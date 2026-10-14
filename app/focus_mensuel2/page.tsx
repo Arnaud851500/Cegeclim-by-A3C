@@ -33,12 +33,21 @@
  *    get_focus_mensuel_daily_summary_metier, qui nette déjà les bons de
  *    retour dans le même type_document 'BL' (voir le flux bl_flux_lignes /
  *    bl_summary de cette RPC, alimentant monthRows/monthRowsN1 ici).
+ *
+ * MODE CLAIR (2026-10-14) — l'écran suit le choix Clair / Sombre du bandeau
+ * (chemin déclaré dans lib/theme.ts → LIGHT_READY_PATHS). Les couleurs
+ * sombres écrites en dur passent par les variables de app/theme.css
+ * (--cg-ink, --cg-bg, --cg-card…) : en sombre elles valent exactement les
+ * anciennes couleurs, rendu inchangé ; en clair, fond crème, cartes
+ * blanches et encres marine. Les tableaux réutilisés de focus_mensuel
+ * restent des cartes claires (blanches en clair, crème en sombre).
  * ------------------------------------------------------------------------
  */
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Space_Grotesk, IBM_Plex_Sans, IBM_Plex_Mono } from "next/font/google";
 import { supabase } from "@/lib/supabaseClient";
+import { useTheme } from "@/components/ThemeContext";
 import { usePageFilterAccess } from "@/lib/pageAccessFilters";
 import { useViewport } from "@/lib/useViewport";
 import MobileShell from "@/components/mobile/MobileShell";
@@ -237,6 +246,9 @@ export default function FocusMensuel3Page() {
   // pouvoir être lue par l'effet de chargement ci-dessous et éviter les
   // appels RPC desktop quand ils ne servent à rien sur mobile.
   const { isMobile } = useViewport();
+  // Thème réellement appliqué (clair / sombre) : seuls les graphiques SVG des
+  // cartes KPI en ont besoin, le reste de l'écran suit les variables CSS.
+  const { theme } = useTheme();
 
   const [tab, setTab] = useState<TabKey>("vue");
   const [useProjectedCaInRolling, setUseProjectedCaInRolling] = useState(true);
@@ -547,13 +559,14 @@ export default function FocusMensuel3Page() {
   return (
     <div
       className={`${display.variable} ${body.variable} ${mono.variable} min-h-screen w-full`}
-      style={{ background: "#0B1220", fontFamily: "var(--font-body)" }}
+      style={{ background: "var(--cg-bg)", fontFamily: "var(--font-body)" }}
     >
       {/* Les composants réutilisés (AgencyPortfolioTable, ActivityBy...ComparisonTable,
           HighlightTable, Rolling12ComparisonTable) rendent en blanc pur (#fff) via un
           style partagé de la page d'origine (styles.sectionCard) qu'on ne veut pas
-          modifier là-bas. Surcharge locale, scopée à cette page uniquement. */}
-      <style>{`.focus-pdf-section-card { background: #F5F3EC !important; }`}</style>
+          modifier là-bas. Surcharge locale, scopée à cette page uniquement :
+          crème en sombre, blanc en clair (--cg-card). */}
+      <style>{`.focus-pdf-section-card { background: var(--cg-card) !important; }`}</style>
 
       {/* ---- Bandeau de page, ancré sous le bandeau de navigation du site ----
           Il reste dans le flux (sticky) : il ne masque jamais la navigation du
@@ -561,16 +574,16 @@ export default function FocusMensuel3Page() {
           du site s'escamote, `headerOffset` tombe à 0 et celui-ci remonte tout
           en haut de l'écran. */}
       <div
-        className="sticky z-20 border-b border-white/10 bg-[#0B1220]/95 backdrop-blur"
+        className="sticky z-20 border-b border-[color:var(--cg-ink)]/10 bg-[color:var(--cg-bg)]/95 backdrop-blur"
         style={{ top: headerOffset }}
       >
         <div className="w-full px-6 py-4 md:px-10">
           <div className="mb-4 flex flex-wrap items-end justify-between gap-4">
             <div>
-              <div className="mb-1 text-[11px] font-medium uppercase tracking-[0.2em] text-[#A6A181]">
+              <div className="mb-1 text-[11px] font-medium uppercase tracking-[0.2em] text-[color:var(--cg-sauge)]">
                 CEGECLIM — Pilotage commercial
               </div>
-              <h1 className="font-[var(--font-display)] text-2xl font-bold text-white md:text-3xl">
+              <h1 className="font-[var(--font-display)] text-2xl font-bold text-[color:var(--cg-ink)] md:text-3xl">
                 Activité Quotidienne
               </h1>
               <div className="mt-1.5">
@@ -579,33 +592,33 @@ export default function FocusMensuel3Page() {
             </div>
             <div className="flex flex-wrap items-center gap-4">
               <div className="flex items-center gap-2">
-                <label className="text-xs uppercase tracking-wide text-white/40">Jour focus</label>
+                <label className="text-xs uppercase tracking-wide text-[color:var(--cg-ink)]/40">Jour focus</label>
                 <input
                   type="date"
                   value={focusDay}
                   onChange={(e) => handleFocusDayChange(e.target.value)}
-                  className="rounded-lg border border-white/15 bg-white/5 px-3 py-1.5 text-sm text-white outline-none focus:border-[#A6A181]"
+                  className="rounded-lg border border-[color:var(--cg-ink)]/15 bg-[color:var(--cg-ink)]/5 px-3 py-1.5 text-sm text-[color:var(--cg-ink)] outline-none focus:border-[#A6A181]"
                 />
                 <button
                   onClick={() => handleFocusDayChange(ymd(new Date(Date.now() - 86400000)))}
-                  className="rounded-lg border border-white/15 px-2.5 py-1.5 text-xs text-white/60 hover:text-white"
+                  className="rounded-lg border border-[color:var(--cg-ink)]/15 px-2.5 py-1.5 text-xs text-[color:var(--cg-ink)]/60 hover:text-[color:var(--cg-ink)]"
                 >
                   Hier
                 </button>
                 <button
                   onClick={() => handleFocusDayChange(ymd(new Date()))}
-                  className="rounded-lg border border-white/15 px-2.5 py-1.5 text-xs text-white/60 hover:text-white"
+                  className="rounded-lg border border-[color:var(--cg-ink)]/15 px-2.5 py-1.5 text-xs text-[color:var(--cg-ink)]/60 hover:text-[color:var(--cg-ink)]"
                 >
                   Aujourd&rsquo;hui
                 </button>
               </div>
               <div className="flex items-center gap-2">
-                <label className="text-xs uppercase tracking-wide text-white/40">Mois analysé</label>
+                <label className="text-xs uppercase tracking-wide text-[color:var(--cg-ink)]/40">Mois analysé</label>
                 <input
                   type="month"
                   value={month}
                   onChange={(e) => setMonth(e.target.value)}
-                  className="rounded-lg border border-white/15 bg-white/5 px-3 py-1.5 text-sm text-white outline-none focus:border-[#A6A181]"
+                  className="rounded-lg border border-[color:var(--cg-ink)]/15 bg-[color:var(--cg-ink)]/5 px-3 py-1.5 text-sm text-[color:var(--cg-ink)] outline-none focus:border-[#A6A181]"
                 />
               </div>
 
@@ -620,12 +633,12 @@ export default function FocusMensuel3Page() {
           </div>
 
           {/* ---- Filtres globaux (partagés par tous les onglets) ---- */}
-          <div className="flex flex-wrap items-center gap-3 rounded-xl border border-white/10 bg-white/[0.03] p-3">
+          <div className="flex flex-wrap items-center gap-3 rounded-xl border border-[color:var(--cg-ink)]/10 bg-[color:var(--cg-ink)]/[0.03] p-3">
             <FilterSelect label="Agence" value={agence} onChange={setAgence} options={availableAgences} locked={access.hasAgenceRestriction} />
             <FilterSelect label="Famille" value={familleMacro} onChange={setFamilleMacro} options={availableFamilies} />
             <FilterSelect label="Collaborateur" value={collaborateur} onChange={setCollaborateur} options={availableCollaborateurs} locked={access.hasCollaborateurRestriction} />
-            <label className="ml-auto flex cursor-pointer items-center gap-2 text-sm text-white/60">
-              <input type="checkbox" checked={includeHorsStats} onChange={(e) => setIncludeHorsStats(e.target.checked)} className="h-4 w-4 rounded border-white/20 bg-transparent accent-[#A6A181]" />
+            <label className="ml-auto flex cursor-pointer items-center gap-2 text-sm text-[color:var(--cg-ink)]/60">
+              <input type="checkbox" checked={includeHorsStats} onChange={(e) => setIncludeHorsStats(e.target.checked)} className="h-4 w-4 rounded border-[color:var(--cg-ink)]/20 bg-transparent accent-[#A6A181]" />
               Inclure les hors-statistiques
             </label>
           </div>
@@ -637,7 +650,7 @@ export default function FocusMensuel3Page() {
                 key={t.key}
                 onClick={() => setTab(t.key)}
                 className={`shrink-0 rounded-t-lg px-4 py-2 text-sm font-medium transition-colors ${
-                  tab === t.key ? "bg-[#F5F3EC] text-[#141A26]" : "text-white/50 hover:bg-white/5 hover:text-white/80"
+                  tab === t.key ? "bg-[color:var(--cg-card)] text-[#141A26]" : "text-[color:var(--cg-ink)]/50 hover:bg-[color:var(--cg-ink)]/5 hover:text-[color:var(--cg-ink)]/80"
                 }`}
               >
                 {t.label}
@@ -650,7 +663,7 @@ export default function FocusMensuel3Page() {
       {/* ---- Contenu ---- */}
       <div className="w-full px-6 py-8 md:px-10">
         {error && (
-          <div className="mb-6 rounded-lg border border-[#C1683C]/40 bg-[#C1683C]/10 px-4 py-3 text-sm text-[#e0a685]">
+          <div className="mb-6 rounded-lg border border-[#C1683C]/40 bg-[#C1683C]/10 px-4 py-3 text-sm text-[color:var(--cg-alert-soft)]">
             Impossible de charger les données : {error}
           </div>
         )}
@@ -671,13 +684,14 @@ export default function FocusMensuel3Page() {
                       annualSeries={ytdMonthIndices.map((i) => annualSeriesByType[type][i])}
                       annualSeriesN1={ytdMonthIndices.map((i) => annualSeriesN1ByType[type][i])}
                       months={ytdMonths}
+                      theme={theme}
                     />
                   ))}
             </section>
 
             <section className="mb-8 grid grid-cols-1 items-stretch gap-4 xl:grid-cols-3">
               <div
-                className="flex flex-col rounded-xl border border-white/10 bg-[#F5F3EC] p-4"
+                className="flex flex-col rounded-xl border border-[color:var(--cg-ink)]/10 bg-[color:var(--cg-card)] p-4"
                 style={{ minHeight: OVERVIEW_CARD_MIN_HEIGHT }}
               >
                 <h3 className="mb-3 font-[var(--font-display)] text-base font-semibold text-[#141A26]">
@@ -743,7 +757,7 @@ export default function FocusMensuel3Page() {
 
         {tab === "rolling" && (
           <TableShell loading={loading}>
-            <div className="flex items-center gap-2 border-b border-black/10 bg-[#F5F3EC] px-3 pt-3 pb-1">
+            <div className="flex items-center gap-2 border-b border-black/10 bg-[color:var(--cg-card)] px-3 pt-3 pb-1">
               <input
                 type="checkbox"
                 id="use-projected-ca"
@@ -1024,7 +1038,7 @@ function TableShell({
   loading, children, minHeight,
 }: { loading: boolean; children: React.ReactNode; minHeight?: number }) {
   return (
-    <div className="flex flex-col rounded-xl border border-white/10 bg-[#F5F3EC] p-1" style={minHeight ? { minHeight } : undefined}>
+    <div className="flex flex-col rounded-xl border border-[color:var(--cg-ink)]/10 bg-[color:var(--cg-card)] p-1" style={minHeight ? { minHeight } : undefined}>
       {loading ? (
         <div className="p-6 text-sm text-[#141A26]/50">Chargement…</div>
       ) : (
@@ -1065,7 +1079,7 @@ export function PortfolioTableCompact({ rows }: { rows: AgencyPortfolioRow[] }) 
           disponible. */}
       <div className="min-h-0 flex-1 overflow-y-auto">
         <table className="w-full text-sm">
-          <thead className="sticky top-0 bg-[#F5F3EC]">
+          <thead className="sticky top-0 bg-[color:var(--cg-card)]">
             <tr className="border-b border-black/10 text-left text-xs uppercase tracking-wide text-[#141A26]/50">
               <th className="px-2 py-2">Agence</th>
               <th className="px-2 py-2 text-right">Total</th>
@@ -1122,9 +1136,9 @@ export function ProjectionTableCompact({ rows }: { rows: AgencyProjectionRow[] }
       <h3 className="mb-3 font-[var(--font-display)] text-base font-semibold text-[#141A26]">Projection du CA par agence</h3>
       <div className="min-h-0 flex-1 overflow-auto">
         <table className="w-full text-sm">
-          <thead className="sticky top-0 z-10 bg-[#F5F3EC]">
+          <thead className="sticky top-0 z-10 bg-[color:var(--cg-card)]">
             <tr className="border-b border-black/10 text-left text-xs uppercase tracking-wide text-[#141A26]/50">
-              <th className="sticky left-0 z-20 bg-[#F5F3EC] px-2 py-2">Agence</th>
+              <th className="sticky left-0 z-20 bg-[color:var(--cg-card)] px-2 py-2">Agence</th>
               <th className="whitespace-nowrap px-2 py-2 text-right">CA projeté</th>
               <th className="whitespace-nowrap px-2 py-2 text-right">CA N-1</th>
               <th className="whitespace-nowrap px-2 py-2 text-right">Évol.</th>
@@ -1137,7 +1151,7 @@ export function ProjectionTableCompact({ rows }: { rows: AgencyProjectionRow[] }
           <tbody className="divide-y divide-black/[0.06]">
             {display.map((r) => (
               <tr key={r.label} className={r.label === "TOTAL AGENCE" ? "bg-black/[0.03] font-semibold" : ""}>
-                <td className={`sticky left-0 z-10 px-2 py-2 text-[#141A26] ${r.label === "TOTAL AGENCE" ? "bg-[#EDEAE0]" : "bg-[#F5F3EC]"}`}>{r.label}</td>
+                <td className={`sticky left-0 z-10 px-2 py-2 text-[#141A26] ${r.label === "TOTAL AGENCE" ? "bg-[color:var(--cg-card-2)]" : "bg-[color:var(--cg-card)]"}`}>{r.label}</td>
                 <td className="whitespace-nowrap px-2 py-2 text-right font-[var(--font-mono)] font-semibold text-[#141A26]">{formatMoney(r.projectionCa)}</td>
                 <td className="whitespace-nowrap px-2 py-2 text-right font-[var(--font-mono)] text-[#141A26]/70">{formatMoney(r.caN1)}</td>
                 <td className="whitespace-nowrap px-2 py-2 text-right">
@@ -1166,25 +1180,25 @@ function FilterSelect({
 }: { label: string; value: string; onChange: (v: string) => void; options: string[]; locked?: boolean }) {
   return (
     <div className="flex items-center gap-2">
-      <label className="text-xs uppercase tracking-wide text-white/40">{label}</label>
+      <label className="text-xs uppercase tracking-wide text-[color:var(--cg-ink)]/40">{label}</label>
       <select
         value={value}
         disabled={locked}
         onChange={(e) => onChange(e.target.value)}
-        className="rounded-lg border border-white/15 bg-white/5 px-3 py-1.5 text-sm text-white outline-none focus:border-[#A6A181] disabled:cursor-not-allowed disabled:opacity-50"
+        className="rounded-lg border border-[color:var(--cg-ink)]/15 bg-[color:var(--cg-ink)]/5 px-3 py-1.5 text-sm text-[color:var(--cg-ink)] outline-none focus:border-[#A6A181] disabled:cursor-not-allowed disabled:opacity-50"
       >
-        <option value="" className="bg-[#101A2E]">Tous</option>
+        <option value="" className="bg-[color:var(--cg-surface)]">Tous</option>
         {options.map((o) => (
-          <option key={o} value={o} className="bg-[#101A2E]">{o}</option>
+          <option key={o} value={o} className="bg-[color:var(--cg-surface)]">{o}</option>
         ))}
       </select>
-      {locked && <span className="text-[10px] uppercase tracking-wide text-[#A6A181]">périmètre</span>}
+      {locked && <span className="text-[10px] uppercase tracking-wide text-[color:var(--cg-sauge)]">périmètre</span>}
     </div>
   );
 }
 
 function KpiCardJMA({
-  type, dayValue, dayLabel, monthValue, monthValueN1, annualSeries, annualSeriesN1, months,
+  type, dayValue, dayLabel, monthValue, monthValueN1, annualSeries, annualSeriesN1, months, theme = "dark",
 }: {
   type: DocType;
   dayValue: number;
@@ -1194,13 +1208,14 @@ function KpiCardJMA({
   annualSeries: number[];
   annualSeriesN1?: number[];
   months: string[];
+  theme?: "dark" | "light";
 }) {
   const color = DOC_COLORS[type];
   const evolutionPct = monthValueN1 > 0 ? ((monthValue - monthValueN1) / monthValueN1) * 100 : null;
   const isUp = (evolutionPct ?? 0) >= 0;
 
   return (
-    <div className="flex flex-col rounded-xl border border-white/10 bg-white/[0.04] p-5">
+    <div className="flex flex-col rounded-xl border border-[color:var(--cg-ink)]/10 bg-[color:var(--cg-tile)] p-5">
       <div className="mb-4 flex items-center gap-2">
         <span className="rounded-md px-2.5 py-1 text-[11px] font-semibold uppercase tracking-wide" style={{ background: `${color}22`, color }}>
           {type}
@@ -1211,7 +1226,7 @@ function KpiCardJMA({
             donc son "BL" est net des retours. Mention ajoutée pour que ce
             soit visible à l'écran, pas seulement dans le code. */}
         {type === "BL" && (
-          <span className="text-[10px] text-white/35">(intègre les BR)</span>
+          <span className="text-[10px] text-[color:var(--cg-ink)]/35">(intègre les BR)</span>
         )}
       </div>
 
@@ -1219,42 +1234,42 @@ function KpiCardJMA({
           le jour ancré à gauche, le mois à droite du cadre. */}
       <div className="flex items-end justify-between gap-4">
         <div className="min-w-0">
-          <div className="mb-1.5 text-[10px] uppercase tracking-wide text-white/35">Jour · {dayLabel}</div>
-          <div className="whitespace-nowrap font-[var(--font-mono)] text-[2.5rem] font-semibold leading-none tracking-tight text-white/85">
+          <div className="mb-1.5 text-[10px] uppercase tracking-wide text-[color:var(--cg-ink)]/35">Jour · {dayLabel}</div>
+          <div className="whitespace-nowrap font-[var(--font-mono)] text-[2.5rem] font-semibold leading-none tracking-tight text-[color:var(--cg-ink)]/85">
             {formatMoney(dayValue)}
           </div>
         </div>
         <div className="min-w-0 text-right">
-          <div className="mb-1.5 text-[10px] uppercase tracking-[0.18em] text-white/35">Mois en cours</div>
-          <div className="whitespace-nowrap font-[var(--font-mono)] text-[2.5rem] font-semibold leading-none tracking-tight text-white">
+          <div className="mb-1.5 text-[10px] uppercase tracking-[0.18em] text-[color:var(--cg-ink)]/35">Mois en cours</div>
+          <div className="whitespace-nowrap font-[var(--font-mono)] text-[2.5rem] font-semibold leading-none tracking-tight text-[color:var(--cg-ink)]">
             {formatMoney(monthValue)}
           </div>
         </div>
       </div>
 
       {/* Comparaison N-1 alignée sous le montant du mois, même axe droit. */}
-      <div className="mt-3 flex flex-wrap items-center justify-end gap-x-3 gap-y-1.5 border-t border-white/10 pt-3">
+      <div className="mt-3 flex flex-wrap items-center justify-end gap-x-3 gap-y-1.5 border-t border-[color:var(--cg-ink)]/10 pt-3">
         {evolutionPct !== null && (
           <span
             className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-semibold ${
-              isUp ? "bg-[#C1683C]/15 text-[#e0a685]" : "bg-[#4B92AC]/15 text-[#8fc0d4]"
+              isUp ? "bg-[#C1683C]/15 text-[color:var(--cg-alert-soft)]" : "bg-[#4B92AC]/15 text-[color:var(--cg-info-soft)]"
             }`}
           >
             {isUp ? "▲" : "▼"} {Math.abs(evolutionPct).toFixed(1)}%
-            <span className="font-normal text-white/40">vs N-1</span>
+            <span className="font-normal text-[color:var(--cg-ink)]/40">vs N-1</span>
           </span>
         )}
-        <span className="text-[11px] uppercase tracking-wide text-white/35">
+        <span className="text-[11px] uppercase tracking-wide text-[color:var(--cg-ink)]/35">
           N-1 · même mois{" "}
-          <span className="ml-1 font-[var(--font-mono)] text-sm normal-case tracking-normal text-white/60">
+          <span className="ml-1 font-[var(--font-mono)] text-sm normal-case tracking-normal text-[color:var(--cg-ink)]/60">
             {formatMoney(monthValueN1)}
           </span>
         </span>
       </div>
 
       <div className="mt-4">
-        <div className="mb-1.5 text-[10px] uppercase tracking-[0.18em] text-white/35">Tendance · depuis janvier</div>
-        <KpiTrendChart values={annualSeries} valuesN1={annualSeriesN1} months={months} color={color} />
+        <div className="mb-1.5 text-[10px] uppercase tracking-[0.18em] text-[color:var(--cg-ink)]/35">Tendance · depuis janvier</div>
+        <KpiTrendChart values={annualSeries} valuesN1={annualSeriesN1} months={months} color={color} theme={theme} />
       </div>
     </div>
   );
@@ -1321,9 +1336,9 @@ export function KpiTrendChart({
   const hoverLeftPct = hoverIdx !== null ? (x(hoverIdx) / width) * 100 : null;
 
   const tooltipBg = theme === 'light' ? '#FFFFFF' : '#0B1220';
-  const tooltipBorder = theme === 'light' ? 'border-black/10' : 'border-white/15';
-  const tooltipTextMuted = theme === 'light' ? 'text-[#141A26]/60' : 'text-white/60';
-  const tooltipTextStrong = theme === 'light' ? 'text-[#141A26]' : 'text-white';
+  const tooltipBorder = theme === 'light' ? 'border-black/10' : 'border-[color:var(--cg-ink)]/15';
+  const tooltipTextMuted = theme === 'light' ? 'text-[#141A26]/60' : 'text-[color:var(--cg-ink)]/60';
+  const tooltipTextStrong = theme === 'light' ? 'text-[#141A26]' : 'text-[color:var(--cg-ink)]';
 
   return (
     <div className="relative">
@@ -1398,16 +1413,16 @@ export function KpiTrendChart({
 
 function KpiSkeleton() {
   return (
-    <div className="animate-pulse rounded-xl border border-white/10 bg-white/[0.03] p-5">
-      <div className="mb-4 h-5 w-16 rounded bg-white/10" />
+    <div className="animate-pulse rounded-xl border border-[color:var(--cg-ink)]/10 bg-[color:var(--cg-tile)] p-5">
+      <div className="mb-4 h-5 w-16 rounded bg-[color:var(--cg-ink)]/10" />
       <div className="mb-4 flex items-end justify-between gap-4">
-        <div className="h-12 w-32 rounded bg-white/10" />
-        <div className="h-12 w-32 rounded bg-white/10" />
+        <div className="h-12 w-32 rounded bg-[color:var(--cg-ink)]/10" />
+        <div className="h-12 w-32 rounded bg-[color:var(--cg-ink)]/10" />
       </div>
-      <div className="mb-4 flex justify-end border-t border-white/10 pt-3">
-        <div className="h-6 w-44 rounded-full bg-white/10" />
+      <div className="mb-4 flex justify-end border-t border-[color:var(--cg-ink)]/10 pt-3">
+        <div className="h-6 w-44 rounded-full bg-[color:var(--cg-ink)]/10" />
       </div>
-      <div className="h-24 w-full rounded bg-white/10" />
+      <div className="h-24 w-full rounded bg-[color:var(--cg-ink)]/10" />
     </div>
   );
 }

@@ -48,6 +48,22 @@
   --cg-ok-text: #C3E6D0;
   --cg-reading-ink: #E3E6EC;
   --cg-app-veil: linear-gradient(rgba(11, 18, 32, 0.965), rgba(11, 18, 32, 0.985));
+  /* 14/10/2026 — Activité quotidienne, Vision ONE PAGE, Stock articles */
+  --cg-card: #F5F3EC;          /* cartes « papier » posées sur le fond */
+  --cg-card-2: #EDEAE0;        /* en-têtes / ligne total de ces cartes */
+  --cg-panel: #141A26;         /* tuiles et listes déroulantes foncées */
+  --cg-panel-hover: #182034;
+  --cg-tile: rgba(255, 255, 255, 0.04); /* tuiles translucides (cartes KPI) */
+  --cg-tooltip: #0B1220;       /* infobulles des graphiques */
+  --cg-up-ink: #34D399;        /* hausse (ex. emerald-400) */
+  --cg-down-ink: #FB923C;      /* baisse (ex. orange-400) */
+  --cg-err-ink: #FCA5A5;       /* message d'erreur (ex. red-300) */
+  --cg-ok-soft: #8FD4A8;       /* vert « promissible » de l'écran Stock */
+  --cg-alert-soft: #E0A685;    /* orange-rouge doux (rupture, hausse) */
+  --cg-info-soft: #8FC0D4;     /* bleu doux (baisse) */
+  --cg-neutral-ink: #D8D2BC;   /* stock Sage − PL (neutre) */
+  --cg-neutral-rgb: 216, 210, 188;
+  --cg-surface-deep: #0D1526;  /* barre de fenêtre flottante */
 }
 
 [data-theme="light"] {
@@ -82,6 +98,21 @@
   --cg-ok-text: #1F4D33;
   --cg-reading-ink: #1E2433;
   --cg-app-veil: linear-gradient(rgba(245, 243, 236, 0.975), rgba(245, 243, 236, 0.99));
+  --cg-card: #FFFFFF;
+  --cg-card-2: #F3F1EA;
+  --cg-panel: #FFFFFF;
+  --cg-panel-hover: #FBFAF6;
+  --cg-tile: #FFFFFF;
+  --cg-tooltip: #FFFFFF;
+  --cg-up-ink: #17673A;
+  --cg-down-ink: #B4471F;
+  --cg-err-ink: #B42318;
+  --cg-ok-soft: #17673A;
+  --cg-alert-soft: #B4471F;
+  --cg-info-soft: #1F6A80;
+  --cg-neutral-ink: #4A4632;
+  --cg-neutral-rgb: 110, 106, 77;
+  --cg-surface-deep: #F3F1EA;
 }
 
 /* Bandeau défilant du fil d'actualité */

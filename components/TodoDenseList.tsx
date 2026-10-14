@@ -3,6 +3,11 @@
 /**
  * TodoDenseList — V4
  * ------------------------------------------------------------------------
+ * MODE CLAIR (2026-10-14) : couleurs de fond / encre passées par les
+ * variables de app/theme.css (identiques aux anciennes en sombre, rendu
+ * inchangé) pour que le composant suive le choix Clair / Sombre sur
+ * Vision ONE PAGE.
+ *
  * Vue dense de todo_actions, filtrée sur les tâches ACCESSIBLES à
  * l'utilisateur connecté :
  *   - assignées à lui (assigned_to = son email OU son display_name, ancien
@@ -196,7 +201,7 @@ export default function TodoDenseList() {
   }, [rows, sortKey, sortAsc, hideTerminees, assigneeNames]);
 
   return (
-    <div className="rounded-2xl border border-black/10 bg-[#F5F3EC] p-3 text-[#141A26]">
+    <div className="rounded-2xl border border-black/10 bg-[color:var(--cg-card)] p-3 text-[#141A26]">
       <div className="mb-2 flex flex-wrap items-center gap-2">
         <h3 className="font-[var(--font-display,inherit)] text-sm font-bold">Mes tâches</h3>
         <span className="text-[10px] text-[#141A26]/45">{visibleRows.length}</span>
@@ -213,7 +218,7 @@ export default function TodoDenseList() {
       ) : (
         <div className="max-h-[280px] overflow-auto rounded-lg border border-black/10">
           <table className="w-full text-[11px]">
-            <thead className="sticky top-0 bg-[#EDEAE0]">
+            <thead className="sticky top-0 bg-[color:var(--cg-card-2)]">
               <tr className="border-b border-black/10 text-left uppercase tracking-wide text-[#141A26]/50">
                 <th className="cursor-pointer whitespace-nowrap px-1.5 py-1" style={{ width: 64 }} onClick={() => toggleSort("mission_project")}>
                   Domaine {sortKey === "mission_project" && (sortAsc ? "▲" : "▼")}

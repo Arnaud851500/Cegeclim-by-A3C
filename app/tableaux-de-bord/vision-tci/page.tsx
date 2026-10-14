@@ -16,6 +16,13 @@
 //    hauteur visible sans scroll) -- toujours dans la même colonne que la
 //    todo, sous "Activité" en largeur (grid xl:grid-cols-2).
 //
+// MODE CLAIR (2026-10-14) : l'écran suit le choix Clair / Sombre du bandeau
+// (chemin déclaré dans lib/theme.ts → LIGHT_READY_PATHS). Fonds et encres
+// passent par les variables de app/theme.css (--cg-bg, --cg-ink, --cg-panel,
+// --cg-card…), y compris dans VisionTciKpiPanel, OutlookAgenda, TodoDenseList
+// et LastSyncBadge : en sombre elles valent les anciennes couleurs, rendu
+// inchangé (et ces composants restent sombres sur les écrans non convertis).
+//
 // MOBILE — Sur téléphone (largeur < 768px), cette page bascule vers
 // MobileStandaloneActivite (même écran "Mon activité" que le bouton 1 du
 // menu MobileShell) plutôt que d'afficher ce gabarit 2 colonnes, illisible
@@ -83,7 +90,7 @@ function SectionFrame({
           </a>
         )}
       </div>
-      <div className={bodyClassName || "flex-1 bg-[#0B1220] p-3"}>{children}</div>
+      <div className={bodyClassName || "flex-1 bg-[color:var(--cg-bg)] p-3"}>{children}</div>
     </div>
   );
 }
@@ -96,7 +103,7 @@ export default function VisionTciPage() {
   }
 
   return (
-    <div className="min-h-screen w-full bg-[#0B1220] p-6">
+    <div className="min-h-screen w-full bg-[color:var(--cg-bg)] p-6">
       {/* FIX (2026-08) : le titre "Vision ONE PAGE" vit désormais dans le
           bandeau global du site (ClientRootShell.tsx, à la place de
           "Suivi commercial & prospect") -- il ne serait redondant de le

@@ -62,6 +62,12 @@
 //       • article bloqué → « NOUVELLE VENTE IMPOSSIBLE » ;
 //       • sinon → livraison client dès aujourd'hui + délai d'appro retenu
 //         (référence → calcul de besoin → fournisseur → défaut) + 7 j.
+// MODE CLAIR (2026-10-14, demandé par Arnaud) : l'écran suit le choix
+//   Clair / Sombre du bandeau (lib/theme.ts → LIGHT_READY_EXACT_PATHS, /stock
+//   seul : /stock/groupes, /stock/reconstruction… restent sombres). Styles
+//   passés par themed(), couleurs inline / SVG / CSS par les variables de
+//   app/theme.css (--cg-ink, --cg-ok-soft, --cg-alert-soft, --cg-panel…) :
+//   en sombre elles valent exactement les anciennes couleurs.
 // Sur mobile (< 768 px) on rend MobileStockArticles tel quel.
 // ============================================================================
 
@@ -69,6 +75,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type React from 'react'
 import { supabase } from '@/lib/supabaseClient'
 import { useViewport } from '@/lib/useViewport'
+import { tc, themed } from '@/lib/theme'
 import MobileStockArticles from '@/components/mobile/MobileStockArticles'
 
 // ── Types ─────────────────────────────────────────────────────────────────
@@ -210,16 +217,18 @@ const STATUT_LABEL: Record<CouvertureRow['statut_couverture'], string> = {
   RUPTURE: 'Rupture',
 }
 const STATUT_COLOR: Record<CouvertureRow['statut_couverture'], string> = {
-  COUVERT: '#8fd4a8',
-  COUVERT_PAR_RECEPTION: '#8FC7DA',
-  RECEPTION_TARDIVE: '#E0A961',
-  RUPTURE: '#e0a685',
+  COUVERT: 'var(--cg-ok-soft)',
+  COUVERT_PAR_RECEPTION: 'var(--cg-info-ink)',
+  RECEPTION_TARDIVE: 'var(--cg-warn-ink)',
+  RUPTURE: 'var(--cg-alert-soft)',
 }
-const C_VERT = '#8fd4a8'
-const C_BLEU = '#8FC7DA'
-const C_ORANGE = '#E0A961'
-const C_ROUGE = '#e0a685'
-const C_NEUTRE = '#D8D2BC'
+// Variables de thème (app/theme.css) : en sombre #8fd4a8 / #8FC7DA / #E0A961 /
+// #e0a685 / #D8D2BC comme avant, versions foncées lisibles sur fond clair.
+const C_VERT = 'var(--cg-ok-soft)'
+const C_BLEU = 'var(--cg-info-ink)'
+const C_ORANGE = 'var(--cg-warn-ink)'
+const C_ROUGE = 'var(--cg-alert-soft)'
+const C_NEUTRE = 'var(--cg-neutral-ink)'
 
 // ── Helpers ───────────────────────────────────────────────────────────────
 function toNumber(v: unknown): number {
@@ -273,14 +282,14 @@ function depotCourt(depot: string): string {
 function couleurDispo(n: number): string {
   if (n > 0) return C_VERT
   if (n < 0) return C_ROUGE
-  return 'rgba(255,255,255,0.35)'
+  return 'rgba(var(--cg-ink-rgb), 0.35)'
 }
 /** Couleur du stock Sage − PL : neutre (jamais vert -- ce stock inclut des
  * quantités déjà promises aux CDC), gris si 0, rouge si négatif. */
 function couleurStock(n: number): string {
   if (n > 0) return C_NEUTRE
   if (n < 0) return C_ROUGE
-  return 'rgba(255,255,255,0.35)'
+  return 'rgba(var(--cg-ink-rgb), 0.35)'
 }
 function parseReferences(q: string): string[] {
   return Array.from(new Set(q.split(/[\n,;]+/).map((s) => s.trim()).filter(Boolean).map((s) => s.toUpperCase())))
@@ -739,7 +748,7 @@ function StockDesktop() {
 
   return (
     <div style={styles.page}>
-      <style>{`
+      <style>{tc(`
         .stkBtn:hover { background: rgba(255,255,255,0.10); color: #fff; border-color: rgba(255,255,255,0.3); }
         .stkBtn:focus-visible, .stkRefBtn:focus-visible { outline: 2px solid #F5F3EC; outline-offset: 2px; }
         .stkTable th { position: sticky; top: 0; background: #101A2E; z-index: 1; }
@@ -748,7 +757,7 @@ function StockDesktop() {
         .stkGroup:hover td { background: rgba(255,255,255,0.035); }
         .stkGroup.stkActive td { background: rgba(166,161,129,0.10); }
         .stkRefBtn:hover .stkRefCode { text-decoration: underline; text-underline-offset: 3px; }
-      `}</style>
+      `)}</style>
 
       <div style={styles.header}>
         <div>
@@ -849,7 +858,7 @@ function StockDesktop() {
         {results === null && !loading && (
           <div style={styles.emptyList}>
             <div style={{ fontSize: 30 }}>📦</div>
-            <div style={{ fontWeight: 700, color: '#fff', marginTop: 6 }}>Tape une référence, une désignation ou colle une liste</div>
+            <div style={{ fontWeight: 700, color: 'var(--cg-ink)', marginTop: 6 }}>Tape une référence, une désignation ou colle une liste</div>
             <div style={{ ...styles.muted, marginTop: 4 }}>ou choisis un filtre pour parcourir le stock.</div>
           </div>
         )}
@@ -884,7 +893,7 @@ function StockDesktop() {
                     <tr>
                       <td rowSpan={4} style={{ ...styles.td, ...styles.refCell }}>
                         <button type="button" className="stkRefBtn" style={styles.refBtn}>
-                          <span className="stkRefCode" style={styles.resultRef}>{r.reference_article} <span style={{ color: 'rgba(255,255,255,0.45)' }}>↗</span></span>
+                          <span className="stkRefCode" style={styles.resultRef}>{r.reference_article} <span style={{ color: 'rgba(var(--cg-ink-rgb), 0.45)' }}>↗</span></span>
                           <span style={styles.refDesignation}>{r.designation || '—'}</span>
                         </button>
                         <div style={styles.flags}>
@@ -933,7 +942,7 @@ function StockDesktop() {
                     <tr>
                       <td style={{ ...styles.td, ...styles.lineLabel }}>Stock projeté fin de période</td>
                       {Array.from({ length: nbPeriodes }, (_, k) => (
-                        <td key={k} style={{ ...styles.tdNum, color: p && p.periodes[k].stockFin < 0 ? C_ROUGE : 'rgba(255,255,255,0.85)' }}>
+                        <td key={k} style={{ ...styles.tdNum, color: p && p.periodes[k].stockFin < 0 ? C_ROUGE : 'rgba(var(--cg-ink-rgb), 0.85)' }}>
                           {p ? formatNumber(p.periodes[k].stockFin) : <Attente />}
                         </td>
                       ))}
@@ -990,11 +999,11 @@ function StockDesktop() {
 
 // ── Cellules de la liste ──────────────────────────────────────────────────
 function Attente() {
-  return <span style={{ color: 'rgba(255,255,255,0.3)' }}>…</span>
+  return <span style={{ color: 'rgba(var(--cg-ink-rgb), 0.3)' }}>…</span>
 }
 
 function Point() {
-  return <span style={{ color: 'rgba(255,255,255,0.25)' }}>·</span>
+  return <span style={{ color: 'rgba(var(--cg-ink-rgb), 0.25)' }}>·</span>
 }
 
 function CelluleCdc({ per }: { per: PeriodeAgg }) {
@@ -1275,7 +1284,7 @@ function ArticleDetail({
       {!loading && issue?.type === 'IMPOSSIBLE' && (
         <div style={styles.impossibleBox}>
           <strong style={{ fontSize: 16, letterSpacing: '0.03em' }}>NOUVELLE VENTE IMPOSSIBLE</strong>
-          <span style={{ color: 'rgba(255,255,255,0.75)' }}>
+          <span style={{ color: 'rgba(var(--cg-ink-rgb), 0.75)' }}>
             {appro?.source === 'MANUEL' ? 'Arrêt appro' : 'Blocage appro SAGE'} : aucun stock promissible, aucune réception attendue et aucun réappro possible. Proposer une référence de substitution.
           </span>
         </div>
@@ -1298,11 +1307,11 @@ function ArticleDetail({
           variante="neutre"
         />
         <Kpi label="Réel" value={loading || !totalDepot ? '…' : formatNumber(totalDepot.stock_reel)} />
-        <Kpi label="Réservé" value={loading || !totalDepot ? '…' : formatNumber(totalDepot.stock_reserve)} color={totalDepot && totalDepot.stock_reserve > 0 ? '#D69A4A' : undefined} />
+        <Kpi label="Réservé" value={loading || !totalDepot ? '…' : formatNumber(totalDepot.stock_reserve)} color={totalDepot && totalDepot.stock_reserve > 0 ? 'var(--cg-warn)' : undefined} />
         <Kpi label="À terme (SAGE)" value={loading || !totalDepot ? '…' : formatNumber(totalDepot.stock_a_terme)} color={totalDepot && totalDepot.stock_a_terme < 0 ? C_ROUGE : undefined} />
         <Kpi label="Réceptions attendues" value={loading ? '…' : `+ ${formatNumber(totalReceptions)}`} color={C_BLEU} sub={receptionsAvecHypothese > 0 ? `${receptionsAvecHypothese} CDF en retard / sans date → demain` : `${receptions.length} ligne(s) CDF`} />
         <Kpi label="Besoins CDC fermes" value={loading ? '…' : `− ${formatNumber(totalBesoins)}`} color={C_ORANGE} sub={`${couverture.length} ligne(s) · ${nonCompletes.length} non complète(s)`} />
-        <Kpi label="Stock projeté fin de besoins" value={loading ? '…' : formatNumber(stockFinal)} color={stockFinal < 0 ? C_ROUGE : '#fff'} sub="après toutes réceptions et CDC connus" />
+        <Kpi label="Stock projeté fin de besoins" value={loading ? '…' : formatNumber(stockFinal)} color={stockFinal < 0 ? C_ROUGE : 'var(--cg-ink)'} sub="après toutes réceptions et CDC connus" />
       </div>
 
       {/* ── Projection ── */}
@@ -1328,7 +1337,7 @@ function ArticleDetail({
         <div style={styles.card}>
           <div style={styles.cardTitle}>
             Commandes non complètes à la date de livraison client
-            <span style={{ ...styles.countTag, background: nonCompletes.length > 0 ? 'rgba(193,104,60,0.25)' : 'rgba(255,255,255,0.08)', color: nonCompletes.length > 0 ? C_ROUGE : 'rgba(255,255,255,0.5)' }}>{nonCompletes.length}</span>
+            <span style={{ ...styles.countTag, background: nonCompletes.length > 0 ? 'rgba(193,104,60,0.25)' : 'rgba(var(--cg-ink-rgb), 0.08)', color: nonCompletes.length > 0 ? C_ROUGE : 'rgba(var(--cg-ink-rgb), 0.5)' }}>{nonCompletes.length}</span>
           </div>
           {loading ? <div style={styles.skeleton} /> : nonCompletes.length === 0 ? (
             <div style={styles.okBox}>✓ Toutes les commandes clients connues sur cette référence sont servables à leur date de livraison.</div>
@@ -1343,9 +1352,9 @@ function ArticleDetail({
                 <tbody>
                   {nonCompletes.map((r) => (
                     <tr key={r.id}>
-                      <td style={{ ...styles.td, fontFamily: 'var(--font-mono)', fontWeight: 700, color: '#fff' }}>{r.numero_document}</td>
+                      <td style={{ ...styles.td, fontFamily: 'var(--font-mono)', fontWeight: 700, color: 'var(--cg-ink)' }}>{r.numero_document}</td>
                       <td style={styles.td}>
-                        <div style={{ color: r.visible ? '#fff' : 'rgba(255,255,255,0.55)', fontStyle: r.visible ? undefined : 'italic' }}>{r.nom_tiers || r.numero_tiers}</div>
+                        <div style={{ color: r.visible ? 'var(--cg-ink)' : 'rgba(var(--cg-ink-rgb), 0.55)', fontStyle: r.visible ? undefined : 'italic' }}>{r.nom_tiers || r.numero_tiers}</div>
                         <div style={styles.tdSub}>{[r.agence, r.representant].filter(Boolean).join(' · ')}</div>
                       </td>
                       <td style={{ ...styles.td, whiteSpace: 'nowrap', color: r.date_livraison && r.date_livraison < todayIso() ? C_ROUGE : undefined }}>{formatDateFr(r.date_livraison)}</td>
@@ -1417,7 +1426,7 @@ function ArticleDetail({
                   <tbody>
                     <tr>
                       <td style={{ ...styles.td, whiteSpace: 'nowrap' }}>{formatDateCourte(todayIso())}</td>
-                      <td style={styles.td}><span style={{ ...styles.badge, borderColor: '#A6A181', color: '#E9E5D6' }}>Stock Sage − PL</span></td>
+                      <td style={styles.td}><span style={{ ...styles.badge, borderColor: 'var(--cg-sauge)', color: 'var(--cg-sauge-ink)' }}>Stock Sage − PL</span></td>
                       <td style={styles.td}><span style={styles.tdSub}>tous dépôts, avant CDC</span></td>
                       <td style={{ ...styles.td, textAlign: 'right' }}></td>
                       <td style={{ ...styles.td, textAlign: 'right', fontFamily: 'var(--font-mono)', fontWeight: 700, color: couleurStock(stock0) }}>{formatNumber(stock0)}</td>
@@ -1480,10 +1489,10 @@ function ArticleDetail({
                         {r.hypothese_reception === 'RETARD' ? <span style={styles.tdSub}> · en retard, supposée demain</span> : r.hypothese_reception === 'SANS_DATE' ? <span style={styles.tdSub}> · sans date, supposée demain</span> : null}
                       </td>
                       <td style={{ ...styles.td, whiteSpace: 'nowrap' }}>{r.date_livraison_sage ? formatDateFr(r.date_livraison_sage) : <span style={styles.tdSub}>à confirmer</span>}</td>
-                      <td style={{ ...styles.td, fontFamily: 'var(--font-mono)', color: '#fff' }}>{r.numero_cdf || '—'}</td>
+                      <td style={{ ...styles.td, fontFamily: 'var(--font-mono)', color: 'var(--cg-ink)' }}>{r.numero_cdf || '—'}</td>
                       <td style={styles.td}>{r.nom_fournisseur || r.numero_fournisseur || '—'}</td>
                       <td style={styles.td}>{r.depot_reception ? depotCourt(r.depot_reception) : '—'}</td>
-                      <td style={{ ...styles.td, textAlign: 'right', fontFamily: 'var(--font-mono)', fontWeight: 700, color: '#fff' }}>+ {formatNumber(r.quantite_attendue)}</td>
+                      <td style={{ ...styles.td, textAlign: 'right', fontFamily: 'var(--font-mono)', fontWeight: 700, color: 'var(--cg-ink)' }}>+ {formatNumber(r.quantite_attendue)}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -1584,50 +1593,50 @@ function ProjectionChart({ stock0, events, debut, fin }: { stock0: number; event
       <svg ref={svgRef} viewBox={`0 0 ${width} ${height}`} style={{ width: '100%', height: 'auto', cursor: 'crosshair' }} onMouseMove={handleMove} onMouseLeave={() => setHover(null)}>
         <defs>
           <linearGradient id="stk-area" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stopColor={C_BLEU} stopOpacity={0.22} />
-            <stop offset="100%" stopColor={C_BLEU} stopOpacity={0} />
+            <stop offset="0%" style={{ stopColor: C_BLEU, stopOpacity: 0.22 }} />
+            <stop offset="100%" style={{ stopColor: C_BLEU, stopOpacity: 0 }} />
           </linearGradient>
         </defs>
         {ticks.map((t, i) => (
           <g key={i}>
-            <line x1={padding.left} y1={y(t)} x2={width - padding.right} y2={y(t)} stroke="rgba(255,255,255,0.08)" strokeDasharray="3 3" />
-            <text x={padding.left - 8} y={y(t) + 3} fontSize={10} textAnchor="end" fill="rgba(255,255,255,0.45)" fontFamily="var(--font-mono)">{formatNumber(t)}</text>
+            <line x1={padding.left} y1={y(t)} x2={width - padding.right} y2={y(t)} style={{ stroke: 'rgba(var(--cg-ink-rgb), 0.08)' }} strokeDasharray="3 3" />
+            <text x={padding.left - 8} y={y(t) + 3} fontSize={10} textAnchor="end" style={{ fill: 'rgba(var(--cg-ink-rgb), 0.45)', fontFamily: 'var(--font-mono)' }}>{formatNumber(t)}</text>
           </g>
         ))}
         {mois.map((m) => (
           <g key={m.iso}>
-            <line x1={x(m.iso)} y1={padding.top} x2={x(m.iso)} y2={padding.top + innerH} stroke="rgba(255,255,255,0.06)" />
-            <text x={x(m.iso)} y={height - 12} fontSize={10} textAnchor="middle" fill="rgba(255,255,255,0.45)">{m.label}</text>
+            <line x1={x(m.iso)} y1={padding.top} x2={x(m.iso)} y2={padding.top + innerH} style={{ stroke: 'rgba(var(--cg-ink-rgb), 0.06)' }} />
+            <text x={x(m.iso)} y={height - 12} fontSize={10} textAnchor="middle" style={{ fill: 'rgba(var(--cg-ink-rgb), 0.45)' }}>{m.label}</text>
           </g>
         ))}
         <line x1={padding.left} y1={yZero} x2={width - padding.right} y2={yZero} stroke="#C1683C" strokeWidth={1.2} strokeDasharray="6 4" opacity={0.8} />
-        <text x={width - padding.right} y={yZero - 4} fontSize={10} textAnchor="end" fill={C_ROUGE}>rupture</text>
+        <text x={width - padding.right} y={yZero - 4} fontSize={10} textAnchor="end" style={{ fill: C_ROUGE }}>rupture</text>
         {negSegments.map((s, i) => (
           <rect key={i} x={s.x1} y={yZero} width={Math.max(0, s.x2 - s.x1)} height={Math.max(0, s.ymin - yZero)} fill="rgba(193,104,60,0.25)" />
         ))}
         <path d={`${path} L ${padding.left + innerW} ${yZero} L ${padding.left} ${yZero} Z`} fill="url(#stk-area)" />
-        <path d={path} fill="none" stroke={C_BLEU} strokeWidth={2.4} strokeLinejoin="round" />
+        <path d={path} fill="none" style={{ stroke: C_BLEU }} strokeWidth={2.4} strokeLinejoin="round" />
         {points.slice(1).map((p, i) => (
           <g key={i}>
-            <circle cx={x(p.date)} cy={y(p.stock)} r={4} fill={p.event?.type === 'RECEPTION' ? C_BLEU : C_ORANGE} stroke="#101A2E" strokeWidth={1.5} />
-            {p.event?.hypothese && <circle cx={x(p.date)} cy={y(p.stock)} r={7} fill="none" stroke={C_ORANGE} strokeDasharray="2 2" />}
+            <circle cx={x(p.date)} cy={y(p.stock)} r={4} style={{ fill: p.event?.type === 'RECEPTION' ? C_BLEU : C_ORANGE, stroke: 'var(--cg-surface)' }} strokeWidth={1.5} />
+            {p.event?.hypothese && <circle cx={x(p.date)} cy={y(p.stock)} r={7} fill="none" style={{ stroke: C_ORANGE }} strokeDasharray="2 2" />}
           </g>
         ))}
-        <text x={padding.left} y={padding.top - 5} fontSize={10} fill="rgba(255,255,255,0.55)">aujourd'hui · stock Sage − PL</text>
+        <text x={padding.left} y={padding.top - 5} fontSize={10} style={{ fill: 'rgba(var(--cg-ink-rgb), 0.55)' }}>aujourd'hui · stock Sage − PL</text>
         {hp && (
-          <line x1={hpX} y1={padding.top} x2={hpX} y2={padding.top + innerH} stroke="rgba(255,255,255,0.35)" strokeWidth={1} />
+          <line x1={hpX} y1={padding.top} x2={hpX} y2={padding.top + innerH} style={{ stroke: 'rgba(var(--cg-ink-rgb), 0.35)' }} strokeWidth={1} />
         )}
       </svg>
       {hp && (
         <div style={{ ...styles.tooltip, left: `${Math.min(88, Math.max(6, (hpX / width) * 100))}%` }}>
-          <div style={{ fontWeight: 700, color: '#fff' }}>{formatDateFr(hp.date)}</div>
+          <div style={{ fontWeight: 700, color: 'var(--cg-ink)' }}>{formatDateFr(hp.date)}</div>
           {hp.event ? (
             <div style={{ color: hp.event.type === 'RECEPTION' ? C_BLEU : C_ORANGE }}>
               {hp.event.type === 'RECEPTION' ? 'Réception' : 'CDC'} {hp.event.label} : {hp.event.quantite > 0 ? '+' : ''}{formatNumber(hp.event.quantite)}
               {hp.event.detail ? <div style={styles.tdSub}>{hp.event.detail}</div> : null}
               {hp.event.hypothese ? <div style={styles.tdSub}>hypothèse : CDF en retard / sans date → demain</div> : null}
             </div>
-          ) : <div style={{ color: '#E9E5D6' }}>Stock Sage − PL aujourd'hui (avant CDC)</div>}
+          ) : <div style={{ color: 'var(--cg-sauge-ink)' }}>Stock Sage − PL aujourd'hui (avant CDC)</div>}
           <div style={{ marginTop: 3 }}>Stock projeté : <strong style={{ color: couleurStock(hp.stock) }}>{formatNumber(hp.stock)}</strong></div>
         </div>
       )}
@@ -1690,7 +1699,7 @@ function Kpi({ label, value, color, sub, variante }: { label: string; value: str
   return (
     <div style={{ ...styles.kpi, ...cadre }}>
       <div style={styles.kpiLabel}>{label}</div>
-      <div style={{ ...styles.kpiValue, ...(variante === 'dispo' || variante === 'rupture' ? { fontSize: 36 } : {}), color: color || '#fff' }}>{value}</div>
+      <div style={{ ...styles.kpiValue, ...(variante === 'dispo' || variante === 'rupture' ? { fontSize: 36 } : {}), color: color || 'var(--cg-ink)' }}>{value}</div>
       {sub && <div style={styles.kpiSub}>{sub}</div>}
     </div>
   )
@@ -1705,23 +1714,23 @@ function LigneDepot({ row, maxDispo }: { row: DepotStockRow; maxDispo: number })
   return (
     <div style={styles.depotRow}>
       <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 8 }}>
-        <span style={{ fontSize: 13.5, fontWeight: 700, color: '#fff' }}>{depotCourt(row.depot)}</span>
+        <span style={{ fontSize: 13.5, fontWeight: 700, color: 'var(--cg-ink)' }}>{depotCourt(row.depot)}</span>
         <span style={{ fontFamily: 'var(--font-mono)', fontSize: 20, fontWeight: 700, color: couleur }}>{formatNumber(dispo)}</span>
       </div>
-      <div style={{ marginTop: 5, height: 5, borderRadius: 3, background: 'rgba(255,255,255,0.08)', overflow: 'hidden' }}>
-        <div style={{ width: `${largeur}%`, height: '100%', borderRadius: 3, background: dispo > 0 ? 'rgba(216,210,188,0.55)' : couleur }} />
+      <div style={{ marginTop: 5, height: 5, borderRadius: 3, background: 'rgba(var(--cg-ink-rgb), 0.08)', overflow: 'hidden' }}>
+        <div style={{ width: `${largeur}%`, height: '100%', borderRadius: 3, background: dispo > 0 ? 'rgba(var(--cg-neutral-rgb), 0.55)' : couleur }} />
       </div>
-      <div style={{ marginTop: 4, display: 'flex', gap: 12, fontSize: 11, fontFamily: 'var(--font-mono)', color: 'rgba(255,255,255,0.5)' }}>
-        <span>réel <span style={{ color: 'rgba(255,255,255,0.8)' }}>{formatNumber(reel)}</span></span>
-        <span>réservé <span style={{ color: reserve > 0 ? '#D69A4A' : 'rgba(255,255,255,0.8)' }}>{formatNumber(reserve)}</span></span>
-        <span>cde fourn. <span style={{ color: 'rgba(255,255,255,0.8)' }}>{formatNumber(toNumber(row.stock_commande_fournisseur))}</span></span>
+      <div style={{ marginTop: 4, display: 'flex', gap: 12, fontSize: 11, fontFamily: 'var(--font-mono)', color: 'rgba(var(--cg-ink-rgb), 0.5)' }}>
+        <span>réel <span style={{ color: 'rgba(var(--cg-ink-rgb), 0.8)' }}>{formatNumber(reel)}</span></span>
+        <span>réservé <span style={{ color: reserve > 0 ? 'var(--cg-warn)' : 'rgba(var(--cg-ink-rgb), 0.8)' }}>{formatNumber(reserve)}</span></span>
+        <span>cde fourn. <span style={{ color: 'rgba(var(--cg-ink-rgb), 0.8)' }}>{formatNumber(toNumber(row.stock_commande_fournisseur))}</span></span>
       </div>
     </div>
   )
 }
 
 // ── Styles ────────────────────────────────────────────────────────────────
-const styles: Record<string, React.CSSProperties> = {
+const styles: Record<string, React.CSSProperties> = themed({
   page: { maxWidth: 1800, margin: '0 auto', padding: '10px 4px 40px', color: '#F5F3EC', fontFamily: 'var(--font-body)' },
   header: { display: 'flex', alignItems: 'flex-end', justifyContent: 'space-between', gap: 16, flexWrap: 'wrap', marginBottom: 14 },
   kicker: { fontFamily: 'var(--font-mono)', fontSize: 11, letterSpacing: '0.24em', textTransform: 'uppercase', color: 'rgba(255,255,255,0.5)' },
@@ -1729,7 +1738,7 @@ const styles: Record<string, React.CSSProperties> = {
   lead: { marginTop: 4, fontSize: 13.5, color: 'rgba(255,255,255,0.6)', maxWidth: 1100 },
   headerActions: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' },
 
-  card: { borderRadius: 18, border: '1px solid rgba(255,255,255,0.10)', background: 'rgba(255,255,255,0.04)', padding: 16 },
+  card: { borderRadius: 18, border: '1px solid rgba(255,255,255,0.10)', background: 'var(--cg-tile)', padding: 16 },
   cardTitle: { display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, textTransform: 'uppercase', letterSpacing: '0.08em', fontWeight: 700, color: 'rgba(255,255,255,0.6)', marginBottom: 10 },
   cardHeaderRow: { display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap', marginBottom: 10 },
   subTitle: { fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.06em', fontWeight: 700, color: 'rgba(255,255,255,0.5)', marginBottom: 6 },
@@ -1745,7 +1754,7 @@ const styles: Record<string, React.CSSProperties> = {
   searchArea: { width: '100%', borderRadius: 12, border: '1px solid rgba(255,255,255,0.15)', background: 'rgba(255,255,255,0.05)', color: '#fff', padding: '8px 12px', fontSize: 14, resize: 'vertical', fontFamily: 'inherit', boxSizing: 'border-box' },
   field: { display: 'flex', flexDirection: 'column', gap: 4, minWidth: 0 },
   fieldLabel: { fontSize: 11, color: 'rgba(255,255,255,0.5)', textTransform: 'uppercase', letterSpacing: '0.06em', fontWeight: 700 },
-  select: { height: 36, borderRadius: 9, border: '1px solid rgba(255,255,255,0.15)', background: '#141A26', color: '#fff', padding: '0 8px', fontSize: 13, fontFamily: 'inherit', width: '100%', boxSizing: 'border-box' },
+  select: { height: 36, borderRadius: 9, border: '1px solid rgba(255,255,255,0.15)', background: 'var(--cg-panel)', color: '#fff', padding: '0 8px', fontSize: 13, fontFamily: 'inherit', width: '100%', boxSizing: 'border-box' },
   input: { height: 40, width: 120, borderRadius: 10, border: '1px solid rgba(255,255,255,0.15)', background: 'rgba(255,255,255,0.05)', color: '#fff', padding: '0 10px', fontSize: 18, fontWeight: 700, fontFamily: 'var(--font-mono)', boxSizing: 'border-box' },
   ghostBtn: { display: 'inline-flex', alignItems: 'center', padding: '8px 12px', borderRadius: 10, border: '1px solid rgba(255,255,255,0.18)', background: 'transparent', color: 'rgba(255,255,255,0.78)', fontFamily: 'inherit', fontSize: 12.5, fontWeight: 600, cursor: 'pointer', whiteSpace: 'nowrap', textDecoration: 'none' },
   linkBtn: { marginTop: 4, alignSelf: 'flex-start', background: 'none', border: 'none', padding: '4px 0', fontSize: 12, color: 'rgba(255,255,255,0.45)', textDecoration: 'underline', textUnderlineOffset: 3, cursor: 'pointer', fontFamily: 'inherit' },
@@ -1781,9 +1790,9 @@ const styles: Record<string, React.CSSProperties> = {
   echelonLabel: { fontSize: 10, color: 'rgba(255,255,255,0.55)', whiteSpace: 'nowrap' },
   resultRef: { display: 'block', fontFamily: 'var(--font-mono)', fontSize: 14, fontWeight: 800, color: '#fff' },
 
-  overlay: { position: 'fixed', inset: 0, zIndex: 1000, background: 'rgba(5,9,18,0.72)', backdropFilter: 'blur(3px)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '2vh 2vw' },
+  overlay: { position: 'fixed', inset: 0, zIndex: 1000, background: 'rgba(var(--cg-backdrop-rgb), calc(0.72 * var(--cg-backdrop-k)))', backdropFilter: 'blur(3px)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '2vh 2vw' },
   modal: { width: 'min(1560px, 96vw)', maxHeight: '96vh', display: 'flex', flexDirection: 'column', borderRadius: 20, border: '1px solid rgba(255,255,255,0.14)', background: '#101A2E', boxShadow: '0 30px 80px rgba(0,0,0,0.55)', overflow: 'hidden' },
-  modalBar: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, padding: '10px 16px', borderBottom: '1px solid rgba(255,255,255,0.10)', background: '#0D1526' },
+  modalBar: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, padding: '10px 16px', borderBottom: '1px solid rgba(255,255,255,0.10)', background: 'var(--cg-surface-deep)' },
   modalKicker: { fontFamily: 'var(--font-mono)', fontSize: 11, letterSpacing: '0.18em', textTransform: 'uppercase', color: 'rgba(255,255,255,0.5)' },
   modalBody: { overflow: 'auto', padding: 18 },
 
@@ -1793,7 +1802,7 @@ const styles: Record<string, React.CSSProperties> = {
   detailDesignation: { marginTop: 2, fontSize: 14, color: 'rgba(255,255,255,0.65)' },
 
   kpiRow: { display: 'grid', gridTemplateColumns: '1.35fr 1.15fr repeat(6, minmax(0, 1fr))', gap: 10 },
-  kpi: { borderRadius: 14, border: '1px solid rgba(255,255,255,0.10)', background: 'rgba(255,255,255,0.04)', padding: '12px 14px', minWidth: 0 },
+  kpi: { borderRadius: 14, border: '1px solid rgba(255,255,255,0.10)', background: 'var(--cg-tile)', padding: '12px 14px', minWidth: 0 },
   kpiDispo: { border: '1px solid rgba(143,212,168,0.5)', background: 'rgba(143,212,168,0.10)' },
   kpiRupture: { border: '1px solid rgba(193,104,60,0.55)', background: 'rgba(193,104,60,0.12)' },
   kpiNeutre: { border: '1px solid rgba(216,210,188,0.28)', background: 'rgba(216,210,188,0.05)' },
@@ -1822,8 +1831,8 @@ const styles: Record<string, React.CSSProperties> = {
 
   depotRow: { borderRadius: 12, border: '1px solid rgba(255,255,255,0.08)', background: 'rgba(255,255,255,0.03)', padding: '9px 12px' },
 
-  tooltip: { position: 'absolute', top: 8, transform: 'translateX(-50%)', pointerEvents: 'none', whiteSpace: 'nowrap', borderRadius: 10, border: '1px solid rgba(255,255,255,0.15)', background: '#0B1220', padding: '8px 10px', fontSize: 12, color: 'rgba(255,255,255,0.85)', boxShadow: '0 10px 24px rgba(0,0,0,0.4)', zIndex: 5 },
+  tooltip: { position: 'absolute', top: 8, transform: 'translateX(-50%)', pointerEvents: 'none', whiteSpace: 'nowrap', borderRadius: 10, border: '1px solid rgba(255,255,255,0.15)', background: 'var(--cg-tooltip)', padding: '8px 10px', fontSize: 12, color: 'rgba(255,255,255,0.85)', boxShadow: '0 10px 24px rgba(0,0,0,0.4)', zIndex: 5 },
   legend: { display: 'flex', flexWrap: 'wrap', gap: 14, marginTop: 8, fontSize: 11.5, color: 'rgba(255,255,255,0.6)' },
   legendItem: { display: 'inline-flex', alignItems: 'center', gap: 6 },
   legendDot: { width: 10, height: 10, borderRadius: '50%', display: 'inline-block' },
-}
+}, ['badgeBlocage'])

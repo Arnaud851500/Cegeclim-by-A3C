@@ -12,7 +12,9 @@
 // Passer un écran au thème clair :
 //   1. envelopper son objet de styles : const styles = themed({ ... })
 //   2. passer les couleurs écrites en dur dans le JSX par tc('…')
-//   3. ajouter son chemin dans LIGHT_READY_PATHS ci-dessous.
+//   3. ajouter son chemin dans LIGHT_READY_PATHS ci-dessous (l'écran et ses
+//      sous-écrans) ou dans LIGHT_READY_EXACT_PATHS (l'écran seul, quand ses
+//      sous-écrans ne sont pas encore passés au clair — ex. /stock).
 // Tant qu'un écran n'est pas dans la liste, sa zone de contenu reste sombre
 // même si l'utilisateur a choisi le mode clair (le bandeau, lui, suit).
 // ============================================================================
@@ -24,11 +26,23 @@ export type ThemeMode = 'light' | 'dark'
 export const THEME_STORAGE_KEY = 'cegeclim.theme'
 
 /** Écrans dont le contenu sait s'afficher en clair (préfixes de chemin). */
-export const LIGHT_READY_PATHS: string[] = ['/accueil', '/actualites']
+export const LIGHT_READY_PATHS: string[] = [
+  '/accueil',
+  '/actualites',
+  '/focus_mensuel2', // Activité quotidienne (14/10/2026)
+  '/tableaux-de-bord/vision-tci', // Vision ONE PAGE (14/10/2026)
+]
+
+/** Écrans passés au clair sans leurs sous-écrans (chemin exact). */
+export const LIGHT_READY_EXACT_PATHS: string[] = [
+  '/stock', // Stock articles (14/10/2026) — /stock/groupes, /stock/reconstruction… restent sombres
+]
 
 export function isLightReadyPath(pathname: string | null | undefined) {
   if (!pathname) return false
-  return LIGHT_READY_PATHS.some((path) => pathname === path || pathname.startsWith(`${path}/`))
+  const path = pathname.length > 1 ? pathname.replace(/\/+$/, '') : pathname
+  if (LIGHT_READY_EXACT_PATHS.includes(path)) return true
+  return LIGHT_READY_PATHS.some((p) => path === p || path.startsWith(`${p}/`))
 }
 
 const NUM = '\\s*([0-9]*\\.?[0-9]+)\\s*'

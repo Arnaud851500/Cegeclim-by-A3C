@@ -3,6 +3,11 @@
 /**
  * VisionTciKpiPanel — V4
  * ------------------------------------------------------------------------
+ * MODE CLAIR (2026-10-14) : couleurs de fond / encre passées par les
+ * variables de app/theme.css (identiques aux anciennes en sombre, rendu
+ * inchangé) pour que le composant suive le choix Clair / Sombre sur
+ * Vision ONE PAGE.
+ *
  * Changements vs V3 :
  *
  *  - BASCULE JOUR / J-1 en en-tête : pilote le "p_utiliser_j_moins_1" de
@@ -235,19 +240,19 @@ function totauxMensuelsDepuisPoints(points: CourbePoint[]): MoisTotal[] {
 function EvolBadge({ valeur, n1, unite = "montant" }: { valeur: number; n1: number; unite?: "montant" | "points" }) {
   if (unite === "points") {
     const delta = valeur - n1;
-    if (!Number.isFinite(delta)) return <span className="text-[10px] text-white/30">—</span>;
+    if (!Number.isFinite(delta)) return <span className="text-[10px] text-[color:var(--cg-ink)]/30">—</span>;
     const up = delta >= 0;
     return (
-      <span className={`text-[10px] font-medium ${up ? "text-emerald-400" : "text-orange-400"}`}>
+      <span className={`text-[10px] font-medium ${up ? "text-[color:var(--cg-up-ink)]" : "text-[color:var(--cg-down-ink)]"}`}>
         {up ? "▲" : "▼"} {Math.abs(delta).toFixed(1)} pts
       </span>
     );
   }
-  if (n1 === 0) return <span className="text-white/30 text-[10px]">—</span>;
+  if (n1 === 0) return <span className="text-[color:var(--cg-ink)]/30 text-[10px]">—</span>;
   const pct = ((valeur - n1) / Math.abs(n1)) * 100;
   const up = pct >= 0;
   return (
-    <span className={`text-[10px] font-medium ${up ? "text-emerald-400" : "text-orange-400"}`}>
+    <span className={`text-[10px] font-medium ${up ? "text-[color:var(--cg-up-ink)]" : "text-[color:var(--cg-down-ink)]"}`}>
       {up ? "▲" : "▼"} {Math.abs(pct).toFixed(1)}%
     </span>
   );
@@ -267,7 +272,7 @@ function CardShell({
 }) {
   return (
     <div
-      className={`relative flex h-full flex-col rounded-xl border border-white/10 bg-[#141A26] ${compact ? "p-2" : "p-3"} ${onClick ? "cursor-pointer hover:border-white/25 hover:bg-[#182034]" : ""}`}
+      className={`relative flex h-full flex-col rounded-xl border border-[color:var(--cg-ink)]/10 bg-[color:var(--cg-panel)] ${compact ? "p-2" : "p-3"} ${onClick ? "cursor-pointer hover:border-[color:var(--cg-ink)]/25 hover:bg-[color:var(--cg-panel-hover)]" : ""}`}
       style={{ borderTopColor: color, borderTopWidth: 3 }}
       onClick={onClick}
       title={clickHint}
@@ -275,7 +280,7 @@ function CardShell({
       <button
         onClick={(e) => { e.stopPropagation(); onRemove(); }}
         title="Retirer ce KPI"
-        className="absolute right-1.5 top-1.5 z-10 text-white/25 hover:text-white/70"
+        className="absolute right-1.5 top-1.5 z-10 text-[color:var(--cg-ink)]/25 hover:text-[color:var(--cg-ink)]/70"
       >
         ✕
       </button>
@@ -284,7 +289,7 @@ function CardShell({
           {badgeLabel}
         </span>
         {!compact && (badges || []).map((b) => (
-          <span key={b} className="rounded-full bg-white/10 px-2 py-0.5 text-[10px] text-white/70">{b}</span>
+          <span key={b} className="rounded-full bg-[color:var(--cg-ink)]/10 px-2 py-0.5 text-[10px] text-[color:var(--cg-ink)]/70">{b}</span>
         ))}
       </div>
       {children}
@@ -348,23 +353,23 @@ function FluxCard({
         clickHint={famille === "Marge" ? "Ouvrir Atelier d'analyse — Analyse marge" : famille === "Devis" ? "Ouvrir Analyse Devis" : "Ouvrir Activité Quotidienne"}
       >
         {loading ? (
-          <div className="h-16 animate-pulse rounded bg-white/5" />
+          <div className="h-16 animate-pulse rounded bg-[color:var(--cg-ink)]/5" />
         ) : error ? (
-          <p className="text-[10px] text-red-300">{error}</p>
+          <p className="text-[10px] text-[color:var(--cg-err-ink)]">{error}</p>
         ) : values ? (
-          <div className="grid grid-cols-3 gap-2 text-white" style={CONTENEUR_TAILLE}>
+          <div className="grid grid-cols-3 gap-2 text-[color:var(--cg-ink)]" style={CONTENEUR_TAILLE}>
             <div className="min-w-0">
-              <div className="text-[9px] uppercase tracking-wide text-white/40">{utiliserJMoins1 ? "Jour (J-1)" : "Jour"}</div>
+              <div className="text-[9px] uppercase tracking-wide text-[color:var(--cg-ink)]/40">{utiliserJMoins1 ? "Jour (J-1)" : "Jour"}</div>
               <div className="whitespace-nowrap font-[var(--font-mono,monospace)] font-semibold" style={VALEUR_COMPACT_STYLE}>{fmt(values.jour_valeur)}</div>
               <EvolBadge valeur={values.jour_valeur} n1={values.jour_n1} unite={estMarge ? "points" : "montant"} />
             </div>
             <div className="min-w-0">
-              <div className="text-[9px] uppercase tracking-wide text-white/40">Mois</div>
+              <div className="text-[9px] uppercase tracking-wide text-[color:var(--cg-ink)]/40">Mois</div>
               <div className="whitespace-nowrap font-[var(--font-mono,monospace)] font-semibold" style={VALEUR_COMPACT_STYLE}>{fmt(values.mois_valeur)}</div>
               <EvolBadge valeur={values.mois_valeur} n1={values.mois_n1} unite={estMarge ? "points" : "montant"} />
             </div>
             <div className="min-w-0">
-              <div className="text-[9px] uppercase tracking-wide text-white/40">Année</div>
+              <div className="text-[9px] uppercase tracking-wide text-[color:var(--cg-ink)]/40">Année</div>
               <div className="whitespace-nowrap font-[var(--font-mono,monospace)] font-semibold" style={VALEUR_COMPACT_STYLE}>{fmt(values.annee_valeur)}</div>
               <EvolBadge valeur={values.annee_valeur} n1={values.annee_n1} unite={estMarge ? "points" : "montant"} />
             </div>
@@ -392,11 +397,11 @@ function FamilleMacroFiltreRow({
   if (familles.length === 0) return null;
   return (
     <div className="mb-3 flex flex-wrap items-center gap-2">
-      <span className="mr-1 text-[11px] uppercase tracking-wide text-white/35">Famille macro :</span>
+      <span className="mr-1 text-[11px] uppercase tracking-wide text-[color:var(--cg-ink)]/35">Famille macro :</span>
       <button
         onClick={() => onChange(null)}
         className={`rounded-full border px-2.5 py-1 text-[11px] font-semibold transition ${
-          actif === null ? "border-white/30 bg-white/15 text-white" : "border-white/10 text-white/50 hover:text-white/80"
+          actif === null ? "border-[color:var(--cg-ink)]/30 bg-[color:var(--cg-ink)]/15 text-[color:var(--cg-ink)]" : "border-[color:var(--cg-ink)]/10 text-[color:var(--cg-ink)]/50 hover:text-[color:var(--cg-ink)]/80"
         }`}
       >
         Toutes
@@ -406,7 +411,7 @@ function FamilleMacroFiltreRow({
           key={f}
           onClick={() => onChange(f)}
           className={`flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-semibold transition ${
-            actif === f ? "border-white/30 bg-white/15 text-white" : "border-white/10 text-white/50 hover:text-white/80"
+            actif === f ? "border-[color:var(--cg-ink)]/30 bg-[color:var(--cg-ink)]/15 text-[color:var(--cg-ink)]" : "border-[color:var(--cg-ink)]/10 text-[color:var(--cg-ink)]/50 hover:text-[color:var(--cg-ink)]/80"
           }`}
         >
           <span className="inline-block h-2 w-2 rounded-full" style={{ background: PASTILLE_PALETTE[i % PASTILLE_PALETTE.length] }} />
@@ -474,7 +479,7 @@ function CourbeAnnuelleChart({ points, color, estMarge }: { points: CourbePoint[
   const hp = hoverIdx !== null ? points[hoverIdx] : null;
   const hoverLeftPct = hp ? (x(hp.jour_annee) / width) * 100 : null;
 
-  if (n === 0) return <div className="flex h-[168px] items-center justify-center text-[10px] text-white/30">Aucune donnée.</div>;
+  if (n === 0) return <div className="flex h-[168px] items-center justify-center text-[10px] text-[color:var(--cg-ink)]/30">Aucune donnée.</div>;
 
   return (
     <div className="relative">
@@ -493,8 +498,8 @@ function CourbeAnnuelleChart({ points, color, estMarge }: { points: CourbePoint[
         </defs>
         {ticks.map((t, i) => (
           <g key={i}>
-            <line x1={padding.left} y1={y(t)} x2={width - padding.right} y2={y(t)} stroke="#FFFFFF14" strokeDasharray={i === ticks.length - 1 ? undefined : "3 3"} />
-            <text x={padding.left - 4} y={y(t) + 3} fontSize={9} textAnchor="end" fill="#FFFFFF55">
+            <line x1={padding.left} y1={y(t)} x2={width - padding.right} y2={y(t)} style={{ stroke: "rgba(var(--cg-ink-rgb), 0.08)" }} strokeDasharray={i === ticks.length - 1 ? undefined : "3 3"} />
+            <text x={padding.left - 4} y={y(t) + 3} fontSize={9} textAnchor="end" style={{ fill: "rgba(var(--cg-ink-rgb), 0.33)" }}>
               {estMarge ? `${t.toFixed(0)}%` : formatMontant(t)}
             </text>
           </g>
@@ -504,30 +509,30 @@ function CourbeAnnuelleChart({ points, color, estMarge }: { points: CourbePoint[
         <path d={pathN} fill="none" stroke={color} strokeWidth={2.25} strokeLinejoin="round" strokeLinecap="round" />
         {hp && (
           <>
-            <line x1={x(hp.jour_annee)} y1={padding.top} x2={x(hp.jour_annee)} y2={height - padding.bottom} stroke="#FFFFFF33" strokeWidth={1} />
+            <line x1={x(hp.jour_annee)} y1={padding.top} x2={x(hp.jour_annee)} y2={height - padding.bottom} style={{ stroke: "rgba(var(--cg-ink-rgb), 0.2)" }} strokeWidth={1} />
             <circle cx={x(hp.jour_annee)} cy={y(hp.valeur_n)} r={3.5} fill={color} />
             <circle cx={x(hp.jour_annee)} cy={y(hp.valeur_n1)} r={3} fill={color} opacity={0.55} />
           </>
         )}
         {moisLabels.map(({ jourAnnee, label }) => (
-          <text key={label} x={x(jourAnnee)} y={height - 3} fontSize={9} textAnchor="middle" fill="#FFFFFF55">{label}</text>
+          <text key={label} x={x(jourAnnee)} y={height - 3} fontSize={9} textAnchor="middle" style={{ fill: "rgba(var(--cg-ink-rgb), 0.33)" }}>{label}</text>
         ))}
       </svg>
 
       {hp && hoverLeftPct !== null && (
         <div
-          className="pointer-events-none absolute top-1 z-10 -translate-x-1/2 whitespace-nowrap rounded-lg border border-white/15 bg-[#0B1220] px-2.5 py-1.5 text-[10px] shadow-lg"
+          className="pointer-events-none absolute top-1 z-10 -translate-x-1/2 whitespace-nowrap rounded-lg border border-[color:var(--cg-ink)]/15 bg-[color:var(--cg-tooltip)] px-2.5 py-1.5 text-[10px] shadow-lg"
           style={{ left: `${Math.min(92, Math.max(8, hoverLeftPct))}%` }}
         >
-          <div className="mb-0.5 font-semibold text-white/80">
+          <div className="mb-0.5 font-semibold text-[color:var(--cg-ink)]/80">
             {anneeCouranteDate(hp.jour_annee).toLocaleDateString("fr-FR", { day: "2-digit", month: "short" })}
           </div>
-          <div className="flex items-center gap-1.5 text-white">
+          <div className="flex items-center gap-1.5 text-[color:var(--cg-ink)]">
             <span className="inline-block h-1.5 w-1.5 rounded-full" style={{ background: color }} />
             N&nbsp;: <span className="font-[var(--font-mono,monospace)] font-semibold">{estMarge ? formatPct(hp.valeur_n) : formatMontant(hp.valeur_n)}</span>
           </div>
-          <div className="flex items-center gap-1.5 text-white/60">
-            <span className="inline-block h-1.5 w-1.5 rounded-full border border-white/40" />
+          <div className="flex items-center gap-1.5 text-[color:var(--cg-ink)]/60">
+            <span className="inline-block h-1.5 w-1.5 rounded-full border border-[color:var(--cg-ink)]/40" />
             N-1&nbsp;: <span className="font-[var(--font-mono,monospace)]">{estMarge ? formatPct(hp.valeur_n1) : formatMontant(hp.valeur_n1)}</span>
           </div>
         </div>
@@ -567,8 +572,8 @@ function BarMensuelChart({ points, color }: { points: CourbePoint[]; color: stri
       <svg viewBox={`0 0 ${width} ${height}`} className="w-full" onMouseLeave={() => setHoverMois(null)}>
         {ticks.map((t, i) => (
           <g key={i}>
-            <line x1={padding.left} y1={y(t)} x2={width - padding.right} y2={y(t)} stroke="#FFFFFF14" strokeDasharray={i === ticks.length - 1 ? undefined : "3 3"} />
-            <text x={padding.left - 4} y={y(t) + 3} fontSize={9} textAnchor="end" fill="#FFFFFF55">{formatMontant(t)}</text>
+            <line x1={padding.left} y1={y(t)} x2={width - padding.right} y2={y(t)} style={{ stroke: "rgba(var(--cg-ink-rgb), 0.08)" }} strokeDasharray={i === ticks.length - 1 ? undefined : "3 3"} />
+            <text x={padding.left - 4} y={y(t) + 3} fontSize={9} textAnchor="end" style={{ fill: "rgba(var(--cg-ink-rgb), 0.33)" }}>{formatMontant(t)}</text>
           </g>
         ))}
         {totaux.map((t) => (
@@ -587,21 +592,21 @@ function BarMensuelChart({ points, color }: { points: CourbePoint[]; color: stri
           </g>
         ))}
         {moisLabels.map((label, i) => (
-          <text key={label} x={xGroup(i)} y={height - 3} fontSize={9} textAnchor="middle" fill="#FFFFFF55">{label}</text>
+          <text key={label} x={xGroup(i)} y={height - 3} fontSize={9} textAnchor="middle" style={{ fill: "rgba(var(--cg-ink-rgb), 0.33)" }}>{label}</text>
         ))}
       </svg>
 
       {h && hoverLeftPct !== null && (
         <div
-          className="pointer-events-none absolute top-1 z-10 -translate-x-1/2 whitespace-nowrap rounded-lg border border-white/15 bg-[#0B1220] px-2.5 py-1.5 text-[10px] shadow-lg"
+          className="pointer-events-none absolute top-1 z-10 -translate-x-1/2 whitespace-nowrap rounded-lg border border-[color:var(--cg-ink)]/15 bg-[color:var(--cg-tooltip)] px-2.5 py-1.5 text-[10px] shadow-lg"
           style={{ left: `${Math.min(92, Math.max(8, hoverLeftPct))}%` }}
         >
-          <div className="mb-0.5 font-semibold text-white/80">{moisLabels[h.mois]}</div>
-          <div className="flex items-center gap-1.5 text-white">
+          <div className="mb-0.5 font-semibold text-[color:var(--cg-ink)]/80">{moisLabels[h.mois]}</div>
+          <div className="flex items-center gap-1.5 text-[color:var(--cg-ink)]">
             <span className="inline-block h-1.5 w-1.5 rounded-full" style={{ background: color }} />
             N&nbsp;: <span className="font-[var(--font-mono,monospace)] font-semibold">{formatMontant(h.n)}</span>
           </div>
-          <div className="flex items-center gap-1.5 text-white/60">
+          <div className="flex items-center gap-1.5 text-[color:var(--cg-ink)]/60">
             <span className="inline-block h-1.5 w-1.5 rounded-full" style={{ background: color, opacity: 0.35 }} />
             N-1&nbsp;: <span className="font-[var(--font-mono,monospace)]">{formatMontant(h.n1)}</span>
           </div>
@@ -670,11 +675,11 @@ function FluxCardGrand({
         clickHint={famille === "Marge" ? "Ouvrir Atelier d'analyse — Analyse marge" : famille === "Devis" ? "Ouvrir Analyse Devis" : "Ouvrir Activité Quotidienne"}
       >
         {loading ? (
-          <div className="h-64 animate-pulse rounded bg-white/5" />
+          <div className="h-64 animate-pulse rounded bg-[color:var(--cg-ink)]/5" />
         ) : error ? (
-          <p className="text-[10px] text-red-300">{error}</p>
+          <p className="text-[10px] text-[color:var(--cg-err-ink)]">{error}</p>
         ) : (
-          <div className="text-white">
+          <div className="text-[color:var(--cg-ink)]">
             {/* FIX (2026-10-02) : Jour / Mois (MTD) / Année (YTD) sur UNE
                 ligne avec leur unité, quelle que soit la définition de
                 l'écran : la ligne occupe toute la largeur du pavé (la
@@ -684,9 +689,9 @@ function FluxCardGrand({
                 pavé (VALEUR_GRAND_STYLE, en cqw). */}
             <div className="mb-2 grid grid-cols-3 items-start gap-3" style={CONTENEUR_TAILLE}>
               <div className="min-w-0">
-                <div className="whitespace-nowrap text-[10px] uppercase tracking-wide text-white/40">Jour</div>
+                <div className="whitespace-nowrap text-[10px] uppercase tracking-wide text-[color:var(--cg-ink)]/40">Jour</div>
                 {estMarge ? (
-                  <div className="text-white/25" style={VALEUR_GRAND_STYLE}>—</div>
+                  <div className="text-[color:var(--cg-ink)]/25" style={VALEUR_GRAND_STYLE}>—</div>
                 ) : (
                   <>
                     <div className="whitespace-nowrap font-[var(--font-mono,monospace)] font-semibold leading-tight" style={VALEUR_GRAND_STYLE}>{fmt(agg.jourN)}</div>
@@ -695,9 +700,9 @@ function FluxCardGrand({
                 )}
               </div>
               <div className="min-w-0">
-                <div className="whitespace-nowrap text-[10px] uppercase tracking-wide text-white/40">Mois (MTD)</div>
+                <div className="whitespace-nowrap text-[10px] uppercase tracking-wide text-[color:var(--cg-ink)]/40">Mois (MTD)</div>
                 {estMarge ? (
-                  <div className="text-white/25" style={VALEUR_GRAND_STYLE}>—</div>
+                  <div className="text-[color:var(--cg-ink)]/25" style={VALEUR_GRAND_STYLE}>—</div>
                 ) : (
                   <>
                     <div className="whitespace-nowrap font-[var(--font-mono,monospace)] font-semibold leading-tight" style={VALEUR_GRAND_STYLE}>{fmt(agg.mtdN)}</div>
@@ -706,7 +711,7 @@ function FluxCardGrand({
                 )}
               </div>
               <div className="min-w-0">
-                <div className="whitespace-nowrap text-[10px] uppercase tracking-wide text-white/40">Année (YTD)</div>
+                <div className="whitespace-nowrap text-[10px] uppercase tracking-wide text-[color:var(--cg-ink)]/40">Année (YTD)</div>
                 <div className="whitespace-nowrap font-[var(--font-mono,monospace)] font-semibold leading-tight" style={VALEUR_GRAND_STYLE}>{fmt(agg.ytdN)}</div>
                 <EvolBadge valeur={agg.ytdN} n1={agg.ytdN1} unite={estMarge ? "points" : "montant"} />
               </div>
@@ -714,11 +719,11 @@ function FluxCardGrand({
 
             {!estMarge && (
               <div className="mb-1 flex justify-end">
-                <div className="flex shrink-0 items-center whitespace-nowrap rounded-full border border-white/15 bg-white/5 p-0.5 text-[10px]" onClick={(e) => e.stopPropagation()}>
-                  <button onClick={() => setMode("cumule")} className={`rounded-full px-2 py-1 font-semibold ${mode === "cumule" ? "bg-white/20 text-white" : "text-white/45"}`}>
+                <div className="flex shrink-0 items-center whitespace-nowrap rounded-full border border-[color:var(--cg-ink)]/15 bg-[color:var(--cg-ink)]/5 p-0.5 text-[10px]" onClick={(e) => e.stopPropagation()}>
+                  <button onClick={() => setMode("cumule")} className={`rounded-full px-2 py-1 font-semibold ${mode === "cumule" ? "bg-[color:var(--cg-ink)]/20 text-[color:var(--cg-ink)]" : "text-[color:var(--cg-ink)]/45"}`}>
                     Cumulé
                   </button>
-                  <button onClick={() => setMode("mensuel")} className={`rounded-full px-2 py-1 font-semibold ${mode === "mensuel" ? "bg-white/20 text-white" : "text-white/45"}`}>
+                  <button onClick={() => setMode("mensuel")} className={`rounded-full px-2 py-1 font-semibold ${mode === "mensuel" ? "bg-[color:var(--cg-ink)]/20 text-[color:var(--cg-ink)]" : "text-[color:var(--cg-ink)]/45"}`}>
                     Mensuel
                   </button>
                 </div>
@@ -902,13 +907,13 @@ function RetardsPaiementCard({
         compact={false}
       >
         {loading ? (
-          <div className="h-14 animate-pulse rounded bg-white/5" />
+          <div className="h-14 animate-pulse rounded bg-[color:var(--cg-ink)]/5" />
         ) : error ? (
-          <p className="text-[10px] text-red-300">{error}</p>
+          <p className="text-[10px] text-[color:var(--cg-err-ink)]">{error}</p>
         ) : aucunFichier ? (
           <>
-            <div className="font-[var(--font-mono,monospace)] text-4xl font-semibold text-white/25">—</div>
-            <p className="mt-1 text-[10px] text-white/35">Aucun fichier compta importé (écran Retards de paiement).</p>
+            <div className="font-[var(--font-mono,monospace)] text-4xl font-semibold text-[color:var(--cg-ink)]/25">—</div>
+            <p className="mt-1 text-[10px] text-[color:var(--cg-ink)]/35">Aucun fichier compta importé (écran Retards de paiement).</p>
           </>
         ) : (
           <>
@@ -916,8 +921,8 @@ function RetardsPaiementCard({
               <div className="whitespace-nowrap font-[var(--font-mono,monospace)] text-3xl font-semibold leading-tight" style={{ color: valueColor }}>
                 {formatMontant(synthese?.total_en_retard || 0)}
               </div>
-              <div className="whitespace-nowrap text-right text-[10px] leading-tight text-white/45">
-                <div><span className="font-[var(--font-mono,monospace)] text-sm font-semibold text-white">{nb}</span> client{nb > 1 ? "s" : ""}</div>
+              <div className="whitespace-nowrap text-right text-[10px] leading-tight text-[color:var(--cg-ink)]/45">
+                <div><span className="font-[var(--font-mono,monospace)] text-sm font-semibold text-[color:var(--cg-ink)]">{nb}</span> client{nb > 1 ? "s" : ""}</div>
                 {synthese && synthese.nb_litiges > 0 && <div>{synthese.nb_litiges} en litige</div>}
                 {synthese?.date_extraction && <div>au {formatDateFrRetard(synthese.date_extraction)}</div>}
               </div>
@@ -929,8 +934,8 @@ function RetardsPaiementCard({
                 const v = synthese ? synthese[t.key] : 0;
                 return (
                   <div key={t.key} className="flex items-baseline justify-between gap-2 whitespace-nowrap">
-                    <span className="text-[9px] uppercase tracking-wide text-white/40">{t.court}</span>
-                    <span className={`font-[var(--font-mono,monospace)] text-xs font-semibold ${v > 0 ? "text-white/85" : "text-white/25"}`}>{formatKEurRetard(v)}</span>
+                    <span className="text-[9px] uppercase tracking-wide text-[color:var(--cg-ink)]/40">{t.court}</span>
+                    <span className={`font-[var(--font-mono,monospace)] text-xs font-semibold ${v > 0 ? "text-[color:var(--cg-ink)]/85" : "text-[color:var(--cg-ink)]/25"}`}>{formatKEurRetard(v)}</span>
                   </div>
                 );
               })}
@@ -1083,7 +1088,7 @@ function CompteurCard({
     else if (config.cle === "cdc_avant_2026") window.open("/portefeuille-livraison", "_blank", "noopener,noreferrer");
   }
 
-  const valueColor = isAlerte ? ((total || 0) > 0 ? "#C1683C" : "#3F9142") : "#FFFFFF";
+  const valueColor = isAlerte ? ((total || 0) > 0 ? "#C1683C" : "#3F9142") : "var(--cg-ink)";
 
   // FIX (2026-08) : restructuration du pavé "Clients actifs" -- le nombre
   // de clients créés cette année et les tranches de CA passent à droite du
@@ -1105,27 +1110,27 @@ function CompteurCard({
       <div className="col-span-4 sm:col-span-2">
         <CardShell color="#A6A181" badgeLabel={label} onRemove={onRemove} onClick={handleClick} compact={false}>
           {loading ? (
-            <div className="h-20 animate-pulse rounded bg-white/5" />
+            <div className="h-20 animate-pulse rounded bg-[color:var(--cg-ink)]/5" />
           ) : error ? (
-            <p className="text-[9px] text-red-300">{error}</p>
+            <p className="text-[9px] text-[color:var(--cg-err-ink)]">{error}</p>
           ) : (
             <div className="flex items-start justify-between gap-4">
-              <div className="font-[var(--font-mono,monospace)] text-5xl font-semibold text-white">
+              <div className="font-[var(--font-mono,monospace)] text-5xl font-semibold text-[color:var(--cg-ink)]">
                 {(total ?? 0).toLocaleString("fr-FR")}
               </div>
               <div className="grid grid-cols-[auto_auto_auto] items-baseline gap-x-3 gap-y-1.5">
                 {clientsCreesN !== null && (
                   <>
-                    <span className="whitespace-nowrap text-right text-[11px] text-white/50">Créés cette année</span>
-                    <span className="text-right font-[var(--font-mono,monospace)] text-lg font-semibold text-white">{clientsCreesN.toLocaleString("fr-FR")}</span>
-                    <span className="text-right font-[var(--font-mono,monospace)] text-sm text-white/25" title="Objectif — correspondance avec les catégories gros/moyens/petits à définir">—</span>
+                    <span className="whitespace-nowrap text-right text-[11px] text-[color:var(--cg-ink)]/50">Créés cette année</span>
+                    <span className="text-right font-[var(--font-mono,monospace)] text-lg font-semibold text-[color:var(--cg-ink)]">{clientsCreesN.toLocaleString("fr-FR")}</span>
+                    <span className="text-right font-[var(--font-mono,monospace)] text-sm text-[color:var(--cg-ink)]/25" title="Objectif — correspondance avec les catégories gros/moyens/petits à définir">—</span>
                   </>
                 )}
                 {bandRows.map((b) => (
                   <React.Fragment key={b}>
-                    <span className="whitespace-nowrap text-right text-[11px] text-white/50">{b}</span>
-                    <span className="text-right font-[var(--font-mono,monospace)] text-lg font-semibold text-white">{bands![b]}</span>
-                    <span className="text-right font-[var(--font-mono,monospace)] text-sm text-white/25" title="Objectif — correspondance avec les catégories gros/moyens/petits à définir">—</span>
+                    <span className="whitespace-nowrap text-right text-[11px] text-[color:var(--cg-ink)]/50">{b}</span>
+                    <span className="text-right font-[var(--font-mono,monospace)] text-lg font-semibold text-[color:var(--cg-ink)]">{bands![b]}</span>
+                    <span className="text-right font-[var(--font-mono,monospace)] text-sm text-[color:var(--cg-ink)]/25" title="Objectif — correspondance avec les catégories gros/moyens/petits à définir">—</span>
                   </React.Fragment>
                 ))}
               </div>
@@ -1140,9 +1145,9 @@ function CompteurCard({
     <div className="col-span-2 sm:col-span-1">
       <CardShell color="#A6A181" badgeLabel={label} onRemove={onRemove} onClick={handleClick} compact={false}>
         {loading ? (
-          <div className="h-14 animate-pulse rounded bg-white/5" />
+          <div className="h-14 animate-pulse rounded bg-[color:var(--cg-ink)]/5" />
         ) : error ? (
-          <p className="text-[10px] text-red-300">{error}</p>
+          <p className="text-[10px] text-[color:var(--cg-err-ink)]">{error}</p>
         ) : (
           <div className="font-[var(--font-mono,monospace)] text-4xl font-semibold" style={{ color: valueColor }}>
             {(total ?? 0).toLocaleString("fr-FR")}
@@ -1200,11 +1205,11 @@ function TauxCard({
         compact={false}
       >
         {loading ? (
-          <div className="h-14 animate-pulse rounded bg-white/5" />
+          <div className="h-14 animate-pulse rounded bg-[color:var(--cg-ink)]/5" />
         ) : error ? (
-          <p className="text-[10px] text-red-300">{error}</p>
+          <p className="text-[10px] text-[color:var(--cg-err-ink)]">{error}</p>
         ) : (
-          <div className="font-[var(--font-mono,monospace)] text-4xl font-semibold text-white">
+          <div className="font-[var(--font-mono,monospace)] text-4xl font-semibold text-[color:var(--cg-ink)]">
             {taux === null ? "—" : formatPct(taux)}
           </div>
         )}
@@ -1265,7 +1270,7 @@ async function fetchAgenceLignes(effectiveAgence: string | null, effectiveCollab
 function AgenceModalShell({ title, onClose, children, wide = false }: { title: string; onClose: () => void; children: React.ReactNode; wide?: boolean }) {
   return (
     <div className="fixed inset-0 z-[300] flex items-center justify-center bg-black/60 p-5" onClick={onClose}>
-      <div className={`max-h-[85vh] w-full ${wide ? "max-w-[1400px]" : "max-w-3xl"} overflow-y-auto rounded-2xl bg-[#F5F3EC] p-5 text-[#141A26] shadow-2xl`} onClick={(e) => e.stopPropagation()}>
+      <div className={`max-h-[85vh] w-full ${wide ? "max-w-[1400px]" : "max-w-3xl"} overflow-y-auto rounded-2xl bg-[color:var(--cg-card)] p-5 text-[#141A26] shadow-2xl`} onClick={(e) => e.stopPropagation()}>
         <div className="mb-3 flex items-center justify-between gap-3">
           <h3 className="text-lg font-bold">{title}</h3>
           <button onClick={onClose} className="rounded-full bg-black/5 px-3 py-1.5 text-sm hover:bg-black/10">✕</button>
@@ -1410,25 +1415,25 @@ function PortefeuilleCard({
         compact={false}
       >
         {loading ? (
-          <div className="h-14 animate-pulse rounded bg-white/5" />
+          <div className="h-14 animate-pulse rounded bg-[color:var(--cg-ink)]/5" />
         ) : error ? (
-          <p className="text-[10px] text-red-300">{error}</p>
+          <p className="text-[10px] text-[color:var(--cg-err-ink)]">{error}</p>
         ) : (
           <>
-            <div className="font-[var(--font-mono,monospace)] text-4xl font-semibold text-white">{formatMontant(totalGeneral)}</div>
+            <div className="font-[var(--font-mono,monospace)] text-4xl font-semibold text-[color:var(--cg-ink)]">{formatMontant(totalGeneral)}</div>
             {/* FIX (2026-08) : détail CDC / PL / BL-BR sous le gros chiffre. */}
             <div className="mt-2 grid grid-cols-3 gap-2">
               <div>
-                <div className="text-[9px] uppercase tracking-wide text-white/40">CDC</div>
-                <div className="font-[var(--font-mono,monospace)] text-sm font-semibold text-white/80">{formatMontant(totalCdc)}</div>
+                <div className="text-[9px] uppercase tracking-wide text-[color:var(--cg-ink)]/40">CDC</div>
+                <div className="font-[var(--font-mono,monospace)] text-sm font-semibold text-[color:var(--cg-ink)]/80">{formatMontant(totalCdc)}</div>
               </div>
               <div>
-                <div className="text-[9px] uppercase tracking-wide text-white/40">PL</div>
-                <div className="font-[var(--font-mono,monospace)] text-sm font-semibold text-white/80">{formatMontant(totalPl)}</div>
+                <div className="text-[9px] uppercase tracking-wide text-[color:var(--cg-ink)]/40">PL</div>
+                <div className="font-[var(--font-mono,monospace)] text-sm font-semibold text-[color:var(--cg-ink)]/80">{formatMontant(totalPl)}</div>
               </div>
               <div>
-                <div className="text-[9px] uppercase tracking-wide text-white/40">BL/BR</div>
-                <div className="font-[var(--font-mono,monospace)] text-sm font-semibold text-white/80">{formatMontant(totalBlBr)}</div>
+                <div className="text-[9px] uppercase tracking-wide text-[color:var(--cg-ink)]/40">BL/BR</div>
+                <div className="font-[var(--font-mono,monospace)] text-sm font-semibold text-[color:var(--cg-ink)]/80">{formatMontant(totalBlBr)}</div>
               </div>
             </div>
           </>
@@ -1488,12 +1493,12 @@ function ProjectionCard({
         compact={false}
       >
         {loading ? (
-          <div className="h-14 animate-pulse rounded bg-white/5" />
+          <div className="h-14 animate-pulse rounded bg-[color:var(--cg-ink)]/5" />
         ) : error ? (
-          <p className="text-[10px] text-red-300">{error}</p>
+          <p className="text-[10px] text-[color:var(--cg-err-ink)]">{error}</p>
         ) : (
           <>
-            <div className="font-[var(--font-mono,monospace)] text-4xl font-semibold text-white">{formatMontant(projectionTotal)}</div>
+            <div className="font-[var(--font-mono,monospace)] text-4xl font-semibold text-[color:var(--cg-ink)]">{formatMontant(projectionTotal)}</div>
             {/* FIX (2026-08) : détail BL/BR, Factures (du mois), BL à venir
                 et BL NF sous le gros chiffre -- reprend les composantes du
                 calcul de projection_ca côté RPC (facturé du mois + BL/BR +
@@ -1501,20 +1506,20 @@ function ProjectionCard({
                 détaillées plutôt que résumées. */}
             <div className="mt-2 grid grid-cols-4 gap-1.5">
               <div>
-                <div className="text-[9px] uppercase tracking-wide text-white/40">BL/BR</div>
-                <div className="font-[var(--font-mono,monospace)] text-xs font-semibold text-white/80">{formatMontant(totalBlBr)}</div>
+                <div className="text-[9px] uppercase tracking-wide text-[color:var(--cg-ink)]/40">BL/BR</div>
+                <div className="font-[var(--font-mono,monospace)] text-xs font-semibold text-[color:var(--cg-ink)]/80">{formatMontant(totalBlBr)}</div>
               </div>
               <div>
-                <div className="text-[9px] uppercase tracking-wide text-white/40">Fact. mois</div>
-                <div className="font-[var(--font-mono,monospace)] text-xs font-semibold text-white/80">{formatMontant(totalFactures)}</div>
+                <div className="text-[9px] uppercase tracking-wide text-[color:var(--cg-ink)]/40">Fact. mois</div>
+                <div className="font-[var(--font-mono,monospace)] text-xs font-semibold text-[color:var(--cg-ink)]/80">{formatMontant(totalFactures)}</div>
               </div>
               <div>
-                <div className="text-[9px] uppercase tracking-wide text-white/40">BL à venir</div>
-                <div className="font-[var(--font-mono,monospace)] text-xs font-semibold text-white/80">{formatMontant(totalBlAVenir)}</div>
+                <div className="text-[9px] uppercase tracking-wide text-[color:var(--cg-ink)]/40">BL à venir</div>
+                <div className="font-[var(--font-mono,monospace)] text-xs font-semibold text-[color:var(--cg-ink)]/80">{formatMontant(totalBlAVenir)}</div>
               </div>
               <div>
-                <div className="text-[9px] uppercase tracking-wide text-white/40">BL NF</div>
-                <div className="font-[var(--font-mono,monospace)] text-xs font-semibold text-white/80">{formatMontant(totalBlNf)}</div>
+                <div className="text-[9px] uppercase tracking-wide text-[color:var(--cg-ink)]/40">BL NF</div>
+                <div className="font-[var(--font-mono,monospace)] text-xs font-semibold text-[color:var(--cg-ink)]/80">{formatMontant(totalBlNf)}</div>
               </div>
             </div>
           </>
@@ -1538,7 +1543,7 @@ function SpacerCard({ span, onRemove }: { span: 1 | 2; onRemove: () => void }) {
         <button
           onClick={onRemove}
           title="Retirer cet espace"
-          className="absolute right-1.5 top-1.5 text-white/0 group-hover:text-white/30 hover:!text-white/70"
+          className="absolute right-1.5 top-1.5 text-[color:var(--cg-ink)]/0 group-hover:text-[color:var(--cg-ink)]/30 hover:!text-[color:var(--cg-ink)]/70"
         >
           ✕
         </button>
@@ -1575,9 +1580,9 @@ function AjouterKpiForm({
   }
 
   return (
-    <div className="rounded-xl border border-white/15 bg-white/5 p-3">
+    <div className="rounded-xl border border-[color:var(--cg-ink)]/15 bg-[color:var(--cg-ink)]/5 p-3">
       <div className="mb-2 flex flex-wrap items-center gap-2">
-        <select value={kind} onChange={(e) => handleKindChange(e.target.value as KpiKind)} className="rounded border border-white/20 bg-[#141A26] px-2 py-1 text-xs text-white">
+        <select value={kind} onChange={(e) => handleKindChange(e.target.value as KpiKind)} className="rounded border border-[color:var(--cg-ink)]/20 bg-[color:var(--cg-panel)] px-2 py-1 text-xs text-[color:var(--cg-ink)]">
           <option value="flux">Flux (BL/Devis/CDC/Factures/Marge)</option>
           <option value="compteur">Compteur</option>
           <option value="taux">Taux</option>
@@ -1587,29 +1592,29 @@ function AjouterKpiForm({
         </select>
 
         {kind === "flux" && (
-          <select value={cle} onChange={(e) => setCle(e.target.value)} className="rounded border border-white/20 bg-[#141A26] px-2 py-1 text-xs text-white">
+          <select value={cle} onChange={(e) => setCle(e.target.value)} className="rounded border border-[color:var(--cg-ink)]/20 bg-[color:var(--cg-panel)] px-2 py-1 text-xs text-[color:var(--cg-ink)]">
             {FAMILLES_FLUX.map((f) => <option key={f} value={f}>{f}</option>)}
           </select>
         )}
         {kind === "compteur" && (
-          <select value={cle} onChange={(e) => setCle(e.target.value)} className="rounded border border-white/20 bg-[#141A26] px-2 py-1 text-xs text-white">
+          <select value={cle} onChange={(e) => setCle(e.target.value)} className="rounded border border-[color:var(--cg-ink)]/20 bg-[color:var(--cg-panel)] px-2 py-1 text-xs text-[color:var(--cg-ink)]">
             {COMPTEUR_OPTIONS.map((o) => <option key={o.cle} value={o.cle}>{o.label}</option>)}
           </select>
         )}
         {kind === "taux" && (
-          <select value={cle} onChange={(e) => setCle(e.target.value)} className="rounded border border-white/20 bg-[#141A26] px-2 py-1 text-xs text-white">
+          <select value={cle} onChange={(e) => setCle(e.target.value)} className="rounded border border-[color:var(--cg-ink)]/20 bg-[color:var(--cg-panel)] px-2 py-1 text-xs text-[color:var(--cg-ink)]">
             {TAUX_OPTIONS.map((o) => <option key={o.cle} value={o.cle}>{o.label}</option>)}
           </select>
         )}
         {kind === "spacer" && (
-          <select value={spacerSpan} onChange={(e) => setSpacerSpan(Number(e.target.value) as 1 | 2)} className="rounded border border-white/20 bg-[#141A26] px-2 py-1 text-xs text-white">
+          <select value={spacerSpan} onChange={(e) => setSpacerSpan(Number(e.target.value) as 1 | 2)} className="rounded border border-[color:var(--cg-ink)]/20 bg-[color:var(--cg-panel)] px-2 py-1 text-xs text-[color:var(--cg-ink)]">
             <option value={1}>Petit (largeur d&rsquo;un compteur)</option>
             <option value={2}>Grand (largeur d&rsquo;un flux)</option>
           </select>
         )}
 
         {kind === "flux" && (
-          <select value={familleMacro} onChange={(e) => setFamilleMacro(e.target.value)} className="rounded border border-white/20 bg-[#141A26] px-2 py-1 text-xs text-white">
+          <select value={familleMacro} onChange={(e) => setFamilleMacro(e.target.value)} className="rounded border border-[color:var(--cg-ink)]/20 bg-[color:var(--cg-panel)] px-2 py-1 text-xs text-[color:var(--cg-ink)]">
             <option value="">Toutes familles</option>
             {famillesMacro.map((fm) => <option key={fm} value={fm}>{fm}</option>)}
           </select>
@@ -1624,23 +1629,23 @@ function AjouterKpiForm({
             value={agenceForcee || agence}
             disabled={Boolean(agenceForcee)}
             onChange={(e) => setAgence(e.target.value)}
-            className="rounded border border-white/20 bg-[#141A26] px-2 py-1 text-xs text-white disabled:cursor-not-allowed disabled:opacity-60"
+            className="rounded border border-[color:var(--cg-ink)]/20 bg-[color:var(--cg-panel)] px-2 py-1 text-xs text-[color:var(--cg-ink)] disabled:cursor-not-allowed disabled:opacity-60"
           >
             {!agenceForcee && <option value="">Toutes agences</option>}
             {agencesDisponibles.map((a) => <option key={a} value={a}>{a}</option>)}
           </select>
         )}
-        {agenceForcee && kind !== "spacer" && <span className="text-[10px] uppercase tracking-wide text-[#A6A181]">périmètre 🔒</span>}
+        {agenceForcee && kind !== "spacer" && <span className="text-[10px] uppercase tracking-wide text-[color:var(--cg-sauge)]">périmètre 🔒</span>}
 
         {kind === "flux" && (
-          <label className="flex cursor-pointer items-center gap-1.5 rounded border border-white/20 bg-[#141A26] px-2 py-1 text-xs text-white/80">
+          <label className="flex cursor-pointer items-center gap-1.5 rounded border border-[color:var(--cg-ink)]/20 bg-[color:var(--cg-panel)] px-2 py-1 text-xs text-[color:var(--cg-ink)]/80">
             <input type="checkbox" checked={grand} onChange={(e) => setGrand(e.target.checked)} className="h-3.5 w-3.5 accent-[#A6A181]" />
             Grand format (courbe annuelle)
           </label>
         )}
       </div>
       <div className="flex justify-end gap-2">
-        <button onClick={onCancel} className="rounded px-3 py-1 text-xs text-white/60 hover:text-white">Annuler</button>
+        <button onClick={onCancel} className="rounded px-3 py-1 text-xs text-[color:var(--cg-ink)]/60 hover:text-[color:var(--cg-ink)]">Annuler</button>
         <button
           onClick={() =>
             kind === "spacer"
@@ -1653,7 +1658,7 @@ function AjouterKpiForm({
                   grand: kind === "flux" ? grand : undefined,
                 })
           }
-          className="rounded bg-white/20 px-3 py-1 text-xs font-semibold text-white hover:bg-white/30"
+          className="rounded bg-[color:var(--cg-ink)]/20 px-3 py-1 text-xs font-semibold text-[color:var(--cg-ink)] hover:bg-[color:var(--cg-ink)]/30"
         >
           Ajouter
         </button>
@@ -1791,8 +1796,8 @@ export default function VisionTciKpiPanel() {
   if ((loading || access.loading) && !hasLoadedOnceRef.current) {
     return (
       <div>
-        <h1 className="mb-3 text-xl font-bold text-white">Vision ONE PAGE</h1>
-        <div className="grid grid-cols-4 gap-3">{Array.from({ length: 4 }).map((_, i) => <div key={i} className="col-span-2 h-28 animate-pulse rounded-xl bg-white/5" />)}</div>
+        <h1 className="mb-3 text-xl font-bold text-[color:var(--cg-ink)]">Vision ONE PAGE</h1>
+        <div className="grid grid-cols-4 gap-3">{Array.from({ length: 4 }).map((_, i) => <div key={i} className="col-span-2 h-28 animate-pulse rounded-xl bg-[color:var(--cg-ink)]/5" />)}</div>
       </div>
     );
   }
@@ -1807,7 +1812,7 @@ export default function VisionTciKpiPanel() {
           <button
             onClick={() => setRefreshTick((t) => t + 1)}
             title="Actualiser toutes les valeurs maintenant"
-            className="rounded-full border border-white/15 px-2.5 py-1 text-[11px] text-white/60 hover:bg-white/5 hover:text-white"
+            className="rounded-full border border-[color:var(--cg-ink)]/15 px-2.5 py-1 text-[11px] text-[color:var(--cg-ink)]/60 hover:bg-[color:var(--cg-ink)]/5 hover:text-[color:var(--cg-ink)]"
           >
             ↻ Actualiser
           </button>
@@ -1815,16 +1820,16 @@ export default function VisionTciKpiPanel() {
           {/* Bascule Jour / J-1 : pilote tous les pavés flux compacts d'un
               coup (les pavés grand format affichent Jour/MTD/YTD dérivés de
               leur propre série, non concernés par cette bascule). */}
-          <div className="flex items-center rounded-full border border-white/15 bg-white/5 p-0.5 text-xs">
+          <div className="flex items-center rounded-full border border-[color:var(--cg-ink)]/15 bg-[color:var(--cg-ink)]/5 p-0.5 text-xs">
             <button
               onClick={() => setUtiliserJMoins1(false)}
-              className={`rounded-full px-2.5 py-1 font-semibold ${!utiliserJMoins1 ? "bg-[#A6A181] text-[#141A26]" : "text-white/50"}`}
+              className={`rounded-full px-2.5 py-1 font-semibold ${!utiliserJMoins1 ? "bg-[#A6A181] text-[#141A26]" : "text-[color:var(--cg-ink)]/50"}`}
             >
               Jour
             </button>
             <button
               onClick={() => setUtiliserJMoins1(true)}
-              className={`rounded-full px-2.5 py-1 font-semibold ${utiliserJMoins1 ? "bg-[#A6A181] text-[#141A26]" : "text-white/50"}`}
+              className={`rounded-full px-2.5 py-1 font-semibold ${utiliserJMoins1 ? "bg-[#A6A181] text-[#141A26]" : "text-[color:var(--cg-ink)]/50"}`}
             >
               J-1
             </button>
@@ -1833,14 +1838,14 @@ export default function VisionTciKpiPanel() {
           {personnalise && (
             <button
               onClick={() => void revenirAuProfil()}
-              className="rounded-full border border-white/15 px-2.5 py-1 text-[11px] text-white/60 hover:bg-white/5 hover:text-white"
+              className="rounded-full border border-[color:var(--cg-ink)]/15 px-2.5 py-1 text-[11px] text-[color:var(--cg-ink)]/60 hover:bg-[color:var(--cg-ink)]/5 hover:text-[color:var(--cg-ink)]"
               title="Abandonner ma personnalisation et revenir à la disposition par défaut de mon profil"
             >
               ↺ Revenir à la disposition du profil
             </button>
           )}
           {!personnalise && (
-            <span className="text-[11px] text-white/35">Disposition du profil (non personnalisée)</span>
+            <span className="text-[11px] text-[color:var(--cg-ink)]/35">Disposition du profil (non personnalisée)</span>
           )}
       </div>
 
@@ -1927,7 +1932,7 @@ export default function VisionTciKpiPanel() {
       ) : (
         <button
           onClick={() => setShowForm(true)}
-          className="w-full rounded-xl border border-dashed border-white/20 py-3 text-xs font-medium text-white/50 hover:border-white/40 hover:text-white/80"
+          className="w-full rounded-xl border border-dashed border-[color:var(--cg-ink)]/20 py-3 text-xs font-medium text-[color:var(--cg-ink)]/50 hover:border-[color:var(--cg-ink)]/40 hover:text-[color:var(--cg-ink)]/80"
         >
           + Ajouter un KPI
         </button>
@@ -1940,7 +1945,7 @@ export default function VisionTciKpiPanel() {
           pas ici — voir le composant fourni séparément à y intégrer. */}
       {rights?.can_autorisation && (
         <div className="mt-4 rounded-xl border border-[#A6A181]/25 bg-[#A6A181]/[0.05] p-3">
-          <div className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-[#A6A181]">
+          <div className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-[color:var(--cg-sauge)]">
             Administrateur — enregistrer comme modèle nommé
           </div>
           <div className="flex flex-wrap items-center gap-2">
@@ -1948,7 +1953,7 @@ export default function VisionTciKpiPanel() {
               value={nomModele}
               onChange={(e) => setNomModele(e.target.value)}
               placeholder='Nom du modèle (ex. "TCI", "Direction", "Chef d&apos;agence")'
-              className="min-w-[220px] flex-1 rounded border border-white/20 bg-[#141A26] px-2 py-1.5 text-xs text-white outline-none"
+              className="min-w-[220px] flex-1 rounded border border-[color:var(--cg-ink)]/20 bg-[color:var(--cg-panel)] px-2 py-1.5 text-xs text-[color:var(--cg-ink)] outline-none"
             />
             <button
               onClick={() => void enregistrerCommeModele()}
@@ -1958,8 +1963,8 @@ export default function VisionTciKpiPanel() {
               {savingModele ? "Enregistrement…" : "Enregistrer le modèle"}
             </button>
           </div>
-          {modeleMessage && <p className="mt-1.5 text-[10px] text-white/60">{modeleMessage}</p>}
-          <p className="mt-1.5 text-[10px] text-white/35">
+          {modeleMessage && <p className="mt-1.5 text-[10px] text-[color:var(--cg-ink)]/60">{modeleMessage}</p>}
+          <p className="mt-1.5 text-[10px] text-[color:var(--cg-ink)]/35">
             Enregistre la disposition actuelle (celle affichée ci-dessus) comme modèle réutilisable. L&rsquo;affectation
             à un profil se fait ensuite depuis Admin → Profils et autorisation.
           </p>

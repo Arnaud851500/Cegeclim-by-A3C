@@ -3,6 +3,11 @@
 /**
  * OutlookAgenda
  * ------------------------------------------------------------------------
+ * MODE CLAIR (2026-10-14) : couleurs de fond / encre passées par les
+ * variables de app/theme.css (identiques aux anciennes en sombre, rendu
+ * inchangé) pour que le composant suive le choix Clair / Sombre sur
+ * Vision ONE PAGE.
+ *
  * Bloc "AGENDA" du mockup "Vision One page TCI" :
  *  - fenêtre glissante des 7 PROCHAINS JOURS, affichage restreint aux
  *    JOURS OUVRÉS (lundi→vendredi uniquement)
@@ -754,7 +759,7 @@ export default function OutlookAgenda({
   }, [rdvEvents]);
 
   return (
-    <div className="flex h-full flex-col rounded-2xl border border-black/10 bg-[#F5F3EC] p-3 text-[#141A26]">
+    <div className="flex h-full flex-col rounded-2xl border border-black/10 bg-[color:var(--cg-card)] p-3 text-[#141A26]">
       <div className="mb-3 flex flex-wrap items-center gap-2">
         <h3 className="font-[var(--font-display,inherit)] text-base font-bold">Agenda</h3>
         {rdvEvents.length > 0 && (

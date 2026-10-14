@@ -72,7 +72,9 @@ export default function LastSyncBadge({
   if (loading || !status || !status.last_synced_at) return null
 
   const isStale = (status.minutes_ago ?? 0) > 30 || status.status === 'erreur'
-  const color = isStale ? '#D69A4A' : 'rgba(255,255,255,0.4)'
+  // Variables de thème (app/theme.css) : identiques aux anciennes couleurs en
+  // sombre, encre marine / ambre foncé en clair (14/10/2026).
+  const color = isStale ? 'var(--cg-warn)' : 'rgba(var(--cg-ink-rgb), 0.4)'
   const dotColor = isStale ? '#D69A4A' : '#3F9142'
 
   const label = compact
