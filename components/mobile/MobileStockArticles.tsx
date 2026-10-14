@@ -66,6 +66,13 @@ import { supabase } from '@/lib/supabaseClient'
 //       • article bloqué  → « NOUVELLE VENTE IMPOSSIBLE » ;
 //       • sinon           → livraison client dès aujourd'hui + délai appro
 //                           + 7 j (sécurité et transport).
+//
+//   ÉVOLUTION (2026-10-14, demandé par Arnaud) -- prix catalogue :
+//   - prix de vente catalogue HT (sans remise, SAGE F_ARTICLE.AR_PrixVen,
+//     lu dans sage.articles.art_prix) affiché sur chaque carte de la liste
+//     et dans l'en-tête de la fiche détail ;
+//   - chargé par lot via la RPC get_articles_prix_catalogue(p_references),
+//     en parallèle de la dispo ; « — » quand l'article n'a pas de prix.
 // ─────────────────────────────────────────────────────────────────────────
 
 type StockRow = {
@@ -148,6 +155,27 @@ function toNumber(v: unknown): number {
 function formatNumber(n: number): string {
   return Math.round(n).toLocaleString('fr-FR')
 }
+/** Prix catalogue HT : « 9 612 € HT », centimes seulement s'il y en a. */
+function formatPrixHT(n: number | null | undefined): string {
+  if (n === null || n === undefined || !Number.isFinite(n) || n <= 0) return '—'
+  const avecCentimes = Math.round(n * 100) % 100 !== 0
+  return `${n.toLocaleString('fr-FR', { minimumFractionDigits: avecCentimes ? 2 : 0, maximumFractionDigits: 2 })} € HT`
+}
+
+/** Prix catalogue HT par référence (une seule requête pour un lot). */
+async function chargerPrixCatalogue(references: string[]): Promise<Record<string, number | null>> {
+  const out: Record<string, number | null> = {}
+  if (references.length === 0) return out
+  const { data, error } = await supabase.rpc('get_articles_prix_catalogue', { p_references: references })
+  if (error) return out
+  for (const ref of references) out[ref] = null
+  for (const r of (data || []) as any[]) {
+    const p = r.prix_catalogue_ht === null || r.prix_catalogue_ht === undefined ? null : Number(r.prix_catalogue_ht)
+    out[String(r.reference_article)] = p !== null && Number.isFinite(p) && p > 0 ? p : null
+  }
+  return out
+}
+
 function formatDateCourte(iso?: string | null): string {
   if (!iso) return '—'
   const [y, m, d] = iso.slice(0, 10).split('-')
@@ -252,6 +280,8 @@ export default function MobileStockArticles({
 
   // ── Dispo pour nouvelle commande (tous dépôts), par référence ─────────
   const [dispoParRef, setDispoParRef] = useState<Record<string, DispoNouvelleCommande>>({})
+  // ── Prix catalogue HT (sans remise), par référence ───────────────────
+  const [prixParRef, setPrixParRef] = useState<Record<string, number | null>>({})
 
   // ── Filtres ──────────────────────────────────────────────────────────
   const [famillesRef, setFamillesRef] = useState<FamilleRow[] | null>(null)
@@ -365,6 +395,19 @@ export default function MobileStockArticles({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [refsResultatsKey])
 
+  // Prix catalogue HT des références affichées : un seul appel par lot.
+  useEffect(() => {
+    const refs = refsResultatsKey ? refsResultatsKey.split('|') : []
+    const manquantes = refs.filter((r) => !(r in prixParRef))
+    if (manquantes.length === 0) return
+    let cancelled = false
+    void chargerPrixCatalogue(manquantes).then((out) => {
+      if (!cancelled) setPrixParRef((prev) => ({ ...prev, ...out }))
+    })
+    return () => { cancelled = true }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [refsResultatsKey])
+
   const refsSaisies = useMemo(() => parseReferences(query), [query])
   const isListe = refsSaisies.length > 1
 
@@ -466,7 +509,10 @@ export default function MobileStockArticles({
                     <span style={{ fontFamily: 'var(--font-mono)', fontSize: 14.5, fontWeight: 700, color: '#fff' }}>{r.reference_article}</span>
                     {d?.blocage_appro && <BadgeBlocage source={d.blocage_source} />}
                   </span>
-                  <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.3)', flexShrink: 0 }}>Détail ›</span>
+                  <span style={{ display: 'flex', alignItems: 'baseline', gap: 6, flexShrink: 0 }}>
+                    <PrixCatalogue prix={prixParRef[r.reference_article]} charge={r.reference_article in prixParRef} />
+                    <span style={{ fontSize: 12, color: 'rgba(255,255,255,0.3)' }}>›</span>
+                  </span>
                 </div>
                 <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.55)', marginBottom: 8, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
                   {r.designation || '—'}
@@ -709,6 +755,20 @@ function StockArticleDetailSheet({
   const [dispoNCLoading, setDispoNCLoading] = useState(true)
   const [dispoNCError, setDispoNCError] = useState<string | null>(null)
 
+  // Prix catalogue HT (sans remise) de la référence consultée.
+  const [prixCatalogue, setPrixCatalogue] = useState<number | null>(null)
+  const [prixCharge, setPrixCharge] = useState(false)
+  useEffect(() => {
+    let cancelled = false
+    setPrixCharge(false)
+    void chargerPrixCatalogue([reference]).then((out) => {
+      if (cancelled) return
+      setPrixCatalogue(out[reference] ?? null)
+      setPrixCharge(true)
+    })
+    return () => { cancelled = true }
+  }, [reference])
+
   useEffect(() => {
     let cancelled = false
     async function loadDispoNC() {
@@ -847,6 +907,11 @@ function StockArticleDetailSheet({
                 {dispoNC?.blocage_appro && <BadgeBlocage source={dispoNC.blocage_source} />}
               </span>
               <div style={{ fontSize: 12.5, color: 'rgba(255,255,255,0.55)', marginTop: 2 }}>{designationResolue || '—'}</div>
+              <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginTop: 6 }}>
+                <span style={{ fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'rgba(255,255,255,0.4)' }}>Prix catalogue</span>
+                <PrixCatalogue prix={prixCatalogue} charge={prixCharge} taille={16} />
+                <span style={{ fontSize: 10.5, color: 'rgba(255,255,255,0.35)' }}>sans remise</span>
+              </div>
             </div>
             <button onClick={onClose} style={{ color: 'rgba(255,255,255,0.4)', fontSize: 20, lineHeight: 1, background: 'none', border: 'none', flexShrink: 0 }}>✕</button>
           </div>
@@ -1087,6 +1152,22 @@ function BandeauTousDepots({
         </div>
       )}
     </div>
+  )
+}
+
+/** Prix catalogue HT (sans remise) : « … » pendant le chargement, « — » sans prix. */
+function PrixCatalogue({ prix, charge, taille = 13 }: { prix: number | null | undefined; charge: boolean; taille?: number }) {
+  const absent = charge && (prix === null || prix === undefined)
+  return (
+    <span
+      title="Prix de vente catalogue HT, sans remise"
+      style={{
+        fontFamily: 'var(--font-mono)', fontSize: taille, fontWeight: 700, whiteSpace: 'nowrap',
+        color: absent ? 'rgba(255,255,255,0.35)' : '#A6A181',
+      }}
+    >
+      {!charge ? '…' : formatPrixHT(prix)}
+    </span>
   )
 }
 
