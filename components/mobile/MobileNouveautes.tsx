@@ -10,8 +10,15 @@
 //
 // Ouverture automatique : à l'ouverture du Compagnon, s'il existe des
 // nouveautés mobiles non lues, le panneau s'ouvre tout seul, une fois.
-// Ouvrir le panneau les marque lues : il ne se rouvrira donc qu'à la
-// prochaine publication. Pas d'ouverture automatique sur PC.
+// Pas d'ouverture automatique sur PC.
+//
+// CORRECTIF (14/10/2026) : les nouveautés ne sont plus marquées lues à
+// l'ouverture du panneau mais à sa fermeture par l'utilisateur (croix, fond
+// ou « Voir le fil »). Si l'app se recharge pendant que le panneau est
+// affiché (cas constaté juste après la connexion, corrigé dans
+// LoginScreen.tsx), les nouveautés restent non lues : le panneau se rouvre
+// au chargement suivant et l'icône reste orange, au lieu de disparaître
+// sans avoir été lues.
 // ============================================================================
 
 import { useCallback, useEffect, useRef, useState } from 'react'
@@ -72,11 +79,18 @@ export default function MobileNouveautes() {
     setFreshIds(new Set(unreadIds))
     setExpanded(new Set(unreadIds.length > 0 ? unreadIds.slice(0, 1) : rows.slice(0, 1).map((row) => row.id)))
     setOpen(true)
-    if (unreadIds.length > 0) {
-      setItems((current) => current.map((row) => (unreadIds.includes(row.id) ? { ...row, lu: true } : row)))
-      void marquerActualites(unreadIds, { lu: true }).catch(() => {})
-    }
   }, [])
+
+  // Fermeture par l'utilisateur : c'est là que les nouveautés affichées
+  // deviennent lues (et que l'ouverture automatique est notée pour la session).
+  const closeSheet = useCallback(() => {
+    setOpen(false)
+    const ids = [...freshIds]
+    if (ids.length === 0) return
+    noterOuvertureAutomatique(ids)
+    setItems((current) => current.map((row) => (ids.includes(row.id) ? { ...row, lu: true } : row)))
+    void marquerActualites(ids, { lu: true }).catch(() => {})
+  }, [freshIds])
 
   const load = useCallback(async () => {
     try {
@@ -87,8 +101,10 @@ export default function MobileNouveautes() {
         autoTente.current = true
         const unreadIds = rows.filter((row) => !row.lu).map((row) => row.id)
         if (unreadIds.length > 0 && !dejaOuvertAutomatiquement(unreadIds)) {
-          noterOuvertureAutomatique(unreadIds)
-          window.setTimeout(() => openSheet(rows), 600)
+          // Laisse l'écran se poser (redirection vers l'accueil, droits) avant d'ouvrir.
+          window.setTimeout(() => {
+            if (document.visibilityState === 'visible') openSheet(rows)
+          }, 1200)
         }
       }
     } catch {
@@ -131,7 +147,7 @@ export default function MobileNouveautes() {
     })
 
   const voirFil = () => {
-    setOpen(false)
+    closeSheet()
     ouvrirActualitesMobile({ onglet: 'nouveaute' }, (href) => router.push(href))
   }
 
@@ -150,7 +166,7 @@ export default function MobileNouveautes() {
 
       {open
         ? createPortal(
-            <div style={styles.backdrop} onClick={() => setOpen(false)} role="presentation">
+            <div style={styles.backdrop} onClick={closeSheet} role="presentation">
               <div
                 role="dialog"
                 aria-modal="true"
@@ -167,7 +183,7 @@ export default function MobileNouveautes() {
                       {items.length} nouveauté{items.length > 1 ? 's' : ''}, la plus récente en premier
                     </div>
                   </div>
-                  <button type="button" onClick={() => setOpen(false)} style={styles.close} aria-label="Fermer">
+                  <button type="button" onClick={closeSheet} style={styles.close} aria-label="Fermer">
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" aria-hidden="true">
                       <path d="M6 6l12 12M18 6L6 18" />
                     </svg>
@@ -203,7 +219,7 @@ export default function MobileNouveautes() {
                 </div>
 
                 <div style={styles.footer}>
-                  <button type="button" onClick={() => setOpen(false)} style={styles.ok}>
+                  <button type="button" onClick={closeSheet} style={styles.ok}>
                     J’ai compris
                   </button>
                 </div>

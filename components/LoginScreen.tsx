@@ -1,6 +1,6 @@
 'use client'
 
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { Space_Grotesk, IBM_Plex_Sans, IBM_Plex_Mono } from 'next/font/google'
 import { supabase } from '@/lib/supabaseClient'
@@ -205,17 +205,52 @@ export default function LoginScreen({ brand }: { brand: LoginBrand }) {
   const backgroundImageUrl =
     'https://gchwihltydsplarhveyv.supabase.co/storage/v1/object/sign/Logo%20et%20images/Image%20site%20CEGECLIM%20maison.jpg?token=eyJraWQiOiJzdG9yYWdlLXVybC1zaWduaW5nLWtleV8yZWU1N2MxYS05ZjJjLTQ1OTItYjE0Ny03ZGE2YzlmOTRmMDIiLCJhbGciOiJIUzI1NiJ9.eyJ1cmwiOiJMb2dvIGV0IGltYWdlcy9JbWFnZSBzaXRlIENFR0VDTElNIG1haXNvbi5qcGciLCJpYXQiOjE3NzU1MDYyNTEsImV4cCI6NDg5NzU3MDI1MX0.d1YT7_-xD44QOm2LFbZIfpkjh9kiIGjpJiEuJxV0rMM'
 
+  // CORRECTIF (14/10/2026) — rechargements intempestifs après connexion,
+  // surtout sur téléphone. Deux chemins appelaient allerVers : handleLogin et
+  // l'effet « session déjà ouverte » ci-dessous, qui se redéclenche à chaque
+  // fin de rechargement des droits (connexion, rafraîchissement du jeton,
+  // retour sur l'onglet). Sa recherche de page d'atterrissage est asynchrone :
+  // elle pouvait aboutir APRÈS que l'app ait déjà quitté /login. allerVers
+  // relevait alors comme « page de login » la page déjà affichée (/accueil),
+  // router.replace vers cette même page ne changeait rien, et le filet de
+  // sécurité forçait 1,2 s plus tard un rechargement complet — qui fermait au
+  // passage la fenêtre « Nouveau dans votre compagnon » ouverte entre-temps.
+  // Désormais : une seule navigation par passage sur l'écran de connexion,
+  // rien après sa disparition, et le rechargement de secours n'a lieu que si
+  // l'on est encore sur la page de connexion d'origine.
+  const loginPathRef = useRef<string | null>(null)
+  const navigationLanceeRef = useRef(false)
+  const monteRef = useRef(true)
+  const fallbackTimerRef = useRef<number | null>(null)
+
+  useEffect(() => {
+    monteRef.current = true
+    loginPathRef.current = window.location.pathname
+    return () => {
+      monteRef.current = false
+      if (fallbackTimerRef.current !== null) window.clearTimeout(fallbackTimerRef.current)
+    }
+  }, [])
+
   const allerVers = useCallback(
     (destination: string) => {
-      const loginPath = window.location.pathname
+      // L'écran de connexion a déjà disparu (navigation faite) ou une
+      // navigation est déjà partie : ne rien relancer.
+      if (!monteRef.current || navigationLanceeRef.current) return
+      const loginPath = loginPathRef.current || window.location.pathname
+      if (window.location.pathname !== loginPath) return
+      navigationLanceeRef.current = true
       router.replace(destination)
 
-      window.setTimeout(() => {
-        if (window.location.pathname === loginPath) {
+      fallbackTimerRef.current = window.setTimeout(() => {
+        fallbackTimerRef.current = null
+        // Navigation cliente réellement bloquée : toujours sur la page de
+        // connexion d'origine, et l'écran de connexion toujours affiché.
+        if (monteRef.current && window.location.pathname === loginPath && destination !== loginPath) {
           console.warn('[login] navigation cliente sans effet, rechargement complet vers', destination)
           window.location.assign(destination)
         }
-      }, 1200)
+      }, 2500)
     },
     [router],
   )
@@ -223,9 +258,10 @@ export default function LoginScreen({ brand }: { brand: LoginBrand }) {
   useEffect(() => {
     if (accessLoading) return
 
-    if (sessionEmail) {
+    if (sessionEmail && !navigationLanceeRef.current) {
       void (async () => {
         const landingPage = await getUserLandingPage(sessionEmail, brand.defaultLandingPage)
+        // allerVers ignore l'appel si l'écran de connexion a été quitté entre-temps.
         allerVers(landingPage)
       })()
     }
