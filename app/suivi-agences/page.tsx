@@ -20,6 +20,16 @@
  * migration supabase/migrations/20261009_suivi_agences_commerciaux.sql.
  * URL : ?vue=collaborateurs, ?fiche=A:ANGLET ou ?fiche=C:BRPAROUTOT.
  *
+ * Bilan commercial 2026 (15/10/2026, demandé par Arnaud) — migration
+ * 20261015_bilan_commercial_2026_objectifs_creations.sql :
+ *   - objectifs de CA par agence / collaborateur / entreprise repris du bilan
+ *     (collaborateurs sans compte : périmètre « collaborateur » au code SAGE) ;
+ *   - objectif à date = objectif annuel × cumul de la répartition mensuelle du
+ *     bilan (saisonnalité de l'année passée) jusqu'au dernier mois clos ;
+ *     colonnes « Obj. à date » et « Réal. / obj. », KPI global vs objectif ;
+ *   - créations de comptes clients (bilan, complété par les fiches SAGE au-delà
+ *     du dernier mois du bilan) : colonne et KPI, comparées à N-1 au prorata.
+ *
  * Droits (13/10/2026) : écran ouvert par can_suivi_agences (profil). Le
  * périmètre agences / collaborateurs de la personne (user_page_access) est
  * appliqué côté base par suivi_perimetre() dans chaque RPC — migration
@@ -47,9 +57,14 @@ import {
   fmtK,
   fmtPct,
   fmtPts,
+  creationsPour,
   impayesPourCodes,
   objectifsPourEntite,
+  parseCreations,
   parseImpayes,
+  parseRepartition,
+  partAnneeEcoulee,
+  partObjectifADate,
   parseDataRows,
   parseRefRows,
   positionsTrimestrielles,
@@ -59,6 +74,9 @@ import {
   toneOf,
   type Collaborateur,
   type Commercial,
+  type CreationsData,
+  type CreationsEntite,
+  type Repartition,
   type DataRow,
   type ImpayesData,
   type Entity,
@@ -85,7 +103,9 @@ const SEUIL_PETIT = 10000
 type Perimetre = { restreint: boolean; agences: string[]; collaborateurs: string[] }
 const PERIMETRE_LIBRE: Perimetre = { restreint: false, agences: [], collaborateurs: [] }
 
-type SortKey = 'label' | 'caN1' | 'caN1Date' | 'caNDate' | 'evol' | 'ecart' | 'marge' | 'margeDelta' | 'vsEntreprise' | 'objectif'
+type SortKey =
+  | 'label' | 'caN1' | 'caN1Date' | 'caNDate' | 'evol' | 'ecart' | 'marge' | 'margeDelta' | 'vsEntreprise'
+  | 'objectifADate' | 'realisation' | 'creationsN'
 
 type Ligne = {
   entity: Entity
@@ -99,8 +119,14 @@ type Ligne = {
   marge: number | null
   margeDelta: number | null
   vsEntreprise: number | null
+  /** Objectif annuel de CA (null si aucun, ou si un filtre familles est actif). */
   objectifCa: number | null
+  /** Objectif à date = annuel × répartition mensuelle cumulée des mois clos. */
+  objectifADate: number | null
+  /** Réalisé à date / objectif à date, en %. */
   realisation: number | null
+  creations: CreationsEntite | null
+  creationsN: number | null
   positions: ReturnType<typeof positionsTrimestrielles>
 }
 
@@ -128,6 +154,8 @@ function SuiviAgencesPage() {
   const [objectifs, setObjectifs] = useState<Objectif[]>([])
   const [commerciaux, setCommerciaux] = useState<Commercial[]>([])
   const [impayes, setImpayes] = useState<ImpayesData | null>(null)
+  const [repartition, setRepartition] = useState<Repartition>(null)
+  const [creations, setCreations] = useState<CreationsData | null>(null)
   const [perimetre, setPerimetre] = useState<Perimetre>(PERIMETRE_LIBRE)
 
   const [filtres, setFiltres] = useState<Filtres>({ ...FILTRES_VIDES, vue: searchParams.get('vue') === 'collaborateurs' ? 'collaborateurs' : 'agences' })
@@ -143,12 +171,15 @@ function SuiviAgencesPage() {
   const load = useCallback(async (targetAnnee: number) => {
     setLoading(true)
     setError(null)
-    const [dataRes, refRes, objRes, impRes] = await Promise.all([
+    const [dataRes, refRes, objRes, impRes, creRes] = await Promise.all([
       supabase.rpc('get_suivi_agences_data', { p_annee: targetAnnee }),
       supabase.rpc('get_suivi_agences_reference', { p_annee: targetAnnee }),
       supabase.rpc('get_suivi_objectifs', { p_annee: targetAnnee }),
       supabase.rpc('get_suivi_impayes', { p_annee: targetAnnee }),
+      supabase.rpc('get_suivi_creations_comptes', { p_annee: targetAnnee }),
     ])
+    // Créations de comptes : facultatif (migration 20261015 non appliquée → pas de colonne).
+    setCreations(creRes.error ? null : parseCreations(creRes.data))
     // Impayés : facultatif (migration 20261011 non appliquée → pas de pavé).
     setImpayes(impRes.error ? null : parseImpayes(impRes.data))
     if (dataRes.error) {
@@ -187,6 +218,7 @@ function SuiviAgencesPage() {
       famille_macro: o.famille_macro ? String(o.famille_macro) : null,
       valeur_cible: Number(o.valeur_cible),
     })))
+    setRepartition(parseRepartition(obj.repartition))
     setCommerciaux(((obj.commerciaux || []) as any[]).map((c) => ({
       email: String(c.email || ''),
       display_name: String(c.display_name || ''),
@@ -286,6 +318,22 @@ function SuiviAgencesPage() {
 
   const refEvol = evolPct(sumMonths(refSerie.ca[2], 1, moisClos), sumMonths(refSerie.ca[1], 1, moisClos))
 
+  // Objectif à date : part de l'objectif annuel attendue à fin du dernier mois clos.
+  const partADate = useMemo(() => partObjectifADate(repartition, moisClos), [repartition, moisClos])
+  const partAnnee = useMemo(() => partAnneeEcoulee(annee), [annee])
+  const agenceDeCode = useCallback((code: string) => collabByCode.get(code.toUpperCase())?.agence, [collabByCode])
+
+  /** Créations de comptes d'une entité (agence = agence de la fiche collaborateur). */
+  const creationsEntite = useCallback(
+    (entity: Entity): CreationsEntite | null => {
+      if (entity.kind === 'collaborateur') return creationsPour(creations, (r) => r.code === entity.id.toUpperCase(), annee, partAnnee)
+      if (entity.kind === 'agence') return creationsPour(creations, (r) => r.agence === entity.id && (!coSet || coSet.has(r.code)), annee, partAnnee)
+      if (entity.id === 'entreprise') return creationsPour(creations, () => true, annee, partAnnee)
+      return creationsPour(creations, (r) => (!agSet || agSet.has(r.agence)) && (!coSet || coSet.has(r.code)), annee, partAnnee)
+    },
+    [creations, annee, partAnnee, agSet, coSet]
+  )
+
   const buildLigne = useCallback(
     (entity: Entity, serie: Serie): Ligne => {
       const caN1 = sumMonths(serie.ca[1], 1, 12)
@@ -300,8 +348,12 @@ function SuiviAgencesPage() {
       })
       const tN = tauxMarge(sumMonths(serie.mg[2], 1, moisClos), caNDate)
       const tN1 = tauxMarge(sumMonths(serie.mg[1], 1, moisClos), caN1Date)
-      const objs = objectifsPourEntite(entity, objectifs, commerciaux)
-      const objCa = objs.propres.find((o) => o.type_objectif === 'ca_valeur' && !o.famille_macro)
+      const objs = objectifsPourEntite(entity, objectifs, commerciaux, agenceDeCode)
+      const objCaRow = objs.propres.find((o) => o.type_objectif === 'ca_valeur' && !o.famille_macro)
+      // Un filtre familles rend la comparaison à l'objectif global sans objet.
+      const objCa = famSet ? null : objCaRow ? objCaRow.valeur_cible : null
+      const objADate = objCa !== null ? objCa * partADate : null
+      const cre = creationsEntite(entity)
       return {
         entity,
         serie,
@@ -314,12 +366,15 @@ function SuiviAgencesPage() {
         marge: tN,
         margeDelta: tN !== null && tN1 !== null ? tN - tN1 : null,
         vsEntreprise: evol !== null && refEvol !== null ? evol - refEvol : null,
-        objectifCa: objCa ? objCa.valeur_cible : null,
-        realisation: objCa && objCa.valeur_cible > 0 ? (caNDate / objCa.valeur_cible) * 100 : null,
+        objectifCa: objCa,
+        objectifADate: objADate,
+        realisation: objADate && objADate > 0 ? (caNDate / objADate) * 100 : null,
+        creations: cre,
+        creationsN: cre ? cre.n : null,
         positions: positionsTrimestrielles(serie, moisClos),
       }
     },
-    [moisClos, objectifs, commerciaux, refEvol]
+    [moisClos, objectifs, commerciaux, refEvol, agenceDeCode, famSet, partADate, creationsEntite]
   )
 
   const isPetit = useCallback(
@@ -372,14 +427,24 @@ function SuiviAgencesPage() {
     [filtres.vue, lignesAgence, lignesCollab, sorter]
   )
 
-  const totalLigne = useMemo(
-    () => buildLigne({ key: 'T', kind: 'entreprise', id: 'total', label: 'Total sélection', agence: '', codes: Array.from(seriesByCode.keys()) }, serieTotal),
-    [buildLigne, serieTotal, seriesByCode]
-  )
-  const refLigne = useMemo(
-    () => buildLigne({ key: 'R', kind: 'entreprise', id: 'entreprise', label: 'Entreprise (réf.)', agence: '', codes: [] }, refSerie),
-    [buildLigne, refSerie]
-  )
+  const totalLigne = useMemo(() => {
+    const l = buildLigne({ key: 'T', kind: 'entreprise', id: 'total', label: 'Total sélection', agence: '', codes: Array.from(seriesByCode.keys()) }, serieTotal)
+    // Objectif de la sélection : objectif entreprise sans filtre agence / collaborateur,
+    // sinon somme des objectifs des lignes affichées.
+    let objCa = l.objectifCa
+    if (famSet) objCa = null
+    else if (agSet || coSet || objCa === null) {
+      const avecObjectif = topLignes.filter((x) => x.objectifCa !== null)
+      objCa = avecObjectif.length ? avecObjectif.reduce((s, x) => s + (x.objectifCa || 0), 0) : null
+    }
+    const objADate = objCa !== null ? objCa * partADate : null
+    return { ...l, objectifCa: objCa, objectifADate: objADate, realisation: objADate && objADate > 0 ? (l.caNDate / objADate) * 100 : null }
+  }, [buildLigne, serieTotal, seriesByCode, topLignes, famSet, agSet, coSet, partADate])
+  const refLigne = useMemo(() => {
+    const l = buildLigne({ key: 'R', kind: 'entreprise', id: 'entreprise', label: 'Entreprise (réf.)', agence: '', codes: [] }, refSerie)
+    // La référence est « hors exclusions » : pas d'objectif comparable.
+    return { ...l, objectifCa: null, objectifADate: null, realisation: null }
+  }, [buildLigne, refSerie])
 
   const nbTrimestres = Math.min(4, Math.floor(moisClos / 3))
 
@@ -462,9 +527,10 @@ function SuiviAgencesPage() {
   }, [fiche, impayes, collaborateurs])
 
   const ficheObjectifs = useMemo(
-    () => (fiche ? objectifsPourEntite(fiche.entity, objectifs, commerciaux) : { propres: [], familles: [], zeroImpaye: null, herites: [], heritesDe: null }),
-    [fiche, objectifs, commerciaux]
+    () => (fiche ? objectifsPourEntite(fiche.entity, objectifs, commerciaux, agenceDeCode) : { propres: [], familles: [], zeroImpaye: null, herites: [], heritesDe: null }),
+    [fiche, objectifs, commerciaux, agenceDeCode]
   )
+  const ficheCreations = useMemo(() => (fiche ? creationsEntite(fiche.entity) : null), [fiche, creationsEntite])
 
   // ------------------------------------------------------------------ rendu
   function toggleExpand(agence: string) {
@@ -630,13 +696,38 @@ function SuiviAgencesPage() {
             )}
 
             {/* KPI sélection */}
-            <div className="mb-4 grid grid-cols-2 gap-3 md:grid-cols-4 xl:grid-cols-6">
+            <div className="mb-4 grid grid-cols-2 gap-3 md:grid-cols-4 xl:grid-cols-8">
               <Kpi label={`CA ${annee} à date`} value={fmtK(totalLigne.caNDate)} sub={`${annee - 1} : ${fmtK(totalLigne.caN1Date)}`} />
+              <Kpi
+                label="vs objectif à date"
+                value={totalLigne.realisation === null ? '—' : `${Math.round(totalLigne.realisation)} %`}
+                tone={totalLigne.realisation === null ? 'text-slate-400' : totalLigne.realisation >= 100 ? 'text-[#1F6B3A]' : 'text-[#A32C2C]'}
+                sub={
+                  totalLigne.objectifADate === null
+                    ? filtres.familles.length ? 'filtre familles actif' : 'aucun objectif'
+                    : `${totalLigne.caNDate - totalLigne.objectifADate >= 0 ? '+' : ''}${fmtK(totalLigne.caNDate - totalLigne.objectifADate)} · obj. ${fmtK(totalLigne.objectifADate)}`
+                }
+                title={totalLigne.objectifCa !== null ? `Objectif annuel ${fmtEuro(totalLigne.objectifCa)} · attendu à fin ${MOIS_LONGS[moisClos] || '—'} : ${fmtPct(partADate * 100, 1, false)}` : undefined}
+              />
+              <Kpi
+                label={`Objectif ${annee}`}
+                value={totalLigne.objectifCa === null ? '—' : fmtK(totalLigne.objectifCa)}
+                sub={totalLigne.objectifCa === null ? '' : `réalisé ${fmtPct((totalLigne.caNDate / totalLigne.objectifCa) * 100, 0, false)} · reste ${fmtK(Math.max(0, totalLigne.objectifCa - totalLigne.caNDate))}`}
+              />
               <Kpi label="Évolution vs N-1" value={fmtPct(totalLigne.evol)} tone={toneOf(totalLigne.evol)} sub={`${totalLigne.ecart >= 0 ? '+' : ''}${fmtK(totalLigne.ecart)}`} />
               <Kpi label="Entreprise (réf.)" value={fmtPct(refLigne.evol)} tone={toneOf(refLigne.evol)} sub={exclusionsLibelle || 'toutes agences'} />
               <Kpi label="Écart vs entreprise" value={fmtPts(totalLigne.vsEntreprise)} tone={toneOf(totalLigne.vsEntreprise)} sub="sélection − entreprise" />
               <Kpi label="Taux de marge" value={fmtPct(totalLigne.marge, 1, false)} sub={`vs N-1 ${fmtPts(totalLigne.margeDelta)}`} />
-              <Kpi label={`CA ${annee - 1} année`} value={fmtK(totalLigne.caN1)} sub={`${annee - 2} : ${fmtK(sumMonths(serieTotal.ca[0], 1, 12))}`} />
+              {creations && totalLigne.creations ? (
+                <Kpi
+                  label="Comptes créés"
+                  value={String(totalLigne.creations.n)}
+                  tone={totalLigne.creations.n >= totalLigne.creations.n1Prorata ? 'text-[#1F6B3A]' : 'text-[#A32C2C]'}
+                  sub={`${annee - 1} : ${totalLigne.creations.n1} (prorata ${Math.round(totalLigne.creations.n1Prorata)})`}
+                />
+              ) : (
+                <Kpi label={`CA ${annee - 1} année`} value={fmtK(totalLigne.caN1)} sub={`${annee - 2} : ${fmtK(sumMonths(serieTotal.ca[0], 1, 12))}`} />
+              )}
             </div>
 
             <div className={`grid grid-cols-1 gap-4 ${showCross ? '2xl:grid-cols-[minmax(0,1fr)_640px]' : ''}`}>
@@ -658,7 +749,7 @@ function SuiviAgencesPage() {
                   )}
                 </div>
                 <div className="overflow-x-auto">
-                  <table className="w-full min-w-[1080px] text-[13px]">
+                  <table className="w-full min-w-[1280px] text-[13px]">
                     <thead className="bg-[#FAF9F7] text-[11px] uppercase tracking-[0.05em] text-slate-500">
                       <tr>
                         {header('label', filtres.vue === 'agences' ? 'Agence / collaborateur' : 'Collaborateur', 'left')}
@@ -673,7 +764,9 @@ function SuiviAgencesPage() {
                         {header('vsEntreprise', 'vs entr.', 'right', `Évolution − évolution entreprise ${exclusionsLibelle}`)}
                         {header('marge', 'Marge %')}
                         {header('margeDelta', 'Δ marge')}
-                        {header('objectif', 'Obj. CA')}
+                        {header('objectifADate', 'Obj. à date', 'right', `Objectif annuel × répartition mensuelle du bilan, janvier → ${MOIS_LONGS[moisClos] || '—'} (${fmtPct(partADate * 100, 1, false)} de l’année)`)}
+                        {header('realisation', 'Réal. / obj.', 'right', 'CA à date / objectif à date')}
+                        {creations && header('creationsN', 'Comptes créés', 'right', `Comptes clients créés en ${annee} (à ce jour), comparés à ${annee - 1} au prorata de l’année écoulée`)}
                         <th className="whitespace-nowrap px-2 py-2.5 text-left font-semibold">Position</th>
                       </tr>
                     </thead>
@@ -693,25 +786,29 @@ function SuiviAgencesPage() {
                             onToggle={isAgence ? () => toggleExpand(l.entity.id) : undefined}
                             onOpen={(key) => openFiche(key)}
                             showAgence={filtres.vue === 'collaborateurs'}
+                            avecCreations={!!creations}
                           />
                         )
                       })}
                       {topLignes.length === 0 && (
                         <tr>
-                          <td colSpan={12} className="px-4 py-10 text-center text-sm text-slate-500">
+                          <td colSpan={15} className="px-4 py-10 text-center text-sm text-slate-500">
                             Aucune ligne pour cette sélection.
                           </td>
                         </tr>
                       )}
                     </tbody>
                     <tfoot>
-                      <LigneRow ligne={totalLigne} variant="total" />
-                      <LigneRow ligne={refLigne} variant="ref" masquerMontants={perimetre.restreint} />
+                      <LigneRow ligne={totalLigne} variant="total" avecCreations={!!creations} />
+                      <LigneRow ligne={refLigne} variant="ref" masquerMontants={perimetre.restreint} avecCreations={!!creations} />
                     </tfoot>
                   </table>
                 </div>
                 <div className="border-t border-[#EFEDE8] px-4 py-2 text-[11px] text-slate-500">
-                  Agence = agence de la fiche collaborateur. Trimestre en italique = trimestre en cours, comparé sur les mêmes mois. Obj. CA = réalisé à date / objectif annuel.
+                  Agence = agence de la fiche collaborateur. Trimestre en italique = trimestre en cours, comparé sur les mêmes mois. Obj. à date = objectif annuel ×{' '}
+                  {repartition ? 'répartition mensuelle du bilan commercial (saisonnalité de l’année passée)' : 'prorata des mois clos'} ; Réal. / obj. = CA à date / objectif à date
+                  {filtres.familles.length > 0 && ' (masqué : filtre familles actif)'}.
+                  {creations && ` Comptes créés = bilan commercial${creations.moisBilan[annee] ? ` jusqu’à ${MOIS_LONGS[creations.moisBilan[annee] || 0]}` : ''}, puis fiches clients SAGE ; N-1 comparé au prorata de l’année écoulée.`}
                 </div>
               </section>
 
@@ -747,6 +844,9 @@ function SuiviAgencesPage() {
           objectifs={ficheObjectifs}
           exclusionsLibelle={exclusionsLibelle}
           impayes={ficheImpayes}
+          repartition={repartition}
+          partADate={partADate}
+          creations={ficheCreations}
           onClose={() => openFiche(null)}
         />
       )}
@@ -764,6 +864,7 @@ function LigneGroupe({
   onToggle,
   onOpen,
   showAgence,
+  avecCreations,
 }: {
   ligne: Ligne
   enfants: Ligne[]
@@ -771,12 +872,13 @@ function LigneGroupe({
   onToggle?: () => void
   onOpen: (key: string) => void
   showAgence: boolean
+  avecCreations: boolean
 }) {
   return (
     <>
-      <LigneRow ligne={ligne} open={open} onToggle={onToggle} onOpen={onOpen} showAgence={showAgence} />
+      <LigneRow ligne={ligne} open={open} onToggle={onToggle} onOpen={onOpen} showAgence={showAgence} avecCreations={avecCreations} />
       {enfants.map((e) => (
-        <LigneRow key={e.entity.key} ligne={e} child onOpen={onOpen} />
+        <LigneRow key={e.entity.key} ligne={e} child onOpen={onOpen} avecCreations={avecCreations} />
       ))}
     </>
   )
@@ -791,8 +893,10 @@ function LigneRow({
   showAgence,
   variant,
   masquerMontants,
+  avecCreations = false,
 }: {
   ligne: Ligne
+  avecCreations?: boolean
   open?: boolean
   onToggle?: () => void
   onOpen?: (key: string) => void
@@ -863,9 +967,36 @@ function LigneRow({
       <td className={`px-2 py-2 text-right tabular-nums ${variant === 'ref' ? '' : toneOf(l.vsEntreprise)}`}>{variant === 'ref' ? '—' : fmtPts(l.vsEntreprise)}</td>
       <td className="px-2 py-2 text-right tabular-nums">{fmtPct(l.marge, 1, false)}</td>
       <td className={`px-2 py-2 text-right tabular-nums ${toneOf(l.margeDelta, 0.1)}`}>{fmtPts(l.margeDelta)}</td>
-      <td className="px-2 py-2 text-right tabular-nums" title={l.objectifCa ? `Objectif ${fmtEuro(l.objectifCa)}` : undefined}>
-        {l.realisation === null ? <span className="text-slate-300">—</span> : `${Math.round(l.realisation)} %`}
+      <td className="px-2 py-2 text-right tabular-nums text-slate-600" title={l.objectifCa !== null ? `Objectif annuel ${fmtEuro(l.objectifCa)}` : undefined}>
+        {l.objectifADate === null ? <span className="text-slate-300">—</span> : mask(fmtK(l.objectifADate))}
       </td>
+      <td
+        className="px-2 py-2 text-right tabular-nums"
+        title={l.objectifADate !== null ? `${fmtEuro(l.caNDate)} / ${fmtEuro(l.objectifADate)} (écart ${l.caNDate - l.objectifADate >= 0 ? '+' : ''}${fmtK(l.caNDate - l.objectifADate)})` : undefined}
+      >
+        {l.realisation === null ? (
+          <span className="text-slate-300">—</span>
+        ) : (
+          <span className={`rounded px-1.5 py-0.5 text-[12px] font-semibold ${l.realisation >= 100 ? 'bg-[#E5F2E8] text-[#1F6B3A]' : l.realisation >= 90 ? 'bg-[#FBF1DC] text-[#8A5A11]' : 'bg-[#FBE6E3] text-[#A32C2C]'}`}>
+            {Math.round(l.realisation)} %
+          </span>
+        )}
+      </td>
+      {avecCreations && (
+        <td
+          className="px-2 py-2 text-right tabular-nums"
+          title={l.creations ? `${l.creations.n} en N à ce jour · N-1 : ${l.creations.n1} sur l’année (prorata ${l.creations.n1Prorata.toFixed(1)})${l.creations.avecSage ? ' · derniers mois : fiches SAGE' : ''}` : undefined}
+        >
+          {!l.creations || (l.creations.n === 0 && l.creations.n1 === 0) ? (
+            <span className="text-slate-300">—</span>
+          ) : (
+            <span className="inline-flex items-baseline gap-1">
+              <span className={`font-semibold ${l.creations.n >= l.creations.n1Prorata ? 'text-[#1F6B3A]' : 'text-[#A32C2C]'}`}>{l.creations.n}</span>
+              <span className="text-[11px] text-slate-400">/ {l.creations.n1}</span>
+            </span>
+          )}
+        </td>
+      )}
       <td className="px-2 py-2">
         {quadrant ? (
           <div className="flex items-center gap-1">
@@ -890,9 +1021,9 @@ function LigneRow({
   )
 }
 
-function Kpi({ label, value, sub, tone = 'text-slate-900' }: { label: string; value: string; sub?: string; tone?: string }) {
+function Kpi({ label, value, sub, tone = 'text-slate-900', title }: { label: string; value: string; sub?: string; tone?: string; title?: string }) {
   return (
-    <div className="rounded-xl border border-[#E2DFD8] bg-white px-3.5 py-3">
+    <div className="rounded-xl border border-[#E2DFD8] bg-white px-3.5 py-3" title={title}>
       <div className="text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-500">{label}</div>
       <div className={`mt-1 text-[19px] font-bold leading-tight ${tone}`}>{value}</div>
       {sub && <div className="mt-0.5 truncate text-[11px] text-slate-500">{sub}</div>}

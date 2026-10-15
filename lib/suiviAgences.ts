@@ -45,7 +45,8 @@ export type Collaborateur = {
 }
 
 export type Objectif = {
-  perimetre_type: 'entreprise' | 'agence' | 'commercial'
+  /** 'collaborateur' (15/10/2026) : objectif d'un collaborateur sans compte dans l'outil, perimetre_ref = code SAGE. */
+  perimetre_type: 'entreprise' | 'agence' | 'commercial' | 'collaborateur'
   perimetre_ref: string | null
   type_objectif: string
   famille_macro: string | null
@@ -323,11 +324,29 @@ function completer(base: Objectif[], autre: Objectif[]) {
 export function objectifsPourEntite(
   entity: Entity,
   objectifs: Objectif[],
-  commerciaux: Commercial[]
+  commerciaux: Commercial[],
+  /** Agence (fiche collaborateur) d'un code SAGE : sert à compter les collaborateurs
+   * sans compte qui ont un objectif propre dans une agence (règle « un seul commercial »). */
+  agenceDeCode?: (code: string) => string | undefined
 ): ObjectifsEntite {
   const entreprise = objectifs.filter((o) => o.perimetre_type === 'entreprise')
   const agenceKey = normAgence(entity.agence)
   const agence = objectifs.filter((o) => o.perimetre_type === 'agence' && normAgence(o.perimetre_ref) === agenceKey)
+
+  // Objectifs fixés au code SAGE (collaborateurs sans compte, Bilan commercial 2026).
+  const objectifsCode = (code: string) =>
+    objectifs.filter((o) => o.perimetre_type === 'collaborateur' && String(o.perimetre_ref || '').toUpperCase() === code.toUpperCase())
+  const codesObjectifDansAgence = (key: string) => {
+    if (!agenceDeCode) return 0
+    const codesComptes = new Set(commerciaux.map((c) => (c.code || '').toUpperCase()).filter(Boolean))
+    const codes = new Set(
+      objectifs
+        .filter((o) => o.perimetre_type === 'collaborateur' && o.perimetre_ref)
+        .map((o) => String(o.perimetre_ref).toUpperCase())
+        .filter((code) => !codesComptes.has(code) && normAgence(agenceDeCode(code)) === key)
+    )
+    return codes.size
+  }
 
   // Règle du 12/10/2026 : agence à un seul commercial soumis à objectif → les
   // objectifs de l'agence valent pour le commercial (et inversement), un objectif
@@ -342,7 +361,7 @@ export function objectifsPourEntite(
   else if (entity.kind === 'agence') {
     propres = agence
     const seuls = commerciaux.filter((c) => normAgence(c.agence_objectif) === agenceKey)
-    if (seuls.length === 1) {
+    if (seuls.length === 1 && codesObjectifDansAgence(agenceKey) === 0) {
       herites = completer(propres, objectifsCommercial(seuls[0].email))
       if (herites.length) heritesDe = `commercial ${seuls[0].display_name || seuls[0].email}`
       propres = [...propres, ...herites]
@@ -350,9 +369,11 @@ export function objectifsPourEntite(
   } else {
     const fiches = commerciaux.filter((c) => (c.code || '').toUpperCase() === entity.id.toUpperCase())
     propres = fiches.flatMap((c) => objectifsCommercial(c.email))
+    // Objectifs au code SAGE : complètent ceux du compte (le compte reste prioritaire).
+    propres = [...propres, ...completer(propres, objectifsCode(entity.id))]
     const agenceCommerciale = fiches.find((c) => c.agence_objectif)?.agence_objectif || entity.agence
     const keyCo = normAgence(agenceCommerciale)
-    const nbCommerciaux = commerciaux.filter((c) => normAgence(c.agence_objectif) === keyCo).length
+    const nbCommerciaux = commerciaux.filter((c) => normAgence(c.agence_objectif) === keyCo).length + codesObjectifDansAgence(keyCo)
     if (fiches.length > 0 && nbCommerciaux === 1) {
       const objAgence = objectifs.filter((o) => o.perimetre_type === 'agence' && normAgence(o.perimetre_ref) === keyCo)
       herites = completer(propres, objAgence)
@@ -489,4 +510,113 @@ export function fmtDateCourte(iso: string | null | undefined) {
   if (!iso) return '—'
   const [y, m, d] = iso.slice(0, 10).split('-')
   return `${d}/${m}/${y}`
+}
+
+// ----------------------------------------------------------------------------
+// Objectif à date (15/10/2026, Bilan commercial 2026)
+// L'objectif annuel est réparti par mois selon la saisonnalité du bilan
+// (ligne « % » de la feuille BUDGET, issue de l'année passée) :
+// objectif à date = objectif annuel × cumul des % des mois clos.
+// À défaut de répartition saisie pour l'année : prorata 1/12 par mois.
+// ----------------------------------------------------------------------------
+/** Pourcentages mensuels, index 1..12 (0 inutilisé) ; null = pas de répartition. */
+export type Repartition = number[] | null
+
+export function parseRepartition(raw: unknown): Repartition {
+  if (!Array.isArray(raw) || raw.length === 0) return null
+  const out = new Array(13).fill(0)
+  raw.forEach((r: any) => {
+    const m = Number(r?.mois)
+    if (m >= 1 && m <= 12) out[m] = Number(r?.pct) || 0
+  })
+  return out.slice(1).some((v) => v > 0) ? out : null
+}
+
+/** Part (0..1) de l'objectif annuel attendue à fin du mois `moisClos`. */
+export function partObjectifADate(rep: Repartition, moisClos: number): number {
+  if (moisClos <= 0) return 0
+  if (!rep) return Math.min(12, moisClos) / 12
+  const total = rep.slice(1).reduce((a, b) => a + b, 0)
+  if (total <= 0) return Math.min(12, moisClos) / 12
+  return rep.slice(1, Math.min(12, moisClos) + 1).reduce((a, b) => a + b, 0) / total
+}
+
+/** Part (0..1) de l'objectif annuel du mois m. */
+export function partObjectifMois(rep: Repartition, m: number): number {
+  if (!rep) return 1 / 12
+  const total = rep.slice(1).reduce((a, b) => a + b, 0)
+  return total > 0 ? (rep[m] || 0) / total : 1 / 12
+}
+
+// ----------------------------------------------------------------------------
+// Créations de comptes clients (15/10/2026, Bilan commercial 2026)
+// RPC get_suivi_creations_comptes : chiffres du bilan (cumuls annuels jusqu'à
+// N-1, détail mensuel en N), complétés au-delà du dernier mois du bilan par les
+// fiches clients SAGE (ref_tiers.date_creation × représentant).
+// mois 0 = cumul annuel sans détail mensuel.
+// ----------------------------------------------------------------------------
+export type CreationRow = { code: string; agence: string; annee: number; mois: number; nb: number; source: 'bilan' | 'sage' }
+export type CreationsData = { rows: CreationRow[]; moisBilan: Record<number, number | null> }
+
+export function parseCreations(raw: unknown): CreationsData | null {
+  if (!raw || typeof raw !== 'object') return null
+  const r = raw as any
+  const rows: CreationRow[] = ((r.rows || []) as any[]).map((x) => ({
+    code: String(x[0] || '').toUpperCase(),
+    agence: String(x[1] || 'NON AFFECTE'),
+    annee: Number(x[2]),
+    mois: Number(x[3]),
+    nb: Number(x[4]) || 0,
+    source: x[5] === 'sage' ? 'sage' : 'bilan',
+  }))
+  const moisBilan: Record<number, number | null> = {}
+  ;((r.couverture || []) as any[]).forEach((c) => {
+    moisBilan[Number(c.annee)] = c.mois_bilan === null || c.mois_bilan === undefined ? null : Number(c.mois_bilan)
+  })
+  return { rows, moisBilan }
+}
+
+export type CreationsEntite = {
+  /** Comptes créés en N, à date (tous les mois disponibles). */
+  n: number
+  /** Détail mensuel N (index 1..12). */
+  parMois: number[]
+  /** Comptes créés sur l'année N-1 complète. */
+  n1: number
+  /** N-1 ramené à la même part de l'année (prorata calendaire) : base de comparaison. */
+  n1Prorata: number
+  /** Une partie de N vient des fiches SAGE (au-delà du dernier mois du bilan). */
+  avecSage: boolean
+}
+
+export function creationsPour(
+  data: CreationsData | null,
+  filtre: (row: CreationRow) => boolean,
+  annee: number,
+  partAnnee: number
+): CreationsEntite | null {
+  if (!data) return null
+  const parMois = new Array(13).fill(0)
+  let n = 0
+  let n1 = 0
+  let avecSage = false
+  data.rows.forEach((r) => {
+    if (!filtre(r)) return
+    if (r.annee === annee) {
+      n += r.nb
+      if (r.mois >= 1) parMois[r.mois] += r.nb
+      if (r.source === 'sage') avecSage = true
+    } else if (r.annee === annee - 1) n1 += r.nb
+  })
+  return { n, parMois, n1, n1Prorata: n1 * partAnnee, avecSage }
+}
+
+/** Part calendaire écoulée de l'année (1 pour une année passée). */
+export function partAnneeEcoulee(annee: number, now: Date = new Date()): number {
+  const y = now.getFullYear()
+  if (annee < y) return 1
+  if (annee > y) return 0
+  const debut = new Date(y, 0, 1).getTime()
+  const fin = new Date(y + 1, 0, 1).getTime()
+  return Math.min(1, Math.max(0, (now.getTime() - debut) / (fin - debut)))
 }

@@ -67,7 +67,9 @@ type TypeObjectif =
   | 'nb_clients_petits'
   | 'zero_impaye_45j'
 
-type PerimetreType = 'entreprise' | 'agence' | 'commercial'
+// 'collaborateur' (15/10/2026, Bilan commercial 2026) : collaborateur SAGE sans
+// compte dans l'outil, objectif rattaché à son code (perimetre_ref = code).
+type PerimetreType = 'entreprise' | 'agence' | 'commercial' | 'collaborateur'
 
 type ObjectifRow = {
   id: string
@@ -468,6 +470,28 @@ export default function ObjectifsPage() {
     return usersObjectif.filter((user) => normAgence(user.agence_objectif) === normAgence(agence))
   }
 
+  /** Collaborateurs actifs de l'agence (fiche collaborateur) sans compte soumis à objectif,
+   * plus ceux qui ont déjà un objectif au code SAGE. */
+  function collaborateursSansCompteDe(agence: string) {
+    const codesComptes = new Set(usersObjectif.map((u) => u.code).filter(Boolean))
+    const codes = new Set<string>()
+    collabsRef
+      .filter((c) => !c.sommeil && normAgence(c.agence) === normAgence(agence) && !codesComptes.has(c.code))
+      .forEach((c) => codes.add(c.code))
+    objectifs
+      .filter((o) => o.perimetre_type === 'collaborateur' && o.perimetre_ref)
+      .forEach((o) => {
+        const code = String(o.perimetre_ref).toUpperCase()
+        const ref = collabsRef.find((c) => c.code === code)
+        if (ref && normAgence(ref.agence) === normAgence(agence) && !codesComptes.has(code)) codes.add(code)
+      })
+    return Array.from(codes).sort((a, b) => a.localeCompare(b, 'fr'))
+  }
+
+  function aUnObjectifCode(code: string) {
+    return objectifs.some((o) => o.perimetre_type === 'collaborateur' && String(o.perimetre_ref || '').toUpperCase() === code)
+  }
+
   /** Codes SAGE d'une agence : collaborateurs actifs de la fiche collaborateur + commerciaux soumis à objectif. */
   function codesAgence(agence: string) {
     const set = new Set<string>()
@@ -515,6 +539,8 @@ export default function ObjectifsPage() {
         return
       }
       codes = [code]
+    } else if (selected.type === 'collaborateur') {
+      codes = [selected.ref]
     } else if (selected.type === 'agence') {
       codes = codesAgence(selected.ref)
       if (codes.length === 0) {
@@ -642,11 +668,16 @@ export default function ObjectifsPage() {
     if (selected.type === 'entreprise') {
       children = agences.map((agence) => ({ type: 'agence', ref: agence, label: agence }))
     } else if (selected.type === 'agence') {
-      children = commerciauxDe(selected.ref).map((user) => ({
-        type: 'commercial',
-        ref: user.email,
-        label: user.display_name || user.email,
-      }))
+      children = [
+        ...commerciauxDe(selected.ref).map((user): Perimetre => ({
+          type: 'commercial',
+          ref: user.email,
+          label: user.display_name || user.email,
+        })),
+        ...collaborateursSansCompteDe(selected.ref)
+          .filter((code) => aUnObjectifCode(code))
+          .map((code): Perimetre => ({ type: 'collaborateur', ref: code, label: code })),
+      ]
     }
     if (children.length === 0) return []
 
@@ -668,7 +699,7 @@ export default function ObjectifsPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selected, agences, usersObjectif, objectifs])
 
-  const perimetreHasChildren = selected.type !== 'commercial'
+  const perimetreHasChildren = selected.type !== 'commercial' && selected.type !== 'collaborateur'
 
   // Situation des impayés > 45 j du périmètre sélectionné (codes collaborateur).
   const impayeSituation = useMemo(() => {
@@ -678,8 +709,10 @@ export default function ObjectifsPage() {
       const code = usersObjectif.find((u) => u.email === selected.ref)?.code
       if (!code) return { sansCode: true as const }
       codes = new Set([code])
+    } else if (selected.type === 'collaborateur') {
+      codes = new Set([selected.ref])
     } else if (selected.type === 'agence') {
-      const list = commerciauxDe(selected.ref).map((u) => u.code).filter(Boolean)
+      const list = [...commerciauxDe(selected.ref).map((u) => u.code), ...collaborateursSansCompteDe(selected.ref)].filter(Boolean)
       codes = new Set(list)
     }
     const rows = impayes.rows.filter((r) => !codes || codes.has(r.code))
@@ -758,6 +791,8 @@ export default function ObjectifsPage() {
                     {agences.map((agence) => {
                       const expanded = expandedAgences.has(agence)
                       const commerciaux = commerciauxDe(agence)
+                      const sansCompte = collaborateursSansCompteDe(agence)
+                      const sansCompteObj = sansCompte.filter((code) => aUnObjectifCode(code)).length
                       return (
                         <div key={agence}>
                           <div className="flex items-center gap-1">
@@ -774,11 +809,11 @@ export default function ObjectifsPage() {
                                 active={selected.type === 'agence' && selected.ref === agence}
                                 label={agence}
                                 sub={
-                                  commerciaux.length === 0
+                                  commerciaux.length + sansCompteObj === 0
                                     ? 'aucun commercial soumis à objectif'
-                                    : commerciaux.length === 1
+                                    : commerciaux.length === 1 && sansCompteObj === 0
                                     ? '1 commercial · objectifs partagés'
-                                    : `${commerciaux.length} commerciaux`
+                                    : `${commerciaux.length + sansCompteObj} commerciaux${sansCompteObj ? ` (dont ${sansCompteObj} sans compte)` : ''}`
                                 }
                                 onClick={() => selectPerimetre({ type: 'agence', ref: agence, label: agence })}
                               />
@@ -799,6 +834,16 @@ export default function ObjectifsPage() {
                                       label: user.display_name || user.email,
                                     })
                                   }
+                                />
+                              ))}
+                              {sansCompte.map((code) => (
+                                <PerimetreButton
+                                  key={`code-${code}`}
+                                  compact
+                                  active={selected.type === 'collaborateur' && selected.ref === code}
+                                  label={code}
+                                  sub={aUnObjectifCode(code) ? 'sans compte · objectif au code SAGE' : 'sans compte'}
+                                  onClick={() => selectPerimetre({ type: 'collaborateur', ref: code, label: code })}
                                 />
                               ))}
                             </div>
@@ -847,7 +892,13 @@ export default function ObjectifsPage() {
             <section className="space-y-4">
               <div className="rounded-2xl border border-[#E2DFD8] bg-white p-5">
                 <Eyebrow>
-                  {selected.type === 'entreprise' ? 'Périmètre entreprise' : selected.type === 'agence' ? 'Périmètre agence' : 'Périmètre commercial'}
+                  {selected.type === 'entreprise'
+                    ? 'Périmètre entreprise'
+                    : selected.type === 'agence'
+                    ? 'Périmètre agence'
+                    : selected.type === 'collaborateur'
+                    ? 'Collaborateur sans compte (code SAGE)'
+                    : 'Périmètre commercial'}
                 </Eyebrow>
                 <h2 className="mt-1 text-xl font-bold text-slate-900">{selected.label}</h2>
 

@@ -24,6 +24,7 @@ import {
   fmtPct,
   fmtPts,
   moisComparables,
+  partObjectifMois,
   periodesDetail,
   positionsTrimestrielles,
   quadrantOf,
@@ -31,12 +32,14 @@ import {
   sumMonths,
   tauxMarge,
   toneOf,
+  type CreationsEntite,
   type DataRow,
   type Entity,
   type ImpayesEntite,
   type Objectif,
   type ObjectifsEntite,
   type RefRow,
+  type Repartition,
   type Serie,
 } from '@/lib/suiviAgences'
 
@@ -112,6 +115,9 @@ export default function FicheDetail({
   objectifs,
   exclusionsLibelle,
   impayes = null,
+  repartition = null,
+  partADate = null,
+  creations = null,
   onClose,
 }: {
   entity: Entity
@@ -127,6 +133,12 @@ export default function FicheDetail({
   exclusionsLibelle: string
   /** Impayés > 45 j de l'entité (null = donnée indisponible). */
   impayes?: ImpayesEntite | null
+  /** Répartition mensuelle de l'objectif (bilan commercial) ; null = saisonnalité N-1 de l'entité. */
+  repartition?: Repartition
+  /** Part de l'objectif annuel attendue à fin du dernier mois clos (0..1). */
+  partADate?: number | null
+  /** Créations de comptes clients de l'entité. */
+  creations?: CreationsEntite | null
   onClose: () => void
 }) {
   const [profil, setProfil] = useState<Profil | null>(null)
@@ -174,12 +186,20 @@ export default function FicheDetail({
 
   const objectifCa = objectifs.propres.find((o) => o.type_objectif === 'ca_valeur' && !o.famille_macro)
   const caN1Total = sumMonths(serie.ca[1], 1, 12)
-  const attenduADate = objectifCa && caN1Total > 0 ? objectifCa.valeur_cible * (aDate.n1 / caN1Total) : null
+  // Objectif à date (15/10/2026) : répartition mensuelle du bilan commercial
+  // quand elle existe, sinon saisonnalité N-1 propre à l'entité (règle d'origine).
+  const attenduADate =
+    objectifCa && repartition && partADate !== null
+      ? objectifCa.valeur_cible * partADate
+      : objectifCa && caN1Total > 0
+      ? objectifCa.valeur_cible * (aDate.n1 / caN1Total)
+      : null
+  const libelleAttendu = repartition ? 'répartition mensuelle du bilan' : 'saisonnalité N-1'
   const objectifMarge = objectifs.propres.find((o) => o.type_objectif === 'marge_valeur' && !o.famille_macro)
   const mgN1Total = sumMonths(serie.mg[1], 1, 12)
   const margeAttendue = objectifMarge && mgN1Total > 0 ? objectifMarge.valeur_cible * (aDate.mgN1 / mgN1Total) : null
   const heritesKeys = new Set(objectifs.herites.map((o) => `${o.type_objectif}|${o.famille_macro || ''}`))
-  const ctxReel: CtxReel = { profil, famillesActives: famillesFiltre.length > 0, margeAttendue }
+  const ctxReel: CtxReel = { profil, famillesActives: famillesFiltre.length > 0, margeAttendue, libelleAttendu }
   const objectifsGlobaux = objectifs.propres
     .filter((o) => !o.famille_macro && o.type_objectif !== 'zero_impaye_45j')
     .sort((a, b) => ORDRE_TYPES.indexOf(a.type_objectif) - ORDRE_TYPES.indexOf(b.type_objectif))
@@ -213,8 +233,13 @@ export default function FicheDetail({
         [`${annee - 2}`]: Math.round(serie.ca[0][m]),
         [`${annee - 1}`]: Math.round(serie.ca[1][m]),
         [`${annee}`]: m <= moisMax ? Math.round(serie.ca[2][m]) : null,
+        // Objectif mensuel = objectif annuel × répartition mensuelle (hors filtre familles).
+        ...(objectifCa && famillesFiltre.length === 0
+          ? { [`Objectif ${annee}`]: Math.round(objectifCa.valeur_cible * partObjectifMois(repartition, m)) }
+          : {}),
       })),
-    [serie, annee, moisMax]
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [serie, annee, moisMax, objectifCa?.valeur_cible, repartition, famillesFiltre.length]
   )
 
   // ---------------------------------------------------- familles suivies
@@ -261,8 +286,17 @@ export default function FicheDetail({
 
         <div className="space-y-5 p-4 md:p-7">
           {/* KPI */}
-          <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">
-            <Kpi label={`CA ${annee} à date`} value={fmtK(aDate.n)} sub={`N-1 ${fmtK(aDate.n1)}`} />
+          <div className={`grid grid-cols-2 gap-3 md:grid-cols-3 ${creations ? 'xl:grid-cols-7' : 'xl:grid-cols-6'}`}>
+            <Kpi
+              label={`CA ${annee} à date`}
+              value={fmtK(aDate.n)}
+              sub={
+                attenduADate !== null && famillesFiltre.length === 0
+                  ? `obj. à date ${fmtK(attenduADate)} (${Math.round((aDate.n / attenduADate) * 100)} %) · N-1 ${fmtK(aDate.n1)}`
+                  : `N-1 ${fmtK(aDate.n1)}`
+              }
+              tone={attenduADate !== null && famillesFiltre.length === 0 ? (aDate.n >= attenduADate ? 'text-[#1F6B3A]' : 'text-[#A32C2C]') : 'text-slate-900'}
+            />
             <Kpi label="Évolution vs N-1" value={fmtPct(aDate.evolN)} tone={toneOf(aDate.evolN)} sub={`${aDate.n - aDate.n1 >= 0 ? '+' : ''}${fmtK(aDate.n - aDate.n1)}`} />
             <Kpi
               label="vs entreprise"
@@ -277,6 +311,14 @@ export default function FicheDetail({
               tone={toneOf(tauxN !== null && tauxN1 !== null ? tauxN - tauxN1 : null, 0.1)}
               sub={`Entreprise ${tauxRefN !== null && tauxRefN1 !== null ? fmtPts(tauxRefN - tauxRefN1) : '—'}`}
             />
+            {creations && (
+              <Kpi
+                label="Comptes créés"
+                value={String(creations.n)}
+                tone={creations.n >= creations.n1Prorata ? 'text-[#1F6B3A]' : 'text-[#A32C2C]'}
+                sub={`${annee - 1} : ${creations.n1} (prorata ${Math.round(creations.n1Prorata)})${creations.avecSage ? ' · SAGE' : ''}`}
+              />
+            )}
             <Kpi
               label="Positionnement"
               value={quadrant ? QUADRANT_LIBELLES[quadrant].label : '—'}
@@ -474,6 +516,9 @@ export default function FicheDetail({
                   <Bar dataKey={`${annee - 1}`} fill="#C9C4B6" radius={[3, 3, 0, 0]} />
                   <Bar dataKey={`${annee}`} fill="#245A9E" radius={[3, 3, 0, 0]} />
                   <Line dataKey={`${annee - 2}`} stroke="#B4761A" strokeDasharray="4 3" dot={false} strokeWidth={1.5} />
+                  {objectifCa && famillesFiltre.length === 0 && (
+                    <Line dataKey={`Objectif ${annee}`} stroke="#7A5EA8" dot={{ r: 2.5 }} strokeWidth={2} type="stepAfter" />
+                  )}
                 </ComposedChart>
               </ResponsiveContainer>
             </div>
@@ -638,7 +683,7 @@ function valeurs(serie: Serie, from: number, to: number, nVide = false) {
 
 type Reel = { texte: string; statut: 'ok' | 'ko' | 'neutre'; detail?: string }
 
-type CtxReel = { profil: Profil | null; famillesActives: boolean; margeAttendue: number | null }
+type CtxReel = { profil: Profil | null; famillesActives: boolean; margeAttendue: number | null; libelleAttendu?: string }
 
 function reelPour(
   o: Objectif,
@@ -683,7 +728,7 @@ function reelPour(
       return {
         texte: `${fmtK(v.n)} (${pct === null ? '—' : `${Math.round(pct)} %`})`,
         statut: ok === null ? 'neutre' : ok ? 'ok' : 'ko',
-        detail: attenduADate !== null ? `Attendu à date (saisonnalité N-1) : ${fmtK(attenduADate)}` : undefined,
+        detail: attenduADate !== null ? `Attendu à date (${ctx.libelleAttendu || 'saisonnalité N-1'}) : ${fmtK(attenduADate)} · réalisé ${Math.round((v.n / attenduADate) * 100)} %` : undefined,
       }
     }
     case 'ca_evolution_pct':
