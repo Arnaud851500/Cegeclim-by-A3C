@@ -15,6 +15,11 @@
 // l'écran Stock avec le groupe d'articles sélectionné, référence cliquable
 // vers sa fiche. Dans le Compagnon mobile, l'ouverture passe par la pile de
 // MobileShell (ouvrirStock).
+// ÉVOLUTION (2026-10-15 bis, demandé par Arnaud) : les tableaux (saisis ou
+// stock en direct) peuvent occuper toute la largeur de l'article tandis que
+// le texte garde une colonne de lecture (prop largeurTexte) ; tableau stock
+// resserré (désignation sans le code article répété, « arrivage » sous la
+// dispo, en-têtes courts) pour tenir sans défilement horizontal.
 // ============================================================================
 
 import { Fragment, useEffect, useMemo, useState } from 'react'
@@ -162,6 +167,18 @@ function libelleArrivages(arrivages: StockLigneDirect['arrivages']) {
   return parts.join('\n')
 }
 
+/** Désignation SAGE sans le code article répété en fin de libellé (« … 230/1 RAS2HVRC3 »). */
+function designationCourte(designation: string | null, ref: string) {
+  if (!designation) return ''
+  const code = ref.replace(/[^A-Z0-9.]/gi, '').toUpperCase()
+  const mots = designation.trim().split(/\s+/)
+  const dernier = (mots[mots.length - 1] || '').replace(/[^A-Z0-9.]/gi, '').toUpperCase()
+  if (mots.length > 1 && dernier && (dernier === code || code.startsWith(dernier) || dernier.startsWith(code.slice(0, Math.max(4, code.length - 2))))) {
+    return mots.slice(0, -1).join(' ')
+  }
+  return designation
+}
+
 function StockTable({ block }: { block: StockBlock }) {
   const router = useRouter()
   const refs = useMemo(() => stockBlockRefs(block), [block])
@@ -225,10 +242,15 @@ function StockTable({ block }: { block: StockBlock }) {
   const entetes = ['Référence', 'Dispo', 'Désignation']
   if (colonnes.includes('stock')) entetes.push('Stock')
   if (colonnes.includes('reserve')) entetes.push('Réservé')
-  if (colonnes.includes('commande')) entetes.push('En commande')
+  if (colonnes.includes('commande')) entetes.push('Commandé')
   if (colonnes.includes('arrivages')) entetes.push('Arrivages')
   if (avecNotes) entetes.push('Remarque')
-  const numeriques = new Set(['Dispo', 'Stock', 'Réservé', 'En commande'])
+  const numeriques = new Set(['Dispo', 'Stock', 'Réservé', 'Commandé'])
+  const titres: Record<string, string> = {
+    Dispo: 'Stock − réservé (CDC + PL) ; négatif = déjà engagé',
+    Réservé: 'CDC + préparations de livraison (PL)',
+    Commandé: 'Commandes fournisseurs en cours (CDF)',
+  }
 
   return (
     <section style={styles.stockSection}>
@@ -256,11 +278,11 @@ function StockTable({ block }: { block: StockBlock }) {
         </a>
       </div>
       <div style={styles.tableWrap}>
-        <table style={styles.table}>
+        <table style={{ ...styles.table, ...styles.stockTable }}>
           <thead>
             <tr>
               {entetes.map((h) => (
-                <th key={h} style={{ ...styles.th, ...(numeriques.has(h) ? { textAlign: 'right' } : {}) }}>{h}</th>
+                <th key={h} title={titres[h]} style={{ ...styles.th, ...styles.stockTh, ...(numeriques.has(h) ? { textAlign: 'right' } : {}) }}>{h}</th>
               ))}
             </tr>
           </thead>
@@ -272,22 +294,22 @@ function StockTable({ block }: { block: StockBlock }) {
               const dispoCouleur = r ? (r.dispo > 0 ? 'var(--cg-ok)' : 'var(--cg-danger)') : undefined
               return (
                 <tr key={ref}>
-                  <td style={{ ...styles.td, whiteSpace: 'nowrap' }}>
+                  <td style={{ ...styles.td, ...styles.stockTd, whiteSpace: 'nowrap' }}>
                     <a href={`/stock?ref=${encodeURIComponent(ref)}`} onClick={(e) => ouvrirRef(e, ref)} style={styles.stockRefLink}>{ref}</a>
                   </td>
-                  <td style={{ ...styles.td, ...styles.tdNum, fontWeight: 700, color: dispoCouleur }}>
+                  <td style={{ ...styles.td, ...styles.stockTd, ...styles.tdNum, fontWeight: 700, color: dispoCouleur }}>
                     {r ? fmtQte(r.dispo) : vide}
-                    {r && r.dispo <= 0 && r.en_commande > 0 ? <span style={styles.stockArrow}> → arrivage</span> : null}
+                    {r && r.dispo <= 0 && r.en_commande > 0 ? <span style={styles.stockArrow}>→ arrivage</span> : null}
                   </td>
-                  <td style={{ ...styles.td, minWidth: 220 }}>{r?.designation || (attente ? '' : '—')}</td>
-                  {colonnes.includes('stock') ? <td style={{ ...styles.td, ...styles.tdNum }}>{r ? fmtQte(r.stock) : vide}</td> : null}
-                  {colonnes.includes('reserve') ? <td style={{ ...styles.td, ...styles.tdNum }}>{r ? fmtQte(r.reserve) : vide}</td> : null}
-                  {colonnes.includes('commande') ? <td style={{ ...styles.td, ...styles.tdNum }}>{r ? fmtQte(r.en_commande) : vide}</td> : null}
+                  <td style={{ ...styles.td, ...styles.stockTd, minWidth: 150 }}>{r ? designationCourte(r.designation, ref) || '—' : ''}</td>
+                  {colonnes.includes('stock') ? <td style={{ ...styles.td, ...styles.stockTd, ...styles.tdNum }}>{r ? fmtQte(r.stock) : vide}</td> : null}
+                  {colonnes.includes('reserve') ? <td style={{ ...styles.td, ...styles.stockTd, ...styles.tdNum }}>{r ? fmtQte(r.reserve) : vide}</td> : null}
+                  {colonnes.includes('commande') ? <td style={{ ...styles.td, ...styles.stockTd, ...styles.tdNum }}>{r ? fmtQte(r.en_commande) : vide}</td> : null}
                   {colonnes.includes('arrivages') ? (
-                    <td style={{ ...styles.td, whiteSpace: 'pre-line', minWidth: 130, fontSize: '0.92em' }}>{r ? libelleArrivages(r.arrivages) : vide}</td>
+                    <td style={{ ...styles.td, ...styles.stockTd, whiteSpace: 'pre-line', minWidth: 120, fontSize: '0.92em' }}>{r ? libelleArrivages(r.arrivages) : vide}</td>
                   ) : null}
                   {avecNotes ? (
-                    <td style={{ ...styles.td, minWidth: 160 }}>
+                    <td style={{ ...styles.td, ...styles.stockTd, minWidth: 140 }}>
                       <RichText text={notes.get(ref) || ''} />
                     </td>
                   ) : null}
@@ -302,13 +324,19 @@ function StockTable({ block }: { block: StockBlock }) {
 }
 
 // ── Rendu ────────────────────────────────────────────────────────────────────
+/** Blocs qui peuvent occuper toute la largeur de l'article (les autres restent dans la colonne de lecture). */
+const BLOCS_LARGES = new Set<Block['type']>(['table', 'stock'])
+
 export default function ActualiteContent({
   blocks,
   compact = false,
   style,
+  largeurTexte,
 }: {
   blocks: Block[]
   compact?: boolean
+  /** Largeur max (px) du texte ; tableaux et tableaux stock prennent toute la largeur. Absent = tout à la même largeur. */
+  largeurTexte?: number
   /** Ajustements de taille (ex. lecture sur téléphone). */
   style?: React.CSSProperties
 }) {
@@ -321,6 +349,18 @@ export default function ActualiteContent({
   return (
     <div style={{ ...styles.body, ...(compact ? styles.bodyCompact : {}), ...(style || {}) }}>
       {blocks.map((block, index) => {
+        const rendu = renduBloc(block, index)
+        if (!rendu || !largeurTexte || BLOCS_LARGES.has(block.type)) return rendu
+        return (
+          <div key={index} style={{ maxWidth: largeurTexte }}>
+            {rendu}
+          </div>
+        )
+      })}
+    </div>
+  )
+
+  function renduBloc(block: Block, index: number): React.ReactNode {
         switch (block.type) {
           case 'paragraph':
             return block.text.trim() ? (
@@ -430,9 +470,7 @@ export default function ActualiteContent({
           default:
             return null
         }
-      })}
-    </div>
-  )
+  }
 }
 
 const styles: Record<string, React.CSSProperties> = {
@@ -615,9 +653,21 @@ const styles: Record<string, React.CSSProperties> = {
     fontWeight: 600,
   },
   stockArrow: {
+    display: 'block',
     fontWeight: 400,
-    fontSize: '0.88em',
-    color: 'rgba(var(--cg-ink-rgb), 0.62)',
+    fontSize: '0.78em',
+    lineHeight: 1.2,
+    color: 'rgba(var(--cg-ink-rgb), 0.6)',
+  },
+  stockTable: {
+    fontSize: 14,
+  },
+  stockTh: {
+    padding: '8px 10px',
+    letterSpacing: '0.03em',
+  },
+  stockTd: {
+    padding: '7px 10px',
   },
   lightbox: {
     position: 'fixed',

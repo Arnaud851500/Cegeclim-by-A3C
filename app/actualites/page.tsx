@@ -363,7 +363,7 @@ function FilActualite() {
               </span>
             </div>
             {selected.contenu.length > 0 ? (
-              <ActualiteContent blocks={selected.contenu} />
+              <ActualiteContent blocks={selected.contenu} largeurTexte={LARGEUR_TEXTE} />
             ) : (
               <p style={styles.muted}>Cette publication n’a pas encore de contenu.</p>
             )}
@@ -472,9 +472,15 @@ export default function ActualitesPage() {
   )
 }
 
+// 15/10/2026 (demandé par Arnaud) : la page utilise davantage la largeur de
+// l'écran ; le texte reste sur une colonne de lecture de LARGEUR_TEXTE px,
+// les tableaux (dont les tableaux stock en direct) prennent toute la largeur
+// de l'article pour éviter le défilement horizontal.
+const LARGEUR_TEXTE = 760
+
 const styles: Record<string, React.CSSProperties> = {
   page: {
-    maxWidth: 1360,
+    maxWidth: 1720,
     margin: '0 auto',
     padding: '10px 4px 40px',
     display: 'flex',
@@ -485,8 +491,8 @@ const styles: Record<string, React.CSSProperties> = {
     fontFamily: 'var(--font-body)',
   },
   aside: {
-    flex: '1 1 340px',
-    maxWidth: 420,
+    flex: '1 1 300px',
+    maxWidth: 380,
     minWidth: 0,
     display: 'flex',
     flexDirection: 'column',
@@ -703,11 +709,11 @@ const styles: Record<string, React.CSSProperties> = {
     borderRadius: 18,
     border: '1px solid rgba(var(--cg-ink-rgb), 0.10)',
     background: 'var(--cg-surface)',
-    padding: 'clamp(22px, 4vw, 44px) clamp(18px, 4vw, 52px)',
+    padding: 'clamp(20px, 3vw, 40px) clamp(16px, 2.6vw, 40px)',
     boxShadow: '0 10px 30px rgba(0,0,0,calc(0.25 * var(--cg-shadow-k)))',
   },
   reading: {
-    maxWidth: 760,
+    maxWidth: 1240,
     margin: '0 auto',
   },
   articleMeta: {
