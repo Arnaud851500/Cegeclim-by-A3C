@@ -17,7 +17,8 @@
 // MobileShell (ouvrirStock).
 // ÉVOLUTION (2026-10-15 bis, demandé par Arnaud) : les tableaux (saisis ou
 // stock en direct) peuvent occuper toute la largeur de l'article tandis que
-// le texte garde une colonne de lecture (prop largeurTexte) ; tableau stock
+// le texte garde une colonne de lecture (prop largeurTexte) — encadrés
+// compris dans les blocs larges ; tableau stock
 // resserré (désignation sans le code article répété, « arrivage » sous la
 // dispo, en-têtes courts) pour tenir sans défilement horizontal.
 // ============================================================================
@@ -325,7 +326,8 @@ function StockTable({ block }: { block: StockBlock }) {
 
 // ── Rendu ────────────────────────────────────────────────────────────────────
 /** Blocs qui peuvent occuper toute la largeur de l'article (les autres restent dans la colonne de lecture). */
-const BLOCS_LARGES = new Set<Block['type']>(['table', 'stock'])
+// 15/10/2026 (demandé par Arnaud) : les encadrés s'alignent sur la largeur des tableaux.
+const BLOCS_LARGES = new Set<Block['type']>(['table', 'stock', 'callout'])
 
 export default function ActualiteContent({
   blocks,
