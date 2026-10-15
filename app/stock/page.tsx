@@ -68,6 +68,13 @@
 //   passés par themed(), couleurs inline / SVG / CSS par les variables de
 //   app/theme.css (--cg-ink, --cg-ok-soft, --cg-alert-soft, --cg-panel…) :
 //   en sombre elles valent exactement les anciennes couleurs.
+// ÉVOLUTION (2026-10-15, demandé par Arnaud) : notion de groupe d'articles
+//   dans l'écran (sans passer par « Disponibilité par groupe ») : sélecteur
+//   « Groupe » (table stock_groupes_articles) qui remplit la recherche avec
+//   les références du groupe ; ?groupe=<nom>[&refs=A,B…] ouvre l'écran sur un
+//   groupe — c'est le lien des tableaux stock du fil d'actualité (les
+//   références passées dans l'adresse priment, le groupe pouvant ne pas
+//   encore exister).
 // Sur mobile (< 768 px) on rend MobileStockArticles tel quel.
 // ============================================================================
 
@@ -99,6 +106,8 @@ type DepotStockRow = {
   stock_disponible: number
   stock_a_terme: number
 }
+
+type GroupeArticles = { id: string; nom: string; references_articles: string[] }
 
 type FamilleRow = { famille: string; famille_macro: string; libelle_famille: string | null }
 
@@ -545,6 +554,11 @@ function StockDesktop() {
   const [vue, setVue] = useState<Vue>('toutes')
   const filtresActifs = Boolean(familleMacro || famille || depot || dispoFiltre !== 'tous')
 
+  // ── Groupes d'articles (sélecteur « Groupe », ?groupe=&refs=) ──────────
+  const [groupes, setGroupes] = useState<GroupeArticles[]>([])
+  const [groupeActif, setGroupeActif] = useState('')
+  const groupeDemandeRef = useRef<{ nom: string; avecRefs: boolean } | null>(null)
+
   // ── Référence ouverte en fenêtre flottante ─────────────────────────────
   const [selected, setSelected] = useState<{ reference: string; designation: string } | null>(null)
   const [horizonMois, setHorizonMois] = useState(6)
@@ -563,12 +577,71 @@ function StockDesktop() {
     return () => { cancelled = true }
   }, [])
 
-  // Ouverture directe ?ref=XXXX
+  // Ouverture directe ?ref=XXXX, ou ?groupe=<nom>[&refs=A,B…] (lien du fil d'actualité)
   useEffect(() => {
     const params = new URLSearchParams(window.location.search)
     const ref = String(params.get('ref') || '').trim().toUpperCase()
-    if (ref) { setSelected({ reference: ref, designation: '' }); setQuery(ref) }
+    const groupe = String(params.get('groupe') || '').trim()
+    const refsUrl = parseReferences(String(params.get('refs') || ''))
+    if (groupe || refsUrl.length) {
+      if (refsUrl.length) setQuery(refsUrl.join('\n'))
+      if (groupe) setGroupeActif(groupe)
+      groupeDemandeRef.current = groupe ? { nom: groupe, avecRefs: refsUrl.length > 0 } : null
+    }
+    if (ref) {
+      setSelected({ reference: ref, designation: '' })
+      if (!groupe && refsUrl.length === 0) setQuery(ref)
+    }
   }, [])
+
+  useEffect(() => {
+    let cancelled = false
+    async function chargerGroupes() {
+      const { data } = await supabase.from('stock_groupes_articles').select('id, nom, references_articles').order('nom')
+      if (cancelled) return
+      const liste = ((data || []) as GroupeArticles[]).filter((g) => (g.references_articles || []).length > 0)
+      setGroupes(liste)
+      // Groupe demandé par l'adresse sans références : on prend celles du groupe.
+      const demande = groupeDemandeRef.current
+      if (demande && !demande.avecRefs) {
+        const g = liste.find((x) => x.nom.toLowerCase() === demande.nom.toLowerCase())
+        if (g) { setGroupeActif(g.nom); setQuery(g.references_articles.join('\n')) }
+      }
+      groupeDemandeRef.current = null
+    }
+    void chargerGroupes()
+    return () => { cancelled = true }
+  }, [])
+
+  function choisirGroupe(nom: string) {
+    const g = groupes.find((x) => x.nom === nom)
+    setGroupeActif(g ? g.nom : '')
+    setQuery(g ? g.references_articles.join('\n') : '')
+    setVue('toutes')
+    const url = new URL(window.location.href)
+    url.searchParams.delete('refs')
+    url.searchParams.delete('ref')
+    if (g) url.searchParams.set('groupe', g.nom)
+    else url.searchParams.delete('groupe')
+    window.history.replaceState(null, '', url.toString())
+  }
+
+  function saisirRecherche(valeur: string) {
+    setQuery(valeur)
+    if (groupeActif) {
+      setGroupeActif('')
+      const url = new URL(window.location.href)
+      url.searchParams.delete('groupe')
+      url.searchParams.delete('refs')
+      window.history.replaceState(null, '', url.toString())
+    }
+  }
+
+  // Groupe venu d'un lien mais absent de la liste (pas encore créé) : proposé quand même.
+  const groupesProposes = useMemo(
+    () => (groupeActif && !groupes.some((g) => g.nom === groupeActif) ? [{ id: 'url', nom: groupeActif, references_articles: parseReferences(query) }, ...groupes] : groupes),
+    [groupes, groupeActif, query],
+  )
 
   const famillesMacroDisponibles = useMemo(
     () => (famillesRef ? Array.from(new Set(famillesRef.map((f) => f.famille_macro).filter(Boolean))).sort() : []),
@@ -774,11 +847,18 @@ function StockDesktop() {
             <span style={styles.fieldLabel}>Rechercher</span>
             <textarea
               value={query}
-              onChange={(e) => setQuery(e.target.value)}
+              onChange={(e) => saisirRecherche(e.target.value)}
               placeholder="Bout de référence, désignation — ou une liste de références (une par ligne)"
               rows={isListe ? 4 : 2}
               style={styles.searchArea}
             />
+          </label>
+          <label style={styles.field}>
+            <span style={styles.fieldLabel}>Groupe</span>
+            <select value={groupeActif} onChange={(e) => choisirGroupe(e.target.value)} style={{ ...styles.select, ...(groupeActif ? styles.selectActif : {}) }}>
+              <option value="">Aucun</option>
+              {groupesProposes.map((g) => <option key={g.id} value={g.nom}>{g.nom} · {g.references_articles.length}</option>)}
+            </select>
           </label>
           <label style={styles.field}>
             <span style={styles.fieldLabel}>Famille macro</span>
@@ -821,7 +901,9 @@ function StockDesktop() {
           </label>
         </div>
         <div style={styles.searchFooter}>
-          {isListe && <span style={styles.hint}>{refsSaisies.length} référence(s) détectée(s)</span>}
+          {groupeActif && <span style={{ ...styles.hint, fontWeight: 700 }}>Groupe « {groupeActif} » · {refsSaisies.length} référence(s)</span>}
+          {!groupeActif && isListe && <span style={styles.hint}>{refsSaisies.length} référence(s) détectée(s)</span>}
+          {groupeActif && <a href={`/stock/groupes`} style={{ ...styles.hint, textDecoration: 'underline' }}>Gérer les groupes</a>}
           {quantitePromise > 0 && <span style={styles.hint}>1ʳᵉ date à laquelle {formatNumber(quantitePromise)} pièce(s) peuvent être promises affichée pour chaque référence.</span>}
           {filtresActifs && (
             <button type="button" className="stkBtn" onClick={reinitialiserFiltres} style={{ ...styles.ghostBtn, borderColor: 'rgba(193,104,60,0.5)', color: C_ROUGE, marginLeft: 'auto' }}>✕ Réinitialiser les filtres</button>
@@ -1749,7 +1831,8 @@ const styles: Record<string, React.CSSProperties> = themed({
   okBox: { padding: '12px 14px', borderRadius: 12, border: '1px solid rgba(143,212,168,0.35)', background: 'rgba(143,212,168,0.08)', color: C_VERT, fontSize: 13 },
   skeleton: { height: 120, borderRadius: 12, background: 'rgba(255,255,255,0.05)' },
 
-  searchGrid: { display: 'grid', gridTemplateColumns: 'minmax(300px, 2.2fr) repeat(5, minmax(140px, 1fr))', gap: 10, alignItems: 'start' },
+  searchGrid: { display: 'grid', gridTemplateColumns: 'minmax(280px, 2fr) repeat(6, minmax(130px, 1fr))', gap: 10, alignItems: 'start' },
+  selectActif: { borderColor: 'var(--cg-sauge)', boxShadow: '0 0 0 1px var(--cg-sauge)', fontWeight: 700 },
   searchFooter: { marginTop: 8, display: 'flex', alignItems: 'center', gap: 14, flexWrap: 'wrap', minHeight: 4 },
   searchArea: { width: '100%', borderRadius: 12, border: '1px solid rgba(255,255,255,0.15)', background: 'rgba(255,255,255,0.05)', color: '#fff', padding: '8px 12px', fontSize: 14, resize: 'vertical', fontFamily: 'inherit', boxSizing: 'border-box' },
   field: { display: 'flex', flexDirection: 'column', gap: 4, minWidth: 0 },

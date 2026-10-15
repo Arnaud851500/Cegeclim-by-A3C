@@ -21,7 +21,10 @@ import {
   MobileFilActu,
   type MobileOpenActualitesDetail,
 } from './MobileFilActu'
-import type { ActualiteType } from '@/lib/actualites'
+import { MOBILE_OPEN_STOCK_EVENT, type ActualiteType, type MobileOpenStockDetail } from '@/lib/actualites'
+// ÉVOLUTION (2026-10-15) : tableaux stock du fil d'actu → écran Stock empilé
+// avec la sélection (groupe / liste de références, ou fiche d'une référence)
+// via l'événement MOBILE_OPEN_STOCK_EVENT.
 // ÉVOLUTION (2026-09-29) : journal d'usage mobile (/m/... dans user_activity_log)
 import { logMobileView } from '@/lib/mobileActivityLog'
 // ÉVOLUTION (2026-10-09) : zoom à deux doigts optionnel (préférence « 🎙️ Voix »)
@@ -42,6 +45,8 @@ type PileEntree = {
   screen: MobileScreen
   cibleClient?: { numero: string; nom: string } | null
   cibleStock?: { reference: string; designation: string } | null
+  /** Écran 'stock' : liste de références à afficher (groupe d'articles du fil d'actu). */
+  cibleListe?: { refs: string[]; groupe?: string } | null
   /** Écran 'actualites' : publication à lire (absente = liste). */
   cibleActu?: string | null
   /** Écran 'actualites' (liste) : onglet affiché à l'ouverture. */
@@ -239,6 +244,27 @@ export default function MobileShell() {
     for (let d = actuelle.length + 1; d <= suivante.length; d += 1) pousserHistorique(d)
   }
 
+  const ouvrirStockRef = useRef<(detail: MobileOpenStockDetail) => void>(() => {})
+  ouvrirStockRef.current = (detail: MobileOpenStockDetail) => {
+    if (detail.ref) {
+      empiler({ screen: 'stock', cibleStock: { reference: detail.ref, designation: '' } })
+    } else if (detail.refs && detail.refs.length) {
+      empiler({ screen: 'stock', cibleListe: { refs: detail.refs, groupe: detail.groupe } })
+    }
+  }
+
+  useEffect(() => {
+    window.__cgcMobileShellStock = true
+    const onOpen = (event: Event) => {
+      ouvrirStockRef.current((event as CustomEvent<MobileOpenStockDetail>).detail || {})
+    }
+    window.addEventListener(MOBILE_OPEN_STOCK_EVENT, onOpen)
+    return () => {
+      window.__cgcMobileShellStock = false
+      window.removeEventListener(MOBILE_OPEN_STOCK_EVENT, onOpen)
+    }
+  }, [])
+
   const ouvrirActualitesRef = useRef(ouvrirActualites)
   ouvrirActualitesRef.current = ouvrirActualites
 
@@ -257,7 +283,7 @@ export default function MobileShell() {
 
   /** Une fois la cible consommée par l'écran (fiche ouverte), on l'efface
    * de son entrée pour ne pas la ré-ouvrir plus tard. */
-  function consommerCible(key: number, quoi: 'cibleClient' | 'cibleStock') {
+  function consommerCible(key: number, quoi: 'cibleClient' | 'cibleStock' | 'cibleListe') {
     setPile((prev) => prev.map((e) => (e.key === key ? { ...e, [quoi]: null } : e)))
   }
 
@@ -324,6 +350,8 @@ export default function MobileShell() {
                 cibleReference={entree.cibleStock?.reference}
                 cibleDesignation={entree.cibleStock?.designation}
                 onCibleConsommee={() => consommerCible(entree.key, 'cibleStock')}
+                cibleListe={entree.cibleListe}
+                onCibleListeConsommee={() => consommerCible(entree.key, 'cibleListe')}
               />
             )}
             {entree.screen === 'Admin' && <MobileAdminPanel />}

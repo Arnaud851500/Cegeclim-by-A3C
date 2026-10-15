@@ -20,6 +20,14 @@
 //     déposer sur l'éditeur → bloc image (bucket privé « actualites ») ;
 //   - coller une plage Excel dans un paragraphe → bloc tableau ;
 //   - dans le texte : **gras**, *italique*, [libellé](https://… ou /chemin).
+// ÉVOLUTION (2026-10-15) : bloc « Tableau stock en direct » — titre, liste de
+// références avec une remarque par ligne (« RÉF ; remarque »), colonnes à
+// afficher ; les chiffres sont lus dans SAGE à chaque lecture et le titre
+// ouvre l'écran Stock sur le groupe d'articles du même nom, créé à la
+// publication. Un tableau existant dont la 1re colonne contient des
+// références se convertit en un clic (« → Tableau stock en direct ») : le
+// titre reprend l'intertitre qui le précède, les mentions textuelles des
+// cellules (bonne affaire, allocation, sav…) deviennent les remarques.
 // ============================================================================
 
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
@@ -35,7 +43,10 @@ import {
   PLATEFORMES_DEFAUT,
   fetchActualite,
   notifyActualitesChanged,
+  STOCK_COLONNES,
+  STOCK_COLONNES_DEFAUT,
   safeUrl,
+  stockBlockGroupe,
   uploadActualiteImage,
   usePeutPublier,
   useSignedImages,
@@ -44,6 +55,8 @@ import {
   type Plateforme,
   type Block,
   type BlockType,
+  type StockBlock,
+  type StockColonne,
 } from '@/lib/actualites'
 
 type EditorBlock = Block & { _k: string }
@@ -59,6 +72,7 @@ const BLOCK_LABELS: Record<BlockType, string> = {
   image: 'Image',
   callout: 'Encadré',
   link: 'Lien',
+  stock: 'Tableau stock en direct',
 }
 
 function emptyBlock(type: BlockType): EditorBlock {
@@ -77,7 +91,114 @@ function emptyBlock(type: BlockType): EditorBlock {
       return { type, title: 'Ce qui est attendu de vous', text: '', tone: 'info', _k: newKey() }
     case 'link':
       return { type, label: '', url: '', _k: newKey() }
+    case 'stock':
+      return { type, titre: '', lignes: [], colonnes: [...STOCK_COLONNES_DEFAUT], _k: newKey() }
   }
+}
+
+// ── Tableau stock : texte « RÉF ; remarque » ⇄ lignes ───────────────────────
+function lignesVersTexte(lignes: StockBlock['lignes']) {
+  return (lignes || []).map((l) => (l.note ? `${l.ref} ; ${l.note}` : l.ref)).join('\n')
+}
+
+function texteVersLignes(texte: string): StockBlock['lignes'] {
+  return texte
+    .split('\n')
+    .map((line) => {
+      const m = /^\s*([^\s;|\t]+)\s*(?:[;|\t]\s*(.*))?$/.exec(line)
+      if (!m) return null
+      const note = (m[2] || '').trim()
+      return note ? { ref: m[1].toUpperCase(), note } : { ref: m[1].toUpperCase() }
+    })
+    .filter((l): l is { ref: string; note?: string } => Boolean(l))
+}
+
+const REF_ARTICLE_RE = /^[A-Z0-9][A-Z0-9.\-/_]*[0-9][A-Z0-9.\-/_]*$/i
+
+/** Tableau saisi → bloc stock en direct (null si la 1re colonne ne contient pas de références). */
+function tableVersStock(table: Extract<Block, { type: 'table' }>, titre: string): StockBlock | null {
+  const rows = table.rows.filter((r) => r.some((c) => String(c || '').trim()))
+  const head = table.header !== false ? rows[0] || [] : []
+  const body = table.header !== false ? rows.slice(1) : rows
+  const lignes: StockBlock['lignes'] = []
+  for (const row of body) {
+    const ref = String(row[0] || '').trim()
+    if (!REF_ARTICLE_RE.test(ref)) continue
+    const notes: string[] = []
+    row.forEach((cell, c) => {
+      if (c === 0) return
+      const entete = String(head[c] || '').trim()
+      if (/d[ée]signation/i.test(entete)) return
+      let v = String(cell || '').replace(/→\s*arrivage/gi, '').replace(/\s+/g, ' ').trim()
+      if (!/[a-zà-ÿ]/i.test(v)) return
+      if (/^dispo/i.test(entete)) {
+        v = v.replace(/^[−\-+]?\s*\d+([.,]\d+)?\s*/, '').replace(/^[·\s]+|[·\s]+$/g, '').trim()
+        if (v) notes.push(v)
+      } else {
+        notes.push(entete ? `${entete.toLowerCase()} : ${v}` : v)
+      }
+    })
+    lignes.push(notes.length ? { ref: ref.toUpperCase(), note: notes.join(' · ') } : { ref: ref.toUpperCase() })
+  }
+  if (lignes.length === 0) return null
+  return { type: 'stock', titre: titre || 'Tableau stock', lignes, colonnes: [...STOCK_COLONNES_DEFAUT] }
+}
+
+function StockEditor({ block, onChange }: { block: StockBlock; onChange: (b: Partial<StockBlock>) => void }) {
+  // Texte saisi gardé localement : la saisie reste libre (lignes vides, ; en cours de frappe).
+  const [texte, setTexte] = useState(() => lignesVersTexte(block.lignes))
+  const colonnes = block.colonnes && block.colonnes.length > 0 ? block.colonnes : STOCK_COLONNES_DEFAUT
+  const nbRefs = new Set((block.lignes || []).map((l) => l.ref)).size
+  const groupe = stockBlockGroupe(block)
+
+  const toggleColonne = (key: StockColonne, on: boolean) => {
+    const next = on ? [...colonnes.filter((c) => c !== key), key] : colonnes.filter((c) => c !== key)
+    onChange({ colonnes: STOCK_COLONNES.map((c) => c.key).filter((k) => next.includes(k)) })
+  }
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+      <div style={styles.inlineTools}>
+        <input
+          value={block.titre}
+          onChange={(e) => onChange({ titre: e.target.value })}
+          placeholder="Titre affiché (ex. Yutaki H Combi — promo en cours)"
+          style={{ ...styles.input, ...styles.headingInput, flex: '1 1 320px' }}
+          aria-label="Titre du tableau stock"
+        />
+        <input
+          value={block.groupe || ''}
+          onChange={(e) => onChange({ groupe: e.target.value })}
+          placeholder="Nom du groupe (facultatif, sinon le titre)"
+          style={{ ...styles.input, flex: '1 1 220px' }}
+          aria-label="Nom du groupe d’articles"
+        />
+      </div>
+      <AutoTextarea
+        value={texte}
+        onChange={(e) => {
+          setTexte(e.target.value)
+          onChange({ lignes: texteVersLignes(e.target.value) })
+        }}
+        placeholder={'Une référence par ligne, remarque facultative après « ; »\nRAS-4HVRC2E ; allocation\nHWD-WE-220S ; + 1 bonne affaire'}
+        style={{ fontFamily: 'var(--font-mono)', fontSize: 13.5 }}
+        aria-label="Références du tableau stock"
+      />
+      <div style={styles.inlineTools}>
+        <span style={styles.hint}>Colonnes :</span>
+        {STOCK_COLONNES.map((c) => (
+          <label key={c.key} style={styles.check}>
+            <input type="checkbox" checked={colonnes.includes(c.key)} onChange={(e) => toggleColonne(c.key, e.target.checked)} />
+            {c.label}
+          </label>
+        ))}
+      </div>
+      <span style={styles.hint}>
+        {nbRefs} référence{nbRefs > 1 ? 's' : ''} · Dispo, stock et arrivages lus dans SAGE à chaque lecture (Dispo = stock − CDC − PL).
+        {groupe ? ` À la publication, le groupe « ${groupe} » est créé dans l’écran Stock et le titre y renvoie.` : ' Donnez un titre : il devient le nom du groupe d’articles.'}
+      </span>
+    </div>
+  )
 }
 
 function stripKeys(blocks: EditorBlock[]): Block[] {
@@ -265,6 +386,7 @@ function BlockEditor({
   onRemove,
   onInsertAfter,
   onUpload,
+  onConvertStock,
 }: {
   block: EditorBlock
   index: number
@@ -273,6 +395,8 @@ function BlockEditor({
   onMove: (delta: number) => void
   onRemove: () => void
   onInsertAfter: (blocks: EditorBlock[]) => void
+  /** Tableau → tableau stock en direct (absent si la conversion est impossible). */
+  onConvertStock?: () => void
   onUpload: (file: File) => Promise<string | null>
 }) {
   const onParagraphPaste = async (event: React.ClipboardEvent<HTMLTextAreaElement>) => {
@@ -331,7 +455,20 @@ function BlockEditor({
       )
       break
     case 'table':
-      body = <TableEditor block={block} onChange={(patch) => onChange(patch)} />
+      body = (
+        <>
+          <TableEditor block={block} onChange={(patch) => onChange(patch)} />
+          {onConvertStock ? (
+            <div style={{ ...styles.inlineTools, marginTop: 6 }}>
+              <button type="button" style={styles.miniBtn} onClick={onConvertStock}>→ Tableau stock en direct</button>
+              <span style={styles.hint}>Remplace ce tableau (et l’intertitre qui le précède) par un tableau aux chiffres SAGE à jour, avec lien vers le groupe dans Stock.</span>
+            </div>
+          ) : null}
+        </>
+      )
+      break
+    case 'stock':
+      body = <StockEditor block={block} onChange={(patch) => onChange(patch)} />
       break
     case 'image':
       body = <ImageEditor block={block} onChange={(patch) => onChange(patch)} onUpload={onUpload} />
@@ -498,6 +635,20 @@ function Editeur() {
     setBlocks((current) => [...current.slice(0, index + 1), ...added, ...current.slice(index + 1)])
 
   const addBlock = (blockType: BlockType) => setBlocks((current) => [...current, emptyBlock(blockType)])
+
+  // Tableau → tableau stock en direct ; l'intertitre juste au-dessus devient son titre.
+  const convertirEnStock = (key: string) =>
+    setBlocks((current) => {
+      const index = current.findIndex((b) => b._k === key)
+      const table = current[index]
+      if (index < 0 || !table || table.type !== 'table') return current
+      const precedent = index > 0 ? current[index - 1] : null
+      const titre = precedent && precedent.type === 'heading' ? precedent.text.trim() : ''
+      const stock = tableVersStock(table, titre)
+      if (!stock) return current
+      const debut = titre ? index - 1 : index
+      return [...current.slice(0, debut), { ...stock, _k: newKey() }, ...current.slice(index + 1)]
+    })
 
   const onDrop = async (event: React.DragEvent) => {
     event.preventDefault()
@@ -693,6 +844,7 @@ function Editeur() {
                     onRemove={() => setBlocks((current) => current.filter((b) => b._k !== block._k))}
                     onInsertAfter={(added) => insertAfter(index, added)}
                     onUpload={upload}
+                    onConvertStock={block.type === 'table' && tableVersStock(block, '') ? () => convertirEnStock(block._k) : undefined}
                   />
                 ))}
               </div>

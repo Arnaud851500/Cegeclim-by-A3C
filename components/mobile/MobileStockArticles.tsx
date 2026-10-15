@@ -264,7 +264,13 @@ export default function MobileStockArticles({
   cibleReference,
   cibleDesignation,
   onCibleConsommee,
+  cibleListe,
+  onCibleListeConsommee,
 }: {
+  /** Liste de références à afficher (groupe d'articles d'un tableau stock du
+   * fil d'actu, 15/10/2026) -- passée par MobileShell, consommée une fois. */
+  cibleListe?: { refs: string[]; groupe?: string } | null
+  onCibleListeConsommee?: () => void
   /** Référence à ouvrir directement en détail -- passée par MobileShell
    * quand la navigation vient d'un autre écran (ex. ligne d'article d'un
    * devis/BL/commande). Consommée une fois (onCibleConsommee). */
@@ -314,6 +320,29 @@ export default function MobileStockArticles({
       .filter((f) => f.famille_macro === familleMacro)
       .sort((a, b) => a.famille.localeCompare(b.famille))
   }, [famillesRef, familleMacro])
+
+  // Groupe d'articles : depuis la pile du Compagnon (cibleListe) ou, page
+  // /stock ouverte directement sur un téléphone, depuis ?groupe=&refs= / ?ref=.
+  const [groupeAffiche, setGroupeAffiche] = useState<string | null>(null)
+  useEffect(() => {
+    if (cibleListe && cibleListe.refs.length) {
+      setQuery(cibleListe.refs.join('\n'))
+      setGroupeAffiche(cibleListe.groupe || null)
+      onCibleListeConsommee?.()
+      return
+    }
+    if (cibleReference || typeof window === 'undefined') return
+    const params = new URLSearchParams(window.location.search)
+    const refs = parseReferences(String(params.get('refs') || ''))
+    const ref = String(params.get('ref') || '').trim().toUpperCase()
+    if (refs.length) {
+      setQuery(refs.join('\n'))
+      setGroupeAffiche(String(params.get('groupe') || '').trim() || null)
+    } else if (ref) {
+      setOpenReference({ reference: ref, designation: '' })
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cibleListe])
 
   // Ouverture directe via cible (venue d'un autre écran) -- une seule fois.
   useEffect(() => {
@@ -458,7 +487,7 @@ export default function MobileStockArticles({
       <div>
         <textarea
           value={query}
-          onChange={(e) => setQuery(e.target.value)}
+          onChange={(e) => { setQuery(e.target.value); setGroupeAffiche(null) }}
           placeholder={'Référence ou désignation'}
           rows={isListe ? 3 : 1}
           style={{
@@ -468,6 +497,7 @@ export default function MobileStockArticles({
         />
         {isListe && (
           <div style={{ marginTop: 6, fontSize: 11.5, color: 'rgba(166,161,129,0.9)' }}>
+            {groupeAffiche ? <strong style={{ color: '#E9E5D6' }}>Groupe « {groupeAffiche} » · </strong> : null}
             {refsSaisies.length} référence(s) détectée(s) dans la liste
           </div>
         )}

@@ -17,6 +17,15 @@
 // mobile fetchFlux({ plateforme: 'mobile' }). Tant que le script n'est pas
 // exécuté, l'ancienne fonction à deux paramètres est utilisée et tout
 // s'affiche partout.
+//
+// ÉVOLUTION (2026-10-15) : bloc « Tableau stock en direct » (type 'stock') —
+// une liste de références (+ remarque libre par ligne) dont les chiffres
+// (dispo, stock, réservé, en commande, arrivages) sont lus dans SAGE à
+// l'affichage par la RPC get_stock_actualite : la publication reste à jour
+// sans être modifiée. Son titre ouvre l'écran Stock sur le groupe d'articles
+// correspondant (stockGroupeUrl), groupe créé automatiquement à la
+// publication (trigger actualites_sync_groupes_stock,
+// supabase/sql/20261015_actualites_blocs_stock.sql).
 // ============================================================================
 
 import { useEffect, useState } from 'react'
@@ -36,8 +45,124 @@ export type Block =
   | { type: 'image'; path: string; caption?: string }
   | { type: 'callout'; title?: string; text: string; tone?: 'info' | 'alerte' }
   | { type: 'link'; label: string; url: string }
+  | StockBlock
 
 export type BlockType = Block['type']
+
+// ── Bloc « Tableau stock en direct » ─────────────────────────────────────────
+/** Colonnes facultatives (Référence, Dispo et Désignation sont toujours affichées). */
+export type StockColonne = 'stock' | 'reserve' | 'commande' | 'arrivages'
+export const STOCK_COLONNES: Array<{ key: StockColonne; label: string }> = [
+  { key: 'stock', label: 'Stock' },
+  { key: 'reserve', label: 'Réservé (CDC + PL)' },
+  { key: 'commande', label: 'En commande' },
+  { key: 'arrivages', label: 'Arrivages (dates SAGE)' },
+]
+export const STOCK_COLONNES_DEFAUT: StockColonne[] = ['stock', 'reserve', 'commande', 'arrivages']
+
+export type StockBlock = {
+  type: 'stock'
+  /** Titre affiché (cliquable vers l'écran Stock). */
+  titre: string
+  /** Nom du groupe d'articles ; à défaut, le titre. */
+  groupe?: string
+  /** Une ligne par référence, avec une remarque libre (« bonne affaire », « allocation »…). */
+  lignes: Array<{ ref: string; note?: string }>
+  colonnes?: StockColonne[]
+}
+
+export type StockLigneDirect = {
+  reference_article: string
+  designation: string | null
+  stock: number
+  reserve: number
+  dispo: number
+  en_commande: number
+  arrivages: Array<{ date: string | null; q: number; statut: string }>
+  maj: string | null
+}
+
+export function stockBlockRefs(block: Pick<StockBlock, 'lignes'>) {
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const ligne of block.lignes || []) {
+    const ref = String(ligne?.ref || '').trim().toUpperCase()
+    if (ref && !seen.has(ref)) {
+      seen.add(ref)
+      out.push(ref)
+    }
+  }
+  return out
+}
+
+export function stockBlockGroupe(block: Pick<StockBlock, 'groupe' | 'titre'>) {
+  return (String(block.groupe || '').trim() || String(block.titre || '').trim()).slice(0, 120)
+}
+
+/** Lien vers l'écran Stock, sélection du groupe (références en secours si le groupe n'existe pas encore). */
+export function stockGroupeUrl(groupe: string, refs: string[]) {
+  const params = new URLSearchParams()
+  if (groupe) params.set('groupe', groupe)
+  if (refs.length) params.set('refs', refs.join(','))
+  return `/stock?${params.toString()}`
+}
+
+// Ouverture de l'écran Stock depuis une publication lue dans le Compagnon
+// mobile : MobileShell (quand il est monté) empile son écran Stock avec la
+// sélection au lieu de quitter le Compagnon.
+export const MOBILE_OPEN_STOCK_EVENT = 'cegeclim:mobile-open-stock'
+export type MobileOpenStockDetail = { groupe?: string; refs?: string[]; ref?: string }
+
+declare global {
+  interface Window {
+    /** Posé par MobileShell quand il est monté : il prend en charge l'ouverture du stock. */
+    __cgcMobileShellStock?: boolean
+  }
+}
+
+/** Ouvre l'écran Stock (groupe, liste ou référence) : dans le Compagnon si possible, sinon par l'adresse. */
+export function ouvrirStock(detail: MobileOpenStockDetail, push: (href: string) => void) {
+  if (typeof window !== 'undefined' && window.__cgcMobileShellStock) {
+    window.dispatchEvent(new CustomEvent<MobileOpenStockDetail>(MOBILE_OPEN_STOCK_EVENT, { detail }))
+    return
+  }
+  if (detail.ref) {
+    push(`/stock?ref=${encodeURIComponent(detail.ref)}`)
+    return
+  }
+  push(stockGroupeUrl(detail.groupe || '', detail.refs || []))
+}
+
+let stockRpcAbsente = false
+
+/** Chiffres SAGE en direct des références d'un bloc stock (null = RPC pas encore installée). */
+export async function fetchStockDirect(refs: string[]): Promise<StockLigneDirect[] | null> {
+  if (refs.length === 0 || stockRpcAbsente) return stockRpcAbsente ? null : []
+  const { data, error } = await supabase.rpc('get_stock_actualite', { p_references: refs })
+  if (error) {
+    if (/get_stock_actualite|function|schema cache|PGRST202/i.test(`${error.message} ${error.code || ''}`)) {
+      stockRpcAbsente = true
+      return null
+    }
+    throw error
+  }
+  return ((data || []) as Record<string, unknown>[]).map((row) => ({
+    reference_article: String(row.reference_article || ''),
+    designation: (row.designation as string | null) ?? null,
+    stock: Number(row.stock) || 0,
+    reserve: Number(row.reserve) || 0,
+    dispo: Number(row.dispo) || 0,
+    en_commande: Number(row.en_commande) || 0,
+    arrivages: Array.isArray(row.arrivages)
+      ? (row.arrivages as Array<Record<string, unknown>>).map((a) => ({
+          date: a.date ? String(a.date).slice(0, 10) : null,
+          q: Number(a.q) || 0,
+          statut: String(a.statut || ''),
+        }))
+      : [],
+    maj: (row.maj as string | null) ?? null,
+  }))
+}
 
 export type Actualite = {
   id: string
@@ -141,6 +266,8 @@ export function blocksPlainText(blocks: Block[] | null | undefined): string {
           return b.label
         case 'image':
           return b.caption || ''
+        case 'stock':
+          return `${b.titre || ''} ${(b.lignes || []).map((l) => `${l.ref} ${l.note || ''}`).join(' ')}`
         default:
           return ''
       }

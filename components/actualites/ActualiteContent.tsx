@@ -9,13 +9,32 @@
 // Texte enrichi minimal dans les paragraphes : **gras**, *italique*,
 // [libellé](https://…) ou [libellé](/chemin/interne), adresses http(s) nues.
 // Aucun HTML n'est interprété : tout est rendu comme texte.
+//
+// ÉVOLUTION (2026-10-15) : bloc « Tableau stock en direct » (StockTable) —
+// chiffres SAGE lus à l'affichage (get_stock_actualite), titre cliquable vers
+// l'écran Stock avec le groupe d'articles sélectionné, référence cliquable
+// vers sa fiche. Dans le Compagnon mobile, l'ouverture passe par la pile de
+// MobileShell (ouvrirStock).
 // ============================================================================
 
 import { Fragment, useEffect, useMemo, useState } from 'react'
 import type React from 'react'
 import { createPortal } from 'react-dom'
 import { useRouter } from 'next/navigation'
-import { isInternalUrl, safeUrl, useSignedImages, type Block } from '@/lib/actualites'
+import {
+  STOCK_COLONNES_DEFAUT,
+  fetchStockDirect,
+  isInternalUrl,
+  ouvrirStock,
+  safeUrl,
+  stockBlockGroupe,
+  stockBlockRefs,
+  stockGroupeUrl,
+  useSignedImages,
+  type Block,
+  type StockBlock,
+  type StockLigneDirect,
+} from '@/lib/actualites'
 
 // ── Texte enrichi ────────────────────────────────────────────────────────────
 const INLINE_RE = /(\*\*[^*]+\*\*)|(\*[^*\s][^*]*\*)|(\[[^\]]+\]\([^)\s]+\))|(https?:\/\/[^\s)]+)/g
@@ -112,6 +131,173 @@ function ImageBlock({ src, caption }: { src?: string; caption?: string }) {
       {caption ? <figcaption style={styles.figcaption}>{caption}</figcaption> : null}
       {open && src ? <Lightbox src={src} alt={caption || ''} onClose={() => setOpen(false)} /> : null}
     </figure>
+  )
+}
+
+// ── Tableau stock en direct ──────────────────────────────────────────────────
+function fmtQte(n: number) {
+  return Math.round(n).toLocaleString('fr-FR').replace('-', '−')
+}
+
+function fmtJourMois(iso: string | null) {
+  if (!iso) return ''
+  const [, m, d] = iso.split('-')
+  return `${d}/${m}`
+}
+
+function fmtMaj(iso: string | null) {
+  if (!iso) return ''
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return ''
+  return d.toLocaleString('fr-FR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Paris' })
+}
+
+function libelleArrivages(arrivages: StockLigneDirect['arrivages']) {
+  if (arrivages.length === 0) return '—'
+  const parts = arrivages.slice(0, 3).map((a) => {
+    const quand = a.statut === 'SANS_DATE' || !a.date ? 'sans date' : a.statut === 'RETARD' ? `en retard (${fmtJourMois(a.date)})` : fmtJourMois(a.date)
+    return `${fmtQte(a.q)} · ${quand}`
+  })
+  if (arrivages.length > 3) parts.push(`+ ${arrivages.length - 3} autre(s)`)
+  return parts.join('\n')
+}
+
+function StockTable({ block }: { block: StockBlock }) {
+  const router = useRouter()
+  const refs = useMemo(() => stockBlockRefs(block), [block])
+  const refsKey = refs.join('|')
+  const [rows, setRows] = useState<Record<string, StockLigneDirect> | null>(null)
+  const [indisponible, setIndisponible] = useState(false)
+  const [erreur, setErreur] = useState<string | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    if (refs.length === 0) return
+    fetchStockDirect(refs)
+      .then((data) => {
+        if (cancelled) return
+        if (data === null) {
+          setIndisponible(true)
+          setRows({})
+          return
+        }
+        const map: Record<string, StockLigneDirect> = {}
+        for (const row of data) map[row.reference_article] = row
+        setRows(map)
+      })
+      .catch((e: unknown) => {
+        if (cancelled) return
+        setErreur(e instanceof Error ? e.message : String(e))
+        setRows({})
+      })
+    return () => {
+      cancelled = true
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [refsKey])
+
+  if (refs.length === 0) return null
+
+  const groupe = stockBlockGroupe(block)
+  const colonnes = block.colonnes && block.colonnes.length > 0 ? block.colonnes : STOCK_COLONNES_DEFAUT
+  const avecNotes = (block.lignes || []).some((l) => String(l.note || '').trim())
+  const notes = new Map<string, string>()
+  for (const ligne of block.lignes || []) {
+    const ref = String(ligne.ref || '').trim().toUpperCase()
+    if (ref && ligne.note && !notes.has(ref)) notes.set(ref, ligne.note)
+  }
+  const maj = rows
+    ? Object.values(rows).reduce<string | null>((acc, r) => (r.maj && (!acc || r.maj > acc) ? r.maj : acc), null)
+    : null
+  const enDirect = rows !== null && !indisponible && !erreur
+
+  const ouvrirGroupe = (event: React.MouseEvent) => {
+    if (event.metaKey || event.ctrlKey) return
+    event.preventDefault()
+    ouvrirStock({ groupe, refs }, (href) => router.push(href))
+  }
+  const ouvrirRef = (event: React.MouseEvent, ref: string) => {
+    if (event.metaKey || event.ctrlKey) return
+    event.preventDefault()
+    ouvrirStock({ ref }, (href) => router.push(href))
+  }
+
+  const entetes = ['Référence', 'Dispo', 'Désignation']
+  if (colonnes.includes('stock')) entetes.push('Stock')
+  if (colonnes.includes('reserve')) entetes.push('Réservé')
+  if (colonnes.includes('commande')) entetes.push('En commande')
+  if (colonnes.includes('arrivages')) entetes.push('Arrivages')
+  if (avecNotes) entetes.push('Remarque')
+  const numeriques = new Set(['Dispo', 'Stock', 'Réservé', 'En commande'])
+
+  return (
+    <section style={styles.stockSection}>
+      <h3 style={{ ...styles.heading, marginBottom: '0.3em' }}>
+        <a href={stockGroupeUrl(groupe, refs)} onClick={ouvrirGroupe} style={styles.stockTitleLink} title="Ouvrir ce groupe dans l’écran Stock">
+          {block.titre || groupe}
+          <span aria-hidden="true" style={styles.stockTitleArrow}> ›</span>
+        </a>
+      </h3>
+      <div style={styles.stockMeta}>
+        {enDirect ? (
+          <span style={styles.stockLive}>
+            <span style={styles.stockLiveDot} aria-hidden="true" />
+            Chiffres SAGE en direct{maj ? ` · synchro du ${fmtMaj(maj)}` : ''}
+          </span>
+        ) : rows === null ? (
+          <span>Chargement des chiffres SAGE…</span>
+        ) : (
+          <span style={{ color: 'var(--cg-danger)' }}>
+            {indisponible ? 'Chiffres en direct pas encore disponibles.' : `Chiffres indisponibles : ${erreur}`}
+          </span>
+        )}
+        <a href={stockGroupeUrl(groupe, refs)} onClick={ouvrirGroupe} style={styles.link}>
+          Voir le groupe dans Stock
+        </a>
+      </div>
+      <div style={styles.tableWrap}>
+        <table style={styles.table}>
+          <thead>
+            <tr>
+              {entetes.map((h) => (
+                <th key={h} style={{ ...styles.th, ...(numeriques.has(h) ? { textAlign: 'right' } : {}) }}>{h}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {refs.map((ref) => {
+              const r = rows?.[ref]
+              const attente = rows === null
+              const vide = attente ? '…' : '—'
+              const dispoCouleur = r ? (r.dispo > 0 ? 'var(--cg-ok)' : 'var(--cg-danger)') : undefined
+              return (
+                <tr key={ref}>
+                  <td style={{ ...styles.td, whiteSpace: 'nowrap' }}>
+                    <a href={`/stock?ref=${encodeURIComponent(ref)}`} onClick={(e) => ouvrirRef(e, ref)} style={styles.stockRefLink}>{ref}</a>
+                  </td>
+                  <td style={{ ...styles.td, ...styles.tdNum, fontWeight: 700, color: dispoCouleur }}>
+                    {r ? fmtQte(r.dispo) : vide}
+                    {r && r.dispo <= 0 && r.en_commande > 0 ? <span style={styles.stockArrow}> → arrivage</span> : null}
+                  </td>
+                  <td style={{ ...styles.td, minWidth: 220 }}>{r?.designation || (attente ? '' : '—')}</td>
+                  {colonnes.includes('stock') ? <td style={{ ...styles.td, ...styles.tdNum }}>{r ? fmtQte(r.stock) : vide}</td> : null}
+                  {colonnes.includes('reserve') ? <td style={{ ...styles.td, ...styles.tdNum }}>{r ? fmtQte(r.reserve) : vide}</td> : null}
+                  {colonnes.includes('commande') ? <td style={{ ...styles.td, ...styles.tdNum }}>{r ? fmtQte(r.en_commande) : vide}</td> : null}
+                  {colonnes.includes('arrivages') ? (
+                    <td style={{ ...styles.td, whiteSpace: 'pre-line', minWidth: 130, fontSize: '0.92em' }}>{r ? libelleArrivages(r.arrivages) : vide}</td>
+                  ) : null}
+                  {avecNotes ? (
+                    <td style={{ ...styles.td, minWidth: 160 }}>
+                      <RichText text={notes.get(ref) || ''} />
+                    </td>
+                  ) : null}
+                </tr>
+              )
+            })}
+          </tbody>
+        </table>
+      </div>
+    </section>
   )
 }
 
@@ -230,6 +416,8 @@ export default function ActualiteContent({
                 </div>
               </aside>
             ) : null
+          case 'stock':
+            return <StockTable key={index} block={block} />
           case 'link': {
             const href = safeUrl(block.url)
             if (!href || !block.label.trim()) return null
@@ -386,6 +574,50 @@ const styles: Record<string, React.CSSProperties> = {
   },
   calloutText: {
     color: 'var(--cg-ink)',
+  },
+  stockSection: {
+    margin: '0 0 0.4em',
+  },
+  stockTitleLink: {
+    color: 'inherit',
+    textDecoration: 'none',
+    borderBottom: '2px solid var(--cg-accent-border)',
+  },
+  stockTitleArrow: {
+    color: 'var(--cg-accent)',
+  },
+  stockMeta: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    flexWrap: 'wrap',
+    gap: '4px 14px',
+    margin: '0 0 0.5em',
+    fontFamily: 'var(--font-body)',
+    fontSize: 13,
+    color: 'rgba(var(--cg-ink-rgb), 0.62)',
+  },
+  stockLive: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: 6,
+  },
+  stockLiveDot: {
+    width: 7,
+    height: 7,
+    borderRadius: '50%',
+    background: 'var(--cg-ok)',
+    flexShrink: 0,
+  },
+  stockRefLink: {
+    color: 'var(--cg-accent)',
+    textDecoration: 'none',
+    fontWeight: 600,
+  },
+  stockArrow: {
+    fontWeight: 400,
+    fontSize: '0.88em',
+    color: 'rgba(var(--cg-ink-rgb), 0.62)',
   },
   lightbox: {
     position: 'fixed',

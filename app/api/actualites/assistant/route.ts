@@ -17,6 +17,10 @@
 //   - la réponse de l'IA est filtrée : seuls les types de blocs connus,
 //     des chaînes de texte et des liens http(s) / internes sont gardés.
 // Modèle : OPENAI_ACTUALITES_MODEL, sinon OPENAI_MODEL (vercel.json).
+// ÉVOLUTION (2026-10-15) : les états de stock par référence sont rendus en
+// blocs « stock » (chiffres SAGE en direct, lien vers le groupe dans l'écran
+// Stock) au lieu de tableaux recopiés ; l'IA ne fournit que les références
+// et les mentions qualitatives.
 // ============================================================================
 
 /* eslint-disable @typescript-eslint/no-explicit-any -- réponses JSON d'OpenAI et corps de requête non typés, filtrés champ par champ ci-dessous */
@@ -151,8 +155,8 @@ STRUCTURE ATTENDUE (adapter, ne pas forcer)
 2. Un paragraphe de synthèse : l'essentiel en 2 à 3 phrases, chiffres clés en **gras**.
 3. Un encadré "alerte" (rouge) pour une contrainte forte : pénurie, allocation, délai, date limite. Titre court.
 4. Un encadré "info" intitulé « Ce qui est attendu de vous » avec 2 à 4 actions numérotées (1. 2. 3., une par ligne) — tirées de la source, pas inventées.
-5. Si la source contient des stocks / quantités : un tableau « À proposer en priorité » avec les plus gros volumes disponibles (6 à 8 lignes max, colonnes Référence | Dispo | Désignation).
-6. Les tableaux de détail : un intertitre par famille / gamme, puis un tableau. Ordre des colonnes : Référence, puis la valeur clé (Dispo, prix, date…), puis la désignation, puis le reste. Désignations raccourcies (retire le code article répété en fin de libellé). Valeurs négatives de dispo : écrire « −5 → arrivage ». Une longue liste d'arrivages ligne par ligne doit être regroupée par référence (1re date, quantités par mois, total) en vérifiant que le total est conservé.
+5. Si la source contient des stocks / quantités par référence article : un bloc "stock" « À proposer en priorité » avec les références aux plus gros volumes disponibles (6 à 8 références max).
+6. États de stock par famille / gamme : un bloc "stock" par famille / gamme (PAS de bloc "table", PAS d'intertitre avant : le titre du bloc en tient lieu). Les chiffres (dispo, stock, réservé, en commande, arrivages) sont lus en direct dans SAGE à l'affichage : ne recopie AUCUN chiffre de stock dans le bloc ; recopie seulement les références (caractère par caractère) et, en "note", les mentions qualitatives de la source pour cette référence (« bonne affaire », « allocation », « mettre à jour CDC », « arrivages octobre couvrent les CDC à jour », « sav », « expo »…). Titre court et parlant (gamme + message : « Utopia PRIME R32 — produits tendus »). "groupe" = nom court de la gamme (devient un groupe d'articles dans l'écran Stock). Garde des blocs "table" seulement pour ce qui n'est pas un état de stock par référence (prix, calendrier d'arrivages annoncé par le fournisseur avec ses dates, conditions…). Une longue liste d'arrivages ligne par ligne doit être regroupée par référence (1re date, quantités par mois, total) en vérifiant que le total est conservé.
 7. Si des tableaux sont nombreux, un court paragraphe « Comment lire les tableaux ».
 8. Une ligne « Source : … » (auteur, date) quand la source est un mail.
 9. Des liens vers les écrans utiles de l'application, uniquement parmi : ${LIENS_INTERNES.map(([u, l]) => `${u} (${l})`).join(' ; ')}. Liens externes seulement s'ils figurent dans la source.
@@ -165,6 +169,7 @@ FORMAT DES BLOCS (JSON)
 - {"type":"image","image":0,"caption":"…"} — "image" = numéro de l'image fournie.
 - {"type":"callout","tone":"alerte"|"info","title":"…","text":"…"} — retours à la ligne avec \\n.
 - {"type":"link","label":"…","url":"/stock"}
+- {"type":"stock","titre":"…","groupe":"…","lignes":[{"ref":"RAS-4HVRC2E","note":"allocation"},{"ref":"RAS-3HVRC3"}],"colonnes":["stock","reserve","commande","arrivages"]} — tableau de stock en direct ; "note" facultative ; "colonnes" facultatif (par défaut les quatre ; retirer "arrivages" si la source donne des dates d'arrivage plus fiables, présentées alors dans un bloc "table").
 
 IMAGES FOURNIES
 ${roles || '- Aucune image.'}
@@ -232,6 +237,29 @@ function nettoyerBlocs(raw: unknown, nbImages: number) {
       case 'link': {
         const url = lienSur(block.url)
         if (url && str(block.label).trim()) out.push({ type: 'link', label: str(block.label, 200), url })
+        break
+      }
+      case 'stock': {
+        const lignes = (Array.isArray(block.lignes) ? block.lignes : [])
+          .slice(0, 150)
+          .map((l) => {
+            const ligne = (l && typeof l === 'object' ? l : { ref: l }) as Record<string, unknown>
+            const ref = str(ligne.ref, 60).trim().toUpperCase()
+            const note = str(ligne.note, 200).trim()
+            return ref ? (note ? { ref, note } : { ref }) : null
+          })
+          .filter(Boolean)
+        const colonnesOk = ['stock', 'reserve', 'commande', 'arrivages']
+        const colonnes = Array.isArray(block.colonnes) ? block.colonnes.map((c) => String(c)).filter((c) => colonnesOk.includes(c)) : []
+        if (lignes.length) {
+          out.push({
+            type: 'stock',
+            titre: str(block.titre, 160),
+            ...(str(block.groupe, 120).trim() ? { groupe: str(block.groupe, 120).trim() } : {}),
+            lignes,
+            colonnes: colonnes.length ? colonnes : colonnesOk,
+          })
+        }
         break
       }
       default:
