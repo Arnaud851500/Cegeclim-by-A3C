@@ -78,6 +78,7 @@
   --cg-ad-blue-ink: #9DB2F0;
   --cg-ad-sky-ink: #8FC6E3;
   --cg-ad-amber-ink: #E8C27A;
+  --cg-ad-header: linear-gradient(180deg, #121C33 0%, #0E1628 100%);  /* Analyse devis : en-tête */
 }
 
 [data-theme="light"] {
@@ -140,6 +141,7 @@
   --cg-ad-blue-ink: #1B4FA8;
   --cg-ad-sky-ink: #1F6A80;
   --cg-ad-amber-ink: #8A5A0E;
+  --cg-ad-header: linear-gradient(180deg, #FFFFFF 0%, #FBFAF6 100%);
 }
 
 /* Bandeau défilant du fil d'actualité */

@@ -1426,7 +1426,7 @@ export default function CycleDocumentsPage() {
   return (
     <main className="min-h-screen p-6" style={{ background: C.bg, color: C.text, fontFamily: FONT_BODY }}>
       {/* En-tête */}
-      <header className="mb-6 overflow-hidden rounded-2xl border" style={{ background: 'linear-gradient(180deg,#121C33 0%,#0E1628 100%)', borderColor: C.line }}>
+      <header className="mb-6 overflow-hidden rounded-2xl border" style={{ background: 'var(--cg-ad-header)', borderColor: C.line }}>
         <div className="flex flex-wrap items-center justify-between gap-4 px-6 py-5">
           <div className="flex items-center gap-4">
             <div className="flex h-14 w-14 items-center justify-center rounded-xl text-2xl" style={{ background: 'var(--cg-ad-panel-soft)' }}>📈</div>
