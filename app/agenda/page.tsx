@@ -31,6 +31,13 @@
 // ne peut plus élargir sa colonne), les cellules coupent ce qui dépasse, et
 // l'objet affiché est nettoyé des URLs et des « ----- » (libelleRdv).
 // L'objet complet reste visible au survol (title).
+// MODE CLAIR (15/10/2026, demandé par Arnaud) : l'écran suit le choix
+//   Clair / Sombre du bandeau (lib/theme.ts → LIGHT_READY_PATHS). Styles
+//   passés par themedAgenda() (= themed() de lib/theme.ts + ambre / orange /
+//   fond de fenêtre propres à cet écran) ; les pavés de RDV (fond coloré,
+//   texte blanc), le bouton principal et le jour courant gardent leurs
+//   couleurs. Les boutons de dictée (composant mobile, sombre) sont posés
+//   sur une petite carte restée sombre.
 // ============================================================================
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
@@ -38,6 +45,7 @@ import type React from 'react'
 import { useRouter } from 'next/navigation'
 import { supabase } from '@/lib/supabaseClient'
 import { useViewport } from '@/lib/useViewport'
+import { tc } from '@/lib/theme'
 import { formatMoney } from '@/app/focus_mensuel/page'
 import MobileRdv from '@/components/mobile/MobileRdv'
 import VoiceReportButtons from '@/components/mobile/VoiceReportButtons'
@@ -456,12 +464,12 @@ function AgendaDesktop() {
 
   return (
     <div style={styles.page}>
-      <style>{`
+      <style>{tcAgenda(`
         .agdBtn:hover { background: rgba(255,255,255,0.10); color: #fff; border-color: rgba(255,255,255,0.3); }
         .agdRdv:hover { filter: brightness(1.12); }
         .agdRow:hover { background: rgba(255,255,255,0.07); }
         .agdBtn:focus-visible, .agdRdv:focus-visible, .agdRow:focus-visible { outline: 2px solid #F5F3EC; outline-offset: 2px; }
-      `}</style>
+      `)}</style>
 
       {/* En-tête */}
       <div style={styles.header}>
@@ -567,7 +575,7 @@ function AgendaDesktop() {
                     const estAujourdhui = memeJour(j, aujourdHui)
                     const weekend = j.getDay() === 0 || j.getDay() === 6
                     return (
-                      <div key={j.toISOString()} style={{ ...styles.dayColumn, height: GRILLE_HAUTEUR_TOTALE, background: weekend ? 'rgba(255,255,255,0.015)' : estAujourdhui ? 'rgba(143,199,218,0.05)' : 'transparent' }}>
+                      <div key={j.toISOString()} style={{ ...styles.dayColumn, height: GRILLE_HAUTEUR_TOTALE, background: weekend ? 'rgba(var(--cg-ink-rgb), 0.015)' : estAujourdhui ? 'rgba(143,199,218,0.05)' : 'transparent' }}>
                         {heures.map((h) => (
                           <div key={h} style={{ ...styles.hourLine, top: (h - GRILLE_HEURE_DEBUT) * GRILLE_HAUTEUR_HEURE }} />
                         ))}
@@ -626,7 +634,7 @@ function AgendaDesktop() {
                     <button key={preset} type="button" className="agdBtn" onClick={() => selectionnerPeriode(preset)} style={{ ...styles.chip, ...(periodeLabel === label ? styles.chipActive : {}) }}>{label}</button>
                   ))}
                   <input type="date" value={dateDebutInput} onChange={(e) => setDateDebutInput(e.target.value)} style={styles.dateInput} />
-                  <span style={{ color: 'rgba(255,255,255,0.4)' }}>→</span>
+                  <span style={{ color: 'rgba(var(--cg-ink-rgb), 0.4)' }}>→</span>
                   <input type="date" value={dateFinInput} onChange={(e) => setDateFinInput(e.target.value)} style={styles.dateInput} />
                   <button type="button" className="agdBtn" onClick={appliquerPeriodePersonnalisee} disabled={!dateDebutInput || !dateFinInput} style={{ ...styles.chip, opacity: dateDebutInput && dateFinInput ? 1 : 0.5 }}>Voir</button>
                 </div>
@@ -654,8 +662,8 @@ function AgendaDesktop() {
                         title={r.subject}
                         style={{
                           ...styles.row,
-                          borderColor: selected ? 'rgba(245,243,236,0.5)' : tache ? 'rgba(230,159,74,0.45)' : 'rgba(255,255,255,0.08)',
-                          background: tache ? 'rgba(230,159,74,0.07)' : 'rgba(255,255,255,0.03)',
+                          borderColor: selected ? 'rgba(var(--cg-ink-rgb), 0.5)' : tache ? 'rgba(230,159,74,0.45)' : 'rgba(var(--cg-ink-rgb), 0.08)',
+                          background: tache ? 'rgba(230,159,74,0.07)' : 'rgba(var(--cg-ink-rgb), 0.03)',
                         }}
                       >
                         <span style={{ ...styles.rowBar, background: RDV_TYPE_COLORS[r.type] || '#7A5EA8' }} />
@@ -708,7 +716,7 @@ function AgendaDesktop() {
                     {results.map((r) => (
                       <tr key={r.key} className="agdRow" onClick={() => setSelectedDoc(r)} style={{ cursor: 'pointer' }}>
                         <td style={styles.td}>{r.type || '—'}</td>
-                        <td style={{ ...styles.td, fontWeight: 700, color: '#fff' }}>{r.numero || '—'}</td>
+                        <td style={{ ...styles.td, fontWeight: 700, color: 'var(--cg-ink)' }}>{r.numero || '—'}</td>
                         <td style={styles.td}>{r.tiers || '—'}</td>
                         <td style={styles.td}>{r.reference || '—'}</td>
                         <td style={styles.td}>{r.date ? formatDateFr(r.date) : '—'}</td>
@@ -739,7 +747,7 @@ function AgendaDesktop() {
           ) : (
             <div style={styles.sideEmpty}>
               <div style={{ fontSize: 30 }}>📅</div>
-              <div style={{ fontWeight: 700, color: '#fff', marginTop: 8 }}>Sélectionnez un rendez-vous</div>
+              <div style={{ fontWeight: 700, color: 'var(--cg-ink)', marginTop: 8 }}>Sélectionnez un rendez-vous</div>
               <div style={{ ...styles.muted, marginTop: 4 }}>Le détail, le compte-rendu et la dictée vocale s'affichent ici.</div>
             </div>
           )}
@@ -783,7 +791,7 @@ function AgendaDesktop() {
               ))}
             </dl>
             {selectedDoc.tiers && (
-              <button type="button" className="agdBtn" onClick={() => ouvrirVisionClient(selectedDoc.tiers)} style={{ ...styles.ghostBtn, borderColor: 'rgba(75,146,172,0.5)', color: '#8FC7DA' }}>Vision client 360</button>
+              <button type="button" className="agdBtn" onClick={() => ouvrirVisionClient(selectedDoc.tiers)} style={{ ...styles.ghostBtn, borderColor: 'rgba(75,146,172,0.5)', color: 'var(--cg-info-ink)' }}>Vision client 360</button>
             )}
             <button type="button" className="agdBtn" onClick={() => setSelectedDoc(null)} style={styles.ghostBtn}>Fermer</button>
           </div>
@@ -844,11 +852,11 @@ function RdvDetailPanel({
         {estCompagnon && (
           <>
             <button type="button" className="agdBtn" onClick={onEdit} style={styles.ghostBtn}>✏️ Modifier</button>
-            <button type="button" className="agdBtn" onClick={onDelete} style={{ ...styles.ghostBtn, borderColor: 'rgba(193,104,60,0.5)', color: '#e0a685' }}>🗑 Supprimer</button>
+            <button type="button" className="agdBtn" onClick={onDelete} style={{ ...styles.ghostBtn, borderColor: 'rgba(193,104,60,0.5)', color: 'var(--cg-alert-soft)' }}>🗑 Supprimer</button>
           </>
         )}
         {rdv.numero_tiers && (
-          <button type="button" className="agdBtn" onClick={() => onOpenClient(rdv.numero_tiers as string)} style={{ ...styles.ghostBtn, borderColor: 'rgba(75,146,172,0.5)', color: '#8FC7DA' }}>Vision client 360</button>
+          <button type="button" className="agdBtn" onClick={() => onOpenClient(rdv.numero_tiers as string)} style={{ ...styles.ghostBtn, borderColor: 'rgba(75,146,172,0.5)', color: 'var(--cg-info-ink)' }}>Vision client 360</button>
         )}
       </div>
 
@@ -865,14 +873,16 @@ function RdvDetailPanel({
          client -- le CR est rattaché au RDV (prospect), puis au client dès
          qu'on le choisit sur le RDV (trigger rdv_compagnon_rattacher_cr). */}
       {activityId && (
-        <VoiceReportButtons
-          numeroTiers={rdv.numero_tiers || ''}
-          clientNom={rdv.company_name || ''}
-          rdvActivityId={activityId}
-          rdvLabel={rdv.subject}
-          userEmail={currentEmail}
-          userName={currentName}
-        />
+        <div data-theme="dark" style={{ background: 'var(--cg-surface)', borderRadius: 12, padding: 10 }}>
+          <VoiceReportButtons
+            numeroTiers={rdv.numero_tiers || ''}
+            clientNom={rdv.company_name || ''}
+            rdvActivityId={activityId}
+            rdvLabel={rdv.subject}
+            userEmail={currentEmail}
+            userName={currentName}
+          />
+        </div>
       )}
     </div>
   )
@@ -970,7 +980,7 @@ function CompteRenduBlock({
         {!editMode && (
           <span style={{ display: 'flex', gap: 6 }}>
             <button type="button" className="agdBtn" onClick={() => setEditMode(true)} style={styles.chip}>{compteRendu ? 'Modifier' : '+ Ajouter'}</button>
-            {compteRendu && <button type="button" className="agdBtn" onClick={() => void supprimer()} style={{ ...styles.chip, color: '#e0a685', borderColor: 'rgba(193,104,60,0.5)' }}>Supprimer</button>}
+            {compteRendu && <button type="button" className="agdBtn" onClick={() => void supprimer()} style={{ ...styles.chip, color: 'var(--cg-alert-soft)', borderColor: 'rgba(193,104,60,0.5)' }}>Supprimer</button>}
           </span>
         )}
       </div>
@@ -989,8 +999,8 @@ function CompteRenduBlock({
         <div>
           <p style={styles.crText}>{compteRendu.resume || '(résumé vide)'}</p>
           <div style={styles.crFooter}>
-            Créé par : <span style={{ color: '#E8A96A', fontWeight: 700 }}>{auteurCompteRendu(compteRendu)}</span>
-            <span style={{ color: 'rgba(255,255,255,0.4)' }}> · le {new Date(compteRendu.created_at).toLocaleString('fr-FR', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' })}</span>
+            Créé par : <span style={{ color: 'var(--cg-amber-ink)', fontWeight: 700 }}>{auteurCompteRendu(compteRendu)}</span>
+            <span style={{ color: 'rgba(var(--cg-ink-rgb), 0.4)' }}> · le {new Date(compteRendu.created_at).toLocaleString('fr-FR', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' })}</span>
           </div>
           {error && <div style={styles.errorText}>{error}</div>}
         </div>
@@ -1107,7 +1117,7 @@ function RdvFormModal({
               <div style={styles.suggestions}>
                 {clientResults.map((c) => (
                   <button key={c.numero} type="button" className="agdRow" onClick={() => { setNumeroTiers(c.numero); setIntituleTiers(c.intitule); setClientResults([]) }} style={styles.suggestion}>
-                    <span style={{ color: '#E8A96A', fontWeight: 700 }}>{c.numero}</span> · {c.intitule}
+                    <span style={{ color: 'var(--cg-amber-ink)', fontWeight: 700 }}>{c.numero}</span> · {c.intitule}
                   </button>
                 ))}
               </div>
@@ -1159,7 +1169,29 @@ function RdvFormModal({
 }
 
 // ── Styles ─────────────────────────────────────────────────────────────────
-const styles: Record<string, React.CSSProperties> = {
+// Couleurs « sombres » de l'écran → variables de thème (identiques en sombre).
+function tcAgenda(value: string): string {
+  return tc(value)
+    .replace(/#E8A96A(?![0-9a-f])/gi, 'var(--cg-amber-ink)')
+    .replace(/#e0a685(?![0-9a-f])/gi, 'var(--cg-alert-soft)')
+    .replace(/#141A26(?![0-9a-f])/gi, 'var(--cg-panel)')
+}
+
+// Clés gardées telles quelles : couleurs posées sur un fond coloré fixe.
+const STYLES_FIXES = new Set(['event', 'allDayChip', 'primaryBtn', 'gridHeadDayToday'])
+
+function themedAgenda<T extends Record<string, React.CSSProperties>>(input: T): T {
+  const out: Record<string, React.CSSProperties> = {}
+  for (const [key, style] of Object.entries(input)) {
+    if (STYLES_FIXES.has(key)) { out[key] = style; continue }
+    const converted: Record<string, unknown> = {}
+    for (const [prop, value] of Object.entries(style)) converted[prop] = typeof value === 'string' ? tcAgenda(value) : value
+    out[key] = converted as React.CSSProperties
+  }
+  return out as T
+}
+
+const styles: Record<string, React.CSSProperties> = themedAgenda({
   page: { maxWidth: 1600, margin: '0 auto', padding: '10px 4px 40px', color: '#F5F3EC', fontFamily: 'var(--font-body)' },
 
   header: { display: 'flex', alignItems: 'flex-end', justifyContent: 'space-between', gap: 16, flexWrap: 'wrap', marginBottom: 16 },
@@ -1268,4 +1300,4 @@ const styles: Record<string, React.CSSProperties> = {
   input: { height: 40, borderRadius: 10, border: '1px solid rgba(255,255,255,0.15)', background: 'rgba(255,255,255,0.05)', color: '#fff', padding: '0 10px', fontSize: 14, fontFamily: 'inherit', boxSizing: 'border-box', width: '100%' },
   suggestions: { position: 'absolute', top: '100%', left: 0, right: 0, zIndex: 5, marginTop: 4, borderRadius: 10, border: '1px solid rgba(255,255,255,0.12)', background: '#0B1220', overflow: 'hidden' },
   suggestion: { display: 'block', width: '100%', textAlign: 'left', padding: '9px 12px', border: 'none', borderBottom: '1px solid rgba(255,255,255,0.06)', background: 'transparent', color: '#fff', fontSize: 13.5, cursor: 'pointer', fontFamily: 'inherit' },
-}
+})

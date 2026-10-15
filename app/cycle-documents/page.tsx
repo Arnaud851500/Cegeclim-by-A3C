@@ -9,15 +9,20 @@ import { accessLockedSelectClassName, firstAllowedValue, restrictOptions, usePag
 /* Charte graphique                                                    */
 /* ------------------------------------------------------------------ */
 
+// MODE CLAIR (15/10/2026, demandé par Arnaud) : les couleurs neutres passent
+// par les variables de app/theme.css (--cg-bg, --cg-ad-*…) — en sombre elles
+// valent exactement les anciennes valeurs ; en clair, fond crème, panneaux
+// blancs, encres marine. Écran déclaré dans lib/theme.ts (LIGHT_READY_PATHS).
+// Les couleurs de séries (bleu, sauge, ciel…) restent identiques.
 const C = {
-  bg: '#0B1220',
-  panel: '#111A2E',
-  panelSoft: '#16213A',
-  input: '#0F1729',
-  line: 'rgba(245,243,236,0.10)',
-  lineStrong: 'rgba(245,243,236,0.18)',
-  text: '#F5F3EC',
-  muted: '#8B93A7',
+  bg: 'var(--cg-bg)',
+  panel: 'var(--cg-ad-panel)',
+  panelSoft: 'var(--cg-ad-panel-soft)',
+  input: 'var(--cg-ad-input)',
+  line: 'rgba(var(--cg-ink-rgb), 0.10)',
+  lineStrong: 'rgba(var(--cg-ink-rgb), 0.18)',
+  text: 'var(--cg-ink-soft)',
+  muted: 'var(--cg-ad-muted)',
   sauge: '#A6A181',
   alerte: '#C1683C',
   violet: '#7A5EA8',
@@ -229,30 +234,30 @@ function horizonDefs(maturite: number): HorizonDef[] {
 }
 
 const STATUS_COLORS: Record<string, string> = {
-  'Non transformé': 'bg-white/5 text-[#C9CEDA] border-white/15',
-  'CDC créée': 'bg-[#8FC6E3]/10 text-[#8FC6E3] border-[#8FC6E3]/30',
-  'BL créé': 'bg-[#4C6FD8]/15 text-[#9DB2F0] border-[#4C6FD8]/40',
-  Facturé: 'bg-[#5BA35B]/15 text-[#8FD08F] border-[#5BA35B]/40',
+  'Non transformé': 'bg-[color:var(--cg-ink)]/5 text-[color:var(--cg-ad-soft)] border-[color:var(--cg-ink)]/15',
+  'CDC créée': 'bg-[#8FC6E3]/10 text-[color:var(--cg-ad-sky-ink)] border-[#8FC6E3]/30',
+  'BL créé': 'bg-[#4C6FD8]/15 text-[color:var(--cg-ad-blue-ink)] border-[#4C6FD8]/40',
+  Facturé: 'bg-[#5BA35B]/15 text-[color:var(--cg-ad-up)] border-[#5BA35B]/40',
 }
 
 const ALERT_COLORS: Record<string, string> = {
-  'Décrochage total': 'bg-[#D9534F]/15 text-[#F0928F] border-[#D9534F]/40',
-  'Baisse forte': 'bg-[#C1683C]/15 text-[#E8A07C] border-[#C1683C]/40',
-  'Nouveau signal': 'bg-[#4C6FD8]/15 text-[#9DB2F0] border-[#4C6FD8]/40',
-  'Hausse forte': 'bg-[#5BA35B]/15 text-[#8FD08F] border-[#5BA35B]/40',
-  Stable: 'bg-white/5 text-[#C9CEDA] border-white/15',
+  'Décrochage total': 'bg-[#D9534F]/15 text-[color:var(--cg-ad-red-ink)] border-[#D9534F]/40',
+  'Baisse forte': 'bg-[#C1683C]/15 text-[color:var(--cg-ad-down)] border-[#C1683C]/40',
+  'Nouveau signal': 'bg-[#4C6FD8]/15 text-[color:var(--cg-ad-blue-ink)] border-[#4C6FD8]/40',
+  'Hausse forte': 'bg-[#5BA35B]/15 text-[color:var(--cg-ad-up)] border-[#5BA35B]/40',
+  Stable: 'bg-[color:var(--cg-ink)]/5 text-[color:var(--cg-ad-soft)] border-[color:var(--cg-ink)]/15',
 }
 
 const PRIORITY_COLORS: Record<string, string> = {
-  Haute: 'bg-[#D9534F]/15 text-[#F0928F] border-[#D9534F]/40',
-  Moyenne: 'bg-[#D9A441]/15 text-[#E8C27A] border-[#D9A441]/40',
-  Basse: 'bg-white/5 text-[#C9CEDA] border-white/15',
+  Haute: 'bg-[#D9534F]/15 text-[color:var(--cg-ad-red-ink)] border-[#D9534F]/40',
+  Moyenne: 'bg-[#D9A441]/15 text-[color:var(--cg-ad-amber-ink)] border-[#D9A441]/40',
+  Basse: 'bg-[color:var(--cg-ink)]/5 text-[color:var(--cg-ad-soft)] border-[color:var(--cg-ink)]/15',
 }
 
-const FIELD_CLASS = 'h-11 rounded-xl border border-white/10 bg-[#0F1729] px-3 text-sm font-semibold text-[#F5F3EC] outline-none focus:border-[#4C6FD8]'
-const SMALL_FIELD_CLASS = 'h-9 rounded-lg border border-white/10 bg-[#0F1729] px-2 text-sm font-semibold text-[#F5F3EC] outline-none focus:border-[#4C6FD8]'
-const LABEL_CLASS = 'text-[11px] font-semibold uppercase tracking-[0.12em] text-[#8B93A7]'
-const TH_CLASS = 'px-3 py-2 text-[11px] font-semibold uppercase tracking-[0.08em] text-[#8B93A7]'
+const FIELD_CLASS = 'h-11 rounded-xl border border-[color:var(--cg-ink)]/10 bg-[color:var(--cg-ad-input)] px-3 text-sm font-semibold text-[color:var(--cg-ink-soft)] outline-none focus:border-[#4C6FD8]'
+const SMALL_FIELD_CLASS = 'h-9 rounded-lg border border-[color:var(--cg-ink)]/10 bg-[color:var(--cg-ad-input)] px-2 text-sm font-semibold text-[color:var(--cg-ink-soft)] outline-none focus:border-[#4C6FD8]'
+const LABEL_CLASS = 'text-[11px] font-semibold uppercase tracking-[0.12em] text-[color:var(--cg-ad-muted)]'
+const TH_CLASS = 'px-3 py-2 text-[11px] font-semibold uppercase tracking-[0.08em] text-[color:var(--cg-ad-muted)]'
 
 /* ------------------------------------------------------------------ */
 /* Utilitaires                                                         */
@@ -379,8 +384,8 @@ function formatDelta(value: number | null | undefined) {
 
 function deltaColor(value: number | null | undefined) {
   if (value === null || value === undefined) return C.muted
-  if (value > 0.05) return '#8FD08F'
-  if (value < -0.05) return '#E8A07C'
+  if (value > 0.05) return 'var(--cg-ad-up)'
+  if (value < -0.05) return 'var(--cg-ad-down)'
   return C.muted
 }
 
@@ -591,15 +596,15 @@ function mapCohortAxis(row: any): CohortAxisRow {
 }
 
 function statusBadgeClass(status: string) {
-  return STATUS_COLORS[status] || 'bg-white/5 text-[#C9CEDA] border-white/15'
+  return STATUS_COLORS[status] || 'bg-[color:var(--cg-ink)]/5 text-[color:var(--cg-ad-soft)] border-[color:var(--cg-ink)]/15'
 }
 
 function alertBadgeClass(status: string) {
-  return ALERT_COLORS[status] || 'bg-white/5 text-[#C9CEDA] border-white/15'
+  return ALERT_COLORS[status] || 'bg-[color:var(--cg-ink)]/5 text-[color:var(--cg-ad-soft)] border-[color:var(--cg-ink)]/15'
 }
 
 function priorityBadgeClass(priority: string) {
-  return PRIORITY_COLORS[priority] || 'bg-white/5 text-[#C9CEDA] border-white/15'
+  return PRIORITY_COLORS[priority] || 'bg-[color:var(--cg-ink)]/5 text-[color:var(--cg-ad-soft)] border-[color:var(--cg-ink)]/15'
 }
 
 /* ------------------------------------------------------------------ */
@@ -738,9 +743,9 @@ function PillButton({
       className="inline-flex h-10 items-center gap-2 rounded-full border px-4 text-sm font-semibold transition"
       style={{
         fontFamily: FONT_TITLE,
-        background: active ? 'rgba(245,243,236,0.12)' : 'transparent',
-        borderColor: active ? 'rgba(245,243,236,0.45)' : C.lineStrong,
-        color: active ? C.text : '#C9CEDA',
+        background: active ? 'rgba(var(--cg-ink-rgb), 0.12)' : 'transparent',
+        borderColor: active ? 'rgba(var(--cg-ink-rgb), 0.45)' : C.lineStrong,
+        color: active ? C.text : 'var(--cg-ad-soft)',
       }}
     >
       {dot && <span className="h-2.5 w-2.5 rounded-full" style={{ background: dot }} />}
@@ -787,7 +792,7 @@ function Segmented<T extends string | number>({
             className="rounded-full px-3 py-1.5 text-xs font-semibold transition"
             style={{
               fontFamily: FONT_TITLE,
-              background: active ? '#3A4560' : 'transparent',
+              background: active ? 'var(--cg-ad-active)' : 'transparent',
               color: active ? C.text : C.muted,
             }}
           >
@@ -802,7 +807,7 @@ function Segmented<T extends string | number>({
 function ProgressBar({ value, color = C.sauge }: { value: number | null | undefined; color?: string }) {
   const width = Math.max(0, Math.min(100, safeNumber(value)))
   return (
-    <div className="h-2 w-full overflow-hidden rounded-full" style={{ background: 'rgba(245,243,236,0.08)' }}>
+    <div className="h-2 w-full overflow-hidden rounded-full" style={{ background: 'rgba(var(--cg-ink-rgb), 0.08)' }}>
       <div className="h-full rounded-full" style={{ width: `${width}%`, background: color }} />
     </div>
   )
@@ -898,19 +903,19 @@ function CohortChart({
       <svg viewBox={`0 0 ${W} ${H}`} className="h-auto w-full" onMouseLeave={() => setHover(null)}>
         {ticks.map((tick) => (
           <g key={tick}>
-            <line x1={PL} x2={W - PR} y1={yAt(tick)} y2={yAt(tick)} stroke={C.line} strokeDasharray={tick === 0 ? undefined : '3 4'} />
-            <text x={PL - 8} y={yAt(tick) + 4} textAnchor="end" fontSize="11" fill={C.muted} fontFamily={FONT_MONO}>{tick} %</text>
+            <line x1={PL} x2={W - PR} y1={yAt(tick)} y2={yAt(tick)} style={{ stroke: C.line }} strokeDasharray={tick === 0 ? undefined : '3 4'} />
+            <text x={PL - 8} y={yAt(tick) + 4} textAnchor="end" fontSize="11" style={{ fill: C.muted }} fontFamily={FONT_MONO}>{tick} %</text>
           </g>
         ))}
 
         {nRows.map((row, i) => (
-          <text key={row.mois} x={xAt(i)} y={H - 12} textAnchor="middle" fontSize="11" fill={hover === i ? C.text : C.muted} fontFamily={FONT_BODY}>
+          <text key={row.mois} x={xAt(i)} y={H - 12} textAnchor="middle" fontSize="11" style={{ fill: hover === i ? C.text : C.muted }} fontFamily={FONT_BODY}>
             {formatMonth(row.mois, count > 12)}
           </text>
         ))}
 
         {hover !== null && (
-          <line x1={xAt(hover)} x2={xAt(hover)} y1={PT} y2={PT + plotH} stroke={C.lineStrong} />
+          <line x1={xAt(hover)} x2={xAt(hover)} y1={PT} y2={PT + plotH} style={{ stroke: C.lineStrong }} />
         )}
 
         {horizons.map((h) => {
@@ -980,7 +985,7 @@ function CohortChart({
                   cx={xAt(p.i)}
                   cy={yAt(p.v)}
                   r={hover === p.i ? 5 : 3.5}
-                  fill={p.complete ? h.color : C.panel}
+                  style={{ fill: p.complete ? h.color : C.panel }}
                   stroke={h.color}
                   strokeWidth={p.complete ? 0 : 1.5}
                 />
@@ -1424,7 +1429,7 @@ export default function CycleDocumentsPage() {
       <header className="mb-6 overflow-hidden rounded-2xl border" style={{ background: 'linear-gradient(180deg,#121C33 0%,#0E1628 100%)', borderColor: C.line }}>
         <div className="flex flex-wrap items-center justify-between gap-4 px-6 py-5">
           <div className="flex items-center gap-4">
-            <div className="flex h-14 w-14 items-center justify-center rounded-xl text-2xl" style={{ background: '#1C2A4A' }}>📈</div>
+            <div className="flex h-14 w-14 items-center justify-center rounded-xl text-2xl" style={{ background: 'var(--cg-ad-panel-soft)' }}>📈</div>
             <div>
               <h1 className="text-2xl font-bold uppercase tracking-[0.14em]" style={{ fontFamily: FONT_TITLE, color: '#4C6FD8' }}>
                 Cycle devis → facture
@@ -1468,9 +1473,9 @@ export default function CycleDocumentsPage() {
         </div>
       </header>
 
-      {error && <div className="mb-4 rounded-xl border p-4 text-sm font-semibold" style={{ borderColor: 'rgba(217,83,79,0.4)', background: 'rgba(217,83,79,0.12)', color: '#F0928F' }}>{error}</div>}
-      {message && <div className="mb-4 rounded-xl border p-4 text-sm font-semibold" style={{ borderColor: 'rgba(91,163,91,0.4)', background: 'rgba(91,163,91,0.12)', color: '#8FD08F' }}>{message}</div>}
-      {access.accessBadge && <div className="mb-4 rounded-xl border p-4 text-sm font-semibold" style={{ borderColor: 'rgba(217,164,65,0.4)', background: 'rgba(217,164,65,0.12)', color: '#E8C27A' }}>Périmètre utilisateur appliqué : {access.accessBadge}</div>}
+      {error && <div className="mb-4 rounded-xl border p-4 text-sm font-semibold" style={{ borderColor: 'rgba(217,83,79,0.4)', background: 'rgba(217,83,79,0.12)', color: 'var(--cg-ad-red-ink)' }}>{error}</div>}
+      {message && <div className="mb-4 rounded-xl border p-4 text-sm font-semibold" style={{ borderColor: 'rgba(91,163,91,0.4)', background: 'rgba(91,163,91,0.12)', color: 'var(--cg-ad-up)' }}>{message}</div>}
+      {access.accessBadge && <div className="mb-4 rounded-xl border p-4 text-sm font-semibold" style={{ borderColor: 'rgba(217,164,65,0.4)', background: 'rgba(217,164,65,0.12)', color: 'var(--cg-ad-amber-ink)' }}>Périmètre utilisateur appliqué : {access.accessBadge}</div>}
       {(loading || loadingCohorts || loadingOptions || access.loading) && (
         <div className="mb-4 rounded-xl border p-3 text-sm" style={{ borderColor: C.line, background: C.panel, color: C.muted }}>Chargement de l'analyse cycle documents…</div>
       )}
@@ -1514,7 +1519,7 @@ export default function CycleDocumentsPage() {
           </label>
         </div>
 
-        <div className="mt-4 flex flex-wrap items-center gap-4 text-sm" style={{ color: '#C9CEDA' }}>
+        <div className="mt-4 flex flex-wrap items-center gap-4 text-sm" style={{ color: 'var(--cg-ad-soft)' }}>
           <label className="flex items-center gap-2">
             <input type="checkbox" checked={includeHorsStat} onChange={(event) => setIncludeHorsStat(event.target.checked)} className="accent-[#4C6FD8]" />
             Inclure les articles hors statistique
@@ -1706,7 +1711,7 @@ export default function CycleDocumentsPage() {
                 return (
                   <tr
                     key={row.axe}
-                    className="cursor-pointer border-t hover:bg-white/5"
+                    className="cursor-pointer border-t hover:bg-[color:var(--cg-ink)]/5"
                     style={{ borderColor: C.line }}
                     onClick={() => {
                       if (axis === 'famille_macro') setFamilleMacro(familleMacro === row.axe ? '' : row.axe)
@@ -1719,7 +1724,7 @@ export default function CycleDocumentsPage() {
                       </span>
                     </td>
                     <td className="px-3 py-2 text-right" style={{ fontFamily: FONT_MONO }}>{formatCurrency(row.ca_devis, true)}</td>
-                    <td className="px-3 py-2 text-right text-xs" style={{ fontFamily: FONT_MONO, color: evolCa === null ? C.muted : evolCa >= 0 ? '#8FD08F' : '#E8A07C' }}>
+                    <td className="px-3 py-2 text-right text-xs" style={{ fontFamily: FONT_MONO, color: evolCa === null ? C.muted : evolCa >= 0 ? 'var(--cg-ad-up)' : 'var(--cg-ad-down)' }}>
                       {evolCa === null ? 'Nouveau' : `${evolCa > 0 ? '+' : ''}${formatNumber(evolCa, 1)} %`}
                     </td>
                     {horizons.map((h) => {
@@ -1801,7 +1806,7 @@ export default function CycleDocumentsPage() {
                       {axis === 'famille_macro' && <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ background: macroColor(row.axe) }} />}
                       {row.axe}
                     </div>
-                    <div className="mt-1 h-1.5 overflow-hidden rounded-full" style={{ background: 'rgba(245,243,236,0.08)' }}>
+                    <div className="mt-1 h-1.5 overflow-hidden rounded-full" style={{ background: 'rgba(var(--cg-ink-rgb), 0.08)' }}>
                       <div
                         className="h-full rounded-full"
                         style={{
@@ -1814,7 +1819,7 @@ export default function CycleDocumentsPage() {
                   <td className="px-3 py-2 text-right" style={{ fontFamily: FONT_MONO }}>{formatCurrency(row.ca_devis, true)}</td>
                   <td className="px-3 py-2 text-right" style={{ fontFamily: FONT_MONO }}>{formatPercent(row.taux_cdc_valeur)}</td>
                   <td className="px-3 py-2 text-right" style={{ fontFamily: FONT_MONO }}>{formatPercent(row.taux_bl_valeur)}</td>
-                  <td className="px-3 py-2 text-right font-semibold" style={{ fontFamily: FONT_MONO, color: '#8FD08F' }}>{formatPercent(row.taux_facture_valeur)}</td>
+                  <td className="px-3 py-2 text-right font-semibold" style={{ fontFamily: FONT_MONO, color: 'var(--cg-ad-up)' }}>{formatPercent(row.taux_facture_valeur)}</td>
                   <td className="px-3 py-2 text-right" style={{ fontFamily: FONT_MONO }}>{formatDays(row.delai_facture_moyen)}</td>
                   <td className="px-3 py-2 text-right" style={{ fontFamily: FONT_MONO }}>{formatNumber(row.nb_devis_a_risque)}</td>
                 </tr>
@@ -1932,8 +1937,8 @@ export default function CycleDocumentsPage() {
                   <td className="px-3 py-2 text-xs">{row.agence_collaborateur}</td>
                   <td className="px-3 py-2 text-right font-semibold" style={{ fontFamily: FONT_MONO }}>{formatCurrency(row.ca_devis_periode, true)}</td>
                   <td className="px-3 py-2 text-right" style={{ fontFamily: FONT_MONO, color: C.muted }}>{formatCurrency(row.ca_devis_n1, true)}</td>
-                  <td className="px-3 py-2 text-right font-semibold" style={{ fontFamily: FONT_MONO, color: row.ecart_ca < 0 ? '#E8A07C' : '#8FD08F' }}>{formatCurrency(row.ecart_ca, true)}</td>
-                  <td className="px-3 py-2 text-right font-semibold" style={{ fontFamily: FONT_MONO, color: safeNumber(row.evolution_pct) < 0 ? '#E8A07C' : '#8FD08F' }}>{row.evolution_pct === null ? 'Nouveau' : formatPercent(row.evolution_pct)}</td>
+                  <td className="px-3 py-2 text-right font-semibold" style={{ fontFamily: FONT_MONO, color: row.ecart_ca < 0 ? 'var(--cg-ad-down)' : 'var(--cg-ad-up)' }}>{formatCurrency(row.ecart_ca, true)}</td>
+                  <td className="px-3 py-2 text-right font-semibold" style={{ fontFamily: FONT_MONO, color: safeNumber(row.evolution_pct) < 0 ? 'var(--cg-ad-down)' : 'var(--cg-ad-up)' }}>{row.evolution_pct === null ? 'Nouveau' : formatPercent(row.evolution_pct)}</td>
                   <td className="px-3 py-2 text-right" style={{ fontFamily: FONT_MONO }}>{formatDateShort(row.dernier_devis)}</td>
                 </tr>
               ))}

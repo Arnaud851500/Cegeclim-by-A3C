@@ -64,6 +64,20 @@
   --cg-neutral-ink: #D8D2BC;   /* stock Sage − PL (neutre) */
   --cg-neutral-rgb: 216, 210, 188;
   --cg-surface-deep: #0D1526;  /* barre de fenêtre flottante */
+  /* 15/10/2026 — Agenda et Analyse devis */
+  --cg-amber-ink: #E8A96A;  /* ambre (sociétés, tâches en cours — Agenda) */
+  --cg-ad-panel: #111A2E;  /* Analyse devis : panneaux */
+  --cg-ad-panel-soft: #16213A;
+  --cg-ad-input: #0F1729;
+  --cg-ad-muted: #8B93A7;
+  --cg-ad-soft: #C9CEDA;
+  --cg-ad-active: #3A4560;
+  --cg-ad-up: #8FD08F;
+  --cg-ad-down: #E8A07C;
+  --cg-ad-red-ink: #F0928F;
+  --cg-ad-blue-ink: #9DB2F0;
+  --cg-ad-sky-ink: #8FC6E3;
+  --cg-ad-amber-ink: #E8C27A;
 }
 
 [data-theme="light"] {
@@ -113,6 +127,19 @@
   --cg-neutral-ink: #4A4632;
   --cg-neutral-rgb: 110, 106, 77;
   --cg-surface-deep: #F3F1EA;
+  --cg-amber-ink: #8A5A0E;
+  --cg-ad-panel: #FFFFFF;
+  --cg-ad-panel-soft: #F3F1EA;
+  --cg-ad-input: #FFFFFF;
+  --cg-ad-muted: #5B6273;
+  --cg-ad-soft: #3A4252;
+  --cg-ad-active: #E3E6EE;
+  --cg-ad-up: #17673A;
+  --cg-ad-down: #B4471F;
+  --cg-ad-red-ink: #B42318;
+  --cg-ad-blue-ink: #1B4FA8;
+  --cg-ad-sky-ink: #1F6A80;
+  --cg-ad-amber-ink: #8A5A0E;
 }
 
 /* Bandeau défilant du fil d'actualité */
