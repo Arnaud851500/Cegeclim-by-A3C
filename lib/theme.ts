@@ -31,6 +31,8 @@ export const LIGHT_READY_PATHS: string[] = [
   '/actualites',
   '/focus_mensuel2', // Activité quotidienne (14/10/2026)
   '/tableaux-de-bord/vision-tci', // Vision ONE PAGE (14/10/2026)
+  '/agenda', // Agenda — Mes rdv (15/10/2026)
+  '/cycle-documents', // Analyse devis (15/10/2026)
 ]
 
 /** Écrans passés au clair sans leurs sous-écrans (chemin exact). */
