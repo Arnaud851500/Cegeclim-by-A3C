@@ -71,6 +71,9 @@ const ORDRE_TYPES = [
   'nb_clients_gros', 'nb_clients_moyens', 'nb_clients_petits',
 ]
 
+/** Objectifs du bloc « CA et marge » (les autres types globaux = groupes de clients). */
+const TYPES_CA_MARGE = new Set(['ca_valeur', 'ca_evolution_pct', 'marge_valeur', 'marge_evolution_pct'])
+
 /** Objectif « nombre de clients » → code de tranche du profil CA 12 MG. */
 const TRANCHE_PAR_TYPE: Record<string, string> = {
   nb_clients_t400: 't400',
@@ -177,6 +180,11 @@ export default function FicheDetail({
   const margeAttendue = objectifMarge && mgN1Total > 0 ? objectifMarge.valeur_cible * (aDate.mgN1 / mgN1Total) : null
   const heritesKeys = new Set(objectifs.herites.map((o) => `${o.type_objectif}|${o.famille_macro || ''}`))
   const ctxReel: CtxReel = { profil, famillesActives: famillesFiltre.length > 0, margeAttendue }
+  const objectifsGlobaux = objectifs.propres
+    .filter((o) => !o.famille_macro && o.type_objectif !== 'zero_impaye_45j')
+    .sort((a, b) => ORDRE_TYPES.indexOf(a.type_objectif) - ORDRE_TYPES.indexOf(b.type_objectif))
+  const objectifsCaMarge = objectifsGlobaux.filter((o) => TYPES_CA_MARGE.has(o.type_objectif))
+  const objectifsClients = objectifsGlobaux.filter((o) => !TYPES_CA_MARGE.has(o.type_objectif))
 
   // ------------------------------------------------------------- tableau CA
   const lignes = useMemo(() => {
@@ -286,6 +294,134 @@ export default function FicheDetail({
             />
           </div>
 
+          {/* Objectifs — remonté sous les indicateurs (15/10/2026, demandé par
+              Arnaud) et découpé en 4 blocs distincts : CA et marge, évolutions
+              d'activité par famille, groupes de clients, impayés. */}
+          <Section title="Objectifs" hint="Objectifs fixés dans l’écran Objectifs pour ce périmètre (à défaut : objectifs de l’agence puis de l’entreprise).">
+            {objectifs.heritesDe && (
+              <p className="-mt-1 mb-3 text-[11px] text-slate-500">
+                Agence à un seul commercial : les objectifs non fixés en propre sont repris de l’{objectifs.heritesDe} (mention sur le pavé).
+              </p>
+            )}
+            <div className="space-y-3">
+              <BlocObjectifs
+                numero={1}
+                titre="CA et marge"
+                accent="#245A9E"
+                bilan={bilan(objectifsCaMarge.map((o) => reelPour(o, aDate, tauxN, tauxN1, attenduADate, ctxReel).statut))}
+              >
+                {objectifsCaMarge.length === 0 ? (
+                  <AucunObjectif texte="Aucun objectif de CA ou de marge fixé." />
+                ) : (
+                  <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-4">
+                    {objectifsCaMarge.map((o) => (
+                      <ObjectifChip
+                        key={o.type_objectif}
+                        objectif={o}
+                        reel={reelPour(o, aDate, tauxN, tauxN1, attenduADate, ctxReel)}
+                        origine={heritesKeys.has(`${o.type_objectif}|`) ? objectifs.heritesDe : null}
+                      />
+                    ))}
+                  </div>
+                )}
+              </BlocObjectifs>
+
+              <BlocObjectifs
+                numero={2}
+                titre="Évolutions d’activité par famille"
+                accent="#B4761A"
+                bilan={bilan(famillesSuivies.flatMap((f) => {
+                  const t = tauxMarge(f.v.mgN, f.v.n)
+                  const t1 = tauxMarge(f.v.mgN1, f.v.n1)
+                  return f.objectifs.map((o) => reelPour(o, f.v, t, t1, f.totalN1 > 0 && o.type_objectif === 'ca_valeur' ? o.valeur_cible * (f.v.n1 / f.totalN1) : null, { profil: null, famillesActives: false, margeAttendue: null }).statut)
+                }))}
+              >
+                {famillesSuivies.length === 0 ? (
+                  <AucunObjectif texte={`Aucune famille de produits n’est listée dans les objectifs ${annee} de ce périmètre, de son agence ou de l’entreprise. Ajoutez-en dans l’écran Objectifs (bloc « CA par famille » ou « Marge par famille »).`} />
+                ) : (
+                  <div className="overflow-x-auto">
+                    <table className="w-full min-w-[900px] text-[13px]">
+                      <thead>
+                        <tr className="border-b border-[#E2DFD8] text-[11px] uppercase tracking-[0.06em] text-slate-500">
+                          <th className="py-2 text-left font-semibold">Famille</th>
+                          <th className="py-2 text-right font-semibold">CA {annee - 1} à date</th>
+                          <th className="py-2 text-right font-semibold">CA {annee} à date</th>
+                          <th className="py-2 text-right font-semibold">Évol.</th>
+                          <th className="py-2 text-right font-semibold">Entreprise</th>
+                          <th className="py-2 text-right font-semibold">Taux marge</th>
+                          <th className="py-2 text-right font-semibold">Évol. taux</th>
+                          <th className="py-2 text-left font-semibold pl-4">Objectif</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {famillesSuivies.map((f) => {
+                          const t = tauxMarge(f.v.mgN, f.v.n)
+                          const t1 = tauxMarge(f.v.mgN1, f.v.n1)
+                          return (
+                            <tr key={f.famille} className="border-b border-[#EFEDE8]">
+                              <td className="py-2">
+                                <span className="font-semibold text-slate-800">{FAMILLES_LIBELLES[f.famille] || f.famille}</span>
+                                {f.source !== 'propre' && <span className="ml-2 rounded bg-[#EDEAE3] px-1.5 text-[10px] text-slate-500">objectif {f.source}</span>}
+                              </td>
+                              <td className="py-2 text-right tabular-nums">{fmtEuro(f.v.n1)}</td>
+                              <td className="py-2 text-right font-semibold tabular-nums">{fmtEuro(f.v.n)}</td>
+                              <td className={`py-2 text-right font-semibold tabular-nums ${toneOf(f.v.evolN)}`}>{fmtPct(f.v.evolN)}</td>
+                              <td className={`py-2 text-right tabular-nums ${toneOf(f.r.evolN)}`}>{fmtPct(f.r.evolN)}</td>
+                              <td className="py-2 text-right tabular-nums">{fmtPct(t, 1, false)}</td>
+                              <td className={`py-2 text-right tabular-nums ${toneOf(t !== null && t1 !== null ? t - t1 : null, 0.1)}`}>{t !== null && t1 !== null ? fmtPts(t - t1) : '—'}</td>
+                              <td className="py-2 pl-4">
+                                <div className="flex flex-wrap gap-1.5">
+                                  {f.objectifs.map((o) => (
+                                    <ObjectifChip
+                                      key={o.type_objectif}
+                                      compact
+                                      objectif={o}
+                                      reel={reelPour(o, f.v, t, t1, f.totalN1 > 0 && o.type_objectif === 'ca_valeur' ? o.valeur_cible * (f.v.n1 / f.totalN1) : null, { profil: null, famillesActives: false, margeAttendue: null })}
+                                    />
+                                  ))}
+                                </div>
+                              </td>
+                            </tr>
+                          )
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </BlocObjectifs>
+
+              <BlocObjectifs
+                numero={3}
+                titre="Groupes de clients"
+                accent="#4F7FC0"
+                bilan={bilan(objectifsClients.map((o) => reelPour(o, aDate, tauxN, tauxN1, attenduADate, ctxReel).statut))}
+              >
+                {objectifsClients.length === 0 ? (
+                  <AucunObjectif texte="Aucun objectif de nombre de clients par tranche de CA fixé." />
+                ) : (
+                  <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-5">
+                    {objectifsClients.map((o) => (
+                      <ObjectifChip
+                        key={o.type_objectif}
+                        objectif={o}
+                        reel={reelPour(o, aDate, tauxN, tauxN1, attenduADate, ctxReel)}
+                        origine={heritesKeys.has(`${o.type_objectif}|`) ? objectifs.heritesDe : null}
+                      />
+                    ))}
+                  </div>
+                )}
+              </BlocObjectifs>
+
+              <BlocObjectifs numero={4} titre="Impayés" accent="#A32C2C" bilan={null}>
+                {impayes ? (
+                  <ImpayeChip impayes={impayes} objectif={objectifs.zeroImpaye} annee={annee} />
+                ) : (
+                  <AucunObjectif texte="Situation des impayés indisponible pour ce périmètre." />
+                )}
+              </BlocObjectifs>
+            </div>
+          </Section>
+
           {/* CA par période */}
           <Section title="Chiffre d’affaires facturé" hint={`Comparaison à l’entreprise ${exclusionsLibelle}. Les périodes incomplètes sont comparées sur les mêmes mois.`}>
             <div className="overflow-x-auto">
@@ -390,86 +526,6 @@ export default function FicheDetail({
                 </tbody>
               </table>
             </div>
-          </Section>
-
-          {/* Objectifs & familles */}
-          <Section title="Objectifs et familles suivies" hint="Familles de produits listées dans l’écran Objectifs pour ce périmètre (à défaut : objectifs de l’agence puis de l’entreprise).">
-            {(objectifs.propres.filter((o) => !o.famille_macro && o.type_objectif !== 'zero_impaye_45j').length > 0 || impayes) && (
-              <div className="mb-4 flex flex-wrap items-start gap-2">
-                {objectifs.propres
-                  .filter((o) => !o.famille_macro && o.type_objectif !== 'zero_impaye_45j')
-                  .sort((a, b) => ORDRE_TYPES.indexOf(a.type_objectif) - ORDRE_TYPES.indexOf(b.type_objectif))
-                  .map((o) => (
-                    <ObjectifChip
-                      key={`${o.type_objectif}`}
-                      objectif={o}
-                      reel={reelPour(o, aDate, tauxN, tauxN1, attenduADate, ctxReel)}
-                      origine={heritesKeys.has(`${o.type_objectif}|`) ? objectifs.heritesDe : null}
-                    />
-                  ))}
-                {impayes && <ImpayeChip impayes={impayes} objectif={objectifs.zeroImpaye} annee={annee} />}
-              </div>
-            )}
-            {objectifs.heritesDe && (
-              <p className="-mt-2 mb-3 text-[11px] text-slate-500">
-                Agence à un seul commercial : les objectifs non fixés en propre sont repris de l’{objectifs.heritesDe} (mention sur le pavé).
-              </p>
-            )}
-            {famillesSuivies.length === 0 ? (
-              <p className="rounded-xl border border-dashed border-[#D8D3C8] bg-white px-4 py-5 text-sm text-slate-500">
-                Aucune famille de produits n’est listée dans les objectifs {annee} de ce périmètre, de son agence ou de l’entreprise. Ajoutez-en
-                dans l’écran Objectifs (bloc « CA par famille » ou « Marge par famille ») pour les voir apparaître ici.
-              </p>
-            ) : (
-              <div className="overflow-x-auto">
-                <table className="w-full min-w-[900px] text-[13px]">
-                  <thead>
-                    <tr className="border-b border-[#E2DFD8] text-[11px] uppercase tracking-[0.06em] text-slate-500">
-                      <th className="py-2 text-left font-semibold">Famille</th>
-                      <th className="py-2 text-right font-semibold">CA {annee - 1} à date</th>
-                      <th className="py-2 text-right font-semibold">CA {annee} à date</th>
-                      <th className="py-2 text-right font-semibold">Évol.</th>
-                      <th className="py-2 text-right font-semibold">Entreprise</th>
-                      <th className="py-2 text-right font-semibold">Taux marge</th>
-                      <th className="py-2 text-right font-semibold">Évol. taux</th>
-                      <th className="py-2 text-left font-semibold pl-4">Objectif</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {famillesSuivies.map((f) => {
-                      const t = tauxMarge(f.v.mgN, f.v.n)
-                      const t1 = tauxMarge(f.v.mgN1, f.v.n1)
-                      return (
-                        <tr key={f.famille} className="border-b border-[#EFEDE8]">
-                          <td className="py-2">
-                            <span className="font-semibold text-slate-800">{FAMILLES_LIBELLES[f.famille] || f.famille}</span>
-                            {f.source !== 'propre' && <span className="ml-2 rounded bg-[#EDEAE3] px-1.5 text-[10px] text-slate-500">objectif {f.source}</span>}
-                          </td>
-                          <td className="py-2 text-right tabular-nums">{fmtEuro(f.v.n1)}</td>
-                          <td className="py-2 text-right font-semibold tabular-nums">{fmtEuro(f.v.n)}</td>
-                          <td className={`py-2 text-right font-semibold tabular-nums ${toneOf(f.v.evolN)}`}>{fmtPct(f.v.evolN)}</td>
-                          <td className={`py-2 text-right tabular-nums ${toneOf(f.r.evolN)}`}>{fmtPct(f.r.evolN)}</td>
-                          <td className="py-2 text-right tabular-nums">{fmtPct(t, 1, false)}</td>
-                          <td className={`py-2 text-right tabular-nums ${toneOf(t !== null && t1 !== null ? t - t1 : null, 0.1)}`}>{t !== null && t1 !== null ? fmtPts(t - t1) : '—'}</td>
-                          <td className="py-2 pl-4">
-                            <div className="flex flex-wrap gap-1.5">
-                              {f.objectifs.map((o) => (
-                                <ObjectifChip
-                                  key={o.type_objectif}
-                                  compact
-                                  objectif={o}
-                                  reel={reelPour(o, f.v, t, t1, f.totalN1 > 0 && o.type_objectif === 'ca_valeur' ? o.valeur_cible * (f.v.n1 / f.totalN1) : null, { profil: null, famillesActives: false, margeAttendue: null })}
-                                />
-                              ))}
-                            </div>
-                          </td>
-                        </tr>
-                      )
-                    })}
-                  </tbody>
-                </table>
-              </div>
-            )}
           </Section>
 
           {/* Profil clients */}
@@ -796,6 +852,49 @@ function ProfilBars({
       </div>
     </div>
   )
+}
+
+/** Nombre d'objectifs atteints sur ceux qui ont un verdict. */
+function bilan(statuts: Array<string>) {
+  const juges = statuts.filter((st) => st === 'ok' || st === 'ko')
+  if (juges.length === 0) return null
+  return { ok: juges.filter((st) => st === 'ok').length, total: juges.length }
+}
+
+function BlocObjectifs({
+  numero,
+  titre,
+  accent,
+  bilan: b,
+  children,
+}: {
+  numero: number
+  titre: string
+  accent: string
+  bilan: { ok: number; total: number } | null
+  children: React.ReactNode
+}) {
+  const complet = b && b.ok === b.total
+  return (
+    <div className="rounded-xl border border-[#E2DFD8] bg-[#FBFAF7]" style={{ borderLeft: `4px solid ${accent}` }}>
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#EFEDE8] px-4 py-2.5">
+        <div className="flex items-center gap-2.5">
+          <span className="flex h-6 w-6 items-center justify-center rounded-full text-[12px] font-bold text-white" style={{ background: accent }}>{numero}</span>
+          <span className="text-[13px] font-bold uppercase tracking-[0.08em]" style={{ color: accent }}>{titre}</span>
+        </div>
+        {b && (
+          <span className={`rounded-full px-2.5 py-0.5 text-[11px] font-bold ${complet ? 'bg-[#EEF7F0] text-[#2F6B3F]' : 'bg-[#FCEFEC] text-[#A32C2C]'}`}>
+            {b.ok} / {b.total} atteint{b.ok > 1 ? 's' : ''}
+          </span>
+        )}
+      </div>
+      <div className="p-3 md:p-4">{children}</div>
+    </div>
+  )
+}
+
+function AucunObjectif({ texte }: { texte: string }) {
+  return <p className="rounded-lg border border-dashed border-[#D8D3C8] bg-white px-3 py-3 text-[12.5px] text-slate-500">{texte}</p>
 }
 
 function Kpi({ label, value, sub, tone = 'text-slate-900', style }: { label: string; value: string; sub?: string; tone?: string; style?: React.CSSProperties }) {
