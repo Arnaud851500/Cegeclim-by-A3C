@@ -396,15 +396,30 @@ function SuiviAgencesPage() {
   }, [topLignes, refLigne, perimetre.restreint])
 
   // ------------------------------------------------------------------ fiche
-  const ficheKey = searchParams.get('fiche')
+  // CORRECTIF (15/10/2026) — « Fermer » sans effet : la fiche ouverte ne
+  // dépendait que de ?fiche= dans l'adresse, mise à jour par router.replace ;
+  // quand cette navigation cliente n'aboutit pas, la fiche restait affichée.
+  // La fiche suit désormais un état local, appliqué immédiatement, l'adresse
+  // n'étant qu'un reflet (lien partageable, retour arrière).
+  const ficheUrl = searchParams.get('fiche')
+  const [ficheLocale, setFicheLocale] = useState<{ key: string | null; depuisUrl: string | null } | null>(null)
+  // Si l'adresse change d'elle-même (retour arrière, lien), elle reprend la main.
+  const ficheKey = ficheLocale && ficheLocale.depuisUrl === ficheUrl ? ficheLocale.key : ficheUrl
   const openFiche = useCallback(
     (key: string | null) => {
+      setFicheLocale({ key, depuisUrl: ficheUrl })
       const params = new URLSearchParams(searchParams.toString())
       if (key) params.set('fiche', key)
       else params.delete('fiche')
-      router.replace(`/suivi-agences${params.toString() ? `?${params}` : ''}`, { scroll: false })
+      const href = `/suivi-agences${params.toString() ? `?${params}` : ''}`
+      try {
+        window.history.replaceState(window.history.state, '', href)
+      } catch {
+        // historique indisponible : l'état local suffit
+      }
+      router.replace(href, { scroll: false })
     },
-    [router, searchParams]
+    [router, searchParams, ficheUrl]
   )
 
   const ficheHorsPerimetre = useMemo(() => {
