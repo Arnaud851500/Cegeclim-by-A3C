@@ -363,7 +363,7 @@ function FilActualite() {
               </span>
             </div>
             {selected.contenu.length > 0 ? (
-              <ActualiteContent blocks={selected.contenu} largeurTexte={LARGEUR_TEXTE} />
+              <ActualiteContent blocks={selected.contenu} />
             ) : (
               <p style={styles.muted}>Cette publication n’a pas encore de contenu.</p>
             )}
@@ -476,7 +476,8 @@ export default function ActualitesPage() {
 // l'écran ; le texte reste sur une colonne de lecture de LARGEUR_TEXTE px,
 // les tableaux (dont les tableaux stock en direct) prennent toute la largeur
 // de l'article pour éviter le défilement horizontal.
-const LARGEUR_TEXTE = 760
+// 15/10/2026 bis : plus de colonne de lecture — tout le contenu (texte, photo,
+// encadrés, tableaux) s'aligne sur la largeur de l'article.
 
 const styles: Record<string, React.CSSProperties> = {
   page: {

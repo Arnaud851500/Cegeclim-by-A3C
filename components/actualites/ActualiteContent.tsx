@@ -229,13 +229,17 @@ function StockTable({ block }: { block: StockBlock }) {
     : null
   const enDirect = rows !== null && !indisponible && !erreur
 
+  // 15/10/2026 (demandé par Arnaud) : sur PC, l'écran Stock s'ouvre dans un
+  // nouvel onglet (liens target="_blank", la publication reste affichée).
+  // Dans le Compagnon mobile, il reste empilé dans l'appli (ouvrirStock).
+  const dansCompagnon = () => typeof window !== 'undefined' && Boolean(window.__cgcMobileShellStock)
   const ouvrirGroupe = (event: React.MouseEvent) => {
-    if (event.metaKey || event.ctrlKey) return
+    if (!dansCompagnon()) return
     event.preventDefault()
     ouvrirStock({ groupe, refs }, (href) => router.push(href))
   }
   const ouvrirRef = (event: React.MouseEvent, ref: string) => {
-    if (event.metaKey || event.ctrlKey) return
+    if (!dansCompagnon()) return
     event.preventDefault()
     ouvrirStock({ ref }, (href) => router.push(href))
   }
@@ -256,7 +260,7 @@ function StockTable({ block }: { block: StockBlock }) {
   return (
     <section style={styles.stockSection}>
       <h3 style={{ ...styles.heading, marginBottom: '0.3em' }}>
-        <a href={stockGroupeUrl(groupe, refs)} onClick={ouvrirGroupe} style={styles.stockTitleLink} title="Ouvrir ce groupe dans l’écran Stock">
+        <a href={stockGroupeUrl(groupe, refs)} onClick={ouvrirGroupe} target="_blank" rel="noopener noreferrer" style={styles.stockTitleLink} title="Ouvrir ce groupe dans l’écran Stock (nouvel onglet)">
           {block.titre || groupe}
           <span aria-hidden="true" style={styles.stockTitleArrow}> ›</span>
         </a>
@@ -274,8 +278,8 @@ function StockTable({ block }: { block: StockBlock }) {
             {indisponible ? 'Chiffres en direct pas encore disponibles.' : `Chiffres indisponibles : ${erreur}`}
           </span>
         )}
-        <a href={stockGroupeUrl(groupe, refs)} onClick={ouvrirGroupe} style={styles.link}>
-          Voir le groupe dans Stock
+        <a href={stockGroupeUrl(groupe, refs)} onClick={ouvrirGroupe} target="_blank" rel="noopener noreferrer" style={styles.link}>
+          Voir le groupe dans Stock ↗
         </a>
       </div>
       <div style={styles.tableWrap}>
@@ -296,7 +300,7 @@ function StockTable({ block }: { block: StockBlock }) {
               return (
                 <tr key={ref}>
                   <td style={{ ...styles.td, ...styles.stockTd, whiteSpace: 'nowrap' }}>
-                    <a href={`/stock?ref=${encodeURIComponent(ref)}`} onClick={(e) => ouvrirRef(e, ref)} style={styles.stockRefLink}>{ref}</a>
+                    <a href={`/stock?ref=${encodeURIComponent(ref)}`} onClick={(e) => ouvrirRef(e, ref)} target="_blank" rel="noopener noreferrer" title="Ouvrir la fiche dans un nouvel onglet" style={styles.stockRefLink}>{ref}</a>
                   </td>
                   <td style={{ ...styles.td, ...styles.stockTd, ...styles.tdNum, fontWeight: 700, color: dispoCouleur }}>
                     {r ? fmtQte(r.dispo) : vide}
@@ -327,7 +331,11 @@ function StockTable({ block }: { block: StockBlock }) {
 // ── Rendu ────────────────────────────────────────────────────────────────────
 /** Blocs qui peuvent occuper toute la largeur de l'article (les autres restent dans la colonne de lecture). */
 // 15/10/2026 (demandé par Arnaud) : les encadrés s'alignent sur la largeur des tableaux.
-const BLOCS_LARGES = new Set<Block['type']>(['table', 'stock', 'callout'])
+// 15/10/2026 bis : paragraphes (dont le chapô sous la photo), photos,
+// intertitres, listes et liens aussi — toute la publication s'aligne sur la
+// largeur des tableaux (largeurTexte ne s'applique plus à aucun bloc lu
+// dans /actualites ; la prop reste disponible pour un autre usage).
+const BLOCS_LARGES = new Set<Block['type']>(['table', 'stock', 'callout', 'paragraph', 'image', 'heading', 'list', 'link'])
 
 export default function ActualiteContent({
   blocks,
@@ -570,6 +578,10 @@ const styles: Record<string, React.CSSProperties> = {
     display: 'block',
     width: '100%',
     height: 'auto',
+    // Pleine largeur : une photo haute ne doit pas occuper tout l'écran.
+    maxHeight: 560,
+    objectFit: 'contain',
+    background: '#ffffff',
   },
   figurePlaceholder: {
     padding: 28,
