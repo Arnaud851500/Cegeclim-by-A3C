@@ -6,6 +6,8 @@ import { formatMoney } from '@/app/focus_mensuel/page'
 import MobileDetailSheet, { type DetailField } from './MobileDetailSheet'
 import { NavigationChoiceSheet, PhoneChoiceSheet } from './MobileActionSheets'
 import VoiceReportButtons from './VoiceReportButtons'
+import AssigneeSelect, { useAssignmentOptions } from './AssigneeSelect'
+import { assignmentPatch, finDeSemaineIso } from '@/lib/taskAssignment'
 import MobileTaskDetailSheet, { type TaskRow } from './MobileTaskDetailSheet'
 import { NouveauRdvSheet } from './MobileRdv'
 // ÉVOLUTION (2026-09-10) : filtre "Collaborateur" sur la liste des clients
@@ -2693,8 +2695,11 @@ function NouvelleTacheSheet({
   onCreated: (task: ActionRow) => void
 }) {
   const [description, setDescription] = useState('')
-  const [dueDate, setDueDate] = useState('')
-  const [assignedTo, setAssignedTo] = useState(currentName)
+  // ÉVOLUTION (2026-10-15) : échéance par défaut = fin de semaine (vendredi),
+  // « Assignée à » = liste déroulante (groupes puis personnes), moi par défaut.
+  const [dueDate, setDueDate] = useState(() => finDeSemaineIso())
+  const [assignedTo, setAssignedTo] = useState((currentEmail || '').trim().toLowerCase())
+  const assignmentOptions = useAssignmentOptions()
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
   const [modeVocal, setModeVocal] = useState(false)
@@ -2722,7 +2727,7 @@ function NouvelleTacheSheet({
           numero_tiers: client.numero,
           description_action: description.trim(),
           due_date: dueDate || null,
-          assigned_to: assignedTo.trim() || null,
+          ...assignmentPatch(assignedTo),
           status: 'Non débuté',
           created_by_email: currentEmail,
           created_by_name: currentName,
@@ -2766,12 +2771,12 @@ function NouvelleTacheSheet({
 
         <div style={{ display: 'flex', gap: 8 }}>
           <div style={{ flex: 1 }}>
-            <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.55)', marginBottom: 6 }}>Échéance (facultatif)</div>
+            <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.55)', marginBottom: 6 }}>Échéance</div>
             <input type="date" value={dueDate} onChange={(e) => setDueDate(e.target.value)} style={{ width: '100%', height: 42, borderRadius: 10, border: '1px solid rgba(255,255,255,0.15)', background: 'rgba(255,255,255,0.05)', color: '#fff', padding: '0 10px', fontSize: 14.5 }} />
           </div>
           <div style={{ flex: 1 }}>
             <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.55)', marginBottom: 6 }}>Assignée à</div>
-            <input value={assignedTo} onChange={(e) => setAssignedTo(e.target.value)} placeholder="Nom…" style={{ width: '100%', height: 42, borderRadius: 10, border: '1px solid rgba(255,255,255,0.15)', background: 'rgba(255,255,255,0.05)', color: '#fff', padding: '0 10px', fontSize: 14.5 }} />
+            <AssigneeSelect value={assignedTo} onChange={setAssignedTo} options={assignmentOptions} myEmail={currentEmail} />
           </div>
         </div>
 
@@ -2858,6 +2863,11 @@ function DevisTransformationSheet({
   onCreated: (task: ActionRow) => void
 }) {
   const [motif, setMotif] = useState('')
+  // ÉVOLUTION (2026-10-15) : la tâche générée est affectée dès la création
+  // (groupe ou personne), échéance fin de semaine par défaut.
+  const [assignedTo, setAssignedTo] = useState((currentEmail || '').trim().toLowerCase())
+  const [dueDate, setDueDate] = useState(() => finDeSemaineIso())
+  const assignmentOptions = useAssignmentOptions()
   const [garder, setGarder] = useState<boolean[]>(() => devis.lignes.map(() => true))
 
   const [nouvelles, setNouvelles] = useState<{ reference: string; designation: string; quantite: number; tauxRemise: string }[]>([])
@@ -2976,7 +2986,8 @@ function DevisTransformationSheet({
           description_action: `Transformer le devis ${devis.numeroPiece} en commande — Client : ${client.nom || client.numero} (N° ${client.numero})`,
           comment_progress: commentaireParts.join('\n\n') || null,
           status: 'Non débuté',
-          assigned_to: currentName,
+          ...assignmentPatch(assignedTo),
+          due_date: dueDate || null,
           created_by_email: currentEmail,
           created_by_name: currentName,
           devis_transformation_id: transformationId,
@@ -3126,6 +3137,15 @@ function DevisTransformationSheet({
           </div>
         </div>
 
+        <AffectationTacheFields
+          assignedTo={assignedTo}
+          onAssignedTo={setAssignedTo}
+          dueDate={dueDate}
+          onDueDate={setDueDate}
+          options={assignmentOptions}
+          myEmail={currentEmail}
+        />
+
         {error && <div style={{ fontSize: 13, color: '#e0a685' }}>{error}</div>}
 
         <p style={{ fontSize: 10.5, color: 'rgba(255,255,255,0.35)', lineHeight: 1.4, margin: 0 }}>
@@ -3168,6 +3188,10 @@ export function CommandeModificationSheet({
 }) {
   const [dateLivraison, setDateLivraison] = useState('')
   const [referenceChantier, setReferenceChantier] = useState(referenceActuelle || '')
+  // ÉVOLUTION (2026-10-15) : affectation de la tâche dès la demande.
+  const [assignedTo, setAssignedTo] = useState((currentEmail || '').trim().toLowerCase())
+  const [dueDate, setDueDate] = useState(() => finDeSemaineIso())
+  const assignmentOptions = useAssignmentOptions()
   const [motif, setMotif] = useState('')
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
@@ -3211,7 +3235,8 @@ export function CommandeModificationSheet({
           description_action: `Reporter dans l'ERP la modification de la commande ${numeroPiece} — Client : ${nomClient || numeroTiers} (N° ${numeroTiers})`,
           comment_progress: commentaireParts.join('\n') || null,
           status: 'Non débuté',
-          assigned_to: currentName,
+          ...assignmentPatch(assignedTo),
+          due_date: dueDate || null,
           created_by_email: currentEmail,
           created_by_name: currentName,
           devis_transformation_id: transfo.id,
@@ -3264,6 +3289,15 @@ export function CommandeModificationSheet({
           />
         </div>
 
+        <AffectationTacheFields
+          assignedTo={assignedTo}
+          onAssignedTo={setAssignedTo}
+          dueDate={dueDate}
+          onDueDate={setDueDate}
+          options={assignmentOptions}
+          myEmail={currentEmail}
+        />
+
         {error && <div style={{ fontSize: 13, color: '#e0a685' }}>{error}</div>}
 
         <p style={{ fontSize: 10.5, color: 'rgba(255,255,255,0.35)', lineHeight: 1.4, margin: 0 }}>
@@ -3285,6 +3319,38 @@ export function CommandeModificationSheet({
         >
           Annuler
         </button>
+      </div>
+    </div>
+  )
+}
+
+/** ÉVOLUTION (2026-10-15) : bloc « Tâche générée » des tiroirs Traiter un
+ * devis / Modifier une commande — affectation (groupe ou personne) et
+ * échéance choisies dès la demande, sans repasser par la tâche. */
+function AffectationTacheFields({
+  assignedTo, onAssignedTo, dueDate, onDueDate, options, myEmail,
+}: {
+  assignedTo: string
+  onAssignedTo: (v: string) => void
+  dueDate: string
+  onDueDate: (v: string) => void
+  options: ReturnType<typeof useAssignmentOptions>
+  myEmail: string
+}) {
+  return (
+    <div style={{ borderRadius: 12, border: '1px solid rgba(166,161,129,0.25)', background: 'rgba(166,161,129,0.06)', padding: '10px 12px' }}>
+      <div style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.04em', color: 'rgba(255,255,255,0.5)', marginBottom: 8 }}>
+        Tâche générée
+      </div>
+      <div style={{ display: 'flex', gap: 8 }}>
+        <div style={{ flex: 1.3, minWidth: 0 }}>
+          <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.55)', marginBottom: 6 }}>Affecter à</div>
+          <AssigneeSelect value={assignedTo} onChange={onAssignedTo} options={options} myEmail={myEmail} />
+        </div>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.55)', marginBottom: 6 }}>Échéance</div>
+          <input type="date" value={dueDate} onChange={(e) => onDueDate(e.target.value)} style={{ width: '100%', height: 42, borderRadius: 10, border: '1px solid rgba(255,255,255,0.15)', background: 'rgba(255,255,255,0.05)', color: '#fff', padding: '0 8px', fontSize: 14 }} />
+        </div>
       </div>
     </div>
   )

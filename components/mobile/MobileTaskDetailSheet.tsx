@@ -4,6 +4,13 @@ import { useEffect, useState } from 'react'
 import { supabase } from '@/lib/supabaseClient'
 // ÉVOLUTION (2026-09-29) : journal d'usage mobile (/m/... dans user_activity_log)
 import { logMobileView } from '@/lib/mobileActivityLog'
+import AssigneeSelect, { useAssignmentOptions } from './AssigneeSelect'
+import {
+  GROUP_PREFIX,
+  assignmentValueOf,
+  isGroupValue,
+  prendreTacheGroupe,
+} from '@/lib/taskAssignment'
 
 export type TaskRow = {
   id: string
@@ -19,8 +26,6 @@ export type TaskRow = {
 }
 
 type RefItem = { id: string; name: string; color: string; is_active: boolean; sort_order: number }
-/** Utilisateur proposé dans « Confiée à » (user_page_access, droit can_todo). */
-type AssigneeOption = { email: string; label: string }
 
 const STATUS_OPTIONS = ['Non débuté', 'En cours', 'Terminé', 'Annulé']
 
@@ -86,7 +91,14 @@ export default function MobileTaskDetailSheet({
   const [description, setDescription] = useState(task.description_action || '')
   const [status, setStatus] = useState(task.status || 'Non débuté')
   const [dueDate, setDueDate] = useState(task.due_date || '')
-  const [assignedTo, setAssignedTo] = useState(task.assigned_to || '')
+  // ÉVOLUTION (2026-10-15) : « Confiée à » = groupe (`groupe:<id>`, la tâche
+  // part chez tous les membres) ou personne (email).
+  const initialAssign = task.assigned_to?.trim() ? task.assigned_to.trim() : task.team_id ? `${GROUP_PREFIX}${task.team_id}` : ''
+  const [assignValue, setAssignValue] = useState(initialAssign)
+  const [assignInitial, setAssignInitial] = useState(initialAssign)
+  const assignmentOptions = useAssignmentOptions()
+  const [myEmail, setMyEmail] = useState('')
+  const [taking, setTaking] = useState(false)
   const [categoryId, setCategoryId] = useState<string>(task.category_id || '')
   const [teamId, setTeamId] = useState<string>(task.team_id || '')
   const [concernedPerson, setConcernedPerson] = useState(task.concerned_person || '')
@@ -98,7 +110,6 @@ export default function MobileTaskDetailSheet({
 
   const [categories, setCategories] = useState<RefItem[]>([])
   const [teams, setTeams] = useState<RefItem[]>([])
-  const [assignees, setAssignees] = useState<AssigneeOption[]>([])
   const [personSuggestions, setPersonSuggestions] = useState<string[]>([])
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -114,21 +125,17 @@ export default function MobileTaskDetailSheet({
     async function load() {
       // « Confiée à » : utilisateurs ayant le droit Todo (user_page_access.
       // can_todo), valeur enregistrée = email (format de assigned_to).
-      const [{ data: cats }, { data: tms }, { data: users }, persons] = await Promise.all([
+      const [{ data: cats }, { data: tms }, persons, { data: auth }] = await Promise.all([
         supabase.from('todo_categories').select('id, name, color, is_active, sort_order').order('sort_order'),
         supabase.from('todo_teams').select('id, name, color, is_active, sort_order').order('sort_order'),
-        supabase.from('user_page_access').select('email, display_name').eq('can_todo', true),
         fetchConcernedPersons(),
+        supabase.auth.getUser(),
       ])
       if (cancelled) return
       setCategories((cats || []) as RefItem[])
       setTeams((tms || []) as RefItem[])
       setPersonSuggestions(persons)
-      const options = ((users || []) as Array<{ email: string | null; display_name: string | null }>)
-        .filter((u) => !!u.email)
-        .map((u) => ({ email: String(u.email).trim(), label: (u.display_name || '').trim() || String(u.email) }))
-        .sort((a, b) => a.label.localeCompare(b.label, 'fr', { sensitivity: 'base' }))
-      setAssignees(options)
+      setMyEmail(String(auth.user?.email || '').trim().toLowerCase())
 
       // Les champs de classement ne sont pas toujours fournis par le parent.
       const missing = task.category_id === undefined || task.team_id === undefined || task.concerned_person === undefined
@@ -148,6 +155,12 @@ export default function MobileTaskDetailSheet({
         setCategoryId(next.category_id)
         setTeamId(next.team_id)
         setConcernedPerson(next.concerned_person)
+        // Tâche de groupe non encore prise : la liste affiche le groupe.
+        if (!task.assigned_to?.trim() && next.team_id) {
+          const v = `${GROUP_PREFIX}${next.team_id}`
+          setAssignValue(v)
+          setAssignInitial(v)
+        }
       }
     }
 
@@ -157,11 +170,54 @@ export default function MobileTaskDetailSheet({
     }
   }, [task.id, task.category_id, task.team_id, task.concerned_person])
 
+  // Ancienne saisie par nom (« Camille A. ») → email, une fois la liste chargée.
+  useEffect(() => {
+    if (!assignmentOptions) return
+    const normalized = assignmentValueOf(isGroupValue(assignInitial) ? '' : assignInitial, isGroupValue(assignInitial) ? assignInitial.slice(GROUP_PREFIX.length) : null, assignmentOptions.users)
+    if (normalized && normalized !== assignInitial) {
+      setAssignInitial(normalized)
+      setAssignValue((cur) => (cur === assignInitial ? normalized : cur))
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [assignmentOptions])
+
+  function changeAssign(value: string) {
+    setAssignValue(value)
+    // Un groupe choisi devient aussi le projet / équipe de la tâche.
+    if (isGroupValue(value)) setTeamId(value.slice(GROUP_PREFIX.length))
+  }
+
+  function changeTeam(value: string) {
+    setTeamId(value)
+    // Tâche encore « à prendre » par un groupe : elle suit le groupe choisi.
+    if (isGroupValue(assignValue)) setAssignValue(value ? `${GROUP_PREFIX}${value}` : '')
+  }
+
+  const groupePendant = isGroupValue(assignInitial) && isGroupValue(assignValue) && assignValue === assignInitial
+  const groupeId = groupePendant ? assignValue.slice(GROUP_PREFIX.length) : ''
+  const groupe = assignmentOptions?.groups.find((g) => g.id === groupeId) || null
+  const jeSuisMembre = !!groupe && !!myEmail && groupe.memberEmails.includes(myEmail)
+
+  async function prendre() {
+    if (!myEmail) return
+    setTaking(true)
+    setError(null)
+    const message = await prendreTacheGroupe(task.id, myEmail)
+    setTaking(false)
+    if (message) {
+      setError(message)
+      return
+    }
+    setAssignValue(myEmail)
+    setAssignInitial(myEmail)
+    onSaved?.({ ...task, assigned_to: myEmail, team_id: teamId || null })
+  }
+
   const dirty =
     description !== (task.description_action || '') ||
     status !== (task.status || 'Non débuté') ||
     dueDate !== (task.due_date || '') ||
-    assignedTo !== (task.assigned_to || '') ||
+    assignValue !== assignInitial ||
     categoryId !== initial.category_id ||
     teamId !== initial.team_id ||
     concernedPerson !== initial.concerned_person
@@ -175,11 +231,11 @@ export default function MobileTaskDetailSheet({
         description_action: description.trim() || null,
         status,
         due_date: dueDate || null,
-        assigned_to: assignedTo.trim() || null,
+        assigned_to: isGroupValue(assignValue) ? null : assignValue.trim() || null,
         category_id: categoryId || null,
         // Le texte « mission » suit la catégorie, pour les écrans qui l'affichent encore.
         mission_project: category ? category.name : '',
-        team_id: teamId || null,
+        team_id: isGroupValue(assignValue) ? assignValue.slice(GROUP_PREFIX.length) : teamId || null,
         concerned_person: concernedPerson.trim() || null,
       }
       const { error: updateError } = await supabase.from('todo_actions').update(payload).eq('id', task.id)
@@ -207,13 +263,6 @@ export default function MobileTaskDetailSheet({
   const visibleCategories = categories.filter((c) => c.is_active || c.id === categoryId)
   const visibleTeams = teams.filter((t) => t.is_active || t.id === teamId)
 
-  // Valeur actuelle absente de la liste (anciennes saisies libres type
-  // « Maxime.L », ou utilisateur sans droit Todo) : conservée comme option
-  // pour ne rien modifier à l'insu de l'utilisateur.
-  const assigneeCourantHorsListe =
-    !!assignedTo && !assignees.some((a) => a.email.toLowerCase() === assignedTo.toLowerCase())
-  const assigneeSelectValue =
-    assignees.find((a) => a.email.toLowerCase() === assignedTo.toLowerCase())?.email ?? assignedTo
 
   return (
     <div
@@ -265,7 +314,7 @@ export default function MobileTaskDetailSheet({
           </Field>
 
           <Field label="Projet / équipe">
-            <select value={teamId} onChange={(e) => setTeamId(e.target.value)} style={inputStyle}>
+            <select value={teamId} onChange={(e) => changeTeam(e.target.value)} style={inputStyle}>
               <option value="" style={{ color: '#000' }}>Aucun</option>
               {visibleTeams.map((team) => (
                 <option key={team.id} value={team.id} style={{ color: '#000' }}>
@@ -297,19 +346,24 @@ export default function MobileTaskDetailSheet({
           <SectionTitle title="Réalisation" hint="Qui fait la tâche, et pour quand" />
 
           <Field label="Confiée à">
-            <select value={assigneeSelectValue} onChange={(e) => setAssignedTo(e.target.value)} style={inputStyle}>
-              <option value="" style={{ color: '#000' }}>Non attribuée</option>
-              {assigneeCourantHorsListe && (
-                <option value={assignedTo} style={{ color: '#000' }}>
-                  {assignedTo} (saisie libre)
-                </option>
-              )}
-              {assignees.map((a) => (
-                <option key={a.email} value={a.email} style={{ color: '#000' }}>
-                  {a.label}
-                </option>
-              ))}
-            </select>
+            <AssigneeSelect value={assignValue} onChange={changeAssign} options={assignmentOptions} myEmail={myEmail} style={inputStyle} />
+            {groupePendant && (
+              <div style={{ marginTop: 6, borderRadius: 10, border: '1px solid rgba(122,94,168,0.45)', background: 'rgba(122,94,168,0.14)', padding: '9px 11px', display: 'flex', alignItems: 'center', gap: 10 }}>
+                <div style={{ flex: 1, fontSize: 12, color: '#d9cdee', lineHeight: 1.35 }}>
+                  👥 À prendre par le groupe {groupe?.name || ''} — le premier qui la traite la fait disparaître chez les autres.
+                </div>
+                {jeSuisMembre && (
+                  <button
+                    type="button"
+                    onClick={() => void prendre()}
+                    disabled={taking}
+                    style={{ flexShrink: 0, padding: '8px 12px', borderRadius: 10, border: 'none', background: '#7A5EA8', color: '#fff', fontSize: 12.5, fontWeight: 700 }}
+                  >
+                    {taking ? '…' : '✋ Je la prends'}
+                  </button>
+                )}
+              </div>
+            )}
           </Field>
 
           <Field label="Statut">

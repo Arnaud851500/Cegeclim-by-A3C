@@ -1,6 +1,7 @@
 'use client'
 
 import MobileNouveautes from '@/components/mobile/MobileNouveautes'
+import TaskAssignmentBanner from '@/components/TaskAssignmentBanner'
 
 const LOGO_CEGECLIM =
   'https://gchwihltydsplarhveyv.supabase.co/storage/v1/object/sign/Agences/cegecilm%20officiel.jpg?token=eyJraWQiOiJzdG9yYWdlLXVybC1zaWduaW5nLWtleV8yZWU1N2MxYS05ZjJjLTQ1OTItYjE0Ny03ZGE2YzlmOTRmMDIiLCJhbGciOiJIUzI1NiJ9.eyJ1cmwiOiJBZ2VuY2VzL2NlZ2VjaWxtIG9mZmljaWVsLmpwZyIsImlhdCI6MTc3NDY1MTM3OSwiZXhwIjo0ODk2NzE1Mzc5fQ.ePcMFHir7RsvdR-cR7nwh83H03S8oihNKwVgK2eCmy0'
@@ -15,20 +16,23 @@ const LOGO_CEGECLIM =
  * ÉVOLUTION (2026-10-14) : icône « Nouveau dans votre compagnon » à côté de
  * « Déconnexion » (components/mobile/MobileNouveautes.tsx), masquée pour les
  * profils « aides financières » seuls.
+ *
+ * ÉVOLUTION (2026-10-15) : sous la barre, bandeau violet « une tâche vous a
+ * été affectée » (components/TaskAssignmentBanner.tsx), reste collé en haut.
  */
 export default function MobileBrandBar({
   onLogout,
   showNouveautes = false,
+  showTaskAlerts = false,
 }: {
   onLogout: () => void
   showNouveautes?: boolean
+  showTaskAlerts?: boolean
 }) {
   return (
+    <div style={{ position: 'sticky', top: 0, zIndex: 40 }}>
     <div
       style={{
-        position: 'sticky',
-        top: 0,
-        zIndex: 40,
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'space-between',
@@ -88,6 +92,8 @@ export default function MobileBrandBar({
         Déconnexion
       </button>
       </div>
+    </div>
+    {showTaskAlerts ? <TaskAssignmentBanner variant="mobile" /> : null}
     </div>
   )
 }

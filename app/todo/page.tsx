@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type React from 'react'
 import { useRouter } from 'next/navigation'
 import { supabase } from '@/lib/supabaseClient'
+import { GROUP_PREFIX, finDeSemaineIso, isGroupValue, prendreTacheGroupe } from '@/lib/taskAssignment'
 
 /* ------------------------------------------------------------------ */
 /* Types                                                                */
@@ -245,7 +246,8 @@ function emptyDraft(currentEmail: string): Draft {
     assigned_to: currentEmail,
     concerned_person: '',
     numero_tiers: '',
-    due_date: null,
+    // ÉVOLUTION (2026-10-15) : échéance par défaut = fin de semaine (vendredi).
+    due_date: finDeSemaineIso(),
     status: 'Non débuté',
     comment_progress: '',
   }
@@ -484,10 +486,6 @@ export default function TodoPage() {
     [currentEmail, currentDisplayName]
   )
 
-  const isAssignedToMe = useCallback(
-    (row: TodoRow) => myIdentities.includes(normalize(row.assigned_to)),
-    [myIdentities]
-  )
 
   const isCreatedByMe = useCallback(
     (row: TodoRow) => normalize(row.created_by_email) === normalize(currentEmail),
@@ -498,6 +496,45 @@ export default function TodoPage() {
     () => new Set(teamMembers.filter((m) => m.email === currentEmail).map((m) => m.team_id)),
     [teamMembers, currentEmail]
   )
+
+  /** Confiée à moi, ou à un de mes groupes et pas encore prise (le premier qui la traite la prend). */
+  const isAssignedToMe = useCallback(
+    (row: TodoRow) =>
+      myIdentities.includes(normalize(row.assigned_to)) ||
+      (!String(row.assigned_to || '').trim() && !!row.team_id && myTeamIds.has(row.team_id)),
+    [myIdentities, myTeamIds]
+  )
+
+  // ÉVOLUTION (2026-10-15) : ouverture directe d'une tâche (?tache=<id>, ou
+  // événement du bandeau « tâche affectée » quand on est déjà sur la page).
+  useEffect(() => {
+    if (loading) return
+    try {
+      const id = new URLSearchParams(window.location.search).get('tache')
+      if (id) setSelectedId(id)
+    } catch {
+      /* ignoré */
+    }
+    function onOpen(event: Event) {
+      const id = (event as CustomEvent<{ id?: string }>).detail?.id
+      if (!id) return
+      void loadRows().then(() => setSelectedId(id))
+    }
+    window.addEventListener('cegeclim:open-task', onOpen)
+    return () => window.removeEventListener('cegeclim:open-task', onOpen)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loading])
+
+  async function takeGroupTask(id: string) {
+    const message = await prendreTacheGroupe(id, currentEmail)
+    if (message) {
+      setToast({ tone: 'error', text: message })
+      await loadRows()
+      return
+    }
+    updateLocal(id, { assigned_to: currentEmail })
+    setToast({ tone: 'success', text: 'Tâche prise : elle a disparu de la liste des autres membres du groupe.' })
+  }
 
   /* ---------------------------------------------------------------- */
   /* Filtres et tri                                                    */
@@ -1117,6 +1154,7 @@ export default function TodoPage() {
             assigneeByEmail={assigneeByEmail}
             isAdmin={isAdmin}
             myTeamIds={myTeamIds}
+            onTake={() => void takeGroupTask(selectedRow.id)}
           />
         </FullScreenPanel>
       )}
@@ -1581,6 +1619,7 @@ function TaskForm({
   assigneeByEmail,
   isAdmin,
   myTeamIds,
+  onTake,
 }: {
   value: Draft
   onChange: (patch: Partial<Draft>) => void
@@ -1595,7 +1634,13 @@ function TaskForm({
   assigneeByEmail: Map<string, Assignee>
   isAdmin: boolean
   myTeamIds: Set<string>
+  /** Fiche d'une tâche existante : « Je la prends » quand elle attend un de mes groupes. */
+  onTake?: () => void
 }) {
+  // ÉVOLUTION (2026-10-15) : « Confiée à » propose d'abord les groupes
+  // (team_id renseigné + assigned_to vide = à prendre par les membres).
+  const assignValue = value.assigned_to ? value.assigned_to : value.team_id ? `${GROUP_PREFIX}${value.team_id}` : ''
+  const pendingTeam = !value.assigned_to && value.team_id ? teams.find((t) => t.id === value.team_id) || null : null
   const activeCategories = categories.filter((c) => c.is_active || c.id === value.category_id)
   const activeTeams = teams.filter((t) => t.is_active || t.id === value.team_id)
   const selectedTeam = teams.find((t) => t.id === value.team_id) || null
@@ -1715,10 +1760,44 @@ function TaskForm({
         <div className="grid grid-cols-1 gap-4">
           <Field label="Confiée à" hint="La personne qui doit réaliser la tâche">
             <SelectField
-              value={value.assigned_to || ''}
-              onChange={(v) => onChange({ assigned_to: v || null })}
-              options={[{ value: '', label: 'Non assignée' }, ...assignees.map((item) => ({ value: item.email, label: item.name }))]}
+              value={assignValue}
+              onChange={(v) =>
+                isGroupValue(v)
+                  ? onChange({ assigned_to: null, team_id: v.slice(GROUP_PREFIX.length) })
+                  : onChange({ assigned_to: v || null })
+              }
+              options={[
+                { value: '', label: 'Non assignée' },
+                ...activeTeams.map((team) => ({
+                  value: `${GROUP_PREFIX}${team.id}`,
+                  label: `👥 Groupe ${team.name} — le premier qui la traite la prend`,
+                })),
+                ...(value.assigned_to && !assigneeByEmail.has(value.assigned_to.toLowerCase())
+                  ? [{ value: value.assigned_to, label: value.assigned_to }]
+                  : []),
+                ...assignees.map((item) => ({ value: item.email, label: item.name })),
+              ]}
             />
+            {pendingTeam && (
+              <div className="mt-2 flex items-center gap-2 rounded-xl border border-[#CFC3E3] bg-[#F3EFF9] px-3 py-2">
+                <p className="flex-1 text-[11px] leading-snug text-[#4F3D73]">
+                  À prendre par le groupe <span className="font-semibold">{pendingTeam.name}</span> : visible chez tous ses membres
+                  jusqu’à ce que l’un d’eux la prenne ou change son statut.
+                </p>
+                {onTake && myTeamIds.has(pendingTeam.id) && (
+                  <button
+                    type="button"
+                    onClick={(event) => {
+                      event.preventDefault()
+                      onTake()
+                    }}
+                    className="shrink-0 rounded-lg bg-[#7A5EA8] px-3 py-1.5 text-xs font-bold text-white transition hover:bg-[#6A4F96] focus:outline-none focus-visible:ring-2 focus-visible:ring-[#7A5EA8]"
+                  >
+                    ✋ Je la prends
+                  </button>
+                )}
+              </div>
+            )}
           </Field>
 
           <Field label="Personne concernée" hint="De qui parle la tâche (collègue, contact, client…) — pas forcément celle qui la réalise">

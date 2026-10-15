@@ -2,6 +2,8 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import { supabase } from '@/lib/supabaseClient'
+import AssigneeSelect, { useAssignmentOptions } from './AssigneeSelect'
+import { assignmentPatch, finDeSemaineIso } from '@/lib/taskAssignment'
 
 export type TaskListItem = {
   id: string
@@ -753,9 +755,10 @@ function NewTaskSheet({
   const [concernedPerson, setConcernedPerson] = useState(defaults.concerned_person || '')
   const [assignedTo, setAssignedTo] = useState('')
   const [numeroTiers, setNumeroTiers] = useState('')
-  const [dueDate, setDueDate] = useState('')
+  // ÉVOLUTION (2026-10-15) : échéance par défaut = fin de semaine (vendredi).
+  const [dueDate, setDueDate] = useState(() => finDeSemaineIso())
+  const assignmentOptions = useAssignmentOptions()
   const [me, setMe] = useState<{ email: string; name: string } | null>(null)
-  const [assignees, setAssignees] = useState<AssigneeOption[]>([])
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -773,7 +776,6 @@ function NewTaskSheet({
         .filter((u) => !!u.email)
         .map((u) => ({ email: String(u.email).trim(), label: (u.display_name || '').trim() || String(u.email) }))
         .sort((a, b) => a.label.localeCompare(b.label, 'fr', { sensitivity: 'base' }))
-      setAssignees(options)
 
       const email = auth.user?.email || ''
       if (!email) return
@@ -788,7 +790,7 @@ function NewTaskSheet({
         name = access?.display_name?.trim() || email.split('@')[0]
       }
       setMe({ email, name })
-      setAssignedTo((prev) => prev || email)
+      setAssignedTo((prev) => prev || email.trim().toLowerCase())
     }
     void load()
     return () => {
@@ -799,10 +801,6 @@ function NewTaskSheet({
   const visibleCategories = categories.filter((c) => c.is_active || c.id === categoryId)
   const visibleTeams = teams.filter((t) => t.is_active || t.id === teamId)
 
-  const assigneeHorsListe =
-    !!assignedTo && !assignees.some((a) => a.email.toLowerCase() === assignedTo.toLowerCase())
-  const assigneeSelectValue =
-    assignees.find((a) => a.email.toLowerCase() === assignedTo.toLowerCase())?.email ?? assignedTo
 
   async function create() {
     if (!description.trim()) {
@@ -826,7 +824,8 @@ function NewTaskSheet({
         mission_project: category ? category.name : null,
         team_id: teamId || null,
         concerned_person: concernedPerson.trim() || null,
-        assigned_to: assignedTo.trim() || null,
+        // Groupe choisi dans « Confiée à » : il devient aussi le projet / équipe.
+        ...assignmentPatch(assignedTo),
         numero_tiers: numeroTiers.trim() || null,
         due_date: dueDate || null,
       }
@@ -924,19 +923,7 @@ function NewTaskSheet({
           <SectionTitle title="Réalisation" hint="Qui fait la tâche, et pour quand" />
 
           <Field label="Confiée à">
-            <select value={assigneeSelectValue} onChange={(e) => setAssignedTo(e.target.value)} style={inputStyle}>
-              <option value="" style={{ color: '#000' }}>Non attribuée</option>
-              {assigneeHorsListe && (
-                <option value={assignedTo} style={{ color: '#000' }}>
-                  {assignedTo}
-                </option>
-              )}
-              {assignees.map((a) => (
-                <option key={a.email} value={a.email} style={{ color: '#000' }}>
-                  {a.label}
-                </option>
-              ))}
-            </select>
+            <AssigneeSelect value={assignedTo} onChange={setAssignedTo} options={assignmentOptions} myEmail={me?.email} style={inputStyle} />
           </Field>
 
           <Field label="N° client" hint="Facultatif — sans catégorie, la tâche ira dans « Affectées à 1 client »">

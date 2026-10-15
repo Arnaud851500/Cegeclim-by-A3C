@@ -9,6 +9,8 @@ import MobileDetailSheet, { type DetailField } from './MobileDetailSheet'
 import MobileTaskDetailSheet, { type TaskRow } from './MobileTaskDetailSheet'
 import VoiceReportButtons from './VoiceReportButtons'
 import { CommandeModificationSheet } from './MobileClients'
+import AssigneeSelect, { useAssignmentOptions } from './AssigneeSelect'
+import { assignmentPatch, finDeSemaineIso } from '@/lib/taskAssignment'
 // ÉVOLUTION (2026-09-09) : règle "CDC liv < M-2" partagée avec le bandeau
 // desktop et /portefeuille-livraison -- voir lib/cdcRetard.ts. Le libellé
 // de l'alerte est fourni par le parent (useMobileAlertsCount) : on accepte
@@ -228,12 +230,13 @@ export default function MobileAlertes({
 
   const [ajoutMode, setAjoutMode] = useState<'menu' | 'manuel' | 'vocal' | null>(null)
   const [nouvelleDescription, setNouvelleDescription] = useState('')
-  const [nouvelleEcheance, setNouvelleEcheance] = useState('')
+  // ÉVOLUTION (2026-10-15) : échéance par défaut = fin de semaine.
+  const [nouvelleEcheance, setNouvelleEcheance] = useState(() => finDeSemaineIso())
+  const assignmentOptions = useAssignmentOptions()
   const [nouvelleCategorie, setNouvelleCategorie] = useState('')
   const [nouveauClientTexte, setNouveauClientTexte] = useState('')
   const [nouveauClientNumero, setNouveauClientNumero] = useState<string | null>(null)
   const [suggestionsClient, setSuggestionsClient] = useState<{ numero: string; nom: string }[]>([])
-  const [assigneesDisponibles, setAssigneesDisponibles] = useState<{ email: string; nom: string }[]>([])
   const [nouvelAssigne, setNouvelAssigne] = useState('')
   const [ajoutEnCours, setAjoutEnCours] = useState(false)
   const [ajoutErreur, setAjoutErreur] = useState('')
@@ -288,19 +291,6 @@ export default function MobileAlertes({
    * can_todo=true), chargée une fois. Par défaut, la tâche s'affecte à
    * soi-même -- initialisé dès que userEmail est connu. */
   useEffect(() => {
-    let cancelled = false
-    async function charger() {
-      const { data } = await supabase.from('user_page_access').select('email, display_name').eq('can_todo', true)
-      if (cancelled) return
-      setAssigneesDisponibles(
-        ((data || []) as any[]).map((a) => ({ email: String(a.email || '').toLowerCase(), nom: String(a.display_name || a.email || '') })),
-      )
-    }
-    void charger()
-    return () => { cancelled = true }
-  }, [])
-
-  useEffect(() => {
     if (userEmail && !nouvelAssigne) setNouvelAssigne(userEmail.toLowerCase())
   }, [userEmail, nouvelAssigne])
 
@@ -322,13 +312,13 @@ export default function MobileAlertes({
         description_action: description,
         due_date: nouvelleEcheance || null,
         status: 'Non débuté',
-        assigned_to: nouvelAssigne || userEmail || userName || null,
+        ...assignmentPatch(nouvelAssigne || userEmail || userName || ''),
         mission_project: nouvelleCategorie.trim() || null,
         numero_tiers: nouveauClientNumero || null,
       })
       if (error) throw error
       setNouvelleDescription('')
-      setNouvelleEcheance('')
+      setNouvelleEcheance(finDeSemaineIso())
       setNouvelleCategorie('')
       setNouveauClientTexte('')
       setNouveauClientNumero(null)
@@ -812,7 +802,7 @@ export default function MobileAlertes({
             </div>
 
             <div>
-              <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.55)', marginBottom: 6 }}>Échéance (facultatif)</div>
+              <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.55)', marginBottom: 6 }}>Échéance</div>
               <input
                 type="date"
                 value={nouvelleEcheance}
@@ -823,20 +813,7 @@ export default function MobileAlertes({
 
             <div>
               <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.55)', marginBottom: 6 }}>Affecter à</div>
-              <select
-                value={nouvelAssigne}
-                onChange={(e) => setNouvelAssigne(e.target.value)}
-                style={{ width: '100%', height: 42, borderRadius: 10, border: '1px solid rgba(255,255,255,0.15)', background: 'rgba(255,255,255,0.05)', color: '#fff', padding: '0 10px', fontSize: 14.5 }}
-              >
-                {userEmail && !assigneesDisponibles.some((a) => a.email === userEmail.toLowerCase()) && (
-                  <option value={userEmail.toLowerCase()}>Moi-même ({userName || userEmail})</option>
-                )}
-                {assigneesDisponibles.map((a) => (
-                  <option key={a.email} value={a.email}>
-                    {a.email === userEmail?.toLowerCase() ? `${a.nom} (moi-même)` : a.nom}
-                  </option>
-                ))}
-              </select>
+              <AssigneeSelect value={nouvelAssigne} onChange={setNouvelAssigne} options={assignmentOptions} myEmail={userEmail} allowEmpty={false} />
             </div>
 
             <div>

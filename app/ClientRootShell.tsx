@@ -51,6 +51,7 @@ import { ThemeProvider, ThemeToggle, useTheme } from '@/components/ThemeContext'
 import { isLightReadyPath, tc, themed } from '@/lib/theme'
 import NewsTicker from '@/components/actualites/NewsTicker'
 import NouveautesButton from '@/components/actualites/NouveautesButton'
+import TaskAssignmentBanner from '@/components/TaskAssignmentBanner'
 // ÉVOLUTION (2026-09-15 soir) : Centre d'alertes.
 // - nouvelle pastille « Commande non complète à la date de livraison client »
 //   (ex-« Non servables », renommée le 2026-09-16) = CDC dont au moins une
@@ -1105,6 +1106,21 @@ const lastAppliedScopeSignatureRef = useRef<string | null>(null)
 
     try {
       const today = todayIso()
+
+      // ÉVOLUTION (2026-10-15) : même règle que le mobile (RPC), qui compte
+      // aussi les tâches d'un de mes groupes pas encore prises.
+      const { data: rpcRows, error: rpcError } = await supabase.rpc('get_mes_taches_a_faire')
+      if (!rpcError && Array.isArray(rpcRows)) {
+        const open = rpcRows as Array<{ due_date: string | null }>
+        const overdue = open.filter((r) => r.due_date && r.due_date < today).length
+        setTodoSignal(
+          open.length === 0
+            ? { status: 'green', count: 0 }
+            : { status: overdue > 0 ? 'red' : 'orange', count: open.length }
+        )
+        return
+      }
+
       const assignedFilter = assigneeValues
         .map((value) => `assigned_to.eq.${String(value).replace(/,/g, '\\,')}`)
         .join(',')
@@ -1942,7 +1958,11 @@ const lastAppliedScopeSignatureRef = useRef<string | null>(null)
 
       <div style={styles.overlay}>
         {isMobile ? (
-          <MobileBrandBar onLogout={handleLogout} showNouveautes={hasSession && !isFinancementOnly} />
+          <MobileBrandBar
+            onLogout={handleLogout}
+            showNouveautes={hasSession && !isFinancementOnly}
+            showTaskAlerts={hasSession && !isFinancementOnly}
+          />
         ) : (
           <header
             data-cegeclim-header="true"
@@ -2057,6 +2077,9 @@ const lastAppliedScopeSignatureRef = useRef<string | null>(null)
                 )}
               </div>
             )}
+
+            {/* ÉVOLUTION (2026-10-15) : alerte « une tâche vous a été affectée ». */}
+            {hasSession && !isFinancementOnly && <TaskAssignmentBanner variant="desktop" />}
           </header>
         )}
 
