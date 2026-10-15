@@ -75,6 +75,10 @@
 //   groupe — c'est le lien des tableaux stock du fil d'actualité (les
 //   références passées dans l'adresse priment, le groupe pouvant ne pas
 //   encore exister).
+// ÉVOLUTION (2026-10-15 bis, demandé par Arnaud) : prix de vente catalogue
+//   HT (sans remise, même source que le mobile : RPC
+//   get_articles_prix_catalogue) affiché à côté de chaque référence de la
+//   liste ; « — » quand l'article n'a pas de prix.
 // Sur mobile (< 768 px) on rend MobileStockArticles tel quel.
 // ============================================================================
 
@@ -244,6 +248,13 @@ function toNumber(v: unknown): number {
   const n = Number(v)
   return Number.isFinite(n) ? n : 0
 }
+/** Prix catalogue HT : « 9 612 € HT », centimes seulement s'il y en a. */
+function formatPrixHT(n: number | null | undefined): string {
+  if (n === null || n === undefined || !Number.isFinite(n) || n <= 0) return '—'
+  const avecCentimes = Math.round(n * 100) % 100 !== 0
+  return `${n.toLocaleString('fr-FR', { minimumFractionDigits: avecCentimes ? 2 : 0, maximumFractionDigits: 2 })} € HT`
+}
+
 function formatNumber(n: number): string {
   return Math.round(n).toLocaleString('fr-FR')
 }
@@ -697,6 +708,34 @@ function StockDesktop() {
   const refsResultats = useMemo(() => lignes.map((r) => r.reference_article), [lignes])
   const refsResultatsKey = refsResultats.join('|')
 
+  // ── Prix catalogue HT par référence (chargé une fois par référence) ──────
+  const [prixParRef, setPrixParRef] = useState<Record<string, number | null>>({})
+  const prixDemandesRef = useRef<Set<string>>(new Set())
+  useEffect(() => {
+    const manquantes = refsResultats.filter((r) => !prixDemandesRef.current.has(r))
+    if (manquantes.length === 0) return
+    manquantes.forEach((r) => prixDemandesRef.current.add(r))
+    void (async () => {
+      const TAILLE = 200
+      for (let i = 0; i < manquantes.length; i += TAILLE) {
+        const lot = manquantes.slice(i, i + TAILLE)
+        const { data, error: err } = await supabase.rpc('get_articles_prix_catalogue', { p_references: lot })
+        if (err) {
+          lot.forEach((r) => prixDemandesRef.current.delete(r))
+          continue
+        }
+        const out: Record<string, number | null> = {}
+        for (const r of lot) out[r] = null
+        for (const row of (data || []) as Array<{ reference_article: string; prix_catalogue_ht: number | string | null }>) {
+          const prix = row.prix_catalogue_ht === null || row.prix_catalogue_ht === undefined ? null : Number(row.prix_catalogue_ht)
+          out[String(row.reference_article)] = prix !== null && Number.isFinite(prix) && prix > 0 ? prix : null
+        }
+        setPrixParRef((prev) => ({ ...prev, ...out }))
+      }
+    })()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [refsResultatsKey])
+
   // ── Projections par référence (une requête paginée par source et par lot) ──
   const [projParRef, setProjParRef] = useState<Record<string, RefProjection>>({})
   const [approParRef, setApproParRef] = useState<Record<string, InfoAppro>>({})
@@ -975,7 +1014,15 @@ function StockDesktop() {
                     <tr>
                       <td rowSpan={4} style={{ ...styles.td, ...styles.refCell }}>
                         <button type="button" className="stkRefBtn" style={styles.refBtn}>
-                          <span className="stkRefCode" style={styles.resultRef}>{r.reference_article} <span style={{ color: 'rgba(var(--cg-ink-rgb), 0.45)' }}>↗</span></span>
+                          <span style={styles.refLigne}>
+                            <span className="stkRefCode" style={styles.resultRef}>{r.reference_article} <span style={{ color: 'rgba(var(--cg-ink-rgb), 0.45)' }}>↗</span></span>
+                            <span
+                              style={{ ...styles.prixTag, ...(r.reference_article in prixParRef && !prixParRef[r.reference_article] ? styles.prixTagVide : {}) }}
+                              title="Prix de vente catalogue HT, sans remise (SAGE)"
+                            >
+                              {r.reference_article in prixParRef ? formatPrixHT(prixParRef[r.reference_article]) : '…'}
+                            </span>
+                          </span>
                           <span style={styles.refDesignation}>{r.designation || '—'}</span>
                         </button>
                         <div style={styles.flags}>
@@ -1845,7 +1892,10 @@ const styles: Record<string, React.CSSProperties> = themed({
   emptyList: { minHeight: 220, borderRadius: 14, border: '1px dashed rgba(255,255,255,0.18)', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: 24, textAlign: 'center' },
   listWrap: { maxHeight: 'calc(100vh - 230px)', minHeight: 300, overflow: 'auto', borderRadius: 12, border: '1px solid rgba(255,255,255,0.08)' },
   refCell: { verticalAlign: 'top', maxWidth: 300 },
-  refBtn: { display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 2, background: 'none', border: 'none', padding: 0, color: 'inherit', cursor: 'pointer', textAlign: 'left', fontFamily: 'inherit', maxWidth: '100%' },
+  refBtn: { display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 2, width: '100%', background: 'none', border: 'none', padding: 0, color: 'inherit', cursor: 'pointer', textAlign: 'left', fontFamily: 'inherit', maxWidth: '100%' },
+  refLigne: { display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 10, width: '100%', flexWrap: 'wrap' },
+  prixTag: { fontFamily: 'var(--font-mono)', fontSize: 12.5, fontWeight: 700, color: 'var(--cg-sauge-ink)', background: 'rgba(166,161,129,0.16)', border: '1px solid rgba(166,161,129,0.35)', borderRadius: 7, padding: '1px 7px', whiteSpace: 'nowrap' },
+  prixTagVide: { fontWeight: 400, color: 'rgba(255,255,255,0.4)', background: 'transparent', borderColor: 'rgba(255,255,255,0.12)' },
   refDesignation: { fontSize: 11.5, color: 'rgba(255,255,255,0.55)', lineHeight: 1.35, whiteSpace: 'normal' },
   flags: { marginTop: 8, display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 4 },
   flag: { display: 'inline-flex', padding: '2px 8px', borderRadius: 999, border: '1px solid', fontSize: 10.5, fontWeight: 700, whiteSpace: 'nowrap' },
