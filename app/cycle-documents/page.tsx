@@ -1,9 +1,60 @@
 'use client'
 
-import { useEffect, useMemo, useState, type ReactNode } from 'react'
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import * as XLSX from 'xlsx'
 import { supabase } from '@/lib/supabaseClient'
 import { accessLockedSelectClassName, firstAllowedValue, restrictOptions, usePageFilterAccess } from '@/lib/pageAccessFilters'
+
+/* ------------------------------------------------------------------ */
+/* Chargement : file d'appels limitée (15/10/2026)                     */
+/* ------------------------------------------------------------------ */
+// CORRECTIF « statement timeout » au clic sur une famille macro : chaque
+// changement de filtre lançait 8 RPC en même temps, chacune relisant toute la
+// table indicateur_cycle_documents (~880 000 lignes, N et N-1) — ~3 s seule,
+// mais 15 à 29 s quand les 8 tournent ensemble, d'où les dépassements des
+// 30 s du rôle authenticated. Désormais :
+//   - au plus MAX_RPC_SIMULTANES appels en cours, les autres attendent ;
+//   - priorité aux KPI et aux cohortes (haut de l'écran) ;
+//   - un nouveau clic périme les appels pas encore partis (ils ne partent
+//     jamais) et les réponses périmées sont ignorées ;
+//   - rechargement différé de 400 ms (frappe dans « Client », clics rapides).
+const MAX_RPC_SIMULTANES = 2
+const DELAI_RECHARGEMENT_MS = 400
+
+type AppelEnAttente = { priorite: number; demarrer: () => void }
+let rpcEnCours = 0
+const fileAppels: AppelEnAttente[] = []
+
+function lancerSuivant() {
+  while (rpcEnCours < MAX_RPC_SIMULTANES && fileAppels.length > 0) {
+    fileAppels.sort((a, b) => a.priorite - b.priorite)
+    fileAppels.shift()!.demarrer()
+  }
+}
+
+/** Exécute l'appel dès qu'une place se libère ; null s'il est périmé avant de partir. */
+function appelLimite<T>(appel: () => PromiseLike<T>, perime: () => boolean, priorite = 1): Promise<T | null> {
+  return new Promise((resolve, reject) => {
+    fileAppels.push({
+      priorite,
+      demarrer: () => {
+        if (perime()) {
+          resolve(null)
+          lancerSuivant()
+          return
+        }
+        rpcEnCours += 1
+        Promise.resolve(appel())
+          .then(resolve, reject)
+          .finally(() => {
+            rpcEnCours -= 1
+            lancerSuivant()
+          })
+      },
+    })
+    lancerSuivant()
+  })
+}
 
 /* ------------------------------------------------------------------ */
 /* Charte graphique                                                    */
@@ -1107,6 +1158,9 @@ export default function CycleDocumentsPage() {
 
   const [loading, setLoading] = useState(false)
   const [loadingCohorts, setLoadingCohorts] = useState(false)
+  // Génération de chargement : une réponse d'une génération dépassée est ignorée.
+  const genDataRef = useRef(0)
+  const genCohortesRef = useRef(0)
   const [loadingOptions, setLoadingOptions] = useState(false)
   const [rebuildLoading, setRebuildLoading] = useState(false)
   const [message, setMessage] = useState<string | null>(null)
@@ -1185,23 +1239,25 @@ export default function CycleDocumentsPage() {
   }
 
   async function loadData() {
+    const gen = ++genDataRef.current
+    const perime = () => gen !== genDataRef.current
     setLoading(true)
     setError(null)
     try {
-      const [kpiResult, funnelResult, axisResult, topResult, riskResult, alertsResult] = await Promise.all([
-        supabase.rpc('get_cycle_documents_kpis', {
+      const resultats = await Promise.all([
+        appelLimite(() => supabase.rpc('get_cycle_documents_kpis', {
           ...commonParams,
           p_age_risque_jours: ageRisque,
           p_montant_risque: montantRisque,
-        }),
-        supabase.rpc('get_cycle_documents_funnel', commonParams),
-        supabase.rpc('get_cycle_documents_axes', {
+        }), perime, 0),
+        appelLimite(() => supabase.rpc('get_cycle_documents_funnel', commonParams), perime),
+        appelLimite(() => supabase.rpc('get_cycle_documents_axes', {
           ...commonParams,
           p_axe: axis,
           p_age_risque_jours: ageRisque,
           p_montant_risque: montantRisque,
-        }),
-        supabase.rpc('get_cycle_documents_top_devis', {
+        }), perime),
+        appelLimite(() => supabase.rpc('get_cycle_documents_top_devis', {
           p_date_debut: topDateDebut,
           p_date_fin: dateFin,
           p_agence: effectiveAgence || null,
@@ -1213,14 +1269,14 @@ export default function CycleDocumentsPage() {
           p_include_hors_stat: includeHorsStat,
           p_montant_min: 0,
           p_limit: 30,
-        }),
-        supabase.rpc('get_cycle_documents_devis_a_risque', {
+        }), perime),
+        appelLimite(() => supabase.rpc('get_cycle_documents_devis_a_risque', {
           ...commonParams,
           p_age_min_jours: ageRisque,
           p_montant_min: montantRisque,
           p_limit: 100,
-        }),
-        supabase.rpc('get_cycle_documents_alertes_clients', {
+        }), perime),
+        appelLimite(() => supabase.rpc('get_cycle_documents_alertes_clients', {
           p_date_debut: dateDebut,
           p_date_fin: dateFin,
           p_agence: effectiveAgence || null,
@@ -1231,8 +1287,10 @@ export default function CycleDocumentsPage() {
           p_seuil_pct: seuilAlerte,
           p_montant_min: montantRisque,
           p_limit: 100,
-        }),
+        }), perime),
       ])
+      if (perime()) return
+      const [kpiResult, funnelResult, axisResult, topResult, riskResult, alertsResult] = resultats.map((r) => r!)
 
       const rpcErrors = [kpiResult, funnelResult, axisResult, topResult, riskResult, alertsResult].map((result) => result.error).filter(Boolean)
       if (rpcErrors.length) throw rpcErrors[0]
@@ -1244,6 +1302,7 @@ export default function CycleDocumentsPage() {
       setRiskRows(asArray<any>(riskResult.data).map(mapRisk))
       setAlertRows(asArray<any>(alertsResult.data).map(mapAlert))
     } catch (exception: any) {
+      if (perime()) return
       setError(`Chargement de l'analyse impossible : ${exception?.message || exception}`)
       setKpis(null)
       setFunnelRows([])
@@ -1252,27 +1311,32 @@ export default function CycleDocumentsPage() {
       setRiskRows([])
       setAlertRows([])
     } finally {
-      setLoading(false)
+      if (!perime()) setLoading(false)
     }
   }
 
   async function loadCohorts() {
+    const gen = ++genCohortesRef.current
+    const perime = () => gen !== genCohortesRef.current
     setLoadingCohorts(true)
     try {
-      const [cohortResult, cohortAxisResult] = await Promise.all([
-        supabase.rpc('get_cycle_documents_cohortes', { ...commonParams, p_maturite_jours: maturite }),
-        supabase.rpc('get_cycle_documents_cohortes_axes', { ...commonParams, p_maturite_jours: maturite, p_axe: axis }),
+      const resultats = await Promise.all([
+        appelLimite(() => supabase.rpc('get_cycle_documents_cohortes', { ...commonParams, p_maturite_jours: maturite }), perime, 0),
+        appelLimite(() => supabase.rpc('get_cycle_documents_cohortes_axes', { ...commonParams, p_maturite_jours: maturite, p_axe: axis }), perime),
       ])
+      if (perime()) return
+      const [cohortResult, cohortAxisResult] = resultats.map((r) => r!)
       if (cohortResult.error) throw cohortResult.error
       if (cohortAxisResult.error) throw cohortAxisResult.error
       setCohortRows(asArray<any>(cohortResult.data).map(mapCohort).filter((row) => row.mois))
       setCohortAxisRows(asArray<any>(cohortAxisResult.data).map(mapCohortAxis))
     } catch (exception: any) {
+      if (perime()) return
       setError(`Chargement des cohortes impossible : ${exception?.message || exception}`)
       setCohortRows([])
       setCohortAxisRows([])
     } finally {
-      setLoadingCohorts(false)
+      if (!perime()) setLoadingCohorts(false)
     }
   }
 
@@ -1390,12 +1454,14 @@ export default function CycleDocumentsPage() {
   }, [dateDebut, dateFin, includeHorsStat])
 
   useEffect(() => {
-    loadData()
+    const t = window.setTimeout(() => { void loadData() }, DELAI_RECHARGEMENT_MS)
+    return () => window.clearTimeout(t)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dateDebut, dateFin, agence, collaborateur, familleMacro, famille, client, statut, includeHorsStat, axis, ageRisque, montantRisque, seuilAlerte, topMonths])
 
   useEffect(() => {
-    loadCohorts()
+    const t = window.setTimeout(() => { void loadCohorts() }, DELAI_RECHARGEMENT_MS)
+    return () => window.clearTimeout(t)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dateDebut, dateFin, agence, collaborateur, familleMacro, famille, client, includeHorsStat, axis, maturite])
 

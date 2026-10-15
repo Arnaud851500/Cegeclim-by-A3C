@@ -482,22 +482,23 @@ function SuiviAgencesPage() {
   return (
     <div className="min-h-screen bg-[#F4F3F0] pb-16">
       {/* ------------------------------------------------------------ bandeau */}
-      <header className="border-b border-[#1E2833] bg-[#111820]">
+      {/* Bandeau : couleurs du thème (sombre = inchangé, clair = blanc / encre marine), 15/10/2026 */}
+      <header className="border-b border-[color:var(--cg-hdr-border)] bg-[color:var(--cg-hdr-bg)]">
         <div className="mx-auto flex w-full max-w-[1760px] flex-wrap items-end justify-between gap-4 px-4 py-4 md:px-8">
           <div>
             <div className="text-[11px] font-semibold uppercase tracking-[0.24em] text-[#B4761A]">Mes agences / Mes commerciaux</div>
-            <h1 className="mt-1 text-[24px] font-bold leading-tight text-white md:text-[28px]">Suivi agences – commerciaux</h1>
-            <p className="mt-1 text-[12px] text-slate-400">
+            <h1 className="mt-1 text-[24px] font-bold leading-tight text-[color:var(--cg-hdr-ink)] md:text-[28px]">Suivi agences – commerciaux</h1>
+            <p className="mt-1 text-[12px] text-[color:var(--cg-hdr-muted)]">
               CA facturé {annee} · à date = janvier → {MOIS_LONGS[moisClos] || '—'} (dernier mois clos), comparé aux mêmes mois {annee - 1}
               {exclusionsLibelle && ` · référence entreprise ${exclusionsLibelle}`}
-              <span className="ml-2 rounded bg-[#2C3946] px-1.5 py-0.5 text-[11px] font-semibold text-slate-200">Hors statistique : exclus</span>
+              <span className="ml-2 rounded bg-[color:var(--cg-hdr-chip)] px-1.5 py-0.5 text-[11px] font-semibold text-[color:var(--cg-hdr-ink-2)]">Hors statistique : exclus</span>
             </p>
           </div>
           <div className="flex items-center gap-2">
             <select
               value={annee}
               onChange={(e) => setAnnee(Number(e.target.value))}
-              className="h-9 cursor-pointer rounded-lg border border-[#2C3946] bg-[#161F29] px-2.5 text-sm font-semibold text-white outline-none focus:border-[#B4761A]"
+              className="h-9 cursor-pointer rounded-lg border border-[color:var(--cg-hdr-line)] bg-[color:var(--cg-hdr-field)] px-2.5 text-sm font-semibold text-[color:var(--cg-hdr-ink)] outline-none focus:border-[#B4761A]"
               aria-label="Année"
             >
               {[new Date().getFullYear() - 2, new Date().getFullYear() - 1, new Date().getFullYear()].map((y) => (
@@ -506,7 +507,7 @@ function SuiviAgencesPage() {
                 </option>
               ))}
             </select>
-            <a href="/objectifs" className="flex h-9 items-center rounded-lg border border-[#2C3946] px-3 text-sm font-semibold text-slate-200 hover:border-[#B4761A] hover:text-white">
+            <a href="/objectifs" className="flex h-9 items-center rounded-lg border border-[color:var(--cg-hdr-line)] px-3 text-sm font-semibold text-[color:var(--cg-hdr-ink-2)] hover:border-[#B4761A] hover:text-[color:var(--cg-hdr-ink)]">
               🎯 Objectifs
             </a>
           </div>

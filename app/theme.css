@@ -79,6 +79,16 @@
   --cg-ad-sky-ink: #8FC6E3;
   --cg-ad-amber-ink: #E8C27A;
   --cg-ad-header: linear-gradient(180deg, #121C33 0%, #0E1628 100%);  /* Analyse devis : en-tête */
+  /* Bandeaux Suivi agences / Objectifs (15/10/2026) */
+  --cg-hdr-bg: #111820;
+  --cg-hdr-border: #1E2833;
+  --cg-hdr-field: #161F29;
+  --cg-hdr-line: #2C3946;
+  --cg-hdr-chip: #2C3946;
+  --cg-hdr-ink: #FFFFFF;
+  --cg-hdr-ink-2: #E2E8F0;
+  --cg-hdr-ink-3: #CBD5E1;
+  --cg-hdr-muted: #94A3B8;
 }
 
 [data-theme="light"] {
@@ -142,6 +152,15 @@
   --cg-ad-sky-ink: #1F6A80;
   --cg-ad-amber-ink: #8A5A0E;
   --cg-ad-header: linear-gradient(180deg, #FFFFFF 0%, #FBFAF6 100%);
+  --cg-hdr-bg: #FFFFFF;
+  --cg-hdr-border: rgba(11, 18, 32, 0.10);
+  --cg-hdr-field: #FFFFFF;
+  --cg-hdr-line: rgba(11, 18, 32, 0.18);
+  --cg-hdr-chip: #EEF0F3;
+  --cg-hdr-ink: #0B1220;
+  --cg-hdr-ink-2: #1E2433;
+  --cg-hdr-ink-3: #3A4252;
+  --cg-hdr-muted: #5B6273;
 }
 
 /* Bandeau défilant du fil d'actualité */

@@ -698,12 +698,13 @@ export default function ObjectifsPage() {
 
   return (
     <div className="min-h-screen bg-[#F4F3F0] pb-16">
-      <header className="border-b border-[#1E2833] bg-[#111820]">
+      {/* Bandeau : couleurs du thème (sombre = inchangé, clair = blanc / encre marine), 15/10/2026 */}
+      <header className="border-b border-[color:var(--cg-hdr-border)] bg-[color:var(--cg-hdr-bg)]">
         <div className="mx-auto flex w-full max-w-[1760px] flex-col gap-6 px-4 py-6 md:px-8 lg:flex-row lg:items-end lg:justify-between">
           <div>
             <div className="text-[11px] font-semibold uppercase tracking-[0.24em] text-[#B4761A]">Direction</div>
-            <h1 className="mt-2 text-[28px] font-bold leading-tight text-white md:text-[32px]">Objectifs commerciaux</h1>
-            <p className="mt-2 max-w-3xl text-sm leading-relaxed text-slate-300">
+            <h1 className="mt-2 text-[28px] font-bold leading-tight text-[color:var(--cg-hdr-ink)] md:text-[32px]">Objectifs commerciaux</h1>
+            <p className="mt-2 max-w-3xl text-sm leading-relaxed text-[color:var(--cg-hdr-ink-3)]">
               Un objectif par entreprise, par agence et par commercial. La cohérence se vérifie en comparant
               la somme des objectifs individuels à celui de l’agence, puis la somme des agences à l’objectif entreprise.
             </p>
@@ -711,11 +712,11 @@ export default function ObjectifsPage() {
 
           <div className="flex flex-wrap items-end gap-3">
             <label className="flex flex-col gap-1">
-              <span className="text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-400">Année</span>
+              <span className="text-[10px] font-semibold uppercase tracking-[0.18em] text-[color:var(--cg-hdr-muted)]">Année</span>
               <select
                 value={annee}
                 onChange={(event) => setAnnee(Number(event.target.value))}
-                className="h-[44px] cursor-pointer rounded-xl border border-[#2C3946] bg-[#161F29] px-3 text-sm font-semibold text-white outline-none focus:border-[#B4761A]"
+                className="h-[44px] cursor-pointer rounded-xl border border-[color:var(--cg-hdr-line)] bg-[color:var(--cg-hdr-field)] px-3 text-sm font-semibold text-[color:var(--cg-hdr-ink)] outline-none focus:border-[#B4761A]"
               >
                 {currentYearRange().map((year) => (
                   <option key={year} value={year}>
@@ -727,7 +728,7 @@ export default function ObjectifsPage() {
             <button
               type="button"
               onClick={() => void loadAll(annee)}
-              className="h-[44px] rounded-xl border border-[#2C3946] px-4 text-sm font-semibold text-slate-200 transition hover:border-[#B4761A] hover:text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-[#B4761A]"
+              className="h-[44px] rounded-xl border border-[color:var(--cg-hdr-line)] px-4 text-sm font-semibold text-[color:var(--cg-hdr-ink-2)] transition hover:border-[#B4761A] hover:text-[color:var(--cg-hdr-ink)] focus:outline-none focus-visible:ring-2 focus-visible:ring-[#B4761A]"
             >
               Recharger
             </button>
