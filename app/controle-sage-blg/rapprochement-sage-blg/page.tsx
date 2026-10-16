@@ -25,7 +25,12 @@
  *     n° de CDF + article ; réceptions SAGE = BLF (type 13) rattachés à la CDF.
  *   - CDC : cache mv_cdc_comparaison (portefeuille SAGE non soldé ↔ commandes BLG ouvertes) puis lignes article par article.
  *
- * Route : app/rapprochement-sage-blg/page.tsx → /rapprochement-sage-blg (à déclarer dans lib/navigation.ts, bloc « Projet BLG »)
+ * Deux niveaux d'analyse (v2, 16/10/2026) :
+ *   - ENTETE : le document (commande soldée d'un côté et ouverte de l'autre, absente, statut d'entête…)
+ *   - LIGNE  : article par article (reliquat en double dans BLG, reliquat soldé dans SAGE, réception non passée…)
+ *   Une entête en écart renvoie vers ses lignes (bouton « Voir les lignes » de la fiche).
+ *
+ * Route : app/controle-sage-blg/rapprochement-sage-blg/page.tsx → /controle-sage-blg/rapprochement-sage-blg (bloc « Projet BLG »)
  */
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
@@ -56,12 +61,14 @@ const C = {
 // Types
 // ---------------------------------------------------------------------
 type Domaine = 'STOCK' | 'CDF' | 'CDC';
+type Niveau = 'ENTETE' | 'LIGNE';
 type Systeme = 'BLG' | 'SAGE' | 'INTERFACE' | 'A_ANALYSER' | 'AUCUN';
 type Suivi = 'a_traiter' | 'en_cours' | 'corrige' | 'accepte';
 
 type TypeSynthese = {
   code: string;
   domaine: Domaine;
+  niveau: Niveau;
   libelle: string;
   description: string | null;
   systeme_a_corriger: Systeme;
@@ -84,13 +91,14 @@ type Synthese = {
   run: { id: number; debut: string; fin: string; blg_synchro: string | null; sage_synchro: string | null; compteurs: Record<string, unknown> | null; erreur: string | null } | null;
   en_cours: boolean;
   types: TypeSynthese[];
-  depots: { domaine: Domaine; depot: string; nb: number; valeur_ht: number }[];
+  depots: { domaine: Domaine; niveau: Niveau; depot: string; nb: number; valeur_ht: number }[];
   historique: { jour: string; domaine: Domaine; nb: number; valeur_ht: number | null }[];
 };
 
 type Ecart = {
   id: number;
   domaine: Domaine;
+  niveau: Niveau;
   type_code: string;
   cle: string;
   document: string | null;
@@ -218,6 +226,12 @@ const DETAIL_LABELS: Record<string, string> = {
   status_fk: 'Statut workflow BLG',
   ecart_livraison: 'Écart statut livraison',
   ecart_facturation: 'Écart statut facturation',
+  sage_lignes_ouvertes: 'SAGE — lignes ouvertes',
+  blg_lignes_ouvertes: 'BLG — lignes avec reste',
+  lignes_en_ecart: 'Lignes en écart',
+  types_lignes: 'Types d’écart des lignes',
+  blg_reliquat_double: 'BLG — reliquat compté en double',
+  blg_nb_lignes: 'BLG — nombre de lignes pour l’article',
 };
 
 const PAGE = 100;
@@ -255,10 +269,13 @@ const errMsg = (e: unknown) => {
 const pgrstEsc = (s: string) => s.replace(/[,()*%]/g, ' ').trim();
 
 function lireUrl() {
-  if (typeof window === 'undefined') return { domaine: 'CDC' as Domaine, type: '' };
+  if (typeof window === 'undefined') return { domaine: 'CDC' as Domaine, type: '', niveau: 'ENTETE' as Niveau, q: '' };
   const p = new URLSearchParams(window.location.search);
   const d = (p.get('domaine') || 'CDC').toUpperCase();
-  return { domaine: (['STOCK', 'CDF', 'CDC'].includes(d) ? d : 'CDC') as Domaine, type: p.get('type') || '' };
+  const domaine = (['STOCK', 'CDF', 'CDC'].includes(d) ? d : 'CDC') as Domaine;
+  const n = (p.get('niveau') || '').toUpperCase();
+  const niveau: Niveau = domaine === 'STOCK' ? 'LIGNE' : n === 'LIGNE' ? 'LIGNE' : 'ENTETE';
+  return { domaine, type: p.get('type') || '', niveau, q: p.get('q') || '' };
 }
 
 // ---------------------------------------------------------------------
@@ -272,6 +289,7 @@ export default function RapprochementSageBlgPage() {
   const [info, setInfo] = useState<string | null>(null);
 
   const [domaine, setDomaine] = useState<Domaine>('CDC');
+  const [niveau, setNiveau] = useState<Niveau>('ENTETE');
   const [typeCode, setTypeCode] = useState<string>('');
   const [afficherDecalage, setAfficherDecalage] = useState(false);
   const [afficherInfos, setAfficherInfos] = useState(false);
@@ -297,16 +315,23 @@ export default function RapprochementSageBlgPage() {
   useEffect(() => {
     const u = lireUrl();
     setDomaine(u.domaine);
+    setNiveau(u.niveau);
     setTypeCode(u.type);
+    if (u.q) {
+      setRecherche(u.q);
+      setRechercheDebounced(u.q);
+    }
   }, []);
   useEffect(() => {
     if (typeof window === 'undefined') return;
     const p = new URLSearchParams(window.location.search);
     p.set('domaine', domaine);
+    p.set('niveau', niveau);
     if (typeCode) p.set('type', typeCode);
     else p.delete('type');
+    p.delete('q');
     window.history.replaceState(null, '', `${window.location.pathname}?${p.toString()}`);
-  }, [domaine, typeCode]);
+  }, [domaine, niveau, typeCode]);
 
   useEffect(() => {
     const t = setTimeout(() => setRechercheDebounced(recherche), 300);
@@ -347,16 +372,17 @@ export default function RapprochementSageBlgPage() {
     await chargerLignes();
   }
 
+  const niveauType = (t: TypeSynthese): Niveau => t.niveau ?? 'LIGNE';
   const typesDomaine = useMemo(
-    () => (synthese?.types ?? []).filter((t) => t.domaine === domaine).sort((a, b) => a.ordre - b.ordre),
-    [synthese, domaine]
+    () => (synthese?.types ?? []).filter((t) => t.domaine === domaine && niveauType(t) === niveau).sort((a, b) => a.ordre - b.ordre),
+    [synthese, domaine, niveau]
   );
   const typeActif = useMemo(() => typesDomaine.find((t) => t.code === typeCode) ?? null, [typesDomaine, typeCode]);
 
   const compteDomaine = useCallback(
-    (d: Domaine) =>
+    (d: Domaine, n?: Niveau) =>
       (synthese?.types ?? [])
-        .filter((t) => t.domaine === d && (afficherInfos || t.systeme_a_corriger !== 'AUCUN'))
+        .filter((t) => t.domaine === d && (!n || niveauType(t) === n) && (afficherInfos || t.systeme_a_corriger !== 'AUCUN'))
         .reduce((s, t) => s + t.nb + (afficherDecalage ? t.nb_decalage : 0), 0),
     [synthese, afficherDecalage, afficherInfos]
   );
@@ -379,8 +405,14 @@ export default function RapprochementSageBlgPage() {
   }, [typesDomaine, afficherInfos]);
 
   const depotsDomaine = useMemo(
-    () => (synthese?.depots ?? []).filter((d) => d.domaine === domaine).sort((a, b) => b.nb - a.nb),
-    [synthese, domaine]
+    () => {
+      const m = new Map<string, number>();
+      (synthese?.depots ?? [])
+        .filter((d) => d.domaine === domaine && (d.niveau ?? 'LIGNE') === niveau)
+        .forEach((d) => m.set(d.depot, (m.get(d.depot) ?? 0) + Number(d.nb)));
+      return Array.from(m.entries()).map(([depot, nb]) => ({ depot, nb })).sort((a, b) => b.nb - a.nb);
+    },
+    [synthese, domaine, niveau]
   );
 
   const historique = useMemo(() => {
@@ -398,7 +430,7 @@ export default function RapprochementSageBlgPage() {
   // -------------------------------------------------------------
   const construireRequete = useCallback(
     (selectCols: string, withCount: boolean) => {
-      let q = supabase.from('v_rappro_ecarts').select(selectCols, withCount ? { count: 'exact' } : undefined).eq('domaine', domaine);
+      let q = supabase.from('v_rappro_ecarts').select(selectCols, withCount ? { count: 'exact' } : undefined).eq('domaine', domaine).eq('niveau', niveau);
       if (typeCode) q = q.eq('type_code', typeCode);
       else if (!afficherInfos) q = q.neq('systeme_a_corriger', 'AUCUN');
       if (!afficherDecalage) q = q.eq('probable_decalage', false);
@@ -416,7 +448,7 @@ export default function RapprochementSageBlgPage() {
       }
       return q.order(sortKey, { ascending: sortAsc, nullsFirst: false }).order('id', { ascending: true });
     },
-    [domaine, typeCode, afficherDecalage, afficherInfos, depot, age, suiviFiltre, rechercheDebounced, sortKey, sortAsc]
+    [domaine, niveau, typeCode, afficherDecalage, afficherInfos, depot, age, suiviFiltre, rechercheDebounced, sortKey, sortAsc]
   );
 
   const chargerLignes = useCallback(async () => {
@@ -438,13 +470,32 @@ export default function RapprochementSageBlgPage() {
   useEffect(() => {
     setPage(0);
     setSelection(new Set());
-  }, [domaine, typeCode, afficherDecalage, afficherInfos, depot, age, suiviFiltre, rechercheDebounced, sortKey, sortAsc]);
+  }, [domaine, niveau, typeCode, afficherDecalage, afficherInfos, depot, age, suiviFiltre, rechercheDebounced, sortKey, sortAsc]);
 
   function changerDomaine(d: Domaine) {
     setDomaine(d);
+    setNiveau(d === 'STOCK' ? 'LIGNE' : 'ENTETE');
     setTypeCode('');
     setDepot('');
     setDetail(null);
+  }
+
+  function changerNiveau(n: Niveau) {
+    setNiveau(n);
+    setTypeCode('');
+    setDepot('');
+  }
+
+  // depuis une entête : ouvre les lignes de la même pièce
+  function voirLignes(document: string) {
+    setDetail(null);
+    setNiveau('LIGNE');
+    setTypeCode('');
+    setDepot('');
+    setAge('');
+    setSuiviFiltre('');
+    setRecherche(document);
+    setRechercheDebounced(document);
   }
 
   function trier(k: SortKey) {
@@ -607,7 +658,7 @@ export default function RapprochementSageBlgPage() {
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      const suffixe = typeCode ? typeCode.toLowerCase() : domaine.toLowerCase();
+      const suffixe = typeCode ? typeCode.toLowerCase() : `${domaine.toLowerCase()}-${niveau === 'ENTETE' ? 'entetes' : 'lignes'}`;
       a.download = `rapprochement-sage-blg-${suffixe}-${new Date().toISOString().slice(0, 10)}.xlsx`;
       a.click();
       URL.revokeObjectURL(url);
@@ -687,13 +738,53 @@ export default function RapprochementSageBlgPage() {
               >
                 <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 8 }}>
                   <span style={{ fontFamily: '"Space Grotesk", sans-serif', fontSize: 17, fontWeight: 600 }}>{d.label}</span>
-                  <span style={{ fontFamily: '"Space Grotesk", sans-serif', fontSize: 24, fontWeight: 600 }}>{loadingSynthese ? '…' : fmtNum(compteDomaine(d.key))}</span>
+                  <span style={{ fontFamily: '"Space Grotesk", sans-serif', fontSize: 24, fontWeight: 600 }}>
+                    {loadingSynthese ? '…' : fmtNum(compteDomaine(d.key, 'LIGNE'))}
+                  </span>
                 </div>
-                <div style={{ fontSize: 12, opacity: 0.75, marginTop: 4 }}>{d.hint}</div>
+                <div style={{ fontSize: 12, opacity: 0.75, marginTop: 4 }}>
+                  {d.key === 'STOCK' ? 'couples dépôt × article en écart' : `lignes en écart · ${loadingSynthese ? '…' : fmtNum(compteDomaine(d.key, 'ENTETE'))} entêtes`}
+                </div>
+                <div style={{ fontSize: 12, opacity: 0.6, marginTop: 2 }}>{d.hint}</div>
               </button>
             );
           })}
         </div>
+
+        {/* ---------------- Niveau : entêtes / lignes ---------------- */}
+        {domaine !== 'STOCK' && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 14, flexWrap: 'wrap' }}>
+            <div style={{ display: 'inline-flex', background: C.blanc, border: `1px solid ${C.ligne}`, borderRadius: 10, padding: 3 }}>
+              {(['ENTETE', 'LIGNE'] as Niveau[]).map((n) => {
+                const actif = n === niveau;
+                return (
+                  <button
+                    key={n}
+                    type="button"
+                    onClick={() => changerNiveau(n)}
+                    style={{
+                      border: 'none',
+                      borderRadius: 8,
+                      padding: '7px 16px',
+                      fontSize: 13.5,
+                      fontWeight: 600,
+                      cursor: 'pointer',
+                      background: actif ? C.marine : 'transparent',
+                      color: actif ? C.creme : C.marine,
+                    }}
+                  >
+                    {n === 'ENTETE' ? 'Entêtes' : 'Lignes'} ({fmtNum(compteDomaine(domaine, n))})
+                  </button>
+                );
+              })}
+            </div>
+            <span style={{ fontSize: 12.5, color: C.texte2, maxWidth: 760 }}>
+              {niveau === 'ENTETE'
+                ? 'Une ligne par commande : présente d’un seul côté, soldée d’un côté et ouverte de l’autre, ou statut d’entête différent. Ouvre une commande pour voir ses lignes.'
+                : 'Une ligne par article de commande : reliquat en double, reliquat soldé, réception ou livraison non passée, quantité différente…'}
+            </span>
+          </div>
+        )}
 
         {/* ---------------- KPI + courbe ---------------- */}
         <section style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1.2fr) minmax(0, 1fr)', gap: 14, marginBottom: 14 }}>
@@ -907,9 +998,11 @@ export default function RapprochementSageBlgPage() {
                           Pièce
                         </Th>
                       )}
-                      <Th k="reference_article" sortKey={sortKey} asc={sortAsc} onSort={trier}>
-                        Article
-                      </Th>
+                      {niveau === 'LIGNE' && (
+                        <Th k="reference_article" sortKey={sortKey} asc={sortAsc} onSort={trier}>
+                          Article
+                        </Th>
+                      )}
                       <Th k="depot" sortKey={sortKey} asc={sortAsc} onSort={trier}>
                         {domaine === 'CDC' ? 'Dépôt / agence' : 'Dépôt'}
                       </Th>
@@ -969,6 +1062,7 @@ export default function RapprochementSageBlgPage() {
                               {r.probable_decalage && <DecalageTag />}
                             </td>
                           )}
+                          {niveau === 'LIGNE' && (
                           <td style={{ ...td, maxWidth: 300 }}>
                             <div style={{ fontFamily: '"IBM Plex Mono", monospace', fontSize: 12, fontWeight: 600 }}>
                               {domaine === 'STOCK' && r.lien_blg ? (
@@ -986,6 +1080,7 @@ export default function RapprochementSageBlgPage() {
                               </div>
                             )}
                           </td>
+                          )}
                           <td style={{ ...td, fontSize: 12 }}>{r.depot ?? '—'}</td>
                           {domaine !== 'STOCK' && (
                             <td style={{ ...td, maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis' }} title={r.tiers_nom ?? ''}>
@@ -1051,6 +1146,7 @@ export default function RapprochementSageBlgPage() {
           e={detail}
           onClose={() => setDetail(null)}
           onOpen={(x) => setDetail(x)}
+          onVoirLignes={voirLignes}
           onSuivi={async (statut, commentaire) => {
             await marquer([detail.cle], statut, commentaire);
             setDetail({ ...detail, suivi_statut: statut, suivi_commentaire: commentaire ?? detail.suivi_commentaire });
@@ -1068,11 +1164,13 @@ function FicheEcart({
   e,
   onClose,
   onOpen,
+  onVoirLignes,
   onSuivi,
 }: {
   e: Ecart;
   onClose: () => void;
   onOpen: (x: Ecart) => void;
+  onVoirLignes: (document: string) => void;
   onSuivi: (statut: Suivi, commentaire: string | null) => Promise<void>;
 }) {
   const [lies, setLies] = useState<Ecart[]>([]);
@@ -1141,11 +1239,22 @@ function FicheEcart({
               Fermer (Échap)
             </button>
           </div>
-          {e.lien_blg && (
-            <a href={e.lien_blg} target="_blank" rel="noopener noreferrer" style={{ display: 'inline-block', marginTop: 10, fontSize: 13, color: '#C9BFE6', textDecoration: 'none', fontWeight: 600 }}>
-              Ouvrir dans BLG ↗
-            </a>
-          )}
+          <div style={{ display: 'flex', gap: 16, alignItems: 'center', marginTop: 10, flexWrap: 'wrap' }}>
+            {e.lien_blg && (
+              <a href={e.lien_blg} target="_blank" rel="noopener noreferrer" style={{ fontSize: 13, color: '#C9BFE6', textDecoration: 'none', fontWeight: 600 }}>
+                Ouvrir dans BLG ↗
+              </a>
+            )}
+            {e.niveau === 'ENTETE' && e.document && (
+              <button
+                type="button"
+                onClick={() => onVoirLignes(e.document as string)}
+                style={{ background: 'transparent', border: '1px solid rgba(245,243,236,0.35)', color: C.creme, borderRadius: 8, padding: '4px 10px', cursor: 'pointer', fontSize: 12.5, fontWeight: 600 }}
+              >
+                Voir les lignes de cette commande →
+              </button>
+            )}
+          </div>
         </div>
 
         <div style={{ flex: 1, overflowY: 'auto', padding: 20 }}>
@@ -1249,7 +1358,7 @@ function FicheEcart({
                       <b>{l.type_libelle}</b>
                       <span style={{ color: C.texte2 }}>
                         {' '}
-                        · {[l.domaine, l.document, l.reference_article, l.depot].filter(Boolean).join(' · ')}
+                        · {[l.domaine, l.niveau === 'ENTETE' ? 'entête' : null, l.document, l.reference_article, l.depot].filter(Boolean).join(' · ')}
                       </span>
                     </span>
                     <span style={{ fontWeight: 600, whiteSpace: 'nowrap' }}>{l.ecart_qte == null ? '' : fmtNum(l.ecart_qte, 2)}</span>
