@@ -79,7 +79,7 @@
  *
  *  - V4.6 (2026-10-16) : pavé "Taux transfo devis" refondu (taux à
  *    maturité par cohorte + écart N-1, grille 30/60/90/120 j, devis à
- *    risque) -- voir la note au-dessus de TauxCard.
+ *    risque 3 mois) -- voir la note au-dessus de TauxCard.
  *
  *  - V4.5 (2026-09-10) :
  *    - Compteur "Factures en retard" (cle "factures_retard", conservée pour
@@ -1170,18 +1170,21 @@ function CompteurCard({
 //  - chiffre principal = taux de transformation devis → CDC à maturité
 //    (120 j) de la dernière cohorte mensuelle complète, écart en points
 //    vs le même mois N-1 et mention de la cohorte ;
-//  - grille 30 / 60 / 90 / 120 j : dernière cohorte complète à chaque âge
-//    et écart N-1 (mêmes règles que les 4 cartes de l'écran détaillé :
+//  - mini-barres 30 / 60 / 90 j : dernière cohorte complète à chaque âge
+//    et écart N-1 en points (mêmes règles que les 4 cartes de l'écran détaillé :
 //    cohorte complète = couverture ≥ 99,95 %) ;
 //  - ligne d'action : devis à risque (sans CDC/BL/facture, âge ≥ 30 j,
-//    montant ≥ 15 000 €, depuis le 1er janvier) en nombre et en CA.
+//    montant ≥ 15 000 €, émis sur les 3 derniers mois) en nombre et en CA.
 // Sources : get_cycle_documents_cohortes (12 derniers mois glissants, pour
 // trouver une cohorte mûre à 120 j même en début d'année) et
-// get_cycle_documents_kpis (devis à risque, période identique à l'écran).
+// get_cycle_documents_kpis (devis à risque, 3 derniers mois).
 
 const TAUX_MATURITE_JOURS = 120;
 const TAUX_AGE_RISQUE_JOURS = 30;
 const TAUX_MONTANT_RISQUE = 15000;
+// Devis à risque : émis sur les 3 derniers mois (même fenêtre que "Top devis
+// 3 mois" de l'écran) -- depuis le 1er janvier le volume n'était plus actionnable.
+const TAUX_RISQUE_MOIS = 3;
 
 type TauxHorizonKey = "taux_30" | "taux_60" | "taux_90" | "taux_maturite";
 type TauxCouvertureKey = "couverture_30" | "couverture_60" | "couverture_90" | "couverture_maturite";
@@ -1192,6 +1195,8 @@ const TAUX_HORIZONS: { key: TauxHorizonKey; couverture: TauxCouvertureKey; label
   { key: "taux_90", couverture: "couverture_90", label: "90 j", color: "#A6A181" },
   { key: "taux_maturite", couverture: "couverture_maturite", label: `${TAUX_MATURITE_JOURS} j`, color: "#C1683C" },
 ];
+// Le taux à maturité est le chiffre principal : la grille ne montre que les âges plus courts.
+const TAUX_HORIZONS_GRILLE = TAUX_HORIZONS.filter((h) => h.key !== "taux_maturite");
 
 type TauxCohorte = {
   periode: "N" | "N-1";
@@ -1254,7 +1259,7 @@ function TauxCard({
       const now = new Date();
       const fin = tauxDateIso(new Date(now.getFullYear(), now.getMonth() + 1, 1));
       const debutCohortes = tauxDateIso(new Date(now.getFullYear(), now.getMonth() - 11, 1));
-      const debutAnnee = `${now.getFullYear()}-01-01`;
+      const debutRisque = tauxDateIso(new Date(now.getFullYear(), now.getMonth() + 1 - TAUX_RISQUE_MOIS, 1));
       const filtres = {
         p_agence: effectiveAgence, p_collaborateur: effectiveCollaborateur,
         p_famille_macro: familleMacroEffective, p_famille: null, p_client: null,
@@ -1266,7 +1271,7 @@ function TauxCard({
           p_maturite_jours: TAUX_MATURITE_JOURS,
         }),
         supabase.rpc("get_cycle_documents_kpis", {
-          p_date_debut: debutAnnee, p_date_fin: fin, ...filtres,
+          p_date_debut: debutRisque, p_date_fin: fin, ...filtres,
           p_age_risque_jours: TAUX_AGE_RISQUE_JOURS, p_montant_risque: TAUX_MONTANT_RISQUE,
         }),
       ]);
@@ -1330,6 +1335,8 @@ function TauxCard({
 
   const principal = signaux.taux_maturite;
   const nbRisque = risque?.nb ?? 0;
+  // Échelle commune des mini-barres 30/60/90 j (40 % = barre pleine, ou plus si besoin).
+  const echelleMax = Math.max(40, ...TAUX_HORIZONS_GRILLE.map((h) => signaux[h.key].valeur ?? 0));
 
   return (
     <div className="col-span-2 sm:col-span-1">
@@ -1343,70 +1350,78 @@ function TauxCard({
         compact={false}
       >
         {loading ? (
-          <div className="h-14 animate-pulse rounded bg-[color:var(--cg-ink)]/5" />
+          <div className="h-20 animate-pulse rounded bg-[color:var(--cg-ink)]/5" />
         ) : error ? (
           <p className="text-[10px] text-[color:var(--cg-err-ink)]">{error}</p>
         ) : (
           <>
-            {/* Chiffre principal : maturité, écart N-1, cohorte concernée. */}
-            <div className="flex items-baseline justify-between gap-2" style={CONTENEUR_TAILLE}>
-              <div className="whitespace-nowrap font-[var(--font-mono,monospace)] text-3xl font-semibold leading-tight text-[color:var(--cg-ink)]">
+            {/* Chiffre principal : taux à maturité + écart N-1. */}
+            <div className="flex items-start justify-between gap-2">
+              <div
+                className="whitespace-nowrap font-[var(--font-mono,monospace)] text-3xl font-semibold leading-none text-[color:var(--cg-ink)]"
+                title={principal.n1 !== null ? `N-1 même mois : ${formatPct(principal.n1)}` : undefined}
+              >
                 {principal.valeur === null ? "—" : formatPct(principal.valeur)}
               </div>
-              <div className="whitespace-nowrap text-right text-[10px] leading-tight text-[color:var(--cg-ink)]/45">
-                <div className={`font-[var(--font-mono,monospace)] text-xs font-semibold ${tauxCouleurDelta(principal.delta)}`}>
-                  {principal.delta === null ? "—" : `${tauxFormatDelta(principal.delta)} pt`}
+              {principal.delta !== null && (
+                <div className="text-right leading-tight">
+                  <div className={`whitespace-nowrap font-[var(--font-mono,monospace)] text-sm font-semibold ${tauxCouleurDelta(principal.delta)}`}>
+                    {tauxFormatDelta(principal.delta)} pt
+                  </div>
+                  <div className="text-[9px] text-[color:var(--cg-ink)]/40">vs N-1</div>
                 </div>
-                {principal.n1 !== null && <div>N-1 {formatPct(principal.n1)}</div>}
-                {principal.mois && <div>devis de {tauxFormatMois(principal.mois)}</div>}
-              </div>
+              )}
             </div>
-            <div className="mt-0.5 text-[9px] uppercase tracking-wide text-[color:var(--cg-ink)]/40">
-              Devis → CDC à {TAUX_MATURITE_JOURS} j (maturité)
+            <div className="mt-1 truncate text-[10px] text-[color:var(--cg-ink)]/45">
+              À {TAUX_MATURITE_JOURS} j · devis de {principal.mois ? tauxFormatMois(principal.mois) : "—"}
             </div>
 
-            {/* Grille 30 / 60 / 90 / 120 j : dernière cohorte complète à chaque âge. */}
-            <div className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1">
-              {TAUX_HORIZONS.map((h) => {
+            {/* Signaux plus récents : 30 / 60 / 90 j, mini-barres. */}
+            <div className="mt-2.5 space-y-1">
+              {TAUX_HORIZONS_GRILLE.map((h) => {
                 const s = signaux[h.key];
+                const largeur = s.valeur === null ? 0 : Math.max(2, (s.valeur / echelleMax) * 100);
                 return (
                   <div
                     key={h.key}
-                    className="flex items-baseline justify-between gap-1 whitespace-nowrap"
+                    className="grid grid-cols-[26px_1fr_auto_30px] items-center gap-1.5"
                     title={s.mois ? `Devis de ${tauxFormatMois(s.mois)} · N-1 ${s.n1 === null ? "—" : formatPct(s.n1)}` : "Aucune cohorte complète à cet âge"}
                   >
-                    <span className="flex items-center gap-1 text-[9px] uppercase tracking-wide text-[color:var(--cg-ink)]/40">
-                      <span className="inline-block h-1.5 w-1.5 rounded-full" style={{ background: h.color }} />
-                      {h.label}
+                    <span className="text-[10px] text-[color:var(--cg-ink)]/45">{h.label}</span>
+                    <span className="h-1.5 overflow-hidden rounded-full bg-[color:var(--cg-ink)]/[0.07]">
+                      <span className="block h-full rounded-full" style={{ width: `${largeur}%`, background: h.color }} />
                     </span>
-                    <span className="flex items-baseline gap-1">
-                      <span className={`font-[var(--font-mono,monospace)] text-xs font-semibold ${s.valeur === null ? "text-[color:var(--cg-ink)]/25" : "text-[color:var(--cg-ink)]/85"}`}>
-                        {s.valeur === null ? "—" : formatPct(s.valeur)}
-                      </span>
-                      <span className={`font-[var(--font-mono,monospace)] text-[9px] ${tauxCouleurDelta(s.delta)}`}>
-                        {s.delta === null ? "" : tauxFormatDelta(s.delta)}
-                      </span>
+                    <span className="whitespace-nowrap text-right font-[var(--font-mono,monospace)] text-[11px] font-semibold text-[color:var(--cg-ink)]/85">
+                      {s.valeur === null ? "—" : formatPct(s.valeur)}
+                    </span>
+                    <span className={`whitespace-nowrap text-right font-[var(--font-mono,monospace)] text-[10px] ${tauxCouleurDelta(s.delta)}`}>
+                      {s.delta === null ? "" : `${s.delta >= 0 ? "+" : "−"}${Math.abs(s.delta).toLocaleString("fr-FR", { maximumFractionDigits: 1 })}`}
                     </span>
                   </div>
                 );
               })}
             </div>
 
-            {/* Ligne d'action : devis à relancer. */}
+            {/* Ligne d'action : devis récents à relancer. */}
             {risque && (
               <div
-                className={`mt-2 border-t border-[color:var(--cg-ink)]/10 pt-1.5 text-[10px] leading-tight ${nbRisque > 0 ? "text-[#C1683C]" : "text-[color:var(--cg-ink)]/35"}`}
-                title={`Devis sans CDC, BL ni facture depuis au moins ${TAUX_AGE_RISQUE_JOURS} jours, montant ≥ ${TAUX_MONTANT_RISQUE.toLocaleString("fr-FR")} €, émis depuis le 1er janvier`}
+                className="mt-2.5 flex items-baseline justify-between gap-2 border-t border-[color:var(--cg-ink)]/10 pt-2"
+                title={`Devis émis sur les ${TAUX_RISQUE_MOIS} derniers mois, sans CDC, BL ni facture depuis au moins ${TAUX_AGE_RISQUE_JOURS} jours, montant ≥ ${TAUX_MONTANT_RISQUE.toLocaleString("fr-FR")} €`}
               >
-                {nbRisque > 0 ? (
-                  <>
-                    ⚠ <span className="font-[var(--font-mono,monospace)] font-semibold">{nbRisque}</span> devis à relancer ·{" "}
-                    <span className="font-[var(--font-mono,monospace)] font-semibold">{formatMontant(risque.ca)}</span>
-                    <span className="text-[color:var(--cg-ink)]/40"> (&gt; {TAUX_AGE_RISQUE_JOURS} j, ≥ {TAUX_MONTANT_RISQUE / 1000} K€)</span>
-                  </>
-                ) : (
-                  <>Aucun devis à risque (&gt; {TAUX_AGE_RISQUE_JOURS} j, ≥ {TAUX_MONTANT_RISQUE / 1000} K€)</>
-                )}
+                <span className={`whitespace-nowrap text-[10px] font-semibold uppercase tracking-wide ${nbRisque > 0 ? "text-[#C1683C]" : "text-[color:var(--cg-ink)]/35"}`}>
+                  À relancer
+                </span>
+                <span className="whitespace-nowrap font-[var(--font-mono,monospace)] text-xs">
+                  {nbRisque > 0 ? (
+                    <>
+                      <span className="font-semibold text-[#C1683C]">{nbRisque}</span>
+                      <span className="text-[color:var(--cg-ink)]/35"> · </span>
+                      <span className="font-semibold text-[color:var(--cg-ink)]/85">{formatMontant(risque.ca)}</span>
+                    </>
+                  ) : (
+                    <span className="text-[color:var(--cg-ink)]/35">aucun</span>
+                  )}
+                </span>
               </div>
             )}
           </>
