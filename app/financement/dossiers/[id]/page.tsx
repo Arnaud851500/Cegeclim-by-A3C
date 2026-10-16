@@ -15,8 +15,14 @@
 //   cee_maj_champs(source « saisie ») et déclenche le contrôle de cohérence.
 // * Contrôles de pièces : chaque passage numéroté, avec le contrôle remplacé.
 // * Suivi admin CEGECLIM : synchronisation SAGE (cee_sync_sage).
+//   16/10/2026 soir : sans n° devis / commande CEGECLIM, rapprochement
+//   automatique sur la référence chantier SAGE ↔ nom du bénéficiaire / du
+//   chantier (fenêtre ± 6 mois autour du devis pro). Un seul parcours trouvé :
+//   rattachement « auto » ; plusieurs : fenêtre de choix (rattachement
+//   « manuel » via p_cle). Synchro lancée d'office à l'ouverture d'un dossier
+//   jamais synchronisé.
 
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useParams, useRouter } from 'next/navigation'
 import { supabase } from '@/lib/supabaseClient'
 import { useAccess } from '@/components/AccessContext'
@@ -59,6 +65,8 @@ type Dossier = Record<string, unknown> & {
   offre_aides: string | null
   mention_cee_sage: boolean | null
   sage_synchro_le: string | null
+  appairage_mode: string | null
+  appairage_confiance: number | null
   cree_le: string
   cree_par: string | null
   modifie_le: string
@@ -99,6 +107,40 @@ type Controle = {
   valeurs: Record<string, string>
   controle_le: string
   controle_par: string | null
+}
+
+// Parcours SAGE candidat renvoyé par cee_sync_sage quand plusieurs correspondent
+type CandidatSage = {
+  cle: string
+  reference: string | null
+  date_debut: string | null
+  date_fin: string | null
+  etape: string
+  ro: boolean | null
+  cee_premium: boolean | null
+  devis: string | null
+  cdc: string | null
+  bl: string | null
+  factures: string | null
+  ht: number | null
+  score: number
+}
+
+type SyncResultat = {
+  ok: boolean
+  message?: string
+  mode?: 'auto' | 'manuel'
+  confiance?: number
+  parcours?: string
+  candidats?: CandidatSage[]
+}
+
+const ETAPE_PARCOURS_LABEL: Record<string, string> = {
+  devis: 'Devis',
+  cdc: 'Commandé',
+  pl: 'En préparation',
+  bl: 'Livré',
+  facture: 'Facturé',
 }
 
 const ETAT_OPTIONS = [
@@ -168,6 +210,8 @@ export default function FinancementDossierPage() {
   const [ecartOuvert, setEcartOuvert] = useState<{ champ: string; libelle: string; commentaire: string; busy: boolean; erreur: string } | null>(null)
 
   const [syncBusy, setSyncBusy] = useState(false)
+  const [candidats, setCandidats] = useState<CandidatSage[] | null>(null)
+  const syncAutoLancee = useRef(false)
   const [statutDetail, setStatutDetail] = useState<string | null>(null)
 
   const charger = useCallback(async () => {
@@ -365,19 +409,45 @@ export default function FinancementDossierPage() {
     await charger()
   }
 
-  async function synchroniserSage() {
-    if (!dossier) return
-    setSyncBusy(true)
-    const { data, error } = await supabase.rpc('cee_sync_sage', { p_dossier: dossier.id })
-    setSyncBusy(false)
-    if (error) {
-      setToast({ tone: 'error', text: `Synchronisation SAGE impossible : ${error.message}` })
-      return
-    }
-    const res = data as { ok: boolean; message?: string }
-    setToast(res.ok ? { tone: 'success', text: 'Données SAGE mises à jour (commande, BL, facture, CEE Premium, échéance).' } : { tone: 'error', text: res.message || 'Aucune donnée SAGE trouvée.' })
-    await charger()
-  }
+  // cle : parcours choisi dans la fenêtre des candidats (rattachement manuel)
+  // silencieux : synchro lancée d'office à l'ouverture, sans message d'échec
+  const synchroniserSage = useCallback(
+    async (cle?: string, silencieux = false) => {
+      if (!dossierId) return
+      setSyncBusy(true)
+      const { data, error } = await supabase.rpc('cee_sync_sage', cle ? { p_dossier: dossierId, p_cle: cle } : { p_dossier: dossierId })
+      setSyncBusy(false)
+      if (error) {
+        if (!silencieux) setToast({ tone: 'error', text: `Synchronisation SAGE impossible : ${error.message}` })
+        return
+      }
+      const res = data as SyncResultat
+      if (res.ok) {
+        setCandidats(null)
+        setToast({
+          tone: 'success',
+          text:
+            res.mode === 'auto'
+              ? `Parcours SAGE « ${res.parcours || '—'} » rattaché automatiquement (référence chantier). Devis, commande, BL, facture et échéance mis à jour.`
+              : 'Données SAGE mises à jour (devis, commande, BL, facture, CEE Premium, échéance).',
+        })
+      } else if (res.candidats && res.candidats.length > 1) {
+        setCandidats(res.candidats)
+      } else if (!silencieux) {
+        setToast({ tone: 'error', text: res.message || 'Aucune donnée SAGE trouvée.' })
+      }
+      await charger()
+    },
+    [dossierId, charger]
+  )
+
+  // Dossier jamais synchronisé, sans n° CEGECLIM : tentative de rapprochement à l'ouverture
+  useEffect(() => {
+    if (!dossier || syncAutoLancee.current) return
+    syncAutoLancee.current = true
+    const sansNumero = !valeurEnTexte(dossier.numero_devis) && !valeurEnTexte(dossier.numero_commande)
+    if (!dossier.sage_synchro_le && sansNumero && valeurEnTexte(dossier.numero_tiers)) void synchroniserSage(undefined, true)
+  }, [dossier, synchroniserSage])
 
   async function enregistrerSuivi() {
     if (!dossier) return
@@ -917,7 +987,16 @@ export default function FinancementDossierPage() {
         {/* Colonne latérale --------------------------------------------- */}
         <div className="space-y-5">
           <section className="rounded-2xl border border-[#E2DFD8] bg-white p-5">
-            <h2 className="text-sm font-bold uppercase tracking-wide text-slate-500">Suivi admin CEGECLIM</h2>
+            <div className="flex items-center justify-between gap-2">
+              <h2 className="text-sm font-bold uppercase tracking-wide text-slate-500">Suivi admin CEGECLIM</h2>
+              {dossier.appairage_mode && (
+                <Pastille
+                  label={dossier.appairage_mode === 'auto' ? `Rattaché auto${dossier.appairage_confiance ? ` · ${Math.round(Number(dossier.appairage_confiance) * 100)} %` : ''}` : 'Rattaché manuellement'}
+                  bg={dossier.appairage_mode === 'auto' ? '#EEF5FA' : '#EAF3E8'}
+                  fg={dossier.appairage_mode === 'auto' ? '#2E5E80' : '#2E6B3E'}
+                />
+              )}
+            </div>
             <div className="mt-3 space-y-2 text-sm">
               <Ligne label="N° devis CEGECLIM" value={valeurEnTexte(dossier.numero_devis) || '—'} />
               <Ligne label="Commande" value={valeurEnTexte(dossier.numero_commande) || '—'} />
@@ -935,7 +1014,8 @@ export default function FinancementDossierPage() {
               {syncBusy ? 'Lecture de SAGE…' : 'Synchroniser avec SAGE'}
             </button>
             <div className="mt-2 text-xs text-slate-400">
-              {dossier.sage_synchro_le ? `Dernière synchronisation : ${formatDateHeure(dossier.sage_synchro_le)}` : 'Jamais synchronisé'} · rapprochement par n° pro + n° devis ou commande
+              {dossier.sage_synchro_le ? `Dernière synchronisation : ${formatDateHeure(dossier.sage_synchro_le)}` : 'Jamais synchronisé'} · rapprochement par n° pro + n° devis ou commande CEGECLIM, à défaut par
+              la référence chantier SAGE ↔ nom du bénéficiaire
             </div>
           </section>
 
@@ -1087,6 +1167,53 @@ export default function FinancementDossierPage() {
               </button>
             </div>
           </div>
+        </Modale>
+      )}
+
+      {/* Choix du parcours SAGE quand plusieurs correspondent -------------- */}
+      {candidats && (
+        <Modale titre="Rattacher le dossier à un parcours SAGE" onClose={() => setCandidats(null)}>
+          <p className="text-sm text-slate-600">
+            Plusieurs parcours de vente de {dossier.pro_raison_sociale || 'ce client'} portent une référence chantier proche de « {dossier.beneficiaire_nom || dossier.chantier_nom} ». Choisissez celui qui
+            correspond à ce dossier : devis, commande, BL et facture seront repris de SAGE.
+          </p>
+          <div className="mt-4 space-y-2">
+            {candidats.map((c) => (
+              <div key={c.cle} className="rounded-xl border border-[#E7E4DD] p-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <span className="text-sm font-semibold text-slate-900">{c.reference || '—'}</span>
+                    <span className="ml-2 text-xs text-slate-500">
+                      {formatDateFr(c.date_debut)} → {formatDateFr(c.date_fin)}
+                    </span>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <Pastille label={ETAPE_PARCOURS_LABEL[c.etape] || c.etape} bg="#EAF3E8" fg="#2E6B3E" />
+                    {c.ro && <Pastille label="R/O" bg="#F1ECF8" fg="#5E4390" />}
+                    {c.cee_premium && <Pastille label="CEE Premium" bg="#EEF5FA" fg="#2E5E80" />}
+                  </div>
+                </div>
+                <div className="mt-1.5 grid grid-cols-2 gap-x-4 gap-y-0.5 text-xs text-slate-600 sm:grid-cols-4">
+                  <span>Devis : {c.devis || '—'}</span>
+                  <span>CDC : {c.cdc || '—'}</span>
+                  <span>BL : {c.bl || '—'}</span>
+                  <span>Facture : {c.factures || '—'}</span>
+                </div>
+                <div className="mt-2 flex items-center justify-between gap-2">
+                  <span className="text-xs text-slate-400">{c.ht !== null && c.ht !== undefined ? `${Number(c.ht).toLocaleString('fr-FR', { maximumFractionDigits: 0 })} € HT` : ''}</span>
+                  <button
+                    type="button"
+                    disabled={syncBusy}
+                    onClick={() => void synchroniserSage(c.cle)}
+                    className="rounded-lg bg-[#111820] px-3 py-1.5 text-xs font-semibold text-white disabled:opacity-40"
+                  >
+                    Rattacher ce parcours
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+          <p className="mt-3 text-xs text-slate-400">Aucun ne convient ? Saisissez le n° de devis ou de commande CEGECLIM dans « Suivi admin CEGECLIM » puis relancez la synchronisation.</p>
         </Modale>
       )}
 
