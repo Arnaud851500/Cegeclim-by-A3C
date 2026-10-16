@@ -177,6 +177,8 @@ export type Actualite = {
   bandeau_jusquau: string | null
   epingle: boolean
   cible_agences: string[]
+  /** Équipes destinataires (todo_teams.id). Vide = pas de restriction par équipe. */
+  cible_equipes: string[]
   plateformes: Plateforme[]
   auteur_email: string
   auteur_nom: string | null
@@ -291,6 +293,7 @@ function normalizeRow(row: Record<string, unknown>): Actualite {
     ...(row as unknown as Actualite),
     contenu: normalizeBlocks(row.contenu),
     cible_agences: Array.isArray(row.cible_agences) ? (row.cible_agences as string[]) : [],
+    cible_equipes: Array.isArray(row.cible_equipes) ? (row.cible_equipes as string[]) : [],
     plateformes:
       Array.isArray(row.plateformes) && row.plateformes.length > 0
         ? (row.plateformes as Plateforme[])
@@ -322,6 +325,31 @@ export async function fetchFlux(
   if (error) throw error
   const rows = ((data || []) as Record<string, unknown>[]).map(normalizeRow)
   return plateforme ? rows.filter((row) => row.plateformes.includes(plateforme)) : rows
+}
+
+export type EquipeActualite = { id: string; name: string; color: string }
+
+/** Équipes actives (paramétrage des tâches) utilisables comme destinataires. */
+export async function fetchEquipesActualite(): Promise<EquipeActualite[]> {
+  const { data, error } = await supabase
+    .from('todo_teams')
+    .select('id, name, color, is_active, sort_order')
+    .order('sort_order')
+  if (error) return []
+  return ((data || []) as { id: string; name: string; color: string | null; is_active: boolean | null }[])
+    .filter((t) => t.is_active !== false)
+    .map((t) => ({ id: t.id, name: t.name, color: t.color || '#2C6F88' }))
+}
+
+/** Libellé des destinataires : « Tous », « Agences : … », « Équipes : … ». */
+export function libelleDestinataires(actu: Pick<Actualite, 'cible_agences' | 'cible_equipes'>, equipes: EquipeActualite[]) {
+  const parts: string[] = []
+  if (actu.cible_equipes.length > 0) {
+    const noms = actu.cible_equipes.map((id) => equipes.find((e) => e.id === id)?.name || 'équipe supprimée')
+    parts.push(`équipes : ${noms.join(', ')}`)
+  }
+  if (actu.cible_agences.length > 0) parts.push(`agences : ${actu.cible_agences.join(', ')}`)
+  return parts.join(' · ')
 }
 
 export function libellePlateformes(plateformes: Plateforme[]) {

@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation'
 import Script from 'next/script'
 import { supabase } from '@/lib/supabaseClient'
 import { useAccess } from '@/components/AccessContext'
+import { afficherValeur, valeurEnTexte, valeursEgales, VERDICT_STYLE, type ChampType } from '@/lib/financementCee'
 
 // Relecteur de pièces CEE : reprend l'outil autonome (Artifact HTML
 // "Relecteur de pièces CEE") sous forme de page intégrée à l'application,
@@ -35,12 +36,25 @@ import { useAccess } from '@/components/AccessContext'
 // glisser-déposer, sans perte de focus, n'était pas touché). Désormais, une
 // fois l'accès confirmé, la page reste affichée pendant ces rechargements, et
 // la zone de dépôt est un <label> natif relié au champ fichier.
+//
+// Parcours DRAPO (16/10/2026) :
+// * nouveau type de pièce « Cadre de contribution » ;
+// * la relecture IA relève aussi les caractéristiques du dossier présentes sur
+//   la pièce (registre cee_champs) : elles sont affichées, modifiables, et
+//   comparées aux valeurs du dossier avant enregistrement ; à l'enregistrement
+//   elles sont tracées comme source « <type de pièce> » (RPC cee_maj_champs),
+//   ce qui alimente le contrôle de cohérence de la fiche dossier ;
+// * chaque contrôle est numéroté par type de pièce (trigger en base) : un
+//   nouveau contrôle d'une pièce corrigée remplace le précédent, l'historique
+//   des contrôles précédents du dossier est affiché ;
+// * ouverture directe depuis la fiche : ?dossier=<id>&type=<type de pièce>.
 
-type TypePieceId = 'avis_imposition' | 'note_dimensionnement' | 'devis' | 'facture'
+type TypePieceId = 'cadre_contribution' | 'avis_imposition' | 'note_dimensionnement' | 'devis' | 'facture'
 
 type TypeMeta = { id: TypePieceId; label: string; code: string; art: string; the: string; of: string }
 
 const TYPES: TypeMeta[] = [
+  { id: 'cadre_contribution', label: 'Cadre de contribution', code: 'CC', art: 'un cadre de contribution', the: 'Le cadre de contribution', of: 'du cadre de contribution' },
   { id: 'avis_imposition', label: "Avis d'imposition", code: 'AVIS', art: "un avis d'imposition", the: "L'avis d'imposition", of: "de l'avis d'imposition" },
   { id: 'note_dimensionnement', label: 'Note de dimensionnement', code: 'NOTE', art: 'une note de dimensionnement', the: 'La note de dimensionnement', of: 'de la note de dimensionnement' },
   { id: 'devis', label: 'Devis', code: 'DEVIS', art: 'un devis', the: 'Le devis', of: 'du devis' },
@@ -49,22 +63,43 @@ const TYPES: TypeMeta[] = [
 
 // Types de pièce qui ne peuvent être contrôlés que sur un dossier existant
 // (pas de création de dossier proposée depuis le contrôle).
-const DOSSIER_EXISTANT_OBLIGATOIRE: ReadonlySet<TypePieceId> = new Set<TypePieceId>(['facture'])
+const DOSSIER_EXISTANT_OBLIGATOIRE: ReadonlySet<TypePieceId> = new Set<TypePieceId>(['facture', 'cadre_contribution'])
 
 const STATUS_LABEL: Record<'c' | 'nc' | 'na', string> = { c: 'Conforme', nc: 'Non conforme', na: 'N/A' }
 
 // Étape du dossier à laquelle se rattache chaque type de pièce, utilisée si
 // aucune ligne de cee_pieces_types ne correspond (voir pieceTypeFor).
 const ETAPE_PAR_TYPE: Record<TypePieceId, string> = {
-  avis_imposition: 'pieces_obligatoires',
-  note_dimensionnement: 'note_dimensionnement',
-  devis: 'demande_deposee',
-  facture: 'preuves_chantier',
+  cadre_contribution: 'drapo_1',
+  avis_imposition: 'drapo_1',
+  note_dimensionnement: 'drapo_1',
+  devis: 'drapo_1',
+  facture: 'drapo_3',
+}
+
+// Pièce du dossier (cee_pieces_types) mise à jour par le contrôle. Le devis
+// contrôlé avant la validation avant travaux (statut 6) est le devis avant
+// travaux ; ensuite, c'est le devis signé.
+const STATUTS_APRES_VALIDATION = new Set(['s06', 's07', 's08', 's09', 's10', 's11', 's12', 's13', 's14', 's15'])
+function codePiecePour(t: TypePieceId, statutCee: string | null | undefined): string {
+  switch (t) {
+    case 'cadre_contribution':
+      return 'cadre_contribution'
+    case 'avis_imposition':
+      return 'justificatif_revenus'
+    case 'note_dimensionnement':
+      return 'note_dimensionnement'
+    case 'devis':
+      return statutCee && STATUTS_APRES_VALIDATION.has(statutCee) ? 'devis_signe' : 'devis_initial'
+    case 'facture':
+      return 'facture_acquittee'
+  }
 }
 
 // Mots-clés pour retrouver la ligne de cee_pieces_types (code ou libellé)
 // correspondant au type de pièce contrôlé.
 const MOTS_CLES_PIECE: Record<TypePieceId, string[][]> = {
+  cadre_contribution: [['cadre', 'contribution']],
   avis_imposition: [['avis', 'imposition'], ['avis']],
   note_dimensionnement: [['dimensionnement']],
   devis: [['devis']],
@@ -88,6 +123,18 @@ const MENTION_CEE_DRAPO =
 // ne deviennent la checklist "officielle" que si un humain clique sur
 // Enregistrer.
 const DEFAULT_CHECKLISTS: Record<TypePieceId, { items: ChecklistItem[]; exempleMail: string }> = {
+  cadre_contribution: {
+    items: [
+      { id: 'cc_delegataire', label: 'Délégataire identifié', hint: 'Raison sociale du délégataire (ex. DRAPO) et son SIREN.' },
+      { id: 'cc_professionnel', label: 'Professionnel identifié', hint: "Raison sociale et SIRET de l'installateur." },
+      { id: 'cc_beneficiaire', label: 'Bénéficiaire et adresse', hint: "Nom du bénéficiaire et adresse identiques à ceux du devis et de l'avis d'imposition." },
+      { id: 'cc_date', label: 'Date du cadre de contribution', hint: 'Lisible : le devis doit être signé au plus tard 14 jours après cette date.' },
+      { id: 'cc_operation', label: "Fiche d'opération et coup de pouce", hint: 'Ex. BAR-TH-171, mention « Coup de pouce chauffage » le cas échéant.' },
+      { id: 'cc_prime', label: 'Montant de la prime CEE bénéficiaire', hint: 'Montant en euros, cohérent avec la catégorie de revenus du ménage.' },
+      { id: 'cc_signature', label: 'Signature du professionnel', hint: '' },
+    ],
+    exempleMail: '',
+  },
   avis_imposition: {
     items: [
       { id: 'identite_foyer', label: 'Identité et adresse du foyer fiscal', hint: 'Doit correspondre au bénéficiaire du dossier (nom, prénom, adresse).' },
@@ -279,7 +326,19 @@ type ItemResult = { status?: 'c' | 'nc' | 'na' | null; value?: string; comment?:
 type PageImage = { blob: Blob; url: string }
 type FileEntry = { uid: string; name: string; status: 'loading' | 'ready' | 'error'; error?: string; text?: string; pages: PageImage[] }
 type DocCheck = { ok: boolean; remark: string } | null
-type SessionState = { files: FileEntry[]; results: Record<string, ItemResult>; docCheck: DocCheck; mail: string; mailBusy: boolean }
+type SessionState = {
+  files: FileEntry[]
+  results: Record<string, ItemResult>
+  docCheck: DocCheck
+  mail: string
+  mailBusy: boolean
+  // Caractéristiques du dossier relevées sur la pièce (code cee_champs → valeur)
+  champs: Record<string, string>
+}
+
+type ChampLite = { code: string; libelle: string; groupe: string; type: ChampType; options: string[]; sources: string[]; ordre: number }
+type StatutLite = { code: string; numero: number | null; libelle: string }
+type ControleLite = { id: string; passage: number | null; verdict: string; controle_le: string; controle_par: string | null; nb_non_conformes: number }
 
 type DossierLite = {
   id: string
@@ -289,6 +348,7 @@ type DossierLite = {
   beneficiaire_nom: string | null
   chantier_nom: string
   statut: string
+  statut_cee: string | null
   etat: string
 }
 type EtapeLite = { code: string; ordre: number; libelle: string }
@@ -297,7 +357,7 @@ type LinkState = { dossierId: string | null; mode: 'auto' | 'manuel' | null; can
 type SaveState = { busy: boolean; note: string; tone: 'info' | 'err'; savedDossierId: string | null }
 
 function emptySession(): SessionState {
-  return { files: [], results: {}, docCheck: null, mail: '', mailBusy: false }
+  return { files: [], results: {}, docCheck: null, mail: '', mailBusy: false, champs: {} }
 }
 function emptyLink(): LinkState {
   return { dossierId: null, mode: null, candidats: [] }
@@ -379,6 +439,16 @@ async function waitPdfJs(): Promise<any> {
   throw new Error('Lecteur PDF indisponible (rechargez la page).')
 }
 
+function parType<T>(fabrique: () => T): Record<TypePieceId, T> {
+  return {
+    cadre_contribution: fabrique(),
+    avis_imposition: fabrique(),
+    note_dimensionnement: fabrique(),
+    devis: fabrique(),
+    facture: fabrique(),
+  }
+}
+
 export default function ControlePiecesCeePage() {
   const router = useRouter()
   const { rights, email, loading: accessLoading } = useAccess()
@@ -398,12 +468,7 @@ export default function ControlePiecesCeePage() {
   const [current, setCurrent] = useState<TypePieceId>('note_dimensionnement')
   const [checklists, setChecklists] = useState<Partial<Record<TypePieceId, { items: ChecklistItem[]; exempleMail: string }>>>({})
   const [checklistsError, setChecklistsError] = useState(false)
-  const [sessions, setSessions] = useState<Record<TypePieceId, SessionState>>(() => ({
-    avis_imposition: emptySession(),
-    note_dimensionnement: emptySession(),
-    devis: emptySession(),
-    facture: emptySession(),
-  }))
+  const [sessions, setSessions] = useState<Record<TypePieceId, SessionState>>(() => parType(emptySession))
   const [benef, setBenef] = useState('')
   const [benefAuto, setBenefAuto] = useState(false)
   const [benefBusy, setBenefBusy] = useState(false)
@@ -426,18 +491,16 @@ export default function ControlePiecesCeePage() {
   const [dossiersError, setDossiersError] = useState('')
   const [etapes, setEtapes] = useState<EtapeLite[]>([])
   const [pieceTypes, setPieceTypes] = useState<PieceTypeLite[]>([])
-  const [links, setLinks] = useState<Record<TypePieceId, LinkState>>(() => ({
-    avis_imposition: emptyLink(),
-    note_dimensionnement: emptyLink(),
-    devis: emptyLink(),
-    facture: emptyLink(),
-  }))
-  const [saves, setSaves] = useState<Record<TypePieceId, SaveState>>(() => ({
-    avis_imposition: emptySave(),
-    note_dimensionnement: emptySave(),
-    devis: emptySave(),
-    facture: emptySave(),
-  }))
+  const [links, setLinks] = useState<Record<TypePieceId, LinkState>>(() => parType(emptyLink))
+  const [saves, setSaves] = useState<Record<TypePieceId, SaveState>>(() => parType(emptySave))
+
+  // Caractéristiques du dossier (registre cee_champs), statuts CEGECLIM,
+  // valeurs actuelles du dossier rattaché et contrôles déjà enregistrés.
+  const [registre, setRegistre] = useState<ChampLite[]>([])
+  const [statutsCee, setStatutsCee] = useState<StatutLite[]>([])
+  const [valeursDossier, setValeursDossier] = useState<Record<string, string>>({})
+  const [controlesPrecedents, setControlesPrecedents] = useState<ControleLite[]>([])
+  const dossierDemandeRef = useRef<string | null>(null)
 
   const benefKeyRef = useRef<Partial<Record<TypePieceId, string>>>({})
   const benefRef = useRef('')
@@ -536,10 +599,10 @@ export default function ControlePiecesCeePage() {
     const [{ data: dData, error: dErr }, { data: eData }, { data: pData }] = await Promise.all([
       supabase
         .from('cee_dossiers')
-        .select('id, reference, pro_raison_sociale, numero_tiers, beneficiaire_nom, chantier_nom, statut, etat')
+        .select('id, reference, pro_raison_sociale, numero_tiers, beneficiaire_nom, chantier_nom, statut, statut_cee, etat')
         .eq('cloture', false)
         .order('modifie_le', { ascending: false }),
-      supabase.from('cee_etapes').select('code, ordre, libelle').order('ordre', { ascending: true }),
+      supabase.from('cee_etapes').select('code, ordre, libelle').eq('actif', true).order('ordre', { ascending: true }),
       supabase.from('cee_pieces_types').select('code, libelle, etape_code'),
     ])
     if (dErr) setDossiersError(dErr.message)
@@ -551,6 +614,83 @@ export default function ControlePiecesCeePage() {
   useEffect(() => {
     void chargerDossiers()
   }, [])
+
+  useEffect(() => {
+    let annule = false
+    async function load() {
+      const [{ data: c }, { data: st }] = await Promise.all([
+        supabase.from('cee_champs').select('code, libelle, groupe, type, options, sources, ordre').order('ordre', { ascending: true }),
+        supabase.from('cee_statuts').select('code, numero, libelle').order('ordre', { ascending: true }),
+      ])
+      if (annule) return
+      setRegistre(((c || []) as ChampLite[]).map((x) => ({ ...x, options: x.options || [], sources: x.sources || [] })))
+      setStatutsCee((st || []) as StatutLite[])
+    }
+    void load()
+    return () => {
+      annule = true
+    }
+  }, [])
+
+  // Ouverture depuis la fiche dossier : ?dossier=<id>&type=<type de pièce>
+  useEffect(() => {
+    const sp = new URLSearchParams(window.location.search)
+    const t = sp.get('type')
+    /* eslint-disable react-hooks/set-state-in-effect -- lecture unique de l'URL au montage */
+    if (t && TYPES.some((x) => x.id === t)) setCurrent(t as TypePieceId)
+    /* eslint-enable react-hooks/set-state-in-effect */
+    dossierDemandeRef.current = sp.get('dossier')
+  }, [])
+  useEffect(() => {
+    const id = dossierDemandeRef.current
+    if (!id || !dossiers.some((d) => d.id === id)) return
+    dossierDemandeRef.current = null
+    const d = dossiers.find((x) => x.id === id)!
+    setLinks((prev) => {
+      const next = { ...prev }
+      for (const t of TYPES) next[t.id] = { dossierId: id, mode: 'manuel', candidats: [] }
+      return next
+    })
+    if (d.beneficiaire_nom && !benefRef.current.trim()) setBenef(d.beneficiaire_nom)
+  }, [dossiers])
+
+  function champsDuType(t: TypePieceId): ChampLite[] {
+    return registre.filter((c) => c.sources.includes(t))
+  }
+
+  // Valeurs actuelles du dossier rattaché et contrôles déjà enregistrés pour
+  // ce type de pièce (recontrôle d'une pièce corrigée).
+  const dossierLieId = links[current]?.dossierId || null
+  useEffect(() => {
+    let annule = false
+    async function load() {
+      if (!dossierLieId) {
+        setValeursDossier({})
+        setControlesPrecedents([])
+        return
+      }
+      const codes = registre.filter((c) => c.sources.includes(current)).map((c) => c.code)
+      const [{ data: d }, { data: c }] = await Promise.all([
+        codes.length ? supabase.from('cee_dossiers').select(codes.join(',')).eq('id', dossierLieId).maybeSingle() : Promise.resolve({ data: null }),
+        supabase
+          .from('cee_controles')
+          .select('id, passage, verdict, controle_le, controle_par, nb_non_conformes')
+          .eq('dossier_id', dossierLieId)
+          .eq('type_piece', current)
+          .order('controle_le', { ascending: false }),
+      ])
+      if (annule) return
+      const vals: Record<string, string> = {}
+      const row = (d || {}) as unknown as Record<string, unknown>
+      for (const code of codes) vals[code] = valeurEnTexte(row[code])
+      setValeursDossier(vals)
+      setControlesPrecedents((c || []) as ControleLite[])
+    }
+    void load()
+    return () => {
+      annule = true
+    }
+  }, [dossierLieId, current, registre, saves[current]?.savedDossierId])
 
   function etapeLibelle(code: string): string {
     return etapes.find((e) => e.code === code)?.libelle || code
@@ -566,7 +706,13 @@ export default function ControlePiecesCeePage() {
     return undefined
   }
   function etapeFor(t: TypePieceId): string {
-    return pieceTypeFor(t)?.etape_code || ETAPE_PAR_TYPE[t]
+    const code = codePiecePour(t, null)
+    return pieceTypes.find((p) => p.code === code)?.etape_code || pieceTypeFor(t)?.etape_code || ETAPE_PAR_TYPE[t]
+  }
+  function statutLibelle(code: string | null | undefined): string {
+    const s = statutsCee.find((x) => x.code === code)
+    if (!s) return code || ''
+    return s.numero !== null ? `${s.numero} · ${s.libelle}` : s.libelle
   }
 
   // Appairage automatique : dès qu'un nom de bénéficiaire est connu (lu ou
@@ -745,7 +891,15 @@ export default function ControlePiecesCeePage() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         signal: abortRef.current.signal,
-        body: JSON.stringify({ email, typePiece: t, beneficiaire: benef.trim(), items: list, text, images }),
+        body: JSON.stringify({
+          email,
+          typePiece: t,
+          beneficiaire: benef.trim(),
+          items: list,
+          text,
+          images,
+          champs: champsDuType(t).map((c) => ({ code: c.code, libelle: c.libelle, type: c.type, options: c.options })),
+        }),
       })
       const out = await res.json().catch(() => null)
       if (!res.ok) throw new Error(errCopy(out?.code, out?.error))
@@ -758,7 +912,18 @@ export default function ControlePiecesCeePage() {
         results[p.id] = { status: p.statut || null, value: p.valeur || '', comment: p.commentaire || '', origin: 'claude' }
         n++
       }
-      updateSession(t, (prev) => ({ ...prev, results, docCheck: { ok: out.document_correspond !== false, remark: out.remarque_document || '' }, mail: '' }))
+      const champsLus: Record<string, string> = {}
+      for (const [k, v] of Object.entries((out.champs || {}) as Record<string, unknown>)) {
+        const val = valeurEnTexte(v).trim()
+        if (val) champsLus[k] = val
+      }
+      updateSession(t, (prev) => ({
+        ...prev,
+        results,
+        champs: { ...prev.champs, ...champsLus },
+        docCheck: { ok: out.document_correspond !== false, remark: out.remarque_document || '' },
+        mail: '',
+      }))
       updateSave(t, () => emptySave())
 
       const aiBenef = String(out.beneficiaire || '').trim()
@@ -769,7 +934,7 @@ export default function ControlePiecesCeePage() {
 
       setRunNote(
         n
-          ? `Relecture terminée : ${n} point${n > 1 ? 's' : ''} pré-rempli${n > 1 ? 's' : ''}. Vérifiez et corrigez si besoin.`
+          ? `Relecture terminée : ${n} point${n > 1 ? 's' : ''} pré-rempli${n > 1 ? 's' : ''}${Object.keys(champsLus).length ? `, ${Object.keys(champsLus).length} caractéristique(s) relevée(s)` : ''}. Vérifiez et corrigez si besoin.`
           : "L'IA n'a renvoyé aucun point exploitable. Réessayez ou remplissez à la main."
       )
       setRunNoteTone(n ? 'info' : 'warn')
@@ -898,11 +1063,19 @@ export default function ControlePiecesCeePage() {
       origine: r[it.id]?.origin || null,
     }))
     const pointsNc = nc.map((it) => `${it.label}${r[it.id]?.comment ? ` — ${r[it.id]?.comment}` : ''}`)
-    const pieceType = pieceTypeFor(t)
+    const dossierCible = dossiers.find((x) => x.id === dossierId)
+    const codePiece = codePiecePour(t, dossierCible?.statut_cee)
+    const pieceType = pieceTypes.find((p) => p.code === codePiece) || pieceTypeFor(t)
+    // Caractéristiques relevées sur la pièce (uniquement celles du registre pour ce type)
+    const codesType = new Set(champsDuType(t).map((c) => c.code))
+    const valeursReleves: Record<string, string> = {}
+    for (const [k, v] of Object.entries(s.champs)) if (codesType.has(k) && v.trim()) valeursReleves[k] = v.trim()
 
     try {
-      // 1. Trace du contrôle
-      const { error: ctrlErr } = await supabase.from('cee_controles').insert({
+      // 1. Trace du contrôle (numéro de passage et contrôle remplacé posés en base)
+      const { data: ctrl, error: ctrlErr } = await supabase
+        .from('cee_controles')
+        .insert({
         dossier_id: dossierId,
         type_piece: t,
         etape_code: etapeFor(t),
@@ -920,8 +1093,32 @@ export default function ControlePiecesCeePage() {
         appairage_mode: link.mode,
         controle_le: now,
         controle_par: email || null,
-      })
-      if (ctrlErr) throw new Error(`cee_controles : ${ctrlErr.message}`)
+        valeurs: valeursReleves,
+        })
+        .select('id, passage, controle_precedent_id')
+        .single()
+      if (ctrlErr || !ctrl) throw new Error(`cee_controles : ${ctrlErr?.message || 'insertion impossible'}`)
+      const controle = ctrl as { id: string; passage: number | null; controle_precedent_id: string | null }
+
+      // 1 bis. Caractéristiques relevées → source « type de pièce » + contrôle de cohérence
+      let noteValeurs = ''
+      if (Object.keys(valeursReleves).length) {
+        const { error: majErr } = await supabase.rpc('cee_maj_champs', {
+          p_dossier: dossierId,
+          p_valeurs: valeursReleves,
+          p_source: t,
+          p_controle: controle.id,
+        })
+        if (majErr) noteValeurs = ` Caractéristiques non enregistrées : ${majErr.message}.`
+        else {
+          const ecarts = Object.entries(valeursReleves).filter(([k, v]) => {
+            const c = registre.find((x) => x.code === k)
+            const actuelle = valeursDossier[k] || ''
+            return c && actuelle && !valeursEgales(c.type, actuelle, v)
+          }).length
+          noteValeurs = ` ${Object.keys(valeursReleves).length} caractéristique(s) relevée(s)${ecarts ? `, dont ${ecarts} en écart avec le dossier (à traiter sur la fiche)` : ''}.`
+        }
+      }
 
       // 2. Statut de la pièce dans le dossier
       if (pieceType) {
@@ -956,7 +1153,7 @@ export default function ControlePiecesCeePage() {
         const { error: noteErr } = await supabase.from('cee_notes_dimensionnement').insert({
           dossier_id: dossierId,
           contenu,
-          verdict: verdict === 'non_conforme' ? 'ko' : verdict === 'conforme' ? 'ok' : 'incomplet',
+          verdict,
           points_ko: pointsNc,
           mail_correction: s.mail || null,
           fournisseur_ia: 'openai',
@@ -982,17 +1179,19 @@ export default function ControlePiecesCeePage() {
         .eq('id', dossierId)
       if (updErr) throw new Error(`cee_dossiers : ${updErr.message}`)
 
-      const ref = dossiers.find((x) => x.id === dossierId)?.reference || 'le dossier'
+      const ref = dossierCible?.reference || 'le dossier'
+      const precedent = controle.controle_precedent_id ? controlesPrecedents.find((c) => c.id === controle.controle_precedent_id) : null
+      const numero = `Contrôle n°${controle.passage ?? '?'}${precedent ? ` (remplace le n°${precedent.passage ?? '?'} du ${new Date(precedent.controle_le).toLocaleDateString('fr-FR')})` : ''}`
       updateSave(t, () => ({
         busy: false,
         tone: 'info',
         savedDossierId: dossierId,
         note:
-          verdict === 'conforme'
-            ? `Contrôle enregistré sur ${ref} : pièce validée.`
+          (verdict === 'conforme'
+            ? `${numero} enregistré sur ${ref} : pièce validée.`
             : verdict === 'non_conforme'
-            ? `Contrôle enregistré sur ${ref} : ${pointsNc.length} point${pointsNc.length > 1 ? 's' : ''} bloquant${pointsNc.length > 1 ? 's' : ''}, dossier passé « À corriger ».`
-            : `Contrôle enregistré sur ${ref} (incomplet : ${counts.todo} point${counts.todo > 1 ? 's' : ''} sans statut).`,
+            ? `${numero} enregistré sur ${ref} : ${pointsNc.length} point${pointsNc.length > 1 ? 's' : ''} bloquant${pointsNc.length > 1 ? 's' : ''}, dossier passé « À corriger ».`
+            : `${numero} enregistré sur ${ref} (incomplet : ${counts.todo} point${counts.todo > 1 ? 's' : ''} sans statut).`) + noteValeurs,
       }))
       toast('Contrôle enregistré')
       void chargerDossiers()
@@ -1040,7 +1239,7 @@ export default function ControlePiecesCeePage() {
   const dossierObligatoire = DOSSIER_EXISTANT_OBLIGATOIRE.has(current)
 
   function optionLabel(d: DossierLite): string {
-    return `${d.reference} · ${d.pro_raison_sociale}${d.numero_tiers ? ` (${d.numero_tiers})` : ''} · ${etapeLibelle(d.statut)} · ${ETAT_LABEL[d.etat] || d.etat}`
+    return `${d.reference} · ${d.pro_raison_sociale}${d.numero_tiers ? ` (${d.numero_tiers})` : ''} · ${d.statut_cee ? statutLibelle(d.statut_cee) : etapeLibelle(d.statut)} · ${ETAT_LABEL[d.etat] || d.etat}`
   }
 
   if (!accesAccorde) {
@@ -1087,7 +1286,7 @@ export default function ControlePiecesCeePage() {
       </header>
 
       <main className="mx-auto w-full max-w-[1760px] px-4 py-6 md:px-8">
-        <div className="grid grid-cols-2 gap-0 overflow-hidden rounded-2xl border border-[#E2DFD8] bg-white md:grid-cols-4">
+        <div className="grid grid-cols-2 gap-0 overflow-hidden rounded-2xl border border-[#E2DFD8] bg-white md:grid-cols-5">
           {TYPES.map((t) => {
             const active = t.id === current
             const n = items(t.id).length
@@ -1338,8 +1537,34 @@ export default function ControlePiecesCeePage() {
                       {dossierLie.numero_tiers ? ` · n° ${dossierLie.numero_tiers}` : ''}
                     </div>
                     <div>
-                      {dossierLie.beneficiaire_nom || dossierLie.chantier_nom} · {etapeLibelle(dossierLie.statut)} · {ETAT_LABEL[dossierLie.etat] || dossierLie.etat}
+                      {dossierLie.beneficiaire_nom || dossierLie.chantier_nom} · {etapeLibelle(dossierLie.statut)}
+                      {dossierLie.statut_cee ? ` · statut ${statutLibelle(dossierLie.statut_cee)}` : ''} · {ETAT_LABEL[dossierLie.etat] || dossierLie.etat}
                     </div>
+                    {controlesPrecedents.length > 0 && (
+                      <div className="mt-2 border-t border-[#E7E4DD] pt-2">
+                        <div className="font-medium text-slate-700">
+                          {controlesPrecedents.length} contrôle{controlesPrecedents.length > 1 ? 's' : ''} déjà enregistré{controlesPrecedents.length > 1 ? 's' : ''} pour cette pièce
+                          {saves[current].savedDossierId ? '' : ` — ce contrôle sera le n°${controlesPrecedents.length + 1}`}
+                        </div>
+                        <ul className="mt-1 space-y-0.5">
+                          {controlesPrecedents.slice(0, 4).map((c) => {
+                            const v = VERDICT_STYLE[c.verdict] || VERDICT_STYLE.incomplet
+                            return (
+                              <li key={c.id} className="flex flex-wrap items-center gap-1.5">
+                                <span>
+                                  n°{c.passage ?? '?'} · {new Date(c.controle_le).toLocaleDateString('fr-FR')}
+                                  {c.controle_par ? ` · ${c.controle_par}` : ''}
+                                </span>
+                                <span className="rounded-full px-1.5 py-px text-[10px] font-semibold" style={{ background: v.bg, color: v.fg }}>
+                                  {v.label}
+                                  {c.nb_non_conformes ? ` (${c.nb_non_conformes})` : ''}
+                                </span>
+                              </li>
+                            )
+                          })}
+                        </ul>
+                      </div>
+                    )}
                     {dossierLie.statut !== etapeCourante && (
                       <div className="mt-1 text-[#93600F]">Ce dossier n&apos;est pas à l&apos;étape « {etapeLibelle(etapeCourante)} » : vérifiez qu&apos;il s&apos;agit du bon.</div>
                     )}
@@ -1349,7 +1574,7 @@ export default function ControlePiecesCeePage() {
                     {link.candidats.length > 1
                       ? `${link.candidats.length} dossiers correspondent à ce nom : choisissez-le dans la liste.`
                       : dossierObligatoire
-                      ? "Aucun dossier ouvert ne correspond à ce nom : choisissez le dossier dans la liste. Une facture ne peut pas ouvrir un nouveau dossier."
+                      ? `Aucun dossier ouvert ne correspond à ce nom : choisissez le dossier dans la liste. ${meta.the} ne peut pas ouvrir un nouveau dossier.`
                       : 'Aucun dossier ouvert ne correspond à ce nom : choisissez-le dans la liste ou créez-le.'}
                   </div>
                 ) : (
@@ -1494,6 +1719,91 @@ export default function ControlePiecesCeePage() {
                 </button>
               </div>
             </section>
+
+            {champsDuType(current).length > 0 && (
+              <section className="rounded-2xl border border-[#E2DFD8] bg-white">
+                <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#E2DFD8] px-4 py-3">
+                  <h2 className="text-[15px] font-semibold text-slate-900">Caractéristiques relevées · {meta.label}</h2>
+                  <span className="text-xs text-slate-500">
+                    {dossierLie ? `Comparées au dossier ${dossierLie.reference}` : 'Rattachez un dossier pour comparer'}
+                  </span>
+                </div>
+                <p className="px-4 pt-3 text-xs text-slate-500">
+                  Pré-remplies par la relecture IA, modifiables. À l&apos;enregistrement du contrôle, elles sont tracées comme « {meta.label} » sur le dossier : une valeur vide du dossier est complétée, une valeur différente devient un écart à traiter sur la fiche.
+                </p>
+                <div className="overflow-x-auto p-4">
+                  <table className="w-full min-w-[620px] text-sm">
+                    <thead>
+                      <tr className="border-b border-[#E7E4DD] text-left text-xs uppercase tracking-wide text-slate-500">
+                        <th className="py-2 pr-3">Caractéristique</th>
+                        <th className="py-2 pr-3">Valeur sur la pièce</th>
+                        <th className="py-2 pr-3">Valeur du dossier</th>
+                        <th className="py-2">Cohérence</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {champsDuType(current).map((c) => {
+                        const lu = s.champs[c.code] || ''
+                        const actuel = valeursDossier[c.code] || ''
+                        const ecart = !!(lu && actuel && !valeursEgales(c.type, actuel, lu))
+                        return (
+                          <tr key={c.code} className={`border-b border-[#F0EEE8] ${ecart ? 'bg-[#FDF6F4]' : ''}`}>
+                            <td className="py-1.5 pr-3 text-slate-700">{c.libelle}</td>
+                            <td className="py-1.5 pr-3">
+                              {c.type === 'enum' ? (
+                                <select
+                                  value={lu}
+                                  onChange={(e) => updateSession(current, (prev) => ({ ...prev, champs: { ...prev.champs, [c.code]: e.target.value } }))}
+                                  className="h-8 w-full rounded-lg border border-[#D8D3C8] bg-white px-2 text-sm"
+                                >
+                                  <option value="">—</option>
+                                  {(c.options.includes(lu) || !lu ? c.options : [lu, ...c.options]).map((o) => (
+                                    <option key={o} value={o}>
+                                      {o}
+                                    </option>
+                                  ))}
+                                </select>
+                              ) : c.type === 'bool' ? (
+                                <select
+                                  value={lu}
+                                  onChange={(e) => updateSession(current, (prev) => ({ ...prev, champs: { ...prev.champs, [c.code]: e.target.value } }))}
+                                  className="h-8 w-full rounded-lg border border-[#D8D3C8] bg-white px-2 text-sm"
+                                >
+                                  <option value="">—</option>
+                                  <option value="true">Oui</option>
+                                  <option value="false">Non</option>
+                                </select>
+                              ) : (
+                                <input
+                                  type={c.type === 'date' ? 'date' : 'text'}
+                                  value={c.type === 'date' ? lu.slice(0, 10) : lu}
+                                  onChange={(e) => updateSession(current, (prev) => ({ ...prev, champs: { ...prev.champs, [c.code]: e.target.value } }))}
+                                  className="h-8 w-full rounded-lg border border-[#D8D3C8] bg-white px-2 text-sm"
+                                />
+                              )}
+                            </td>
+                            <td className="py-1.5 pr-3 text-slate-600">{dossierLie ? afficherValeur(c, actuel) : '—'}</td>
+                            <td className="py-1.5">
+                              {!lu ? (
+                                <span className="text-xs text-slate-400">Non relevée</span>
+                              ) : !dossierLie ? (
+                                <span className="text-xs text-slate-400">—</span>
+                              ) : !actuel ? (
+                                <span className="rounded-full bg-[#EEF5FA] px-2 py-0.5 text-[11px] font-semibold text-[#2E5E80]">Complètera le dossier</span>
+                              ) : ecart ? (
+                                <span className="rounded-full bg-[#FBE9E9] px-2 py-0.5 text-[11px] font-semibold text-[#A32C2C]">Écart</span>
+                              ) : (
+                                <span className="rounded-full bg-[#EAF3E8] px-2 py-0.5 text-[11px] font-semibold text-[#2E6B3E]">Cohérent</span>
+                              )}
+                            </td>
+                          </tr>
+                        )
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </section>
+            )}
 
             {(s.mail || s.mailBusy) && (
               <section className="rounded-2xl border border-[#E2DFD8] bg-white">

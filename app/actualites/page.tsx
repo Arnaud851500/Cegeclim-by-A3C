@@ -44,6 +44,9 @@ import {
   resumeOf,
   tempsLecture,
   usePeutPublier,
+  fetchEquipesActualite,
+  libelleDestinataires,
+  type EquipeActualite,
   type Actualite,
   type ActualiteType,
 } from '@/lib/actualites'
@@ -71,6 +74,18 @@ function FilActualite() {
   const [search, setSearch] = useState('')
   const [categorie, setCategorie] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+  const [equipes, setEquipes] = useState<EquipeActualite[]>([])
+
+  // Noms des équipes destinataires (affichage « réservé à … »)
+  useEffect(() => {
+    let cancelled = false
+    void fetchEquipesActualite().then((list) => {
+      if (!cancelled) setEquipes(list)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
   const typeParam = searchParams.get('type') === 'nouveaute' ? 'nouveaute' : 'actualite'
   const [tab, setTab] = useState<ActualiteType>(typeParam)
@@ -328,7 +343,9 @@ function FilActualite() {
             <div style={styles.byline}>
               <span>
                 Publié par {selected.auteur_nom || selected.auteur_email || '—'} · lecture {tempsLecture(selected)}
-                {selected.cible_agences.length > 0 ? ` · agences : ${selected.cible_agences.join(', ')}` : ''}
+                {selected.cible_agences.length > 0 || selected.cible_equipes.length > 0
+                  ? ` · réservé aux ${libelleDestinataires(selected, equipes)}`
+                  : ''}
               </span>
               <span style={styles.actions}>
                 {selected.type === 'actualite' && selected.statut === 'publie' ? (

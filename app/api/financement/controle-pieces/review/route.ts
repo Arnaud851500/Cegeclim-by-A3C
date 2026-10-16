@@ -9,7 +9,15 @@ import {
   callOpenAIResponses,
   AiRouteError,
   OpenAIContentPart,
+  normaliserChampsAExtraire,
+  consigneExtraction,
+  nettoyerChampsExtraits,
 } from '../_shared'
+
+// Relecture d'une pièce CEE : statut de chaque point de la checklist et, depuis
+// le 16/10/2026, relevé des caractéristiques du dossier présentes sur la pièce
+// (« champs », registre cee_champs) pour le contrôle de cohérence entre
+// pièces.
 
 export const runtime = 'nodejs'
 
@@ -40,6 +48,8 @@ export async function POST(req: NextRequest) {
 
     const pts = items.map((it) => `- id "${it.id}" : ${it.label}${it.hint ? ` (précision : ${it.hint})` : ''}`).join('\n')
     const guidance = CONTROL_GUIDANCE[typePiece] ? `\n${CONTROL_GUIDANCE[typePiece]}\n` : ''
+    const champs = normaliserChampsAExtraire(body.champs)
+    const extraction = consigneExtraction(champs)
 
     const prompt = `Tu es contrôleur de conformité pour des dossiers CEE (certificats d'économies d'énergie, France). Tu fais une PREMIÈRE relecture d'une pièce transmise par un artisan ; un humain validera ensuite.
 
@@ -58,15 +68,15 @@ Indique "valeur" : la valeur relevée telle qu'elle figure sur le document (avec
 Indique "commentaire" : une phrase courte en français. Pour "nc", écris une phrase directement réutilisable comme puce dans le mail à l'artisan. Pour "c", laisse vide sauf doute ou incohérence à signaler.
 Ne devine jamais une valeur : si tu ne la vois pas, c'est "nc".
 Si le document ne semble pas être ${meta.art}, mets "document_correspond" à false et explique en une phrase.
-Indique aussi "beneficiaire" : le nom du bénéficiaire (particulier ou ménage client final, jamais l'entreprise) tel qu'écrit sur le document, "" s'il n'apparaît pas.${beneficiaire ? ` S'il diffère nettement du bénéficiaire indiqué ci-dessus, signale-le dans "remarque_document".` : ''}
+${extraction}Indique aussi "beneficiaire" : le nom du bénéficiaire (particulier ou ménage client final, jamais l'entreprise) tel qu'écrit sur le document, "" s'il n'apparaît pas.${beneficiaire ? ` S'il diffère nettement du bénéficiaire indiqué ci-dessus, signale-le dans "remarque_document".` : ''}
 
 Réponds uniquement avec ce JSON, sans autre texte :
-{"document_correspond": true, "remarque_document": "", "beneficiaire": "…", "points": [{"id": "…", "statut": "c", "valeur": "…", "commentaire": "…"}]}${text ? `\n\nTEXTE EXTRAIT DU PDF :\n${text}` : ''}`
+{"document_correspond": true, "remarque_document": "", "beneficiaire": "…", "points": [{"id": "…", "statut": "c", "valeur": "…", "commentaire": "…"}]${champs.length ? ', "champs": {"code": "valeur"}' : ''}}${text ? `\n\nTEXTE EXTRAIT DU PDF :\n${text}` : ''}`
 
     const content: OpenAIContentPart[] = [{ type: 'input_text', text: prompt }]
     for (const url of images) content.push({ type: 'input_image', image_url: url })
 
-    const data = await callOpenAIResponses(content, { maxOutputTokens: 4000 })
+    const data = await callOpenAIResponses(content, { maxOutputTokens: champs.length ? 5500 : 4000 })
     const outText = extractOutputText(data)
     const parsed = tryParseJsonObject(outText)
     if (!parsed) return NextResponse.json({ error: 'La réponse de l’IA était incomplète. Relancez la relecture.', code: 'invalid_json' }, { status: 502 })
@@ -88,6 +98,7 @@ Réponds uniquement avec ce JSON, sans autre texte :
       remarque_document: String(parsed.remarque_document || ''),
       beneficiaire: String(parsed.beneficiaire || ''),
       points,
+      champs: nettoyerChampsExtraits(parsed.champs, champs),
     })
   } catch (error: any) {
     const status = error instanceof AiRouteError ? error.status : 500

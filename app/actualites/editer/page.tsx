@@ -42,6 +42,8 @@ import {
   ACTUALITES_PATH,
   PLATEFORMES_DEFAUT,
   fetchActualite,
+  fetchEquipesActualite,
+  type EquipeActualite,
   notifyActualitesChanged,
   STOCK_COLONNES,
   STOCK_COLONNES_DEFAUT,
@@ -548,6 +550,9 @@ function Editeur() {
   const [epingle, setEpingle] = useState(false)
   const [plateformes, setPlateformes] = useState<Plateforme[]>([...PLATEFORMES_DEFAUT])
   const [cibleAgences, setCibleAgences] = useState<string[]>([])
+  const [cibleEquipes, setCibleEquipes] = useState<string[]>([])
+  const [modeCible, setModeCible] = useState<'tous' | 'equipes' | 'agences'>('tous')
+  const [equipes, setEquipes] = useState<EquipeActualite[]>([])
   const [agences, setAgences] = useState<string[]>([])
   const [preview, setPreview] = useState(false)
   const [saving, setSaving] = useState(false)
@@ -577,6 +582,8 @@ function Editeur() {
           setEpingle(row.epingle)
           setPlateformes(row.plateformes)
           setCibleAgences(row.cible_agences)
+          setCibleEquipes(row.cible_equipes)
+          setModeCible(row.cible_equipes.length > 0 ? 'equipes' : row.cible_agences.length > 0 ? 'agences' : 'tous')
         }
       } catch (err) {
         if (!cancelled) setMessage({ tone: 'error', text: `Chargement impossible : ${(err as Error).message}` })
@@ -588,6 +595,17 @@ function Editeur() {
       cancelled = true
     }
   }, [editId])
+
+  // Liste des équipes (ciblage) — mêmes équipes que la gestion des tâches
+  useEffect(() => {
+    let cancelled = false
+    void fetchEquipesActualite().then((list) => {
+      if (!cancelled) setEquipes(list)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
   // Liste des agences (ciblage)
   useEffect(() => {
@@ -694,6 +712,14 @@ function Editeur() {
       setMessage({ tone: 'error', text: 'Un lien a une adresse non reconnue (https://… ou /chemin de l’app).' })
       return
     }
+    if (modeCible === 'equipes' && cibleEquipes.length === 0) {
+      setMessage({ tone: 'error', text: 'Choisir au moins une équipe destinataire.' })
+      return
+    }
+    if (modeCible === 'agences' && cibleAgences.length === 0) {
+      setMessage({ tone: 'error', text: 'Choisir au moins une agence destinataire.' })
+      return
+    }
     const diffusion = dateDiffusion ? new Date(dateDiffusion) : new Date()
     const payload = {
       type,
@@ -706,7 +732,8 @@ function Editeur() {
       afficher_bandeau: type === 'actualite' ? afficherBandeau : false,
       bandeau_jusquau: type === 'actualite' && afficherBandeau && bandeauJusquau ? bandeauJusquau : null,
       epingle,
-      cible_agences: cibleAgences,
+      cible_agences: modeCible === 'agences' ? cibleAgences : [],
+      cible_equipes: modeCible === 'equipes' ? cibleEquipes : [],
       plateformes,
     }
 
@@ -721,6 +748,22 @@ function Editeur() {
             .select('id')
             .single()
     let result = await enregistrer(payload)
+    // Script 20261016_actualites_cible_equipes.sql pas encore exécuté : la
+    // colonne n'existe pas. On refuse plutôt que de diffuser à tout le monde
+    // une publication réservée à une équipe.
+    if (result.error && /cible_equipes/i.test(result.error.message)) {
+      if (modeCible === 'equipes') {
+        setSaving(false)
+        setMessage({
+          tone: 'error',
+          text: 'Le ciblage par équipe n’est pas encore actif : exécuter le script 20261016_actualites_cible_equipes.sql dans Supabase, puis réenregistrer.',
+        })
+        return
+      }
+      const { cible_equipes: _sansEquipes, ...sansColonne } = payload
+      void _sansEquipes
+      result = await enregistrer(sansColonne)
+    }
     // Script 20261014_actualites_plateformes.sql pas encore exécuté : la
     // colonne n'existe pas, on enregistre sans (affichage PC et mobile).
     let sansPlateformes = false
@@ -934,32 +977,80 @@ function Editeur() {
           <div style={styles.panel}>
             <h2 style={styles.panelTitle}>Destinataires</h2>
             <label style={styles.radio}>
-              <input type="radio" name="cible" checked={cibleAgences.length === 0} onChange={() => setCibleAgences([])} />
+              <input type="radio" name="cible" checked={modeCible === 'tous'} onChange={() => setModeCible('tous')} />
               Tous les utilisateurs
             </label>
             <label style={styles.radio}>
-              <input type="radio" name="cible" checked={cibleAgences.length > 0} onChange={() => setCibleAgences(agences.slice(0, 1))} disabled={agences.length === 0} />
+              <input
+                type="radio"
+                name="cible"
+                checked={modeCible === 'equipes'}
+                onChange={() => {
+                  setModeCible('equipes')
+                  if (cibleEquipes.length === 0 && equipes[0]) setCibleEquipes([equipes[0].id])
+                }}
+                disabled={equipes.length === 0}
+              />
+              Équipes choisies
+            </label>
+            {modeCible === 'equipes' ? (
+              <>
+                <div style={styles.agences}>
+                  {equipes.map((equipe) => (
+                    <label key={equipe.id} style={styles.check}>
+                      <input
+                        type="checkbox"
+                        checked={cibleEquipes.includes(equipe.id)}
+                        onChange={(e) =>
+                          setCibleEquipes((current) =>
+                            e.target.checked ? [...current, equipe.id] : current.filter((id) => id !== equipe.id)
+                          )
+                        }
+                      />
+                      <span style={{ ...styles.equipeDot, background: equipe.color }} />
+                      {equipe.name}
+                    </label>
+                  ))}
+                </div>
+                <span style={styles.hint}>
+                  Seuls les membres de ces équipes voient la publication (fil, bandeau, mobile). Les membres se gèrent dans le paramétrage des équipes de tâches.
+                </span>
+              </>
+            ) : null}
+            <label style={styles.radio}>
+              <input
+                type="radio"
+                name="cible"
+                checked={modeCible === 'agences'}
+                onChange={() => {
+                  setModeCible('agences')
+                  if (cibleAgences.length === 0 && agences[0]) setCibleAgences([agences[0]])
+                }}
+                disabled={agences.length === 0}
+              />
               Agences choisies
             </label>
-            {cibleAgences.length > 0 ? (
-              <div style={styles.agences}>
-                {agences.map((agence) => (
-                  <label key={agence} style={styles.check}>
-                    <input
-                      type="checkbox"
-                      checked={cibleAgences.includes(agence)}
-                      onChange={(e) =>
-                        setCibleAgences((current) =>
-                          e.target.checked ? [...current, agence] : current.filter((a) => a !== agence).length ? current.filter((a) => a !== agence) : current
-                        )
-                      }
-                    />
-                    {agence}
-                  </label>
-                ))}
-              </div>
+            {modeCible === 'agences' ? (
+              <>
+                <div style={styles.agences}>
+                  {agences.map((agence) => (
+                    <label key={agence} style={styles.check}>
+                      <input
+                        type="checkbox"
+                        checked={cibleAgences.includes(agence)}
+                        onChange={(e) =>
+                          setCibleAgences((current) =>
+                            e.target.checked ? [...current, agence] : current.filter((a) => a !== agence)
+                          )
+                        }
+                      />
+                      {agence}
+                    </label>
+                  ))}
+                </div>
+                <span style={styles.hint}>Les utilisateurs sans restriction d’agence voient toutes les publications ciblées par agence.</span>
+              </>
             ) : null}
-            <span style={styles.hint}>Les utilisateurs sans restriction d’agence voient toutes les publications.</span>
           </div>
         </aside>
       </div>
@@ -1301,6 +1392,13 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: 13,
     fontWeight: 500,
     color: 'rgba(var(--cg-ink-rgb), 0.75)',
+  },
+  equipeDot: {
+    display: 'inline-block',
+    width: 9,
+    height: 9,
+    borderRadius: 999,
+    flex: '0 0 auto',
   },
   agences: {
     display: 'grid',

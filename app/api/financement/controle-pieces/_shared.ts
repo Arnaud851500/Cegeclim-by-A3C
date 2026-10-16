@@ -1,20 +1,25 @@
 // Helpers partagés par les routes /api/financement/controle-pieces/*.
 // Ce dossier alimente la page /financement/controle-pieces (relecture des
 // pièces de dossiers CEE par IA) : détection du bénéficiaire, relecture
-// point par point de la checklist, rédaction du mail de retour à l'artisan.
+// point par point de la checklist, relevé des caractéristiques du dossier
+// (contrôle de cohérence entre pièces), rédaction du mail de retour à l'artisan.
+//
+// 16/10/2026 : ajout du type « cadre_contribution » et du relevé des
+// caractéristiques (registre cee_champs).
 //
 // La clé OpenAI reste côté serveur (process.env.OPENAI_API_KEY, déjà utilisée
 // par /api/atelier-ai) : le navigateur n'appelle jamais OpenAI directement.
 
 import { supabaseAdmin } from '@/lib/supabaseAdmin'
 
-export type TypePieceId = 'avis_imposition' | 'note_dimensionnement' | 'devis' | 'facture'
+export type TypePieceId = 'avis_imposition' | 'note_dimensionnement' | 'devis' | 'facture' | 'cadre_contribution'
 
 export const TYPE_META: Record<TypePieceId, { label: string; art: string; the: string; of: string }> = {
   avis_imposition: { label: "Avis d'imposition", art: "un avis d'imposition", the: "L'avis d'imposition", of: "de l'avis d'imposition" },
   note_dimensionnement: { label: 'Note de dimensionnement', art: 'une note de dimensionnement', the: 'La note de dimensionnement', of: 'de la note de dimensionnement' },
   devis: { label: 'Devis', art: 'un devis', the: 'Le devis', of: 'du devis' },
   facture: { label: 'Facture', art: 'une facture', the: 'La facture', of: 'de la facture' },
+  cadre_contribution: { label: 'Cadre de contribution', art: 'un cadre de contribution', the: 'Le cadre de contribution', of: 'du cadre de contribution' },
 }
 
 // Consignes de contrôle spécifiques par type, injectées dans le prompt de
@@ -44,10 +49,70 @@ export const CONTROL_GUIDANCE: Record<TypePieceId, string> = {
 - Elle doit comporter les mentions légales obligatoires (SIRET, numéro de TVA intracommunautaire) et la qualification RGE.
 - La description des prestations facturées doit correspondre aux travaux réellement réalisés, pas seulement recopier le devis.
 - Le montant TTC doit être cohérent avec le devis (tout écart doit être expliqué) et la facture doit indiquer qu'elle est soldée ou préciser les modalités de paiement restantes.`,
+  cadre_contribution: `Règles de contrôle spécifiques au cadre de contribution :
+- Vérifie qu'il s'agit bien du cadre de contribution (document du délégataire, ex. DRAPO, précisant la contribution du délégataire aux travaux d'économies d'énergie).
+- Le délégataire, le professionnel et le bénéficiaire doivent être identifiés ; l'adresse du bénéficiaire doit être lisible.
+- La date du cadre de contribution doit être lisible : le devis doit être signé au plus tard 14 jours après cette date.
+- Le montant de la prime CEE bénéficiaire, la fiche d'opération (ex. BAR-TH-171) et, le cas échéant, la mention « Coup de pouce » doivent apparaître.
+- Le document doit être signé par le professionnel.`,
 }
 
 export function isTypePiece(v: unknown): v is TypePieceId {
-  return v === 'avis_imposition' || v === 'note_dimensionnement' || v === 'devis' || v === 'facture'
+  return v === 'avis_imposition' || v === 'note_dimensionnement' || v === 'devis' || v === 'facture' || v === 'cadre_contribution'
+}
+
+// Caractéristiques du dossier à relever sur la pièce (registre cee_champs,
+// transmis par la page) : l'IA les renvoie normalisées pour que la base
+// puisse les comparer à la saisie et aux autres pièces.
+export type ChampAExtraire = { code: string; libelle: string; type: string; options: string[] }
+
+export function normaliserChampsAExtraire(raw: unknown): ChampAExtraire[] {
+  if (!Array.isArray(raw)) return []
+  return raw
+    .filter((c: any) => c && typeof c.code === 'string' && /^[a-z0-9_]+$/.test(c.code) && c.libelle)
+    .slice(0, 60)
+    .map((c: any) => ({
+      code: String(c.code),
+      libelle: String(c.libelle),
+      type: ['text', 'number', 'integer', 'date', 'bool', 'enum'].includes(c.type) ? String(c.type) : 'text',
+      options: Array.isArray(c.options) ? c.options.map((o: unknown) => String(o)).slice(0, 20) : [],
+    }))
+}
+
+export function consigneExtraction(champs: ChampAExtraire[]): string {
+  if (!champs.length) return ''
+  const lignes = champs
+    .map((c) => {
+      const format =
+        c.type === 'date'
+          ? 'date au format AAAA-MM-JJ'
+          : c.type === 'number'
+          ? 'nombre seul, sans unité, point décimal'
+          : c.type === 'integer'
+          ? 'nombre entier'
+          : c.type === 'bool'
+          ? 'true ou false'
+          : c.type === 'enum'
+          ? `exactement l'une des valeurs : ${c.options.map((o) => `"${o}"`).join(', ')}`
+          : 'texte tel qu’écrit sur le document'
+      return `- "${c.code}" : ${c.libelle} (${format})`
+    })
+    .join('\n')
+  return `\nCaractéristiques du dossier à relever sur ce document (objet "champs") :\n${lignes}\nRenseigne uniquement ce qui figure sur le document ; mets "" pour ce qui n'y figure pas. Ne déduis rien qui ne soit pas écrit.\n`
+}
+
+export function nettoyerChampsExtraits(raw: unknown, champs: ChampAExtraire[]): Record<string, string> {
+  const out: Record<string, string> = {}
+  if (!raw || typeof raw !== 'object') return out
+  const connus = new Map(champs.map((c) => [c.code, c]))
+  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+    const c = connus.get(k)
+    if (!c || v === null || v === undefined) continue
+    const s = typeof v === 'boolean' ? (v ? 'true' : 'false') : String(v).trim()
+    if (!s) continue
+    out[k] = s
+  }
+  return out
 }
 
 /**
