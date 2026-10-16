@@ -89,6 +89,17 @@
   --cg-hdr-ink-2: #E2E8F0;
   --cg-hdr-ink-3: #CBD5E1;
   --cg-hdr-muted: #94A3B8;
+  /* Bandeaux Financement CEE (16/10/2026) — mêmes couleurs qu'avant en sombre */
+  --cg-fin-kicker: #9EAD43;
+  --cg-fin-line: #394652;
+  --cg-fin-badge-line: #394652;
+  --cg-fin-badge-ink: #CBD5E1;
+  --cg-fin-gold-line: #9EAD43;
+  --cg-fin-gold-ink: #D9E3A0;
+  --cg-fin-blue-line: #5E8FB3;
+  --cg-fin-blue-ink: #BFD9EC;
+  --cg-fin-red-line: #C1683C;
+  --cg-fin-red-ink: #F2C5B0;
 }
 
 [data-theme="light"] {
@@ -161,6 +172,16 @@
   --cg-hdr-ink-2: #1E2433;
   --cg-hdr-ink-3: #3A4252;
   --cg-hdr-muted: #5B6273;
+  --cg-fin-kicker: #5C6A16;
+  --cg-fin-line: rgba(11, 18, 32, 0.18);
+  --cg-fin-badge-line: rgba(11, 18, 32, 0.16);
+  --cg-fin-badge-ink: #3A4252;
+  --cg-fin-gold-line: #9EAD43;
+  --cg-fin-gold-ink: #4E5A12;
+  --cg-fin-blue-line: #7FA7C6;
+  --cg-fin-blue-ink: #1F5A80;
+  --cg-fin-red-line: #D9A08A;
+  --cg-fin-red-ink: #9A3A16;
 }
 
 /* Bandeau défilant du fil d'actualité */

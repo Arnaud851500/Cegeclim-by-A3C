@@ -36,6 +36,7 @@ export const LIGHT_READY_PATHS: string[] = [
   '/suivi-agences', // Suivi agences – commerciaux (15/10/2026, contenu déjà clair, bandeau thémé)
   '/objectifs', // Objectifs commerciaux (15/10/2026, idem)
   '/admin/performance-extraction', // Performance des extractions (15/10/2026)
+  '/financement', // Financement CEE et sous-écrans (16/10/2026, contenu déjà clair, bandeau thémé)
 ]
 
 /** Écrans passés au clair sans leurs sous-écrans (chemin exact). */

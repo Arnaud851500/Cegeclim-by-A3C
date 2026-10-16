@@ -285,15 +285,16 @@ export default function ClientCeeDetailPage() {
 
   return (
     <div className="min-h-screen bg-[#F4F3F0] pb-16">
-      <header className="border-b border-[#1E2833] bg-[#111820]">
+      {/* Bandeau : couleurs du thème (sombre = inchangé, clair = blanc / encre marine), 16/10/2026 */}
+      <header className="border-b border-[color:var(--cg-hdr-border)] bg-[color:var(--cg-hdr-bg)]">
         <div className="mx-auto flex w-full max-w-[1760px] flex-col gap-3 px-4 py-6 md:px-8">
-          <button type="button" onClick={retourListe} className="w-fit text-xs font-medium text-slate-300 hover:text-white">
+          <button type="button" onClick={retourListe} className="w-fit text-xs font-medium text-[color:var(--cg-hdr-ink-3)] hover:text-[color:var(--cg-hdr-ink)]">
             ← Clients Convention CEE
           </button>
-          <div className="text-[11px] font-semibold uppercase tracking-[0.24em] text-[#9EAD43]">Financement CEE · Client {numero}</div>
-          <h1 className="text-[26px] font-bold leading-tight text-white md:text-[30px]">{client?.intitule || numero}</h1>
+          <div className="text-[11px] font-semibold uppercase tracking-[0.24em] text-[color:var(--cg-fin-kicker)]">Financement CEE · Client {numero}</div>
+          <h1 className="text-[26px] font-bold leading-tight text-[color:var(--cg-hdr-ink)] md:text-[30px]">{client?.intitule || numero}</h1>
           {client && (
-            <div className="flex flex-wrap gap-x-6 gap-y-1 text-sm text-slate-300">
+            <div className="flex flex-wrap gap-x-6 gap-y-1 text-sm text-[color:var(--cg-hdr-ink-3)]">
               <span>
                 {[client.adresse, [client.code_postal, client.ville].filter(Boolean).join(' ')].filter(Boolean).join(' · ') || 'Adresse non renseignée'}
               </span>
@@ -602,7 +603,11 @@ function Badge({ label, tone }: { label: string; tone?: 'gold' }) {
   return (
     <span
       className="rounded-full border px-2.5 py-1"
-      style={tone === 'gold' ? { borderColor: '#9EAD43', color: '#D9E3A0' } : { borderColor: '#394652', color: '#CBD5E1' }}
+      style={
+        tone === 'gold'
+          ? { borderColor: 'var(--cg-fin-gold-line)', color: 'var(--cg-fin-gold-ink)' }
+          : { borderColor: 'var(--cg-fin-badge-line)', color: 'var(--cg-fin-badge-ink)' }
+      }
     >
       {label}
     </span>

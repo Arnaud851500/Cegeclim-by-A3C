@@ -161,15 +161,16 @@ export default function NouveauDossierCeePage() {
 
   return (
     <div className="min-h-screen bg-[#F4F3F0] pb-16">
-      <header className="border-b border-[#1E2833] bg-[#111820]">
+      {/* Bandeau : couleurs du thème (sombre = inchangé, clair = blanc / encre marine), 16/10/2026 */}
+      <header className="border-b border-[color:var(--cg-hdr-border)] bg-[color:var(--cg-hdr-bg)]">
         <div className="mx-auto flex w-full max-w-[1400px] flex-col gap-3 px-4 py-6 md:px-8">
-          <button onClick={() => router.push('/financement')} className="w-fit text-xs font-semibold uppercase tracking-[0.2em] text-[#9EAD43] hover:text-white">
+          <button onClick={() => router.push('/financement')} className="w-fit text-xs font-semibold uppercase tracking-[0.2em] text-[color:var(--cg-fin-kicker)] hover:text-[color:var(--cg-hdr-ink)]">
             ← Financement CEE
           </button>
           <div>
-            <div className="text-[11px] font-semibold uppercase tracking-[0.24em] text-[#9EAD43]">DRAPO 1 · Constitution du dossier · statut 0</div>
-            <h1 className="mt-1 text-2xl font-bold text-white">Nouveau dossier d&apos;aides</h1>
-            <p className="mt-1 max-w-3xl text-sm text-slate-300">
+            <div className="text-[11px] font-semibold uppercase tracking-[0.24em] text-[color:var(--cg-fin-kicker)]">DRAPO 1 · Constitution du dossier · statut 0</div>
+            <h1 className="mt-1 text-2xl font-bold text-[color:var(--cg-hdr-ink)]">Nouveau dossier d&apos;aides</h1>
+            <p className="mt-1 max-w-3xl text-sm text-[color:var(--cg-hdr-ink-3)]">
               Informations du formulaire installateur. Les autres caractéristiques seront lues sur les pièces au moment de leur contrôle, puis comparées à cette saisie.
             </p>
           </div>

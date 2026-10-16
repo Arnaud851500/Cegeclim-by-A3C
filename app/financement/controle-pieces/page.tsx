@@ -1266,19 +1266,20 @@ export default function ControlePiecesCeePage() {
         }}
       />
 
-      <header className="border-b border-[#1E2833] bg-[#111820]">
+      {/* Bandeau : couleurs du thème (sombre = inchangé, clair = blanc / encre marine), 16/10/2026 */}
+      <header className="border-b border-[color:var(--cg-hdr-border)] bg-[color:var(--cg-hdr-bg)]">
         <div className="mx-auto flex w-full max-w-[1760px] flex-col gap-4 px-4 py-6 md:flex-row md:items-end md:justify-between md:px-8">
           <div>
-            <div className="text-[11px] font-semibold uppercase tracking-[0.24em] text-[#9EAD43]">Financement CEE · Contrôle qualité</div>
-            <h1 className="mt-2 text-[26px] font-bold leading-tight text-white md:text-[30px]">Relecteur de pièces CEE</h1>
-            <p className="mt-2 max-w-3xl text-sm leading-relaxed text-slate-300">
+            <div className="text-[11px] font-semibold uppercase tracking-[0.24em] text-[color:var(--cg-fin-kicker)]">Financement CEE · Contrôle qualité</div>
+            <h1 className="mt-2 text-[26px] font-bold leading-tight text-[color:var(--cg-hdr-ink)] md:text-[30px]">Relecteur de pièces CEE</h1>
+            <p className="mt-2 max-w-3xl text-sm leading-relaxed text-[color:var(--cg-hdr-ink-3)]">
               Déposez la pièce, laissez l&apos;IA faire une première lecture, corrigez ses suggestions, générez le texte du retour à l&apos;artisan, puis enregistrez le contrôle dans le dossier.
             </p>
           </div>
           <button
             type="button"
             onClick={openEditor}
-            className="h-10 shrink-0 rounded-xl border border-[#394652] bg-transparent px-4 text-sm font-medium text-slate-200 hover:border-[#9EAD43] hover:text-white"
+            className="h-10 shrink-0 rounded-xl border border-[color:var(--cg-fin-line)] bg-transparent px-4 text-sm font-medium text-[color:var(--cg-hdr-ink-2)] hover:border-[#9EAD43] hover:text-[color:var(--cg-hdr-ink)]"
           >
             Modifier la checklist
           </button>

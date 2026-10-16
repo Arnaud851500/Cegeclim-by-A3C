@@ -447,16 +447,17 @@ export default function FinancementDossierPage() {
 
   return (
     <div className="min-h-screen bg-[#F4F3F0] pb-16">
-      <header className="border-b border-[#1E2833] bg-[#111820]">
+      {/* Bandeau : couleurs du thème (sombre = inchangé, clair = blanc / encre marine), 16/10/2026 */}
+      <header className="border-b border-[color:var(--cg-hdr-border)] bg-[color:var(--cg-hdr-bg)]">
         <div className="mx-auto flex w-full max-w-[1500px] flex-col gap-3 px-4 py-6 md:px-8">
-          <button onClick={() => router.push('/financement')} className="w-fit text-xs font-semibold uppercase tracking-[0.2em] text-[#9EAD43] hover:text-white">
+          <button onClick={() => router.push('/financement')} className="w-fit text-xs font-semibold uppercase tracking-[0.2em] text-[color:var(--cg-fin-kicker)] hover:text-[color:var(--cg-hdr-ink)]">
             ← Financement CEE
           </button>
           <div className="flex flex-wrap items-end justify-between gap-4">
             <div>
-              <div className="text-[11px] font-semibold uppercase tracking-[0.24em] text-[#9EAD43]">Dossier d&apos;aides CEE · {dossier.reference}</div>
-              <h1 className="mt-1 text-[26px] font-bold leading-tight text-white">{dossier.beneficiaire_nom || dossier.chantier_nom || dossier.reference}</h1>
-              <p className="mt-1 text-sm text-slate-300">
+              <div className="text-[11px] font-semibold uppercase tracking-[0.24em] text-[color:var(--cg-fin-kicker)]">Dossier d&apos;aides CEE · {dossier.reference}</div>
+              <h1 className="mt-1 text-[26px] font-bold leading-tight text-[color:var(--cg-hdr-ink)]">{dossier.beneficiaire_nom || dossier.chantier_nom || dossier.reference}</h1>
+              <p className="mt-1 text-sm text-[color:var(--cg-hdr-ink-3)]">
                 {dossier.pro_raison_sociale || 'Installateur non renseigné'}
                 {dossier.numero_tiers ? ` · ${String(dossier.numero_tiers)}` : ''}
                 {dossier.chantier_ville ? ` · ${String(dossier.chantier_ville)}` : ''}
@@ -472,7 +473,7 @@ export default function FinancementDossierPage() {
               <button
                 type="button"
                 onClick={() => router.push(`/financement/controle-pieces?dossier=${dossier.id}`)}
-                className="h-10 rounded-xl border border-[#394652] px-4 text-sm font-medium text-slate-200 hover:border-[#9EAD43] hover:text-white"
+                className="h-10 rounded-xl border border-[color:var(--cg-fin-line)] px-4 text-sm font-medium text-[color:var(--cg-hdr-ink-2)] hover:border-[#9EAD43] hover:text-[color:var(--cg-hdr-ink)]"
               >
                 Contrôler une pièce
               </button>
@@ -1220,14 +1221,15 @@ function Legende({ bg, fg, label }: { bg: string; fg: string; label: string }) {
 }
 
 function Badge({ label, tone }: { label: string; tone?: 'gold' | 'blue' | 'red' }) {
+  // Couleurs du thème (bandeau sombre ou clair), 16/10/2026
   const style =
     tone === 'gold'
-      ? { borderColor: '#9EAD43', color: '#D9E3A0' }
+      ? { borderColor: 'var(--cg-fin-gold-line)', color: 'var(--cg-fin-gold-ink)' }
       : tone === 'blue'
-      ? { borderColor: '#5E8FB3', color: '#BFD9EC' }
+      ? { borderColor: 'var(--cg-fin-blue-line)', color: 'var(--cg-fin-blue-ink)' }
       : tone === 'red'
-      ? { borderColor: '#C1683C', color: '#F2C5B0' }
-      : { borderColor: '#394652', color: '#CBD5E1' }
+      ? { borderColor: 'var(--cg-fin-red-line)', color: 'var(--cg-fin-red-ink)' }
+      : { borderColor: 'var(--cg-fin-badge-line)', color: 'var(--cg-fin-badge-ink)' }
   return (
     <span className="rounded-full border px-2.5 py-1" style={style}>
       {label}

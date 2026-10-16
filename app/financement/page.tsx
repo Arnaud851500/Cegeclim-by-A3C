@@ -159,15 +159,16 @@ export default function FinancementDashboardPage() {
 
   return (
     <div className="min-h-screen bg-[#F4F3F0] pb-16">
-      <header className="border-b border-[#1E2833] bg-[#111820]">
+      {/* Bandeau : couleurs du thème (sombre = inchangé, clair = blanc / encre marine), 16/10/2026 */}
+      <header className="border-b border-[color:var(--cg-hdr-border)] bg-[color:var(--cg-hdr-bg)]">
         <div className="mx-auto flex w-full max-w-[1760px] flex-col gap-4 px-4 py-6 md:px-8">
-          <div className="text-[11px] font-semibold uppercase tracking-[0.24em] text-[#9EAD43]">
+          <div className="text-[11px] font-semibold uppercase tracking-[0.24em] text-[color:var(--cg-fin-kicker)]">
             Financement CEE
           </div>
-          <h1 className="text-[26px] font-bold leading-tight text-white md:text-[30px]">
+          <h1 className="text-[26px] font-bold leading-tight text-[color:var(--cg-hdr-ink)] md:text-[30px]">
             Le pilotage des aides financières CEGECLIM
           </h1>
-          <p className="max-w-3xl text-sm leading-relaxed text-slate-300">
+          <p className="max-w-3xl text-sm leading-relaxed text-[color:var(--cg-hdr-ink-3)]">
             Du dépôt de la demande par le professionnel jusqu’au versement de la prime : pièces à collecter,
             rattachement au devis / commande / BL, dépôt auprès du financeur, preuves de chantier et validation.
           </p>
