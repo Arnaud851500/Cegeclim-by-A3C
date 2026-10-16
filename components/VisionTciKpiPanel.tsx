@@ -77,7 +77,11 @@
  *      n'ont "aucun" chiffre d'affaires alors qu'ils étaient en réalité
  *      simplement sous le premier seuil affiché.
  *
- *  - V4.5 (2026-09-10, cette révision) :
+ *  - V4.6 (2026-10-16) : pavé "Taux transfo devis" refondu (taux à
+ *    maturité par cohorte + écart N-1, grille 30/60/90/120 j, devis à
+ *    risque) -- voir la note au-dessus de TauxCard.
+ *
+ *  - V4.5 (2026-09-10) :
  *    - Compteur "Factures en retard" (cle "factures_retard", conservée pour
  *      les dispositions déjà enregistrées) : la valeur fictive (48 250 €)
  *      est REMPLACÉE par la synthèse réelle du fichier compta "Qui vous
@@ -1158,14 +1162,86 @@ function CompteurCard({
   );
 }
 
-// ── Pavé TAUX (réduit : 1 colonne sur 4) ────────────────────────────────
+// ── Pavé TAUX TRANSFO DEVIS (1 colonne sur 4) ───────────────────────────
+// V4.6 (2026-10-16) : le pavé n'affiche plus le taux "facturé YTD" de
+// get_cycle_documents_kpis (taux tous âges confondus, mécaniquement bas en
+// fin de période et non comparable d'un mois à l'autre). Il reprend la
+// lecture "à âge égal" de l'écran Analyse devis (/cycle-documents) :
+//  - chiffre principal = taux de transformation devis → CDC à maturité
+//    (120 j) de la dernière cohorte mensuelle complète, écart en points
+//    vs le même mois N-1 et mention de la cohorte ;
+//  - grille 30 / 60 / 90 / 120 j : dernière cohorte complète à chaque âge
+//    et écart N-1 (mêmes règles que les 4 cartes de l'écran détaillé :
+//    cohorte complète = couverture ≥ 99,95 %) ;
+//  - ligne d'action : devis à risque (sans CDC/BL/facture, âge ≥ 30 j,
+//    montant ≥ 15 000 €, depuis le 1er janvier) en nombre et en CA.
+// Sources : get_cycle_documents_cohortes (12 derniers mois glissants, pour
+// trouver une cohorte mûre à 120 j même en début d'année) et
+// get_cycle_documents_kpis (devis à risque, période identique à l'écran).
+
+const TAUX_MATURITE_JOURS = 120;
+const TAUX_AGE_RISQUE_JOURS = 30;
+const TAUX_MONTANT_RISQUE = 15000;
+
+type TauxHorizonKey = "taux_30" | "taux_60" | "taux_90" | "taux_maturite";
+type TauxCouvertureKey = "couverture_30" | "couverture_60" | "couverture_90" | "couverture_maturite";
+
+const TAUX_HORIZONS: { key: TauxHorizonKey; couverture: TauxCouvertureKey; label: string; color: string }[] = [
+  { key: "taux_30", couverture: "couverture_30", label: "30 j", color: "#8FC6E3" },
+  { key: "taux_60", couverture: "couverture_60", label: "60 j", color: "#4C6FD8" },
+  { key: "taux_90", couverture: "couverture_90", label: "90 j", color: "#A6A181" },
+  { key: "taux_maturite", couverture: "couverture_maturite", label: `${TAUX_MATURITE_JOURS} j`, color: "#C1683C" },
+];
+
+type TauxCohorte = {
+  periode: "N" | "N-1";
+  mois: string; // YYYY-MM-DD (1er du mois)
+} & Record<TauxHorizonKey, number | null> & Record<TauxCouvertureKey, number | null>;
+
+type TauxSignal = { valeur: number | null; n1: number | null; delta: number | null; mois: string | null };
+
+function tauxNombreOuNull(v: unknown): number | null {
+  if (v === null || v === undefined || v === "") return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+function tauxDateIso(d: Date): string {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const j = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${j}`;
+}
+
+/** "YYYY-MM-DD" + n mois -> "YYYY-MM-01". */
+function tauxAjouterMois(isoMois: string, n: number): string {
+  const [y, m] = isoMois.slice(0, 10).split("-").map(Number);
+  return tauxDateIso(new Date(y, m - 1 + n, 1));
+}
+
+function tauxFormatMois(isoMois: string | null): string {
+  if (!isoMois) return "";
+  const [y, m] = isoMois.slice(0, 10).split("-").map(Number);
+  return new Date(y, m - 1, 1).toLocaleDateString("fr-FR", { month: "short", year: "2-digit" });
+}
+
+function tauxFormatDelta(delta: number | null): string {
+  if (delta === null) return "—";
+  return `${delta >= 0 ? "▲" : "▼"} ${Math.abs(delta).toLocaleString("fr-FR", { minimumFractionDigits: 1, maximumFractionDigits: 1 })}`;
+}
+
+function tauxCouleurDelta(delta: number | null): string {
+  if (delta === null) return "text-[color:var(--cg-ink)]/30";
+  return delta >= 0 ? "text-[color:var(--cg-up-ink)]" : "text-[color:var(--cg-down-ink)]";
+}
 
 function TauxCard({
   config, effectiveAgence, effectiveCollaborateur, refreshTick, familleMacroFiltre, onRemove,
 }: { config: KpiCardConfig; effectiveAgence: string | null; effectiveCollaborateur: string | null; refreshTick: number; familleMacroFiltre: string | null; onRemove: () => void }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [taux, setTaux] = useState<number | null>(null);
+  const [cohortes, setCohortes] = useState<TauxCohorte[]>([]);
+  const [risque, setRisque] = useState<{ nb: number; ca: number } | null>(null);
   // FIX (2026-08) : le filtre global "Famille macro" surcharge la famille
   // propre à ce pavé quand il est actif -- même mécanique que FluxCardGrand.
   const familleMacroEffective = familleMacroFiltre ?? config.famille_macro;
@@ -1176,22 +1252,84 @@ function TauxCard({
       setLoading(true);
       setError(null);
       const now = new Date();
-      const debut = `${now.getFullYear()}-01-01`;
-      const fin = new Date(now.getFullYear(), now.getMonth() + 1, 1).toISOString().slice(0, 10);
-      const { data, error: err } = await supabase.rpc("get_cycle_documents_kpis", {
-        p_date_debut: debut, p_date_fin: fin,
+      const fin = tauxDateIso(new Date(now.getFullYear(), now.getMonth() + 1, 1));
+      const debutCohortes = tauxDateIso(new Date(now.getFullYear(), now.getMonth() - 11, 1));
+      const debutAnnee = `${now.getFullYear()}-01-01`;
+      const filtres = {
         p_agence: effectiveAgence, p_collaborateur: effectiveCollaborateur,
         p_famille_macro: familleMacroEffective, p_famille: null, p_client: null,
-        p_include_hors_stat: false, p_age_risque_jours: 30, p_montant_risque: 15000,
-      });
+        p_include_hors_stat: false,
+      };
+      const [cohRes, kpiRes] = await Promise.all([
+        supabase.rpc("get_cycle_documents_cohortes", {
+          p_date_debut: debutCohortes, p_date_fin: fin, ...filtres,
+          p_maturite_jours: TAUX_MATURITE_JOURS,
+        }),
+        supabase.rpc("get_cycle_documents_kpis", {
+          p_date_debut: debutAnnee, p_date_fin: fin, ...filtres,
+          p_age_risque_jours: TAUX_AGE_RISQUE_JOURS, p_montant_risque: TAUX_MONTANT_RISQUE,
+        }),
+      ]);
       if (cancelled) return;
-      if (err) setError(err.message);
-      else { const row = Array.isArray(data) ? data[0] : data; setTaux(row ? Number(row.taux_facture_valeur) : null); }
+      if (cohRes.error) {
+        setError(cohRes.error.message);
+        setCohortes([]);
+      } else {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const rows = (Array.isArray(cohRes.data) ? cohRes.data : []) as any[];
+        setCohortes(
+          rows
+            .filter((r) => r && r.mois)
+            .map((r) => ({
+              periode: r.periode === "N-1" ? "N-1" : "N",
+              mois: String(r.mois).slice(0, 10),
+              taux_30: tauxNombreOuNull(r.taux_30),
+              taux_60: tauxNombreOuNull(r.taux_60),
+              taux_90: tauxNombreOuNull(r.taux_90),
+              taux_maturite: tauxNombreOuNull(r.taux_maturite),
+              couverture_30: tauxNombreOuNull(r.couverture_30),
+              couverture_60: tauxNombreOuNull(r.couverture_60),
+              couverture_90: tauxNombreOuNull(r.couverture_90),
+              couverture_maturite: tauxNombreOuNull(r.couverture_maturite),
+            })),
+        );
+      }
+      if (kpiRes.error) {
+        // Les devis à risque sont un complément : une erreur ne masque pas le taux.
+        console.error("[VisionTci] get_cycle_documents_kpis", kpiRes.error);
+        setRisque(null);
+      } else {
+        const row = Array.isArray(kpiRes.data) ? kpiRes.data[0] : kpiRes.data;
+        setRisque(row ? { nb: Number(row.nb_devis_a_risque) || 0, ca: Number(row.ca_devis_a_risque) || 0 } : null);
+      }
       setLoading(false);
     }
     load();
     return () => { cancelled = true; };
   }, [effectiveAgence, effectiveCollaborateur, familleMacroEffective, refreshTick]);
+
+  /** Pour chaque âge : dernière cohorte N complète à cet âge, comparée au même mois N-1. */
+  const signaux = useMemo(() => {
+    const cohortesN = cohortes.filter((c) => c.periode === "N").sort((a, b) => a.mois.localeCompare(b.mois));
+    const n1ParMois = new Map<string, TauxCohorte>();
+    cohortes.filter((c) => c.periode === "N-1").forEach((c) => n1ParMois.set(tauxAjouterMois(c.mois, 12), c));
+    const res = {} as Record<TauxHorizonKey, TauxSignal>;
+    TAUX_HORIZONS.forEach((h) => {
+      const derniere = [...cohortesN].reverse().find((c) => c[h.key] !== null && (c[h.couverture] ?? 0) >= 99.95);
+      const n1 = derniere ? n1ParMois.get(derniere.mois)?.[h.key] ?? null : null;
+      const valeur = derniere ? derniere[h.key] : null;
+      res[h.key] = {
+        valeur,
+        n1,
+        delta: valeur !== null && n1 !== null ? valeur - n1 : null,
+        mois: derniere?.mois ?? null,
+      };
+    });
+    return res;
+  }, [cohortes]);
+
+  const principal = signaux.taux_maturite;
+  const nbRisque = risque?.nb ?? 0;
 
   return (
     <div className="col-span-2 sm:col-span-1">
@@ -1201,7 +1339,7 @@ function TauxCard({
         badges={familleMacroEffective ? [`Fam : ${familleMacroEffective}`] : undefined}
         onRemove={onRemove}
         onClick={() => window.open("/cycle-documents", "_blank", "noopener,noreferrer")}
-        clickHint="Ouvrir Analyse Devis"
+        clickHint="Ouvrir Analyse Devis (cohortes, devis à risque)"
         compact={false}
       >
         {loading ? (
@@ -1209,9 +1347,69 @@ function TauxCard({
         ) : error ? (
           <p className="text-[10px] text-[color:var(--cg-err-ink)]">{error}</p>
         ) : (
-          <div className="font-[var(--font-mono,monospace)] text-4xl font-semibold text-[color:var(--cg-ink)]">
-            {taux === null ? "—" : formatPct(taux)}
-          </div>
+          <>
+            {/* Chiffre principal : maturité, écart N-1, cohorte concernée. */}
+            <div className="flex items-baseline justify-between gap-2" style={CONTENEUR_TAILLE}>
+              <div className="whitespace-nowrap font-[var(--font-mono,monospace)] text-3xl font-semibold leading-tight text-[color:var(--cg-ink)]">
+                {principal.valeur === null ? "—" : formatPct(principal.valeur)}
+              </div>
+              <div className="whitespace-nowrap text-right text-[10px] leading-tight text-[color:var(--cg-ink)]/45">
+                <div className={`font-[var(--font-mono,monospace)] text-xs font-semibold ${tauxCouleurDelta(principal.delta)}`}>
+                  {principal.delta === null ? "—" : `${tauxFormatDelta(principal.delta)} pt`}
+                </div>
+                {principal.n1 !== null && <div>N-1 {formatPct(principal.n1)}</div>}
+                {principal.mois && <div>devis de {tauxFormatMois(principal.mois)}</div>}
+              </div>
+            </div>
+            <div className="mt-0.5 text-[9px] uppercase tracking-wide text-[color:var(--cg-ink)]/40">
+              Devis → CDC à {TAUX_MATURITE_JOURS} j (maturité)
+            </div>
+
+            {/* Grille 30 / 60 / 90 / 120 j : dernière cohorte complète à chaque âge. */}
+            <div className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1">
+              {TAUX_HORIZONS.map((h) => {
+                const s = signaux[h.key];
+                return (
+                  <div
+                    key={h.key}
+                    className="flex items-baseline justify-between gap-1 whitespace-nowrap"
+                    title={s.mois ? `Devis de ${tauxFormatMois(s.mois)} · N-1 ${s.n1 === null ? "—" : formatPct(s.n1)}` : "Aucune cohorte complète à cet âge"}
+                  >
+                    <span className="flex items-center gap-1 text-[9px] uppercase tracking-wide text-[color:var(--cg-ink)]/40">
+                      <span className="inline-block h-1.5 w-1.5 rounded-full" style={{ background: h.color }} />
+                      {h.label}
+                    </span>
+                    <span className="flex items-baseline gap-1">
+                      <span className={`font-[var(--font-mono,monospace)] text-xs font-semibold ${s.valeur === null ? "text-[color:var(--cg-ink)]/25" : "text-[color:var(--cg-ink)]/85"}`}>
+                        {s.valeur === null ? "—" : formatPct(s.valeur)}
+                      </span>
+                      <span className={`font-[var(--font-mono,monospace)] text-[9px] ${tauxCouleurDelta(s.delta)}`}>
+                        {s.delta === null ? "" : tauxFormatDelta(s.delta)}
+                      </span>
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+
+            {/* Ligne d'action : devis à relancer. */}
+            {risque && (
+              <div
+                className={`mt-2 border-t border-[color:var(--cg-ink)]/10 pt-1.5 text-[10px] leading-tight ${nbRisque > 0 ? "text-[#C1683C]" : "text-[color:var(--cg-ink)]/35"}`}
+                title={`Devis sans CDC, BL ni facture depuis au moins ${TAUX_AGE_RISQUE_JOURS} jours, montant ≥ ${TAUX_MONTANT_RISQUE.toLocaleString("fr-FR")} €, émis depuis le 1er janvier`}
+              >
+                {nbRisque > 0 ? (
+                  <>
+                    ⚠ <span className="font-[var(--font-mono,monospace)] font-semibold">{nbRisque}</span> devis à relancer ·{" "}
+                    <span className="font-[var(--font-mono,monospace)] font-semibold">{formatMontant(risque.ca)}</span>
+                    <span className="text-[color:var(--cg-ink)]/40"> (&gt; {TAUX_AGE_RISQUE_JOURS} j, ≥ {TAUX_MONTANT_RISQUE / 1000} K€)</span>
+                  </>
+                ) : (
+                  <>Aucun devis à risque (&gt; {TAUX_AGE_RISQUE_JOURS} j, ≥ {TAUX_MONTANT_RISQUE / 1000} K€)</>
+                )}
+              </div>
+            )}
+          </>
         )}
       </CardShell>
     </div>
