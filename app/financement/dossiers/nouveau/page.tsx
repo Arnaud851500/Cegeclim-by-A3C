@@ -18,7 +18,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { supabase } from '@/lib/supabaseClient'
 import { useAccess } from '@/components/AccessContext'
-import { chargerReferentiels, ORIGINE_LABEL, SOURCE_LABEL, type ChampCee } from '@/lib/financementCee'
+import { ORIGINE_LABEL, SOURCE_LABEL, type ChampCee } from '@/lib/financementCee'
 
 type ClientCee = { numero: string; intitule: string; email: string | null; ville: string | null }
 
@@ -38,6 +38,10 @@ export default function NouveauDossierCeePage() {
   }, [accessLoading, rights.can_financement, router])
 
   const [champs, setChamps] = useState<ChampCee[]>([])
+  // Chargement du registre : le message « registre indisponible » ne s'affiche
+  // qu'après une vraie erreur de lecture, jamais pendant le chargement (16/10/2026).
+  const [registreEtat, setRegistreEtat] = useState<'chargement' | 'ok' | 'erreur'>('chargement')
+  const [registreErreur, setRegistreErreur] = useState('')
   const [clients, setClients] = useState<ClientCee[]>([])
   const [valeurs, setValeurs] = useState<Record<string, string>>({ fiches_cee: 'BAR-TH-171', offre_aides: 'Offre premium' })
   const [adresseDifferente, setAdresseDifferente] = useState(false)
@@ -48,20 +52,44 @@ export default function NouveauDossierCeePage() {
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
 
+  // Registre des caractéristiques et référence suggérée : rapides, ils
+  // conditionnent l'affichage du formulaire.
   useEffect(() => {
     if (!accesAccorde) return
     let annule = false
     async function load() {
       const year = new Date().getFullYear()
-      const [ref, { count }, cl] = await Promise.all([
-        chargerReferentiels(),
+      const [{ data, error }, { count }] = await Promise.all([
+        supabase.from('cee_champs').select('*').eq('ouverture', true).order('ordre', { ascending: true }),
         supabase.from('cee_dossiers').select('id', { count: 'exact', head: true }).like('reference', `CEE-${year}-%`),
-        supabase.rpc('get_cee_clients', { p_depuis: `${year}-01-01`, p_ro_only: false }),
       ])
       if (annule) return
-      setChamps(ref.champs.filter((c) => c.ouverture))
       setSuggestedRef(`CEE-${year}-${String((count || 0) + 1).padStart(4, '0')}`)
-      setClients(((cl.data as { clients?: ClientCee[] } | null)?.clients || []).map((c) => ({ numero: c.numero, intitule: c.intitule, email: c.email, ville: c.ville })))
+      if (error) {
+        setRegistreErreur(error.message)
+        setRegistreEtat('erreur')
+        return
+      }
+      setChamps(((data || []) as ChampCee[]).map((c) => ({ ...c, options: c.options || [], sources: c.sources || [] })))
+      setRegistreEtat((data || []).length ? 'ok' : 'erreur')
+    }
+    void load()
+    return () => {
+      annule = true
+    }
+  }, [accesAccorde])
+
+  // Liste des installateurs (clients Convention CEE) : plus lente, chargée à
+  // part pour ne pas retarder le formulaire ; elle alimente seulement la
+  // suggestion du champ Installateur.
+  useEffect(() => {
+    if (!accesAccorde) return
+    let annule = false
+    async function load() {
+      const year = new Date().getFullYear()
+      const { data } = await supabase.rpc('get_cee_clients', { p_depuis: `${year}-01-01`, p_ro_only: false })
+      if (annule) return
+      setClients(((data as { clients?: ClientCee[] } | null)?.clients || []).map((c) => ({ numero: c.numero, intitule: c.intitule, email: c.email, ville: c.ville })))
     }
     void load()
     return () => {
@@ -222,9 +250,12 @@ export default function NouveauDossierCeePage() {
               </div>
             </section>
           ))}
-          {champs.length === 0 && (
+          {registreEtat === 'chargement' && (
+            <div className="rounded-2xl border border-[#E2DFD8] bg-white p-5 text-sm text-slate-500">Chargement du formulaire…</div>
+          )}
+          {registreEtat === 'erreur' && (
             <div className="rounded-2xl border border-[#E7B7A6] bg-[#FBE9E9] p-5 text-sm text-[#A32C2C]">
-              Registre des caractéristiques indisponible (table cee_champs) : la migration 20261016_cee_parcours_drapo.sql doit être appliquée.
+              Registre des caractéristiques indisponible (table cee_champs){registreErreur ? ` : ${registreErreur}` : ''}. Rechargez la page ; si le message persiste, vérifiez que la migration 20261016_cee_parcours_drapo.sql est appliquée.
             </div>
           )}
         </div>
@@ -261,7 +292,7 @@ export default function NouveauDossierCeePage() {
 
               <button
                 onClick={() => void enregistrer()}
-                disabled={saving || champs.length === 0}
+                disabled={saving || registreEtat !== 'ok'}
                 className="h-11 w-full rounded-xl bg-[#111820] text-sm font-semibold text-white transition hover:brightness-110 disabled:opacity-60"
               >
                 {saving ? 'Création…' : 'Créer le dossier'}
