@@ -1230,10 +1230,10 @@ function formatCellValue(v: unknown): string {
  * BLG identifie l'entreprise par son identifiant hexadécimal `crm_id`
  * (blg.partner_base_partner.crm_id, remonté dans la vue en `blg_crm_id`), pas
  * par le partner_id numérique — ex.
- * https://app.blgcloud.com/cegeclim/?app/crm/company/e190ba6f5863e48e051ea093# */
+ * https://app.blgcloud.com/dakar-11/?app/crm/company/e190ba6f5863e48e051ea093# */
 function lienBlg(r: Pick<ControleRow, 'blg_crm_id'>): string | null {
   const id = safeText(r.blg_crm_id)
-  return id ? `https://app.blgcloud.com/cegeclim/?app/crm/company/${id}#` : null
+  return id ? `https://app.blgcloud.com/dakar-11/?app/crm/company/${id}#` : null
 }
 
 /** Captures d'écran issues du document Excel de reprise SAGE ↔ BLG, à déposer
