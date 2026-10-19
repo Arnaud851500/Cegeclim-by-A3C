@@ -41,10 +41,10 @@ import { ClientNoteButton, fetchNumerosAvecNote } from '@/lib/clientNote'
 //   - suppression des 24 colonnes "Visite n°X" et de l'ancien "Réalisé"
 //     manuel ; colonnes "Dynamisme client" masquées (à retravailler) ;
 //   - Remarque et QRC masquées par défaut ;
-//   - bouton "Cadeau fin d'année" : 3 colonnes (type, qté, adresse de
-//     livraison -- "Autres" impose une adresse vérifiée dans la Base Adresse
-//     Nationale), pavé de synthèse et export Excel dédié. Tables
-//     ref_cadeaux_fin_annee / client_cadeaux_fin_annee.
+//   - bouton "Cadeau fin d'année" : une colonne de quantité par type de
+//     cadeau (plusieurs types possibles par client) + valeur totale, pavé de
+//     synthèse et export Excel dédié. Tables ref_cadeaux_fin_annee /
+//     client_cadeaux_fin_annee (une ligne par client et par type).
 
 const MapContainer: any = dynamic(() => import('react-leaflet').then((mod) => mod.MapContainer as any), { ssr: false })
 const TileLayer: any = dynamic(() => import('react-leaflet').then((mod) => mod.TileLayer as any), { ssr: false })
@@ -293,7 +293,7 @@ type ColumnDef = {
   // distincte de `editable` (qui cible objectif_tiers via save_objectif_tiers).
   editableAlerte?: 'min_appels_visites_mois' | 'max_jours_sans_devis' | 'max_jours_sans_commande'
   // Colonnes "Cadeau fin d'année" (rendu spécifique, hors export principal).
-  cadeau?: 'type' | 'qte' | 'lieu'
+  cadeau?: { kind: 'qte'; cadeauId: number } | { kind: 'total' }
   value: (row: SummaryRow) => any
   format?: 'text' | 'keur' | 'keurBlank' | 'keurCompare' | 'pct' | 'pctBlank' | 'pctCompare' | 'points' | 'number' | 'numberBlank' | 'date' | 'action' | 'caBand'
   compareValue?: (row: SummaryRow) => any
@@ -340,8 +340,6 @@ type VisitesClientOuvert = {
 }
 
 // ── Cadeaux de fin d'année ───────────────────────────────────────────────
-type LieuLivraison = 'agence' | 'client' | 'autre'
-
 type CadeauRef = {
   id: number
   libelle: string
@@ -350,6 +348,7 @@ type CadeauRef = {
   ordre: number
 }
 
+/** Une ligne = un type de cadeau pour un client (plusieurs lignes possibles). */
 type CadeauClient = {
   id?: string
   annee: number
@@ -357,29 +356,6 @@ type CadeauClient = {
   cadeau_id: number
   prix_unitaire: number
   quantite: number
-  lieu_livraison: LieuLivraison
-  adresse_autre: string | null
-  adresse_autre_code_postal: string | null
-  adresse_autre_ville: string | null
-  adresse_autre_lat: number | null
-  adresse_autre_lon: number | null
-  adresse_autre_ban_id: string | null
-}
-
-type AdresseSuggestion = {
-  id: string
-  label: string
-  postcode: string
-  city: string
-  type: string
-  score: number
-  lat: number | null
-  lon: number | null
-}
-
-type AdresseModalState = {
-  numero: string
-  intitule: string
 }
 
 type SyntheseMapClientRow = {
@@ -475,14 +451,13 @@ const GROUPE_CADEAU = "Cadeau fin d'année"
 // à retravailler dans un second temps. Les saisies existantes restent en base.
 const AFFICHER_DYNAMISME_CLIENT = false
 
-const LIEUX_LIVRAISON: { value: LieuLivraison; label: string }[] = [
-  { value: 'agence', label: 'Agence' },
-  { value: 'client', label: 'Adresse client' },
-  { value: 'autre', label: 'Autres' },
-]
+/** Clé de la map des cadeaux : client + type. */
+function cleCadeau(numero: string, cadeauId: number) {
+  return `${normalize(numero)}§${cadeauId}`
+}
 
-function lieuLivraisonLabel(value: string | null | undefined) {
-  return LIEUX_LIVRAISON.find((l) => l.value === value)?.label || ''
+function prixCourt(value: number) {
+  return new Intl.NumberFormat('fr-FR', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(value || 0)
 }
 
 function periodMonthLabel(month: number, year: number) {
@@ -638,49 +613,6 @@ function listeTaches(value: any): any[] {
   if (Array.isArray(value)) return value
   if (typeof value === 'object' && Array.isArray(value.taches)) return value.taches
   return []
-}
-
-// ── Vérification d'adresse (Base Adresse Nationale) ──────────────────────
-// Service Géoplateforme (IGN) en priorité, ancienne URL api-adresse en repli.
-async function rechercherAdresses(query: string): Promise<AdresseSuggestion[]> {
-  const q = query.trim()
-  if (q.length < 5) return []
-  const urls = [
-    `https://data.geopf.fr/geocodage/search?q=${encodeURIComponent(q)}&limit=6&index=address`,
-    `https://api-adresse.data.gouv.fr/search/?q=${encodeURIComponent(q)}&limit=6`,
-  ]
-  let lastError: unknown = null
-  for (const url of urls) {
-    try {
-      const res = await fetch(url)
-      if (!res.ok) { lastError = new Error(`HTTP ${res.status}`); continue }
-      const json = await res.json()
-      const features = Array.isArray(json?.features) ? json.features : []
-      return features.map((f: any) => {
-        const p = f?.properties || {}
-        const coords = Array.isArray(f?.geometry?.coordinates) ? f.geometry.coordinates : []
-        return {
-          id: safeText(p.id),
-          label: safeText(p.label),
-          postcode: safeText(p.postcode),
-          city: safeText(p.city),
-          type: safeText(p.type),
-          score: safeNumber(p.score),
-          lon: coords.length > 1 ? Number(coords[0]) : null,
-          lat: coords.length > 1 ? Number(coords[1]) : null,
-        } as AdresseSuggestion
-      }).filter((s: AdresseSuggestion) => s.label)
-    } catch (err) {
-      lastError = err
-    }
-  }
-  throw lastError instanceof Error ? lastError : new Error("Service de vérification d'adresse indisponible")
-}
-
-/** Une adresse est jugée "existante" si la BAN la reconnaît au moins au
- * niveau de la rue (numéro ou voie) ; une simple commune est refusée. */
-function adresseSuffisante(s: AdresseSuggestion) {
-  return ['housenumber', 'street', 'locality'].includes(s.type)
 }
 
 const EMPTY_LAST_BUSINESS_DATES: LastBusinessDates = { devis: null, factures: null, bl: null }
@@ -1254,7 +1186,6 @@ async function fetchCadeauxRef(): Promise<CadeauRef[]> {
 }
 
 function normalizeCadeauClient(row: Record<string, any>): CadeauClient {
-  const lieu = safeText(row.lieu_livraison, 'agence') as LieuLivraison
   return {
     id: row.id || undefined,
     annee: safeNumber(row.annee),
@@ -1262,22 +1193,15 @@ function normalizeCadeauClient(row: Record<string, any>): CadeauClient {
     cadeau_id: safeNumber(row.cadeau_id),
     prix_unitaire: safeNumber(row.prix_unitaire),
     quantite: Math.max(1, safeNumber(row.quantite) || 1),
-    lieu_livraison: ['agence', 'client', 'autre'].includes(lieu) ? lieu : 'agence',
-    adresse_autre: row.adresse_autre ?? null,
-    adresse_autre_code_postal: row.adresse_autre_code_postal ?? null,
-    adresse_autre_ville: row.adresse_autre_ville ?? null,
-    adresse_autre_lat: row.adresse_autre_lat ?? null,
-    adresse_autre_lon: row.adresse_autre_lon ?? null,
-    adresse_autre_ban_id: row.adresse_autre_ban_id ?? null,
   }
 }
 
 async function fetchCadeauxClients(annee: number) {
-  const rows = await fetchAll('client_cadeaux_fin_annee', '*', (q) => q.eq('annee', annee))
+  const rows = await fetchAll('client_cadeaux_fin_annee', 'id,annee,numero_tiers,cadeau_id,prix_unitaire,quantite', (q) => q.eq('annee', annee))
   const map = new Map<string, CadeauClient>()
   rows.forEach((row) => {
     const c = normalizeCadeauClient(row)
-    map.set(normalize(c.numero_tiers), c)
+    map.set(cleCadeau(c.numero_tiers, c.cadeau_id), c)
   })
   return map
 }
@@ -1547,7 +1471,7 @@ const TOGGLEABLE_COLUMN_LABELS: Record<string, string> = {
 }
 const DEFAULT_VISIBLE_TOGGLEABLE_COLUMNS = new Set(['caBandN'])
 
-function buildColumns(showFamilies: boolean, showCollaborateurColumn = false, encoursDetailMode: EncoursDetailMode = 'macro', showCadeaux = false): ColumnDef[] {
+function buildColumns(showFamilies: boolean, showCollaborateurColumn = false, encoursDetailMode: EncoursDetailMode = 'macro', cadeauxColonnes: CadeauRef[] | null = null): ColumnDef[] {
   const cols: ColumnDef[] = []
 
   if (showCollaborateurColumn) {
@@ -1573,12 +1497,19 @@ function buildColumns(showFamilies: boolean, showCollaborateurColumn = false, en
   )
 
   // ── Cadeau fin d'année (bouton dédié, écran uniquement) ────────────────
-  if (showCadeaux) {
-    cols.push(
-      { key: 'cadeauType', label: 'Type cadeau', group: GROUPE_CADEAU, width: 240, cadeau: 'type', value: () => '', format: 'text' },
-      { key: 'cadeauQte', label: 'Qté', group: GROUPE_CADEAU, width: 62, cadeau: 'qte', value: () => '', format: 'text' },
-      { key: 'cadeauLieu', label: 'Adresse livraison', group: GROUPE_CADEAU, width: 250, cadeau: 'lieu', value: () => '', format: 'text' },
-    )
+  // Une colonne de quantité par type de cadeau actif + valeur totale.
+  if (cadeauxColonnes) {
+    cadeauxColonnes.forEach((ref) => cols.push({
+      key: `cadeau_${ref.id}`,
+      label: `${ref.libelle} (${prixCourt(ref.prix_unitaire)} €)`,
+      group: GROUPE_CADEAU,
+      width: 50,
+      rotate: true,
+      cadeau: { kind: 'qte', cadeauId: ref.id },
+      value: () => '',
+      format: 'text',
+    }))
+    cols.push({ key: 'cadeauTotal', label: 'Valeur cadeaux', group: GROUPE_CADEAU, width: 74, rotate: true, cadeau: { kind: 'total' }, value: () => '', format: 'text' })
   }
 
   cols.push(
@@ -2661,13 +2592,6 @@ export default function SyntheseMultiClientsPage() {
   const [cadeauxErreur, setCadeauxErreur] = useState<string | null>(null)
   const [savingCadeau, setSavingCadeau] = useState<string | null>(null)
   const [cadeauExportEnCours, setCadeauExportEnCours] = useState(false)
-  // Fenêtre "adresse de livraison Autres" (adresse vérifiée BAN obligatoire)
-  const [adresseModal, setAdresseModal] = useState<AdresseModalState | null>(null)
-  const [adresseQuery, setAdresseQuery] = useState('')
-  const [adresseSuggestions, setAdresseSuggestions] = useState<AdresseSuggestion[]>([])
-  const [adresseChoisie, setAdresseChoisie] = useState<AdresseSuggestion | null>(null)
-  const [adresseRecherche, setAdresseRecherche] = useState(false)
-  const [adresseErreur, setAdresseErreur] = useState<string | null>(null)
 
   useEffect(() => {
     let alive = true
@@ -2704,8 +2628,8 @@ export default function SyntheseMultiClientsPage() {
   }, [alertesConfigRows])
 
   const columns = useMemo(
-    () => buildColumns(showFamilies, showCollaborateurColumn, encoursDetailMode, showCadeaux),
-    [showFamilies, showCollaborateurColumn, encoursDetailMode, showCadeaux]
+    () => buildColumns(showFamilies, showCollaborateurColumn, encoursDetailMode, showCadeaux ? cadeauxRef.filter((ref) => ref.actif) : null),
+    [showFamilies, showCollaborateurColumn, encoursDetailMode, showCadeaux, cadeauxRef]
   )
 
   // Colonnes réellement rendues à l'écran : toutes les colonnes SAUF celles
@@ -2833,30 +2757,6 @@ export default function SyntheseMultiClientsPage() {
     void loadCadeaux()
     return () => { alive = false }
   }, [showCadeaux, cadeauxCharges])
-
-  // Recherche d'adresse (BAN) avec temporisation pendant la saisie.
-  useEffect(() => {
-    if (!adresseModal) return
-    const q = adresseQuery.trim()
-    if (adresseChoisie && adresseChoisie.label === q) return
-    if (q.length < 5) { setAdresseSuggestions([]); setAdresseErreur(null); return }
-    let alive = true
-    const timer = window.setTimeout(async () => {
-      setAdresseRecherche(true)
-      setAdresseErreur(null)
-      try {
-        const results = await rechercherAdresses(q)
-        if (!alive) return
-        setAdresseSuggestions(results)
-        if (!results.length) setAdresseErreur("Adresse introuvable dans la Base Adresse Nationale : vérifiez la saisie (numéro, voie, code postal, ville).")
-      } catch (err: any) {
-        if (alive) setAdresseErreur(`Vérification impossible : ${err?.message || 'service indisponible'}`)
-      } finally {
-        if (alive) setAdresseRecherche(false)
-      }
-    }, 350)
-    return () => { alive = false; window.clearTimeout(timer) }
-  }, [adresseQuery, adresseModal, adresseChoisie])
 
   useEffect(() => {
     let alive = true
@@ -3028,198 +2928,117 @@ export default function SyntheseMultiClientsPage() {
   const cadeauxSelection = useMemo(() => {
     const vus = new Set<string>()
     const lignes: { row: SummaryRow; cadeau: CadeauClient }[] = []
+    const clientsAvecCadeau = new Set<string>()
+    // Valeur et quantité par client (colonne "Valeur cadeaux" / ligne TOTAL).
+    const parClient = new Map<string, { qte: number; valeur: number }>()
     baseClientRows.forEach((row) => {
       const key = normalize(row.numero)
       if (vus.has(key)) return
       vus.add(key)
-      const cadeau = cadeauxMap.get(key)
-      if (cadeau) lignes.push({ row, cadeau })
+      cadeauxRef.forEach((ref) => {
+        const cadeau = cadeauxMap.get(cleCadeau(row.numero, ref.id))
+        if (!cadeau) return
+        lignes.push({ row, cadeau })
+        clientsAvecCadeau.add(key)
+        const c = parClient.get(key) || { qte: 0, valeur: 0 }
+        c.qte += cadeau.quantite
+        c.valeur += cadeau.quantite * cadeau.prix_unitaire
+        parClient.set(key, c)
+      })
     })
-    const parTypeMap = new Map<number, { id: number; libelle: string; prix: number; nbClients: number; qte: number; valeur: number }>()
-    lignes.forEach(({ cadeau }) => {
-      const ref = cadeauxRefById.get(cadeau.cadeau_id)
-      const bucket = parTypeMap.get(cadeau.cadeau_id) || { id: cadeau.cadeau_id, libelle: ref?.libelle || `Cadeau #${cadeau.cadeau_id}`, prix: cadeau.prix_unitaire, nbClients: 0, qte: 0, valeur: 0 }
-      bucket.nbClients += 1
-      bucket.qte += cadeau.quantite
-      bucket.valeur += cadeau.quantite * cadeau.prix_unitaire
-      parTypeMap.set(cadeau.cadeau_id, bucket)
-    })
-    // Tous les types actifs apparaissent (à 0 si non choisis).
-    cadeauxRef.filter((ref) => ref.actif).forEach((ref) => {
-      if (!parTypeMap.has(ref.id)) parTypeMap.set(ref.id, { id: ref.id, libelle: ref.libelle, prix: ref.prix_unitaire, nbClients: 0, qte: 0, valeur: 0 })
-    })
-    const ordre = (id: number) => cadeauxRefById.get(id)?.ordre ?? 999
-    const parType = Array.from(parTypeMap.values()).sort((a, b) => ordre(a.id) - ordre(b.id) || a.libelle.localeCompare(b.libelle, 'fr'))
-    const parLieu = LIEUX_LIVRAISON.map((l) => ({ ...l, nb: lignes.filter((x) => x.cadeau.lieu_livraison === l.value).length }))
+    const parType = cadeauxRef
+      .map((ref) => {
+        const l = lignes.filter((x) => x.cadeau.cadeau_id === ref.id)
+        return {
+          id: ref.id,
+          libelle: ref.libelle,
+          prix: ref.prix_unitaire,
+          actif: ref.actif,
+          nbClients: l.length,
+          qte: l.reduce((s, x) => s + x.cadeau.quantite, 0),
+          valeur: l.reduce((s, x) => s + x.cadeau.quantite * x.cadeau.prix_unitaire, 0),
+        }
+      })
+      .filter((t) => t.actif || t.qte > 0)
     return {
       lignes,
-      nbClients: lignes.length,
+      parClient,
+      nbClients: clientsAvecCadeau.size,
       nbClientsSelection: vus.size,
       qte: lignes.reduce((s, x) => s + x.cadeau.quantite, 0),
       valeur: lignes.reduce((s, x) => s + x.cadeau.quantite * x.cadeau.prix_unitaire, 0),
       parType,
-      parLieu,
     }
-  }, [baseClientRows, cadeauxMap, cadeauxRef, cadeauxRefById])
+  }, [baseClientRows, cadeauxMap, cadeauxRef])
 
-  async function saveCadeau(numero: string, patch: Partial<CadeauClient> | null) {
+  /** Enregistre la quantité d'un type de cadeau pour un client ; vide ou 0
+   * supprime la ligne. Le prix unitaire est figé au moment de la saisie. */
+  async function saveCadeauQte(row: SummaryRow, ref: CadeauRef, rawValue: string) {
+    const numero = row.numero
     if (!numero || numero === 'TOTAL') return
-    const key = normalize(numero)
+    const key = cleCadeau(numero, ref.id)
+    const current = cadeauxMap.get(key)
+    const texte = rawValue.trim()
+    const qte = texte === '' ? 0 : Math.round(safeNumber(texte))
+    if (qte < 0) { setCadeauxErreur('La quantité ne peut pas être négative.'); return }
+    if ((current?.quantite || 0) === qte) return
+
     setSavingCadeau(key)
     setCadeauxErreur(null)
     try {
-      if (patch === null) {
-        const { error: delError } = await supabase.from('client_cadeaux_fin_annee').delete().eq('annee', N).eq('numero_tiers', numero)
+      if (qte === 0) {
+        const { error: delError } = await supabase
+          .from('client_cadeaux_fin_annee')
+          .delete()
+          .eq('annee', N)
+          .eq('numero_tiers', numero)
+          .eq('cadeau_id', ref.id)
         if (delError) throw delError
         setCadeauxMap((prev) => { const next = new Map(prev); next.delete(key); return next })
         return
       }
 
-      const current = cadeauxMap.get(key)
-      const merged = { ...(current || {}), ...patch } as Partial<CadeauClient>
-      if (!merged.cadeau_id) throw new Error('type de cadeau manquant')
-      const lieu = (merged.lieu_livraison || 'agence') as LieuLivraison
-      const avecAdresse = lieu === 'autre'
-      if (avecAdresse && !safeText(merged.adresse_autre)) throw new Error('adresse de livraison obligatoire pour "Autres"')
-
       const { data: sessionData } = await supabase.auth.getSession()
       const payload = {
         annee: N,
         numero_tiers: numero,
-        cadeau_id: merged.cadeau_id,
-        prix_unitaire: safeNumber(merged.prix_unitaire),
-        quantite: Math.max(1, Math.round(safeNumber(merged.quantite) || 1)),
-        lieu_livraison: lieu,
-        adresse_autre: avecAdresse ? merged.adresse_autre ?? null : null,
-        adresse_autre_code_postal: avecAdresse ? merged.adresse_autre_code_postal ?? null : null,
-        adresse_autre_ville: avecAdresse ? merged.adresse_autre_ville ?? null : null,
-        adresse_autre_lat: avecAdresse ? merged.adresse_autre_lat ?? null : null,
-        adresse_autre_lon: avecAdresse ? merged.adresse_autre_lon ?? null : null,
-        adresse_autre_ban_id: avecAdresse ? merged.adresse_autre_ban_id ?? null : null,
+        cadeau_id: ref.id,
+        prix_unitaire: current ? current.prix_unitaire : ref.prix_unitaire,
+        quantite: qte,
         updated_by_email: sessionData.session?.user?.email || null,
       }
       const { data, error: upError } = await supabase
         .from('client_cadeaux_fin_annee')
-        .upsert(payload, { onConflict: 'annee,numero_tiers' })
-        .select('*')
+        .upsert(payload, { onConflict: 'annee,numero_tiers,cadeau_id' })
+        .select('id,annee,numero_tiers,cadeau_id,prix_unitaire,quantite')
         .single()
       if (upError) throw upError
       const saved = normalizeCadeauClient((data || payload) as Record<string, any>)
       setCadeauxMap((prev) => { const next = new Map(prev); next.set(key, saved); return next })
     } catch (err: any) {
-      setCadeauxErreur(`Cadeau non enregistré (${numero}) : ${err?.message || err}`)
+      setCadeauxErreur(`Cadeau non enregistré (${numero} · ${ref.libelle}) : ${err?.message || err}`)
     } finally {
       setSavingCadeau(null)
     }
-  }
-
-  function changerTypeCadeau(row: SummaryRow, value: string) {
-    if (!value) { void saveCadeau(row.numero, null); return }
-    const ref = cadeauxRefById.get(Number(value))
-    if (!ref) return
-    const current = cadeauxMap.get(normalize(row.numero))
-    void saveCadeau(row.numero, {
-      cadeau_id: ref.id,
-      prix_unitaire: ref.prix_unitaire,
-      quantite: current?.quantite || 1,
-      lieu_livraison: current?.lieu_livraison || 'agence',
-    })
-  }
-
-  function changerQteCadeau(row: SummaryRow, value: string) {
-    const current = cadeauxMap.get(normalize(row.numero))
-    if (!current) return
-    const qte = Math.round(safeNumber(value))
-    if (qte < 1) { setCadeauxErreur('La quantité doit être au moins 1 (retirez le type de cadeau pour supprimer la ligne).'); return }
-    if (qte === current.quantite) return
-    void saveCadeau(row.numero, { quantite: qte })
-  }
-
-  function ouvrirAdresseAutre(row: SummaryRow) {
-    const current = cadeauxMap.get(normalize(row.numero))
-    setAdresseModal({ numero: row.numero, intitule: row.intitule })
-    setAdresseQuery(current?.adresse_autre || '')
-    setAdresseSuggestions([])
-    setAdresseErreur(null)
-    setAdresseChoisie(current?.adresse_autre ? {
-      id: safeText(current.adresse_autre_ban_id),
-      label: current.adresse_autre,
-      postcode: safeText(current.adresse_autre_code_postal),
-      city: safeText(current.adresse_autre_ville),
-      type: 'housenumber',
-      score: 1,
-      lat: current.adresse_autre_lat,
-      lon: current.adresse_autre_lon,
-    } : null)
-  }
-
-  function changerLieuCadeau(row: SummaryRow, value: string) {
-    const current = cadeauxMap.get(normalize(row.numero))
-    if (!current) return
-    if (value === 'autre') { ouvrirAdresseAutre(row); return }
-    void saveCadeau(row.numero, { lieu_livraison: value as LieuLivraison })
-  }
-
-  function fermerAdresseModal() {
-    setAdresseModal(null)
-    setAdresseQuery('')
-    setAdresseSuggestions([])
-    setAdresseChoisie(null)
-    setAdresseErreur(null)
-  }
-
-  async function validerAdresseAutre() {
-    if (!adresseModal || !adresseChoisie) return
-    if (!adresseSuffisante(adresseChoisie)) {
-      setAdresseErreur('Adresse incomplète : choisissez une adresse avec un numéro et/ou une voie.')
-      return
-    }
-    await saveCadeau(adresseModal.numero, {
-      lieu_livraison: 'autre',
-      adresse_autre: adresseChoisie.label,
-      adresse_autre_code_postal: adresseChoisie.postcode || null,
-      adresse_autre_ville: adresseChoisie.city || null,
-      adresse_autre_lat: adresseChoisie.lat,
-      adresse_autre_lon: adresseChoisie.lon,
-      adresse_autre_ban_id: adresseChoisie.id || null,
-    })
-    fermerAdresseModal()
   }
 
   async function exportCadeauxExcel() {
     if (!cadeauxSelection.lignes.length) return
     setCadeauExportEnCours(true)
     try {
-      // Adresses SAGE des clients livrés à leur adresse.
-      const numerosClient = cadeauxSelection.lignes.filter((x) => x.cadeau.lieu_livraison === 'client').map((x) => x.row.numero)
-      const adressesClient = new Map<string, string>()
-      for (const group of chunk(numerosClient, 300)) {
-        const { data, error: adrError } = await supabase
-          .from('ref_tiers')
-          .select('numero,adresse,complement_adresse,code_postal,ville')
-          .in('numero', group)
-        if (adrError) throw adrError
-        ;((data || []) as Record<string, any>[]).forEach((t) => {
-          const ligne = [safeText(t.adresse), safeText(t.complement_adresse), [safeText(t.code_postal), safeText(t.ville)].filter(Boolean).join(' ')].filter(Boolean).join(', ')
-          adressesClient.set(normalize(t.numero), ligne)
-        })
-      }
-
       // @ts-ignore - xlsx-js-style n'a pas toujours les types TS.
       const XLSX = await import('xlsx-js-style')
+      const ordreRef = (id: number) => cadeauxRefById.get(id)?.ordre ?? 999
       const lignes = [...cadeauxSelection.lignes].sort((a, b) =>
         safeText(a.row.agence).localeCompare(safeText(b.row.agence), 'fr') ||
         safeText(a.row.collaborateur).localeCompare(safeText(b.row.collaborateur), 'fr') ||
-        safeText(a.row.intitule).localeCompare(safeText(b.row.intitule), 'fr'))
+        safeText(a.row.intitule).localeCompare(safeText(b.row.intitule), 'fr') ||
+        ordreRef(a.cadeau.cadeau_id) - ordreRef(b.cadeau.cadeau_id))
 
-      const header = ['Agence', 'Représentant', 'Client', 'Nom', `CA ${N}`, 'Type cadeau', 'Prix unitaire', 'Qté', 'Valeur', 'Lieu', 'Adresse de livraison']
+      // Une ligne par client et par type de cadeau.
+      const header = ['Agence', 'Représentant', 'Client', 'Nom', `CA ${N}`, 'Type cadeau', 'Prix unitaire', 'Qté', 'Valeur']
       const body = lignes.map(({ row, cadeau }) => {
         const ref = cadeauxRefById.get(cadeau.cadeau_id)
-        const adresse = cadeau.lieu_livraison === 'autre'
-          ? safeText(cadeau.adresse_autre)
-          : cadeau.lieu_livraison === 'client'
-            ? adressesClient.get(normalize(row.numero)) || 'Adresse SAGE non renseignée'
-            : `Agence ${safeText(row.agence)}`
         return [
           safeText(row.agence),
           safeText(row.collaborateur),
@@ -3230,11 +3049,9 @@ export default function SyntheseMultiClientsPage() {
           cadeau.prix_unitaire,
           cadeau.quantite,
           Math.round(cadeau.quantite * cadeau.prix_unitaire * 100) / 100,
-          lieuLivraisonLabel(cadeau.lieu_livraison),
-          adresse,
         ]
       })
-      const totalLigne = ['TOTAL', '', `${lignes.length} clients`, '', Math.round(lignes.reduce((s, x) => s + x.row.caYtdNComplet, 0) * 100) / 100, '', '', cadeauxSelection.qte, Math.round(cadeauxSelection.valeur * 100) / 100, '', '']
+      const totalLigne = ['TOTAL', '', `${cadeauxSelection.nbClients} clients`, '', '', '', '', cadeauxSelection.qte, Math.round(cadeauxSelection.valeur * 100) / 100]
 
       const ws = XLSX.utils.aoa_to_sheet([header, ...body, totalLigne])
       const range = XLSX.utils.decode_range(ws['!ref'] || 'A1:A1')
@@ -3254,7 +3071,7 @@ export default function SyntheseMultiClientsPage() {
           }
         }
       }
-      ws['!cols'] = [{ wch: 16 }, { wch: 22 }, { wch: 11 }, { wch: 34 }, { wch: 13 }, { wch: 36 }, { wch: 11 }, { wch: 6 }, { wch: 11 }, { wch: 15 }, { wch: 50 }]
+      ws['!cols'] = [{ wch: 16 }, { wch: 22 }, { wch: 11 }, { wch: 34 }, { wch: 13 }, { wch: 40 }, { wch: 11 }, { wch: 6 }, { wch: 11 }]
       ws['!autofilter'] = { ref: XLSX.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: Math.max(0, range.e.r - 1), c: range.e.c } }) }
       const pane = { xSplit: 0, ySplit: 1, topLeftCell: 'A2', activePane: 'bottomLeft', state: 'frozen' }
       ws['!freeze'] = pane
@@ -3734,7 +3551,7 @@ export default function SyntheseMultiClientsPage() {
     const XLSX = await import('xlsx-js-style')
     // L'export Excel contient systématiquement le détail Famille macro ; il
     // est reconstruit indépendamment de l'écran (pastilles et cadeaux exclus).
-    const exportColumns = buildColumns(true, showCollaborateurColumn, encoursDetailMode, false)
+    const exportColumns = buildColumns(true, showCollaborateurColumn, encoursDetailMode, null)
 
     const sortCol = exportColumns.find((c) => c.key === sort.key) || exportColumns.find((c) => c.key === 'caN1')!
     let exportClientRows = baseClientRows.filter((row) => {
@@ -4078,7 +3895,7 @@ export default function SyntheseMultiClientsPage() {
             </button>
             {showCadeaux && (
               <span className="cadeauHint">
-                Choisissez le type, la quantité et le lieu de livraison dans les colonnes « Cadeau fin d&apos;année ». « Autres » impose une adresse vérifiée.
+                Saisissez une quantité par type de cadeau dans les colonnes « Cadeau fin d&apos;année » (plusieurs types possibles par client ; vider ou 0 = retirer).
               </span>
             )}
           </section>
@@ -4101,12 +3918,6 @@ export default function SyntheseMultiClientsPage() {
                     <div>
                       <span>Valeur totale</span>
                       <strong>{formatEur(cadeauxSelection.valeur)}</strong>
-                    </div>
-                    <div>
-                      <span>Livraison</span>
-                      <strong className="cadeauLieux">
-                        {cadeauxSelection.parLieu.map((l) => <em key={l.value}>{l.label} {l.nb}</em>)}
-                      </strong>
                     </div>
                   </div>
                   <table className="cadeauTypeTable">
@@ -4190,8 +4001,9 @@ export default function SyntheseMultiClientsPage() {
                   const retardClient = col.key === 'numero' && row.kind === 'client' ? retardsMap.get(cleTiers(row.numero)) || null : null
                   const isVisitesCell = col.key === 'nbVisitesReel' && row.kind !== 'month'
                   const statutVisites = isVisitesCell ? visitesStatut(row.nbVisitesReel, row.visiteTheorique) : 'none'
-                  const cadeauClient = col.cadeau && row.kind === 'client' ? cadeauxMap.get(normalize(row.numero)) || null : null
-                  const cadeauSaving = Boolean(col.cadeau) && row.kind === 'client' && savingCadeau === normalize(row.numero)
+                  const cadeauRefCol = col.cadeau?.kind === 'qte' ? cadeauxRefById.get(col.cadeau.cadeauId) || null : null
+                  const cadeauClient = cadeauRefCol && row.kind === 'client' ? cadeauxMap.get(cleCadeau(row.numero, cadeauRefCol.id)) || null : null
+                  const cadeauSaving = Boolean(cadeauRefCol) && row.kind === 'client' && savingCadeau === cleCadeau(row.numero, cadeauRefCol!.id)
                   return (
                     <td key={`${row.id}-${col.key}`} className={`${col.className || ''} ${stickyClass(col.sticky)} ${['keur', 'keurBlank', 'keurCompare', 'pct', 'pctBlank', 'pctCompare', 'points', 'number', 'numberBlank'].includes(col.format || '') ? 'num' : ''} ${col.cadeau ? 'cadeauCell' : ''} ${isVisitesCell ? 'visitesCell' : ''}`} style={{ width: col.width, minWidth: col.width }}>
                       {/* Code et intitulé client : rangée flex, les pictogrammes gardent
@@ -4221,54 +4033,28 @@ export default function SyntheseMultiClientsPage() {
                         </button>
                       ) : null}
                       {col.cadeau ? (
-                        row.kind === 'client' ? (
-                          col.cadeau === 'type' ? (
-                            <select
-                              className={`cadeauSelect ${cadeauSaving ? 'saving' : ''} ${cadeauClient ? 'rempli' : ''}`}
-                              value={cadeauClient ? String(cadeauClient.cadeau_id) : ''}
-                              disabled={!cadeauxCharges || cadeauSaving}
-                              onChange={(e) => changerTypeCadeau(row, e.target.value)}
-                            >
-                              <option value="">—</option>
-                              {cadeauxRef
-                                .filter((ref) => ref.actif || ref.id === cadeauClient?.cadeau_id)
-                                .map((ref) => <option key={ref.id} value={ref.id}>{ref.libelle} — {formatEur(ref.prix_unitaire)}</option>)}
-                            </select>
-                          ) : col.cadeau === 'qte' ? (
+                        col.cadeau.kind === 'qte' && cadeauRefCol ? (
+                          row.kind === 'client' ? (
                             <input
-                              key={`${row.numero}-qte-${cadeauClient?.quantite ?? 'x'}`}
-                              className={`cadeauQte ${cadeauSaving ? 'saving' : ''}`}
+                              key={`${row.numero}-cadeau-${cadeauRefCol.id}-${cadeauClient?.quantite ?? 0}`}
+                              className={`cadeauQte ${cadeauSaving ? 'saving' : ''} ${cadeauClient ? 'rempli' : ''}`}
                               type="number"
-                              min={1}
+                              min={0}
                               step={1}
                               defaultValue={cadeauClient ? cadeauClient.quantite : ''}
-                              disabled={!cadeauClient || cadeauSaving}
-                              onBlur={(e) => changerQteCadeau(row, e.target.value)}
+                              disabled={!cadeauxCharges || cadeauSaving}
+                              title={`${cadeauRefCol.libelle} — ${formatEur(cadeauClient?.prix_unitaire ?? cadeauRefCol.prix_unitaire)} l'unité`}
+                              onBlur={(e) => void saveCadeauQte(row, cadeauRefCol, e.target.value)}
                               onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur() }}
                             />
-                          ) : (
-                            <span className="cadeauLieu">
-                              <select
-                                className={`cadeauSelect ${cadeauSaving ? 'saving' : ''}`}
-                                value={cadeauClient?.lieu_livraison || ''}
-                                disabled={!cadeauClient || cadeauSaving}
-                                onChange={(e) => changerLieuCadeau(row, e.target.value)}
-                              >
-                                {!cadeauClient && <option value="">—</option>}
-                                {LIEUX_LIVRAISON.map((l) => <option key={l.value} value={l.value}>{l.label}</option>)}
-                              </select>
-                              {cadeauClient?.lieu_livraison === 'autre' ? (
-                                <button type="button" className="cadeauAdresseBtn" title={`${cadeauClient.adresse_autre || ''} — cliquer pour modifier`} onClick={() => ouvrirAdresseAutre(row)}>
-                                  ✎ {cadeauClient.adresse_autre}
-                                </button>
-                              ) : null}
-                            </span>
-                          )
-                        ) : row.kind === 'total' ? (
-                          col.cadeau === 'type' ? (
-                            <span>{cadeauxSelection.nbClients} client{cadeauxSelection.nbClients > 1 ? 's' : ''} · {formatEur(cadeauxSelection.valeur)}</span>
-                          ) : col.cadeau === 'qte' ? (
-                            <span>{cadeauxSelection.qte || ''}</span>
+                          ) : row.kind === 'total' ? (
+                            <span>{cadeauxSelection.parType.find((t) => t.id === cadeauRefCol.id)?.qte || ''}</span>
+                          ) : null
+                        ) : col.cadeau.kind === 'total' ? (
+                          row.kind === 'client' ? (
+                            <span className="cadeauValeur">{cadeauxSelection.parClient.get(normalize(row.numero))?.valeur ? formatEur(cadeauxSelection.parClient.get(normalize(row.numero))!.valeur) : ''}</span>
+                          ) : row.kind === 'total' ? (
+                            <span className="cadeauValeur">{cadeauxSelection.valeur ? formatEur(cadeauxSelection.valeur) : ''}</span>
                           ) : null
                         ) : null
                       ) : isVisitesCell ? (
@@ -4711,65 +4497,6 @@ export default function SyntheseMultiClientsPage() {
         </div>
       )}
 
-      {/* ── Cadeau : adresse de livraison "Autres" (vérifiée BAN) ── */}
-      {adresseModal && (
-        <div className="retardOverlay" onClick={fermerAdresseModal}>
-          <div className="retardModal adresseModal" onClick={(e) => e.stopPropagation()}>
-            <div className="retardHeader">
-              <div>
-                <h2>Adresse de livraison du cadeau</h2>
-                <p>{adresseModal.intitule || adresseModal.numero} · {adresseModal.numero} — l&apos;adresse doit exister dans la Base Adresse Nationale.</p>
-              </div>
-              <button type="button" onClick={fermerAdresseModal}>Annuler</button>
-            </div>
-            <div className="adresseCorps">
-              <label className="adresseLabel">
-                Adresse (numéro, voie, code postal, ville)
-                <input
-                  autoFocus
-                  value={adresseQuery}
-                  onChange={(e) => { setAdresseQuery(e.target.value); setAdresseChoisie(null) }}
-                  placeholder="ex. 12 rue des Lilas 85270 Saint-Hilaire-de-Riez"
-                />
-              </label>
-              {adresseRecherche && <div className="adresseInfo">Vérification…</div>}
-              {adresseErreur && <div className="cadeauErreur">{adresseErreur}</div>}
-              {!adresseChoisie && adresseSuggestions.length > 0 && (
-                <ul className="adresseSuggestions">
-                  {adresseSuggestions.map((s) => {
-                    const ok = adresseSuffisante(s)
-                    return (
-                      <li key={`${s.id}-${s.label}`}>
-                        <button
-                          type="button"
-                          disabled={!ok}
-                          onClick={() => { setAdresseChoisie(s); setAdresseQuery(s.label); setAdresseSuggestions([]); setAdresseErreur(null) }}
-                          title={ok ? 'Choisir cette adresse' : 'Adresse trop imprécise (commune seule)'}
-                        >
-                          <strong>{s.label}</strong>
-                          <span>{ok ? (s.type === 'housenumber' ? 'Adresse exacte' : 'Voie') : 'Commune seule — préciser la rue'}{s.score ? ` · confiance ${Math.round(s.score * 100)} %` : ''}</span>
-                        </button>
-                      </li>
-                    )
-                  })}
-                </ul>
-              )}
-              {adresseChoisie && (
-                <div className="adresseValidee">
-                  ✓ Adresse vérifiée : <strong>{adresseChoisie.label}</strong>
-                </div>
-              )}
-              <div className="adresseActions">
-                <button type="button" className="secondary" onClick={fermerAdresseModal}>Annuler</button>
-                <button type="button" onClick={() => void validerAdresseAutre()} disabled={!adresseChoisie || !adresseSuffisante(adresseChoisie)}>
-                  Enregistrer l&apos;adresse
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-
       {/* ── Retards de paiement : liste des clients de la sélection ── */}
       {retardsListeOuverte && (
         <div className="retardOverlay" onClick={() => setRetardsListeOuverte(false)}>
@@ -4891,8 +4618,6 @@ export default function SyntheseMultiClientsPage() {
         .cadeauKpis span { display: block; color: #64748b; font-size: 10px; font-weight: 900; text-transform: uppercase; }
         .cadeauKpis strong { display: block; margin-top: 2px; font-size: 17px; font-weight: 950; color: #3b2a5c; }
         .cadeauKpis strong small { font-size: 12px; color: #64748b; font-weight: 800; }
-        .cadeauLieux { display: flex !important; flex-wrap: wrap; gap: 4px 10px; font-size: 12px !important; }
-        .cadeauLieux em { font-style: normal; font-weight: 850; }
         .cadeauTypeTable { width: 100%; border-collapse: collapse; font-size: 12px; }
         .cadeauTypeTable th { text-align: left; font-size: 10px; text-transform: uppercase; color: #94a3b8; font-weight: 900; padding: 3px 8px; border-bottom: 1px solid #e2e8f0; }
         .cadeauTypeTable td { padding: 4px 8px; border-bottom: 1px solid #f1f5f9; font-weight: 750; }
@@ -4902,15 +4627,14 @@ export default function SyntheseMultiClientsPage() {
         .cadeauActions button { background: #7A5EA8; border-color: #7A5EA8; white-space: nowrap; }
         .cadeauErreur { grid-column: 1 / -1; background: #fee2e2; color: #991b1b; border: 1px solid #fecaca; padding: 7px 10px; border-radius: 8px; font-weight: 750; font-size: 12px; }
         th.cadeauHead, th.cadeauHead span { color: #5b3f8c; }
+        /* Libellés de cadeaux longs : retour à la ligne dans l'en-tête vertical. */
+        th.cadeauHead.rotate span { white-space: normal; line-height: 1.1; font-size: 10px; }
         .groupCadeau { background: #efe9f8 !important; color: #5b3f8c; }
         td.cadeauCell { background: #f8f6fc !important; overflow: visible; }
         tbody tr.total td.cadeauCell { background: #fff2cc !important; }
-        .cadeauSelect { width: 100%; height: 20px; padding: 0 3px; border-radius: 4px; font-size: 11px; background: white; }
-        .cadeauSelect.rempli { border-color: #7A5EA8; font-weight: 800; color: #3b2a5c; }
-        .cadeauQte { width: 100%; height: 20px; padding: 0 4px; border-radius: 4px; font-size: 11px; text-align: right; }
-        .cadeauLieu { display: flex; gap: 3px; align-items: center; min-width: 0; }
-        .cadeauLieu .cadeauSelect { width: 96px; flex: 0 0 96px; }
-        .cadeauAdresseBtn { flex: 1; min-width: 0; height: 20px; padding: 0 5px; border-radius: 4px; font-size: 10.5px; font-weight: 750; background: #efe9f8; color: #3b2a5c; border: 1px solid #d6c9ec; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: left; }
+        .cadeauQte { width: 100%; height: 20px; padding: 0 3px; border-radius: 4px; font-size: 11px; text-align: right; }
+        .cadeauQte.rempli { border-color: #7A5EA8; font-weight: 900; color: #3b2a5c; background: #efe9f8; }
+        .cadeauValeur { display: block; text-align: right; font-weight: 900; color: #3b2a5c; }
 
         /* ── Fréquence visite ── */
         td.visitesCell { text-align: center !important; }
@@ -5135,20 +4859,6 @@ export default function SyntheseMultiClientsPage() {
         .crTranscript summary { cursor: pointer; font-size: 12px; font-weight: 900; color: #475569; }
         .crTranscript p { margin-top: 6px; font-size: 12.5px; color: #334155; }
 
-        .adresseModal { width: min(640px, calc(100vw - 48px)); }
-        .adresseCorps { padding: 14px 18px 18px; display: flex; flex-direction: column; gap: 10px; }
-        .adresseLabel { text-transform: none; font-size: 12px; }
-        .adresseLabel input { font-size: 14px; padding: 9px 11px; }
-        .adresseInfo { font-size: 12px; color: #64748b; font-weight: 800; }
-        .adresseSuggestions { list-style: none; margin: 0; padding: 0; border: 1px solid #e2e8f0; border-radius: 10px; overflow: hidden; }
-        .adresseSuggestions li + li { border-top: 1px solid #f1f5f9; }
-        .adresseSuggestions button { width: 100%; text-align: left; background: white; color: #0f172a; border: none; border-radius: 0; padding: 8px 12px; display: flex; flex-direction: column; gap: 2px; }
-        .adresseSuggestions button:hover:not(:disabled) { background: #f8f6fc; }
-        .adresseSuggestions button strong { font-size: 13px; }
-        .adresseSuggestions button span { font-size: 11px; color: #64748b; font-weight: 700; }
-        .adresseValidee { background: #dcfce7; color: #065f46; border: 1px solid #86efac; border-radius: 10px; padding: 8px 12px; font-size: 13px; font-weight: 700; }
-        .adresseActions { display: flex; justify-content: flex-end; gap: 8px; }
-        .adresseActions button:last-child { background: #7A5EA8; border-color: #7A5EA8; }
       `}</style>
     </main>
   )
