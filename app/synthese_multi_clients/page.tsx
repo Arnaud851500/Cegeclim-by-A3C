@@ -1555,19 +1555,21 @@ function buildColumns(showFamilies: boolean, showCollaborateurColumn = false, en
   }
 
   cols.push(
-    { key: 'numero', label: 'Code Client', group: 'Client', width: 86, sticky: 'code', value: (r) => r.numero, format: 'text' },
+    // Largeurs figées (offsets sticky dans le CSS : .stickyLabel / .stickyMonth).
+    // Code client élargi pour loger +, ⚠ et ⇄ sans masquer le numéro.
+    { key: 'numero', label: 'Code Client', group: 'Client', width: 118, sticky: 'code', value: (r) => r.numero, format: 'text' },
     { key: 'intitule', label: 'Intitulé Client', group: 'Client', width: 210, sticky: 'label', value: (r) => r.intitule, format: 'text' },
-    { key: 'totalMois', label: 'Total / Mois', group: 'Client', width: 105, sticky: 'month', value: (r) => r.totalMois, format: 'text' },
+    { key: 'totalMois', label: 'Total / Mois', group: 'Client', width: 80, sticky: 'month', value: (r) => r.totalMois, format: 'text' },
   )
 
   // ── Fréquence visite (juste après le client) ──────────────────────────
   // Objectif annuel saisi (objectif_tiers Visite/Théorique) ; réalisées =
   // RDV réels de l'année (v_rdv_unifie), code couleur vs prorata à date.
   cols.push(
-    { key: 'visiteTheorique', label: 'Objectif nb visites / an', group: GROUPE_FREQUENCE_VISITE, width: 84, rotate: true, className: 'editableNumber', value: (r) => (r.kind === 'month' ? null : r.visiteTheorique), editable: { domaine: 'Visite', rubrique: 'Théorique', type: 'nombre' }, format: 'numberBlank' },
-    { key: 'nbVisitesReel', label: `Réalisées ${N}`, group: GROUPE_FREQUENCE_VISITE, width: 84, rotate: true, value: (r) => (r.kind === 'month' ? null : r.nbVisitesReel), format: 'numberBlank' },
-    { key: 'derniereVisiteReelle', label: 'Dernière visite', group: GROUPE_FREQUENCE_VISITE, width: 92, rotate: true, value: (r) => r.derniereVisiteReelle, format: 'text' },
-    { key: 'prochaineVisiteReelle', label: 'Prochaine visite', group: GROUPE_FREQUENCE_VISITE, width: 92, rotate: true, value: (r) => r.prochaineVisiteReelle, format: 'text' },
+    { key: 'visiteTheorique', label: 'Objectif / an', group: GROUPE_FREQUENCE_VISITE, width: 48, rotate: true, className: 'editableNumber', value: (r) => (r.kind === 'month' ? null : r.visiteTheorique), editable: { domaine: 'Visite', rubrique: 'Théorique', type: 'nombre' }, format: 'numberBlank' },
+    { key: 'nbVisitesReel', label: `Réalisées ${N}`, group: GROUPE_FREQUENCE_VISITE, width: 48, rotate: true, value: (r) => (r.kind === 'month' ? null : r.nbVisitesReel), format: 'numberBlank' },
+    { key: 'derniereVisiteReelle', label: 'Dernière visite', group: GROUPE_FREQUENCE_VISITE, width: 74, rotate: true, value: (r) => r.derniereVisiteReelle, format: 'text' },
+    { key: 'prochaineVisiteReelle', label: 'Prochaine visite', group: GROUPE_FREQUENCE_VISITE, width: 74, rotate: true, value: (r) => r.prochaineVisiteReelle, format: 'text' },
   )
 
   // ── Cadeau fin d'année (bouton dédié, écran uniquement) ────────────────
@@ -4192,6 +4194,9 @@ export default function SyntheseMultiClientsPage() {
                   const cadeauSaving = Boolean(col.cadeau) && row.kind === 'client' && savingCadeau === normalize(row.numero)
                   return (
                     <td key={`${row.id}-${col.key}`} className={`${col.className || ''} ${stickyClass(col.sticky)} ${['keur', 'keurBlank', 'keurCompare', 'pct', 'pctBlank', 'pctCompare', 'points', 'number', 'numberBlank'].includes(col.format || '') ? 'num' : ''} ${col.cadeau ? 'cadeauCell' : ''} ${isVisitesCell ? 'visitesCell' : ''}`} style={{ width: col.width, minWidth: col.width }}>
+                      {/* Code et intitulé client : rangée flex, les pictogrammes gardent
+                          leur taille et seul le texte se tronque (par la fin). */}
+                      <span className={isClientLinkColumn ? 'tdFlex' : 'tdPlain'}>
                       {col.key === 'numero' && row.kind === 'client' ? (
                         <button type="button" className="expandBtn" onClick={() => toggleExpanded(row.numero)}>{expanded.has(row.numero) ? '−' : '+'}</button>
                       ) : null}
@@ -4328,6 +4333,7 @@ export default function SyntheseMultiClientsPage() {
                       ) : (
                         <span>{displayValue(col, row, objectiveMap)}</span>
                       )}
+                      </span>
                     </td>
                   )
                 })}
@@ -4919,6 +4925,10 @@ export default function SyntheseMultiClientsPage() {
         .clientLink { background: none; border: none; padding: 0; margin: 0; font: inherit; color: #1d4ed8; text-decoration: none; cursor: pointer; text-align: left; }
         .clientLink:hover { text-decoration: underline; }
         .clientNoteSlot { display: inline-flex; margin-right: 5px; vertical-align: middle; }
+        .tdPlain { display: contents; }
+        .tdFlex { display: flex; align-items: center; width: 100%; min-width: 0; overflow: hidden; }
+        .tdFlex > * { flex: 0 0 auto; }
+        .tdFlex > .clientLink { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: block; }
         .retardIcon { background: #fee2e2; color: #dc2626; border: 1px solid #fecaca; border-radius: 4px; width: 17px; height: 17px; padding: 0; margin-right: 3px; font-size: 11px; line-height: 1; display: inline-flex; align-items: center; justify-content: center; vertical-align: middle; cursor: pointer; }
         .retardIcon.ancien { background: #dc2626; color: white; border-color: #b91c1c; }
         .retardIcon:hover { filter: brightness(.92); }
@@ -4937,15 +4947,16 @@ export default function SyntheseMultiClientsPage() {
         .headerComparisonPill.warn { background: #fef3c7; color: #92400e; border: 1px solid #fde68a; }
         .headerComparisonPill.bad { background: #fee2e2; color: #dc2626; border: 1px solid #fecaca; }
         .headerComparisonPill.neutral { background: #e5e7eb; color: #475569; border: 1px solid #cbd5e1; }
-        .rotate span { writing-mode: vertical-rl; transform: rotate(180deg); display: inline-block; max-height: 96px; white-space: normal; }
+        .rotate span { writing-mode: vertical-rl; transform: rotate(180deg); display: inline-block; max-height: 104px; white-space: nowrap; }
         .client, .stickyCollaborateur, .stickyCode, .stickyLabel, .stickyMonth { background: #e2f0d9; }
         .stickyCollaborateur { position: sticky; left: 0; z-index: 4; }
         .stickyCode { position: sticky; left: 0; z-index: 4; }
-        .stickyLabel { position: sticky; left: 86px; z-index: 4; }
-        .stickyMonth { position: sticky; left: 296px; z-index: 4; border-right: 3px solid #111827; }
+        /* Offsets = largeurs cumulées : collaborateur 130 · code 118 · intitulé 210 · mois 80 */
+        .stickyLabel { position: sticky; left: 118px; z-index: 4; }
+        .stickyMonth { position: sticky; left: 328px; z-index: 4; border-right: 3px solid #111827; }
         .withCollaborateur .stickyCode { left: 130px; }
-        .withCollaborateur .stickyLabel { left: 216px; }
-        .withCollaborateur .stickyMonth { left: 426px; }
+        .withCollaborateur .stickyLabel { left: 248px; }
+        .withCollaborateur .stickyMonth { left: 458px; }
         thead .stickyCollaborateur, thead .stickyCode, thead .stickyLabel, thead .stickyMonth { z-index: 8; }
         tbody tr.total td { background: #fff2cc; font-weight: 950; }
         tbody tr.client td { background: #e2f0d9; }
