@@ -31,6 +31,20 @@ import {
 // (table client_notes, cf. lib/clientNote.tsx). La liste des clients ayant
 // une note est chargée une seule fois (fetchNumerosAvecNote).
 import { ClientNoteButton, fetchNumerosAvecNote } from '@/lib/clientNote'
+// ÉVOLUTION (2026-10-19) :
+//   - ordre des colonnes : DEVIS N-1 puis DEVIS N, CA N-1 puis CA N puis
+//     comparatif CA, MARGE N-1 puis MARGE N puis écart de marge ;
+//   - "Fréquence visite" déplacée juste après le client (en-tête de groupe
+//     fusionné) : Objectif nb visites / an, Réalisées N (code couleur vs le
+//     prorata attendu à date, clic -> liste des visites + comptes rendus via
+//     le RPC get_smc_visites_client), Dernière visite, Prochaine visite ;
+//   - suppression des 24 colonnes "Visite n°X" et de l'ancien "Réalisé"
+//     manuel ; colonnes "Dynamisme client" masquées (à retravailler) ;
+//   - Remarque et QRC masquées par défaut ;
+//   - bouton "Cadeau fin d'année" : 3 colonnes (type, qté, adresse de
+//     livraison -- "Autres" impose une adresse vérifiée dans la Base Adresse
+//     Nationale), pavé de synthèse et export Excel dédié. Tables
+//     ref_cadeaux_fin_annee / client_cadeaux_fin_annee.
 
 const MapContainer: any = dynamic(() => import('react-leaflet').then((mod) => mod.MapContainer as any), { ssr: false })
 const TileLayer: any = dynamic(() => import('react-leaflet').then((mod) => mod.TileLayer as any), { ssr: false })
@@ -244,19 +258,14 @@ type SummaryRow = {
   visiteTheorique: number
   visiteRealise: number
   // ── Visite réelle (v_rdv_unifie = RDV BLG + compagnon CEGECLIM) ────────
-  // Distincte du système existant (24 colonnes "Visite n°X" saisies à la
-  // main + visiteRealise ci-dessus, qui compte ces saisies) -- ajoutée en
-  // complément, sans toucher au mécanisme manuel existant. Uniquement
-  // renseignée sur les lignes row_kind='client' (vide sur TOTAL et sur les
-  // lignes mensuelles développées).
+  // Uniquement renseignée sur les lignes row_kind='client' (vide sur TOTAL
+  // et sur les lignes mensuelles développées).
   derniereVisiteReelle: string
   prochaineVisiteReelle: string
   nbVisitesReel: number
   // ── Paramétrage des alertes de comportement (client_alertes_config) ───
   // Mêmes 3 seuils que la section "🔔 Alertes de suivi" de la fiche client
-  // sur l'écran mobile (MobileClients.tsx) -- affichage seul ici (édition
-  // toujours via la fiche client / l'écran mobile), colonnes non affichées
-  // par défaut. null = règle désactivée pour ce client.
+  // sur l'écran mobile (MobileClients.tsx). null = règle désactivée.
   alerteMinAppelsVisitesMois: number | null
   alerteMaxJoursSansDevis: number | null
   alerteMaxJoursSansCommande: number | null
@@ -283,6 +292,8 @@ type ColumnDef = {
   // Édition directe des seuils d'alerte de comportement (client_alertes_config),
   // distincte de `editable` (qui cible objectif_tiers via save_objectif_tiers).
   editableAlerte?: 'min_appels_visites_mois' | 'max_jours_sans_devis' | 'max_jours_sans_commande'
+  // Colonnes "Cadeau fin d'année" (rendu spécifique, hors export principal).
+  cadeau?: 'type' | 'qte' | 'lieu'
   value: (row: SummaryRow) => any
   format?: 'text' | 'keur' | 'keurBlank' | 'keurCompare' | 'pct' | 'pctBlank' | 'pctCompare' | 'points' | 'number' | 'numberBlank' | 'date' | 'action' | 'caBand'
   compareValue?: (row: SummaryRow) => any
@@ -296,6 +307,80 @@ type MapLogicalOperator = 'OR' | 'AND'
 type CapitalSocialFilterOption = 'TOUS' | 'NC' | '<= 1 000€' | '>1 000€' | '>5000€' | '>9999€'
 type ProfileMatrixDimension = 'agence' | 'collaborateur'
 type EncoursDetailMode = 'macro' | 'type'
+
+// ── Visites (liste détaillée d'un client, RPC get_smc_visites_client) ────
+type VisiteCompteRendu = {
+  id: string
+  created_at: string | null
+  created_by_name: string | null
+  resume: string | null
+  transcript: string | null
+  taches_detectees: any
+}
+
+type VisiteDetail = {
+  rdv_id: string
+  source: string
+  type: string
+  subject: string | null
+  start_date: string
+  end_date: string | null
+  all_day: boolean | null
+  lieu: string | null
+  created_by_name: string | null
+  a_venir: boolean
+  comptes_rendus: VisiteCompteRendu[]
+}
+
+type VisitesClientOuvert = {
+  numero: string
+  intitule: string
+  objectif: number
+  realise: number
+}
+
+// ── Cadeaux de fin d'année ───────────────────────────────────────────────
+type LieuLivraison = 'agence' | 'client' | 'autre'
+
+type CadeauRef = {
+  id: number
+  libelle: string
+  prix_unitaire: number
+  actif: boolean
+  ordre: number
+}
+
+type CadeauClient = {
+  id?: string
+  annee: number
+  numero_tiers: string
+  cadeau_id: number
+  prix_unitaire: number
+  quantite: number
+  lieu_livraison: LieuLivraison
+  adresse_autre: string | null
+  adresse_autre_code_postal: string | null
+  adresse_autre_ville: string | null
+  adresse_autre_lat: number | null
+  adresse_autre_lon: number | null
+  adresse_autre_ban_id: string | null
+}
+
+type AdresseSuggestion = {
+  id: string
+  label: string
+  postcode: string
+  city: string
+  type: string
+  score: number
+  lat: number | null
+  lon: number | null
+}
+
+type AdresseModalState = {
+  numero: string
+  intitule: string
+}
 
 type SyntheseMapClientRow = {
   id: string
@@ -383,6 +468,23 @@ const N1_COMPARISON_MONTH = CLOSED_MONTH
 const CA_N1_COMPARISON_MONTH = CA_CLOSED_MONTH
 const ALL_COLLABORATEURS_VALUE = '__ALL_COLLABORATEURS__'
 
+const GROUPE_FREQUENCE_VISITE = 'Fréquence visite'
+const GROUPE_CADEAU = "Cadeau fin d'année"
+
+// Colonnes "Dynamisme client" (domaine Initiative) : masquées le 19/10/2026,
+// à retravailler dans un second temps. Les saisies existantes restent en base.
+const AFFICHER_DYNAMISME_CLIENT = false
+
+const LIEUX_LIVRAISON: { value: LieuLivraison; label: string }[] = [
+  { value: 'agence', label: 'Agence' },
+  { value: 'client', label: 'Adresse client' },
+  { value: 'autre', label: 'Autres' },
+]
+
+function lieuLivraisonLabel(value: string | null | undefined) {
+  return LIEUX_LIVRAISON.find((l) => l.value === value)?.label || ''
+}
+
 function periodMonthLabel(month: number, year: number) {
   return month > 0 ? `${String(month).padStart(2, '0')}-${year}` : `M-1-${year}`
 }
@@ -406,6 +508,9 @@ const ACTIONS = [
   'Animation Cegeclim\n(Barcelone, Rugby, ODP…)',
 ]
 
+// Rubriques de l'ancien suivi manuel des visites (24 dates saisies) --
+// colonnes supprimées de l'écran le 19/10/2026, conservées ici uniquement
+// pour le compteur historique visiteRealise.
 const VISITES = Array.from({ length: 24 }, (_, i) => `Visite n°${i + 1}`)
 
 function normalize(value: any) {
@@ -470,6 +575,112 @@ function formatDateFr(value: any) {
   if (!iso) return safeText(value)
   const [year, month, day] = iso.split('-')
   return `${day}/${month}/${year}`
+}
+
+function formatDateHeureFr(value: string | null | undefined, allDay = false) {
+  if (!value) return '—'
+  const d = new Date(value)
+  if (!Number.isFinite(d.getTime())) return formatDateFr(value)
+  const date = d.toLocaleDateString('fr-FR', { day: '2-digit', month: '2-digit', year: 'numeric', timeZone: 'Europe/Paris' })
+  if (allDay) return date
+  const heure = d.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Paris' })
+  return `${date} ${heure}`
+}
+
+function formatEur(value: number | null | undefined) {
+  return new Intl.NumberFormat('fr-FR', { style: 'currency', currency: 'EUR', minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(value || 0)
+}
+
+// ── Visites : prorata attendu à date et code couleur ─────────────────────
+function fractionAnneeEcoulee() {
+  const now = new Date()
+  const debut = new Date(now.getFullYear(), 0, 1).getTime()
+  const fin = new Date(now.getFullYear() + 1, 0, 1).getTime()
+  return Math.min(1, Math.max(0, (now.getTime() - debut) / (fin - debut)))
+}
+
+function visitesAttenduesADate(objectifAnnuel: number) {
+  return Math.max(0, objectifAnnuel) * fractionAnneeEcoulee()
+}
+
+/** ok = au moins le prorata attendu à date ; warn = ≥ 75 % du prorata ;
+ * bad = en dessous ; none = pas d'objectif saisi. */
+function visitesStatut(realise: number, objectifAnnuel: number): 'ok' | 'warn' | 'bad' | 'none' {
+  if (!objectifAnnuel || objectifAnnuel <= 0) return 'none'
+  const attendu = visitesAttenduesADate(objectifAnnuel)
+  if (attendu <= 0) return 'ok'
+  const ratioVisites = realise / attendu
+  if (ratioVisites >= 1) return 'ok'
+  if (ratioVisites >= 0.75) return 'warn'
+  return 'bad'
+}
+
+function formatAttendu(value: number) {
+  return new Intl.NumberFormat('fr-FR', { minimumFractionDigits: 0, maximumFractionDigits: 1 }).format(value)
+}
+
+function typeVisiteLabel(type: string | null | undefined) {
+  const t = safeText(type)
+  if (t === 'meeting' || t === '4') return 'RDV'
+  if (t === 'phoneCall' || t === '7') return 'Appel'
+  if (t === 'reminder' || t === '9') return 'Rappel'
+  return t || 'Activité'
+}
+
+function tacheLabel(t: any) {
+  if (typeof t === 'string') return t
+  if (t && typeof t === 'object') return safeText(t.titre || t.title || t.label || t.libelle || t.description || t.texte || t.text, JSON.stringify(t))
+  return safeText(t)
+}
+
+function listeTaches(value: any): any[] {
+  if (!value) return []
+  if (Array.isArray(value)) return value
+  if (typeof value === 'object' && Array.isArray(value.taches)) return value.taches
+  return []
+}
+
+// ── Vérification d'adresse (Base Adresse Nationale) ──────────────────────
+// Service Géoplateforme (IGN) en priorité, ancienne URL api-adresse en repli.
+async function rechercherAdresses(query: string): Promise<AdresseSuggestion[]> {
+  const q = query.trim()
+  if (q.length < 5) return []
+  const urls = [
+    `https://data.geopf.fr/geocodage/search?q=${encodeURIComponent(q)}&limit=6&index=address`,
+    `https://api-adresse.data.gouv.fr/search/?q=${encodeURIComponent(q)}&limit=6`,
+  ]
+  let lastError: unknown = null
+  for (const url of urls) {
+    try {
+      const res = await fetch(url)
+      if (!res.ok) { lastError = new Error(`HTTP ${res.status}`); continue }
+      const json = await res.json()
+      const features = Array.isArray(json?.features) ? json.features : []
+      return features.map((f: any) => {
+        const p = f?.properties || {}
+        const coords = Array.isArray(f?.geometry?.coordinates) ? f.geometry.coordinates : []
+        return {
+          id: safeText(p.id),
+          label: safeText(p.label),
+          postcode: safeText(p.postcode),
+          city: safeText(p.city),
+          type: safeText(p.type),
+          score: safeNumber(p.score),
+          lon: coords.length > 1 ? Number(coords[0]) : null,
+          lat: coords.length > 1 ? Number(coords[1]) : null,
+        } as AdresseSuggestion
+      }).filter((s: AdresseSuggestion) => s.label)
+    } catch (err) {
+      lastError = err
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error("Service de vérification d'adresse indisponible")
+}
+
+/** Une adresse est jugée "existante" si la BAN la reconnaît au moins au
+ * niveau de la rue (numéro ou voie) ; une simple commune est refusée. */
+function adresseSuffisante(s: AdresseSuggestion) {
+  return ['housenumber', 'street', 'locality'].includes(s.type)
 }
 
 const EMPTY_LAST_BUSINESS_DATES: LastBusinessDates = { devis: null, factures: null, bl: null }
@@ -1005,12 +1216,6 @@ async function fetchObjectivesForTiers(codes: string[], annee: number) {
 }
 
 // ── Paramétrage des alertes de comportement (client_alertes_config) ──────
-// Mêmes 3 seuils que "🔔 Alertes de suivi" sur la fiche client de l'écran
-// mobile (MobileClients.tsx, table lue/écrite via get_client_alertes_config
-// / upsert_client_alertes_config pour un seul client à la fois). Ici on lit
-// la table directement, en une fois pour tous les clients de la sélection
-// courante -- affichage seul (l'édition reste sur la fiche client / l'écran
-// mobile), colonnes non affichées par défaut (cf. TOGGLEABLE_COLUMN_LABELS).
 type AlerteConfigRow = {
   numero_tiers: string
   min_appels_visites_mois: number | null
@@ -1029,6 +1234,52 @@ async function fetchAlertesConfigForTiers(codes: string[]) {
     rows.push(...(part as AlerteConfigRow[]))
   }
   return rows
+}
+
+// ── Cadeaux de fin d'année : chargement ──────────────────────────────────
+async function fetchCadeauxRef(): Promise<CadeauRef[]> {
+  const { data, error } = await supabase
+    .from('ref_cadeaux_fin_annee')
+    .select('id,libelle,prix_unitaire,actif,ordre')
+    .order('ordre', { ascending: true })
+    .order('libelle', { ascending: true })
+  if (error) throw new Error(`ref_cadeaux_fin_annee : ${error.message}`)
+  return ((data || []) as Record<string, any>[]).map((row) => ({
+    id: safeNumber(row.id),
+    libelle: safeText(row.libelle),
+    prix_unitaire: safeNumber(row.prix_unitaire),
+    actif: row.actif !== false,
+    ordre: safeNumber(row.ordre),
+  }))
+}
+
+function normalizeCadeauClient(row: Record<string, any>): CadeauClient {
+  const lieu = safeText(row.lieu_livraison, 'agence') as LieuLivraison
+  return {
+    id: row.id || undefined,
+    annee: safeNumber(row.annee),
+    numero_tiers: safeText(row.numero_tiers),
+    cadeau_id: safeNumber(row.cadeau_id),
+    prix_unitaire: safeNumber(row.prix_unitaire),
+    quantite: Math.max(1, safeNumber(row.quantite) || 1),
+    lieu_livraison: ['agence', 'client', 'autre'].includes(lieu) ? lieu : 'agence',
+    adresse_autre: row.adresse_autre ?? null,
+    adresse_autre_code_postal: row.adresse_autre_code_postal ?? null,
+    adresse_autre_ville: row.adresse_autre_ville ?? null,
+    adresse_autre_lat: row.adresse_autre_lat ?? null,
+    adresse_autre_lon: row.adresse_autre_lon ?? null,
+    adresse_autre_ban_id: row.adresse_autre_ban_id ?? null,
+  }
+}
+
+async function fetchCadeauxClients(annee: number) {
+  const rows = await fetchAll('client_cadeaux_fin_annee', '*', (q) => q.eq('annee', annee))
+  const map = new Map<string, CadeauClient>()
+  rows.forEach((row) => {
+    const c = normalizeCadeauClient(row)
+    map.set(normalize(c.numero_tiers), c)
+  })
+  return map
 }
 
 function normalizeAgg(row: Record<string, any>): AggRow {
@@ -1220,8 +1471,6 @@ function buildSummaryForNumero(tier: TiersRow | null, factures: AggRow[], devis:
     margeN1Value: margeN1,
     margeN1ByMacro: byMacroMarginPct(factures, numero || null, N - 1, { month }),
     margeN1ValueByMacro: byMacro(factures, numero || null, N - 1, { month, metric: 'marge' }),
-    // L'objectif CA est saisi en annuel sur la ligne TOTAL du client.
-    // Lorsqu'on développe le client, chaque mois affiche 1/12 de cet objectif.
     objectifCa: month ? objectifCa / 12 : objectifCa,
     potentiel: objectiveNumber(objectives, numero, 'Objectif', 'POTENTIEL'),
     encoursCommandeN: 0,
@@ -1269,10 +1518,11 @@ function buildSummaryForNumero(tier: TiersRow | null, factures: AggRow[], devis:
 }
 
 // ── Colonnes optionnelles (pastilles afficher/masquer) ──────────────────
-// Tout sauf Remarque / Profil CA 12M / QRC N est masqué par défaut. Ce
-// filtrage s'applique UNIQUEMENT à l'affichage écran — buildColumns()
-// reste inchangée, et l'export Excel appelle sa propre buildColumns(true, …)
+// Seul "Profil CA 12M" est affiché par défaut (Remarque et QRC masquées
+// depuis le 19/10/2026). Ce filtrage s'applique UNIQUEMENT à l'affichage
+// écran — l'export Excel appelle sa propre buildColumns(true, …)
 // indépendamment de cet état, donc il n'est jamais affecté.
+// Les 4 colonnes "Fréquence visite" sont toujours affichées.
 const TOGGLEABLE_COLUMN_LABELS: Record<string, string> = {
   codePostal: 'Code postal',
   libelleNaf: 'Désignation Naf',
@@ -1291,16 +1541,13 @@ const TOGGLEABLE_COLUMN_LABELS: Record<string, string> = {
   comNotreFaveur: 'Com en notre faveur',
   garantie: 'Garantie',
   qrcN: `QRC ${N}`,
-  derniereVisiteReelle: 'Dernière visite (réel)',
-  prochaineVisiteReelle: 'Prochaine visite (réel)',
-  nbVisitesReel: `Visites réalisées ${N} (réel)`,
   alerteMinAppelsVisitesMois: 'Alerte : appels/visites min (mois)',
   alerteMaxJoursSansDevis: 'Alerte : jours sans devis (max)',
   alerteMaxJoursSansCommande: 'Alerte : jours sans commande (max)',
 }
-const DEFAULT_VISIBLE_TOGGLEABLE_COLUMNS = new Set(['remarque', 'caBandN', 'qrcN', 'derniereVisiteReelle', 'prochaineVisiteReelle', 'nbVisitesReel'])
+const DEFAULT_VISIBLE_TOGGLEABLE_COLUMNS = new Set(['caBandN'])
 
-function buildColumns(showFamilies: boolean, showCollaborateurColumn = false, encoursDetailMode: EncoursDetailMode = 'macro'): ColumnDef[] {
+function buildColumns(showFamilies: boolean, showCollaborateurColumn = false, encoursDetailMode: EncoursDetailMode = 'macro', showCadeaux = false): ColumnDef[] {
   const cols: ColumnDef[] = []
 
   if (showCollaborateurColumn) {
@@ -1311,11 +1558,31 @@ function buildColumns(showFamilies: boolean, showCollaborateurColumn = false, en
     { key: 'numero', label: 'Code Client', group: 'Client', width: 86, sticky: 'code', value: (r) => r.numero, format: 'text' },
     { key: 'intitule', label: 'Intitulé Client', group: 'Client', width: 210, sticky: 'label', value: (r) => r.intitule, format: 'text' },
     { key: 'totalMois', label: 'Total / Mois', group: 'Client', width: 105, sticky: 'month', value: (r) => r.totalMois, format: 'text' },
+  )
+
+  // ── Fréquence visite (juste après le client) ──────────────────────────
+  // Objectif annuel saisi (objectif_tiers Visite/Théorique) ; réalisées =
+  // RDV réels de l'année (v_rdv_unifie), code couleur vs prorata à date.
+  cols.push(
+    { key: 'visiteTheorique', label: 'Objectif nb visites / an', group: GROUPE_FREQUENCE_VISITE, width: 84, rotate: true, className: 'editableNumber', value: (r) => (r.kind === 'month' ? null : r.visiteTheorique), editable: { domaine: 'Visite', rubrique: 'Théorique', type: 'nombre' }, format: 'numberBlank' },
+    { key: 'nbVisitesReel', label: `Réalisées ${N}`, group: GROUPE_FREQUENCE_VISITE, width: 84, rotate: true, value: (r) => (r.kind === 'month' ? null : r.nbVisitesReel), format: 'numberBlank' },
+    { key: 'derniereVisiteReelle', label: 'Dernière visite', group: GROUPE_FREQUENCE_VISITE, width: 92, rotate: true, value: (r) => r.derniereVisiteReelle, format: 'text' },
+    { key: 'prochaineVisiteReelle', label: 'Prochaine visite', group: GROUPE_FREQUENCE_VISITE, width: 92, rotate: true, value: (r) => r.prochaineVisiteReelle, format: 'text' },
+  )
+
+  // ── Cadeau fin d'année (bouton dédié, écran uniquement) ────────────────
+  if (showCadeaux) {
+    cols.push(
+      { key: 'cadeauType', label: 'Type cadeau', group: GROUPE_CADEAU, width: 240, cadeau: 'type', value: () => '', format: 'text' },
+      { key: 'cadeauQte', label: 'Qté', group: GROUPE_CADEAU, width: 62, cadeau: 'qte', value: () => '', format: 'text' },
+      { key: 'cadeauLieu', label: 'Adresse livraison', group: GROUPE_CADEAU, width: 250, cadeau: 'lieu', value: () => '', format: 'text' },
+    )
+  }
+
+  cols.push(
     { key: 'alerteMinAppelsVisitesMois', label: 'Alerte : appels/visites min (mois)', group: 'Client', width: 92, className: 'editableNumber', editableAlerte: 'min_appels_visites_mois', value: (r) => r.alerteMinAppelsVisitesMois, format: 'numberBlank' },
     { key: 'alerteMaxJoursSansDevis', label: 'Alerte : jours sans devis (max)', group: 'Client', width: 92, className: 'editableNumber', editableAlerte: 'max_jours_sans_devis', value: (r) => r.alerteMaxJoursSansDevis, format: 'numberBlank' },
     { key: 'alerteMaxJoursSansCommande', label: 'Alerte : jours sans commande (max)', group: 'Client', width: 92, className: 'editableNumber', editableAlerte: 'max_jours_sans_commande', value: (r) => r.alerteMaxJoursSansCommande, format: 'numberBlank' },
-    // Retard de paiement (dernier fichier compta) -- vide si rien en retard ;
-    // sur les lignes mensuelles, toujours vide (donnée propre au client).
     { key: 'retardPaiement', label: 'Retard paiement (K€)', group: 'Client', width: 96, className: 'retardCell', value: (r) => (r.kind === 'month' ? null : r.retardPaiement), format: 'keurBlank' },
     { key: 'codePostal', label: 'Code postal', group: 'Client', width: 82, value: (r) => r.codePostal, format: 'text' },
     { key: 'libelleNaf', label: 'Désignation Naf', group: 'Client', width: 130, value: (r) => r.libelleNaf, format: 'text' },
@@ -1327,33 +1594,41 @@ function buildColumns(showFamilies: boolean, showCollaborateurColumn = false, en
     { key: 'remarque', label: 'Remarque', group: 'Client', width: 310, value: (r) => r.numero, editable: { domaine: 'Remarque', rubrique: 'Remarque', type: 'texte' }, format: 'text' },
     { key: 'caN3', label: `CA ${N - 3}`, group: 'CA / Objectifs', width: 92, className: 'metric previous', value: (r) => r.caN3, format: 'keurBlank' },
     { key: 'caN2', label: `CA ${N - 2}`, group: 'CA / Objectifs', width: 92, className: 'metric previous', value: (r) => r.caN2, format: 'keurBlank' },
-    { key: 'devisN1', label: `DEVIS ${N - 1}`, group: 'CA / Objectifs', width: 98, className: 'metric devis', value: (r) => r.devisN1, format: 'keurBlank' },
   )
 
+  // ── DEVIS : N-1 puis N ─────────────────────────────────────────────────
+  cols.push({ key: 'devisN1', label: `DEVIS ${N - 1}`, group: 'CA / Objectifs', width: 98, className: 'metric devis', value: (r) => r.devisN1, format: 'keurBlank' })
   if (showFamilies) {
     FAMILY_MACROS.forEach((macro) => cols.push({ key: `devisN1_${macro}`, label: `Dont ${macro}`, group: `Devis ${N - 1}`, width: 78, rotate: true, value: (r) => r.devisN1ByMacro[macro], format: 'keurBlank' }))
   }
+  cols.push({ key: 'devisYtdN', label: `DEVIS ${periodMonthLabel(CLOSED_MONTH, N)}`, group: 'CA / Objectifs', width: 124, className: 'metric devis redLabel compareCell', value: (r) => r.devisYtdN, compareValue: (r) => r.devisYtdN1, format: 'keurCompare' })
+  if (showFamilies) {
+    FAMILY_MACROS.forEach((macro) => cols.push({ key: `devisYtdN_${macro}`, label: `Dont ${macro} (N-1)`, group: `Devis ${periodMonthLabel(CLOSED_MONTH, N)}`, width: 118, rotate: true, className: 'compareCell', value: (r) => r.devisYtdNByMacro[macro], compareValue: (r) => r.devisYtdN1ByMacro[macro], format: 'keurCompare' }))
+  }
 
+  // ── CA : N-1 puis N puis comparatif ────────────────────────────────────
   cols.push({ key: 'caN1', label: `CA ${N - 1}`, group: 'CA / Objectifs', width: 98, className: 'metric ca', value: (r) => r.caN1, format: 'keurBlank' })
   if (showFamilies) {
     FAMILY_MACROS.forEach((macro) => cols.push({ key: `caN1_${macro}`, label: `Dont ${macro}`, group: `CA ${N - 1}`, width: 78, rotate: true, value: (r) => r.caN1ByMacro[macro], format: 'keurBlank' }))
-  }
-  cols.push({ key: 'margePctN1', label: `MARGE ${N - 1}`, group: 'CA / Objectifs', width: 92, className: 'metric margin', value: (r) => r.margePctN1, format: 'pctBlank' })
-  if (showFamilies) {
-    FAMILY_MACROS.forEach((macro) => cols.push({ key: `margeN1_${macro}`, label: `Dont ${macro}`, group: `Marge ${N - 1}`, width: 78, rotate: true, value: (r) => r.margeN1ByMacro[macro], format: 'pctBlank' }))
-  }
-
-  cols.push(
-    { key: 'devisYtdN', label: `DEVIS ${periodMonthLabel(CLOSED_MONTH, N)}`, group: 'CA / Objectifs', width: 124, className: 'metric devis redLabel compareCell', value: (r) => r.devisYtdN, compareValue: (r) => r.devisYtdN1, format: 'keurCompare' },
-  )
-  if (showFamilies) {
-    FAMILY_MACROS.forEach((macro) => cols.push({ key: `devisYtdN_${macro}`, label: `Dont ${macro} (N-1)`, group: `Devis ${periodMonthLabel(CLOSED_MONTH, N)}`, width: 118, rotate: true, className: 'compareCell', value: (r) => r.devisYtdNByMacro[macro], compareValue: (r) => r.devisYtdN1ByMacro[macro], format: 'keurCompare' }))
   }
   cols.push({ key: 'caYtdN', label: `CA RÉEL ${periodMonthLabel(CA_CLOSED_MONTH, N)}`, group: 'CA / Objectifs', width: 124, className: 'metric ca redLabel compareCell', value: (r) => r.caYtdN, compareValue: (r) => r.caYtdN1, format: 'keurCompare' })
   if (showFamilies) {
     FAMILY_MACROS.forEach((macro) => cols.push({ key: `caYtdN_${macro}`, label: `Dont ${macro} (N-1)`, group: `CA ${periodMonthLabel(CA_CLOSED_MONTH, N)}`, width: 118, rotate: true, className: 'compareCell', value: (r) => r.caYtdNByMacro[macro], compareValue: (r) => r.caYtdN1ByMacro[macro], format: 'keurCompare' }))
   }
+  cols.push({ key: 'caVsN1', label: `CA Réalisé / ${N - 1}`, group: 'Comparatif', width: 86, rotate: true, value: (r) => r.caVsN1, format: 'pct' })
 
+  // ── MARGE : N-1 puis N puis écart ──────────────────────────────────────
+  cols.push({ key: 'margePctN1', label: `MARGE ${N - 1}`, group: 'CA / Objectifs', width: 92, className: 'metric margin', value: (r) => r.margePctN1, format: 'pctBlank' })
+  if (showFamilies) {
+    FAMILY_MACROS.forEach((macro) => cols.push({ key: `margeN1_${macro}`, label: `Dont ${macro}`, group: `Marge ${N - 1}`, width: 78, rotate: true, value: (r) => r.margeN1ByMacro[macro], format: 'pctBlank' }))
+  }
+  cols.push({ key: 'margePctYtdN', label: `MARGE RÉEL ${periodMonthLabel(CA_CLOSED_MONTH, N)}`, group: 'CA / Objectifs', width: 124, className: 'metric margin redLabel compareCell', value: (r) => r.margePctYtdN, compareValue: (r) => ratio(r.margeYtdN1Value, r.caYtdN1), format: 'pctCompare' })
+  if (showFamilies) {
+    FAMILY_MACROS.forEach((macro) => cols.push({ key: `margeYtdN_${macro}`, label: `Dont ${macro} (N-1)`, group: `Marge ${periodMonthLabel(CA_CLOSED_MONTH, N)}`, width: 118, rotate: true, className: 'compareCell', value: (r) => r.margeYtdNByMacro[macro], compareValue: (r) => ratio(r.margeYtdN1ValueByMacro[macro], r.caYtdN1ByMacro[macro]), format: 'pctCompare' }))
+  }
+  cols.push({ key: 'margeVsN1', label: `Écart marge / ${N - 1}`, group: 'Comparatif', width: 86, rotate: true, value: (r) => r.margeVsN1, format: 'points' })
+
+  // ── Encours commande ───────────────────────────────────────────────────
   cols.push({ key: 'encoursCommandeN', label: 'ENCOURS CMD', group: 'Encours commande', width: 118, className: 'metric orderBacklog', value: (r) => r.encoursCommandeN, format: 'keurBlank' })
   if (showFamilies) {
     if (encoursDetailMode === 'macro') {
@@ -1363,18 +1638,10 @@ function buildColumns(showFamilies: boolean, showCollaborateurColumn = false, en
     }
   }
 
-  cols.push({ key: 'margePctYtdN', label: `MARGE RÉEL ${periodMonthLabel(CA_CLOSED_MONTH, N)}`, group: 'CA / Objectifs', width: 124, className: 'metric margin redLabel compareCell', value: (r) => r.margePctYtdN, compareValue: (r) => ratio(r.margeYtdN1Value, r.caYtdN1), format: 'pctCompare' })
-  if (showFamilies) {
-    FAMILY_MACROS.forEach((macro) => cols.push({ key: `margeYtdN_${macro}`, label: `Dont ${macro} (N-1)`, group: `Marge ${periodMonthLabel(CA_CLOSED_MONTH, N)}`, width: 118, rotate: true, className: 'compareCell', value: (r) => r.margeYtdNByMacro[macro], compareValue: (r) => ratio(r.margeYtdN1ValueByMacro[macro], r.caYtdN1ByMacro[macro]), format: 'pctCompare' }))
-  }
-
-
   cols.push(
     { key: 'objectifCa', label: `OBJECTIF ${N}`, group: 'Objectif', width: 104, className: 'editableNumber', value: (r) => r.objectifCa, editable: { domaine: 'Objectif', rubrique: 'CA', type: 'montant' }, format: 'keur' },
     { key: 'potentiel', label: 'POTENTIEL', group: 'Objectif', width: 98, className: 'editableNumber', value: (r) => r.potentiel, editable: { domaine: 'Objectif', rubrique: 'POTENTIEL', type: 'montant' }, format: 'keur' },
     { key: 'contratBfa', label: 'Contrat BFA', group: 'Objectif', width: 96, className: 'editableNumber', value: (r) => r.contratBfa, editable: { domaine: 'Objectif', rubrique: 'Contrat\nBFA', type: 'montant' }, format: 'keur' },
-    { key: 'caVsN1', label: `CA Réalisé / ${N - 1}`, group: 'Comparatif', width: 86, rotate: true, value: (r) => r.caVsN1, format: 'pct' },
-    { key: 'margeVsN1', label: `Écart marge / ${N - 1}`, group: 'Comparatif', width: 86, rotate: true, value: (r) => r.margeVsN1, format: 'points' },
     { key: 'realiseObjectif', label: 'Réalisé / Objectif', group: 'Comparatif', width: 86, rotate: true, value: (r) => r.realiseObjectif, format: 'pct' },
     { key: 'qrcN1', label: `QRC ${N - 1}`, group: 'QRC', width: 70, rotate: true, value: (r) => r.qrcN1, editable: { domaine: 'QRC', rubrique: `QRC ${N - 1}`, type: 'nombre' }, format: 'number' },
     { key: 'frequenceCommande', label: 'Fréquence commande', group: 'QRC', width: 76, rotate: true, value: (r) => r.frequenceCommande, editable: { domaine: 'QRC', rubrique: 'Fréquence commande', type: 'nombre' }, format: 'number' },
@@ -1384,44 +1651,26 @@ function buildColumns(showFamilies: boolean, showCollaborateurColumn = false, en
     { key: 'qrcN', label: `QRC ${N}`, group: 'QRC', width: 70, rotate: true, className: 'redLabel', value: (r) => r.qrcN, format: 'number' },
   )
 
-  ACTIONS.forEach((rubrique) => cols.push({
-    key: `action_${rubrique}`,
-    label: rubrique,
-    group: 'Dynamisme Client',
-    width: 76,
-    rotate: true,
-    editable: { domaine: 'Initiative', rubrique, type: 'action' },
-    value: (r) => r.numero,
-    format: 'action',
-  }))
-
-  cols.push(
-    { key: 'visiteTheorique', label: 'Théorique', group: 'Fréquence visite', width: 76, rotate: true, value: (r) => r.visiteTheorique, editable: { domaine: 'Visite', rubrique: 'Théorique', type: 'nombre' }, format: 'number' },
-    { key: 'visiteRealise', label: 'Réalisé', group: 'Fréquence visite', width: 76, rotate: true, className: 'redLabel', value: (r) => r.visiteRealise, format: 'number' },
-    // ── Visite réelle (RDV BLG + compagnon CEGECLIM, v_rdv_unifie) ────────
-    // Distinctes des 24 colonnes "Visite n°X" saisies à la main ci-dessous
-    // (mécanisme existant conservé tel quel) -- celles-ci reflètent les
-    // RDV réellement enregistrés dans l'agenda/l'app, tous canaux confondus.
-    { key: 'derniereVisiteReelle', label: 'Dernière visite (réel)', group: 'Fréquence visite', width: 92, rotate: true, value: (r) => r.derniereVisiteReelle, format: 'text' },
-    { key: 'prochaineVisiteReelle', label: 'Prochaine visite (réel)', group: 'Fréquence visite', width: 92, rotate: true, value: (r) => r.prochaineVisiteReelle, format: 'text' },
-    { key: 'nbVisitesReel', label: `Réalisé ${N} (réel)`, group: 'Fréquence visite', width: 76, rotate: true, className: 'redLabel', value: (r) => r.nbVisitesReel, format: 'number' },
-  )
-
-  VISITES.forEach((rubrique) => cols.push({
-    key: `visite_${rubrique}`,
-    label: rubrique,
-    group: 'Visite',
-    width: 82,
-    rotate: true,
-    editable: { domaine: 'Visite', rubrique, type: 'date' },
-    value: (r) => r.numero,
-    format: 'date',
-  }))
+  // Dynamisme client : masqué (AFFICHER_DYNAMISME_CLIENT = false), à
+  // retravailler dans un second temps.
+  if (AFFICHER_DYNAMISME_CLIENT) {
+    ACTIONS.forEach((rubrique) => cols.push({
+      key: `action_${rubrique}`,
+      label: rubrique,
+      group: 'Dynamisme Client',
+      width: 76,
+      rotate: true,
+      editable: { domaine: 'Initiative', rubrique, type: 'action' },
+      value: (r) => r.numero,
+      format: 'action',
+    }))
+  }
 
   return cols
 }
 
 function displayValue(col: ColumnDef, row: SummaryRow, objectiveMap: Map<string, ObjectiveRow>) {
+  if (col.cadeau) return ''
   if (col.editable && row.kind === 'client') {
     const { domaine, rubrique, type } = col.editable
     if (type === 'date') return formatDateFr(objectiveDate(objectiveMap, row.numero, domaine, rubrique))
@@ -1513,6 +1762,7 @@ function caBandRank(value: any) {
 }
 
 function rawSortableValue(col: ColumnDef, row: SummaryRow, objectiveMap: Map<string, ObjectiveRow>) {
+  if (col.cadeau) return ''
   if (col.editable && row.kind === 'client') {
     if (col.editable.type === 'texte' || col.editable.type === 'date') return displayValue(col, row, objectiveMap)
     return objectiveNumber(objectiveMap, row.numero, col.editable.domaine, col.editable.rubrique)
@@ -1602,10 +1852,7 @@ function cacheRowToSummary(row: CacheDbRow): SummaryRow {
     devisYtdN1ByMacro: kind === 'month' ? macroNumberPayload(row.devis_n1_by_macro) : macroNumberPayload(row.devis_ytd_n1_by_macro),
     caYtdN: safeNumber(row.ca_ytd_n),
     // FIX (2026-08) : valeur brute (non gelée) telle que renvoyée par le
-    // cache -- c'est celle-ci qui alimente le pavé "CA réel {N}" du
-    // bandeau supérieur. caYtdN, juste au-dessus, continue d'être gelée à
-    // M-1 plus bas par recomputeClientN1ComparisonFromMonths pour la
-    // colonne "CA RÉEL 07-2026" du tableau, comme avant.
+    // cache -- alimente le pavé "CA réel {N}" du bandeau supérieur.
     caYtdNComplet: safeNumber(row.ca_ytd_n),
     caYtdN1: safeNumber(row.ca_ytd_n1),
     caYtdNByMacro: macroNumberPayload(row.ca_ytd_n_by_macro),
@@ -1661,8 +1908,7 @@ async function fetchVisitesReelles(annee: number): Promise<Map<string, VisiteBat
 }
 
 /** Applique la dernière/prochaine visite réelle + le compteur réel sur une
- * ligne client -- ne touche jamais aux lignes TOTAL ou mois (row_kind
- * différent de 'client'), qui restent vides sur ces 3 champs. */
+ * ligne client -- ne touche jamais aux lignes TOTAL ou mois. */
 function applyVisiteReelle(row: SummaryRow, visitesMap: Map<string, VisiteBatchInfo>): SummaryRow {
   if (row.kind !== 'client') return row
   const info = visitesMap.get(normalize(row.numero))
@@ -1676,8 +1922,7 @@ function applyVisiteReelle(row: SummaryRow, visitesMap: Map<string, VisiteBatchI
 }
 
 /** Applique le total en retard de paiement (dernier fichier compta) sur une
- * ligne client -- lignes TOTAL et mois non touchées (le total est recalculé
- * dans buildTotalFromRows). */
+ * ligne client -- lignes TOTAL et mois non touchées. */
 function applyRetardPaiement(row: SummaryRow, retardsMap: Map<string, RetardPaiementClient>): SummaryRow {
   if (row.kind !== 'client') return row
   const r = retardsMap.get(cleTiers(row.numero))
@@ -1686,9 +1931,7 @@ function applyRetardPaiement(row: SummaryRow, retardsMap: Map<string, RetardPaie
 }
 
 /** Applique les 3 seuils d'alerte de comportement (client_alertes_config)
- * sur une ligne client -- uniquement les lignes row_kind='client' (les
- * seuils sont propres au client, pas au mois ; les lignes TOTAL et mois
- * développés restent vides sur ces 3 colonnes). */
+ * sur une ligne client uniquement. */
 function applyAlertesConfigOverrides(row: SummaryRow, alertesConfigMap: Map<string, AlerteConfigRow>): SummaryRow {
   if (row.kind !== 'client') return row
   const cfg = alertesConfigMap.get(normalize(row.numero))
@@ -1713,8 +1956,7 @@ function applyObjectiveOverrides(row: SummaryRow, objectiveMap: Map<string, Obje
   const visiteRealise = VISITES.reduce((count, rubrique) => count + (objectiveDate(objectiveMap, row.numero, 'Visite', rubrique) ? 1 : 0), 0)
 
   // RÈGLE B : l'objectif de CA est saisi pour le client entier ; sur la part
-  // d'un collaborateur ou d'une agence (client partagé) il n'est pas réparti,
-  // donc non affiché (0) et le ratio réalisé/objectif n'est pas calculé.
+  // d'un collaborateur ou d'une agence (client partagé) il n'est pas réparti.
   const estPart = Boolean(row.partKind)
 
   return {
@@ -1796,7 +2038,6 @@ function buildTotalFromRows(rows: SummaryRow[], showCollaborateurColumn: boolean
     devisYtdNByMacro: sumMacro(rows, (row) => row.devisYtdNByMacro),
     devisYtdN1ByMacro: sumMacro(rows, (row) => row.devisYtdN1ByMacro),
     caYtdN: rows.reduce((s, r) => s + r.caYtdN, 0),
-    // FIX (2026-08) : total séparé pour le pavé "CA réel {N}" (non gelé).
     caYtdNComplet: rows.reduce((s, r) => s + r.caYtdNComplet, 0),
     caYtdN1: rows.reduce((s, r) => s + r.caYtdN1, 0),
     caYtdNByMacro,
@@ -1999,7 +2240,6 @@ async function fetchReferentialSelectionOptions() {
   )
 
   // Les agences de référence viennent volontairement de ref_collaborateurs.
-  // Les tiers sont rattachés ensuite via leur collaborateur, pour éviter les variantes d'agence issues de ref_tiers/cache.
   const agences = maps.agences
 
   return { collaborateurs, agences, collaborateurAgence: maps.collaborateurAgence, agenceCollaborateurs: maps.agenceCollaborateurs }
@@ -2025,14 +2265,7 @@ async function fetchSelectionOptions(): Promise<SelectionOptions> {
   }
 }
 
-// RÈGLE B (2026-09-20) :
-//  - collaborateur choisi (ou périmètre restreint en « Tous ») : lignes
-//    'client' (représentant de la fiche) + 'client_part' (part sur un client
-//    partagé) pour ce(s) collaborateur(s) -> une seule ligne par client ;
-//  - « Tous les collaborateurs » sans restriction : lignes 'client' seules
-//    -> les clients partagés apparaissent une fois, sous NON AFFECTE ;
-//  - agence choisie : lignes 'client' des collaborateurs de l'agence +
-//    lignes 'client_agence' de l'agence -> une seule ligne par client.
+// RÈGLE B (2026-09-20) : cf. commentaire en tête de fichier.
 async function fetchCacheClientRows(
   mode: ModeSelection,
   selected: string,
@@ -2125,29 +2358,18 @@ function sumSummaryAmount(rows: SummaryRow[], getter: (row: SummaryRow) => numbe
 function recomputeClientN1ComparisonFromMonths(row: SummaryRow, monthRows: SummaryRow[]) {
   if (row.kind !== 'client' || monthRows.length === 0) return row
 
-  // FIX (2026-08) : la valeur "brute" reçue du cache (déjà présente sur
-  // caYtdN à ce stade, incluant le mois en cours) est capturée ici AVANT
-  // d'être remplacée plus bas par la version gelée à M-1 -- c'est elle qui
-  // alimente désormais le pavé "CA réel {N}" du bandeau supérieur.
-  // caYtdN continue d'être recalculée et gelée exactement comme avant : la
-  // colonne "CA RÉEL 07-2026" du tableau n'est pas touchée par ce correctif.
+  // FIX (2026-08) : valeur brute capturée AVANT le gel à M-1 -- alimente le
+  // pavé "CA réel {N}" du bandeau supérieur.
   const caYtdNComplet = row.caYtdN
 
   // Devis : comparaison à M courant.
-  // CA / marge : comparaison à M-1, pour éviter de comparer un mois courant partiellement facturé.
+  // CA / marge : comparaison à M-1.
   const devisRowsN = monthRows.filter((monthRow) => monthNumberFromSummary(monthRow) <= CLOSED_MONTH)
   const devisCompareRowsN1 = monthRows.filter((monthRow) => monthNumberFromSummary(monthRow) <= N1_COMPARISON_MONTH)
   const caRowsN = monthRows.filter((monthRow) => monthNumberFromSummary(monthRow) <= CA_CLOSED_MONTH)
   const caCompareRowsN1 = monthRows.filter((monthRow) => monthNumberFromSummary(monthRow) <= CA_N1_COMPARISON_MONTH)
-  // Encours commande : PAS de recalcul ici. C'est un instantané ("où en est le
-  // portefeuille aujourd'hui"), pas une donnée à comparer par période comme
-  // Devis/CA/Marge — il n'a jamais eu besoin d'entrer dans cette fonction.
-  // row.encoursCommandeN / ByMacro / ByType viennent déjà de la ligne
-  // row_kind='client' en base (le vrai total, sans borne d'année), et le
-  // spread `...row` plus bas les laisse passer tels quels. Le recalcul
-  // précédent, à partir des lignes mensuelles (bornées à l'année N), écrasait
-  // silencieusement ce bon total par un total tronqué à l'année en cours —
-  // c'est la cause du pavé "Encours commande" incohérent avec Focus Mensuel.
+  // Encours commande : PAS de recalcul ici (instantané issu de la ligne
+  // client du cache, sans borne d'année).
 
   const devisYtdNByMacro = sumMacro(devisRowsN, (monthRow) => monthRow.devisYtdNByMacro)
   const devisYtdN = sumSummaryAmount(devisRowsN, (monthRow) => monthRow.devisYtdN)
@@ -2411,20 +2633,39 @@ export default function SyntheseMultiClientsPage() {
   // Colonnes optionnelles affichées à l'écran (pastilles sous les KPI) —
   // n'affecte jamais l'export Excel, qui reconstruit ses propres colonnes.
   const [visibleOptionalCols, setVisibleOptionalCols] = useState<Set<string>>(new Set(DEFAULT_VISIBLE_TOGGLEABLE_COLUMNS))
-  // Dernière/prochaine visite réelle + compteur (v_rdv_unifie) -- chargé
-  // une fois pour tous les clients (indépendant du filtre collaborateur/
-  // agence en cours), fusionné dans baseClientRows ci-dessous.
+  // Dernière/prochaine visite réelle + compteur (v_rdv_unifie).
   const [visitesReellesMap, setVisitesReellesMap] = useState<Map<string, VisiteBatchInfo>>(new Map())
-  // Retards de paiement (dernier fichier compta) -- chargés une fois pour
-  // tous les clients, fusionnés dans baseClientRows ; servent aussi au
-  // pictogramme ⚠, au pavé KPI et aux fenêtres de détail.
+  // Retards de paiement (dernier fichier compta).
   const [retardsMap, setRetardsMap] = useState<Map<string, RetardPaiementClient>>(new Map())
   const [retardsIndisponible, setRetardsIndisponible] = useState(false)
   const [retardsListeOuverte, setRetardsListeOuverte] = useState(false)
   const [retardOuvert, setRetardOuvert] = useState<RetardPaiementClient | null>(null)
-  // Clients ayant une note (bouton "i" plein) -- chargé une fois, mis à jour
-  // après chaque enregistrement.
+  // Clients ayant une note (bouton "i" plein).
   const [numerosAvecNote, setNumerosAvecNote] = useState<Set<string>>(new Set())
+
+  // ── Liste des visites d'un client (clic sur "Réalisées N") ─────────────
+  const [visitesClient, setVisitesClient] = useState<VisitesClientOuvert | null>(null)
+  const [visitesDetail, setVisitesDetail] = useState<VisiteDetail[]>([])
+  const [visitesLoading, setVisitesLoading] = useState(false)
+  const [visitesErreur, setVisitesErreur] = useState<string | null>(null)
+  const [crOuvert, setCrOuvert] = useState<{ visite: VisiteDetail; cr: VisiteCompteRendu } | null>(null)
+
+  // ── Cadeaux de fin d'année ─────────────────────────────────────────────
+  const [showCadeaux, setShowCadeaux] = useState(false)
+  const [cadeauxRef, setCadeauxRef] = useState<CadeauRef[]>([])
+  const [cadeauxMap, setCadeauxMap] = useState<Map<string, CadeauClient>>(new Map())
+  const [cadeauxCharges, setCadeauxCharges] = useState(false)
+  const [cadeauxLoading, setCadeauxLoading] = useState(false)
+  const [cadeauxErreur, setCadeauxErreur] = useState<string | null>(null)
+  const [savingCadeau, setSavingCadeau] = useState<string | null>(null)
+  const [cadeauExportEnCours, setCadeauExportEnCours] = useState(false)
+  // Fenêtre "adresse de livraison Autres" (adresse vérifiée BAN obligatoire)
+  const [adresseModal, setAdresseModal] = useState<AdresseModalState | null>(null)
+  const [adresseQuery, setAdresseQuery] = useState('')
+  const [adresseSuggestions, setAdresseSuggestions] = useState<AdresseSuggestion[]>([])
+  const [adresseChoisie, setAdresseChoisie] = useState<AdresseSuggestion | null>(null)
+  const [adresseRecherche, setAdresseRecherche] = useState(false)
+  const [adresseErreur, setAdresseErreur] = useState<string | null>(null)
 
   useEffect(() => {
     let alive = true
@@ -2460,15 +2701,36 @@ export default function SyntheseMultiClientsPage() {
     return map
   }, [alertesConfigRows])
 
-  const columns = useMemo(() => buildColumns(showFamilies, showCollaborateurColumn, encoursDetailMode), [showFamilies, showCollaborateurColumn, encoursDetailMode])
+  const columns = useMemo(
+    () => buildColumns(showFamilies, showCollaborateurColumn, encoursDetailMode, showCadeaux),
+    [showFamilies, showCollaborateurColumn, encoursDetailMode, showCadeaux]
+  )
 
   // Colonnes réellement rendues à l'écran : toutes les colonnes SAUF celles
   // de la liste "optionnelle" qui n'ont pas été explicitement activées.
-  // L'export Excel (exportExcel ci-dessous) n'utilise jamais cette variable.
   const displayedColumns = useMemo(
     () => columns.filter((col) => !(col.key in TOGGLEABLE_COLUMN_LABELS) || visibleOptionalCols.has(col.key)),
     [columns, visibleOptionalCols]
   )
+
+  // En-têtes de groupe fusionnés : colonnes consécutives non figées du même
+  // groupe -> une seule cellule (colSpan). Les colonnes figées gardent leur
+  // propre cellule (position sticky).
+  const groupHeaderCells = useMemo(() => {
+    const cells: { key: string; group: string; sticky?: ColumnDef['sticky']; span: number; width: number }[] = []
+    displayedColumns.forEach((col) => {
+      const last = cells[cells.length - 1]
+      if (last && !last.sticky && !col.sticky && last.group === col.group) {
+        last.span += 1
+        last.width += col.width
+      } else {
+        cells.push({ key: col.key, group: col.group, sticky: col.sticky, span: 1, width: col.width })
+      }
+    })
+    return cells
+  }, [displayedColumns])
+
+  const tableWidth = useMemo(() => displayedColumns.reduce((sum, col) => sum + col.width, 0), [displayedColumns])
 
   function toggleOptionalColumn(key: string) {
     setVisibleOptionalCols((prev) => {
@@ -2516,10 +2778,7 @@ export default function SyntheseMultiClientsPage() {
   }, [])
 
   // Dernière/prochaine visite réelle + compteur -- une seule fois, pour
-  // tous les clients (v_rdv_unifie n'est pas filtrable par collaborateur/
-  // agence directement, donc chargé indépendamment de la sélection). Si la
-  // RPC n'est pas encore déployée, échoue silencieusement : les 3 colonnes
-  // restent simplement vides plutôt que de bloquer l'écran.
+  // tous les clients. Échec silencieux si la RPC n'est pas déployée.
   useEffect(() => {
     let alive = true
     async function loadVisitesReelles() {
@@ -2534,9 +2793,7 @@ export default function SyntheseMultiClientsPage() {
     return () => { alive = false }
   }, [])
 
-  // Retards de paiement -- une seule fois, tous clients confondus (la
-  // sélection collaborateur/agence est appliquée ensuite en croisant avec
-  // baseClientRows). Échec silencieux si la vue n'est pas encore déployée.
+  // Retards de paiement -- une seule fois, tous clients confondus.
   useEffect(() => {
     let alive = true
     async function loadRetards() {
@@ -2551,6 +2808,53 @@ export default function SyntheseMultiClientsPage() {
     void loadRetards()
     return () => { alive = false }
   }, [])
+
+  // Cadeaux de fin d'année : chargés à la première activation du bouton.
+  useEffect(() => {
+    if (!showCadeaux || cadeauxCharges) return
+    let alive = true
+    async function loadCadeaux() {
+      setCadeauxLoading(true)
+      setCadeauxErreur(null)
+      try {
+        const [refs, map] = await Promise.all([fetchCadeauxRef(), fetchCadeauxClients(N)])
+        if (!alive) return
+        setCadeauxRef(refs)
+        setCadeauxMap(map)
+        setCadeauxCharges(true)
+      } catch (err: any) {
+        if (alive) setCadeauxErreur(err?.message || 'Cadeaux indisponibles')
+      } finally {
+        if (alive) setCadeauxLoading(false)
+      }
+    }
+    void loadCadeaux()
+    return () => { alive = false }
+  }, [showCadeaux, cadeauxCharges])
+
+  // Recherche d'adresse (BAN) avec temporisation pendant la saisie.
+  useEffect(() => {
+    if (!adresseModal) return
+    const q = adresseQuery.trim()
+    if (adresseChoisie && adresseChoisie.label === q) return
+    if (q.length < 5) { setAdresseSuggestions([]); setAdresseErreur(null); return }
+    let alive = true
+    const timer = window.setTimeout(async () => {
+      setAdresseRecherche(true)
+      setAdresseErreur(null)
+      try {
+        const results = await rechercherAdresses(q)
+        if (!alive) return
+        setAdresseSuggestions(results)
+        if (!results.length) setAdresseErreur("Adresse introuvable dans la Base Adresse Nationale : vérifiez la saisie (numéro, voie, code postal, ville).")
+      } catch (err: any) {
+        if (alive) setAdresseErreur(`Vérification impossible : ${err?.message || 'service indisponible'}`)
+      } finally {
+        if (alive) setAdresseRecherche(false)
+      }
+    }, 350)
+    return () => { alive = false; window.clearTimeout(timer) }
+  }, [adresseQuery, adresseModal, adresseChoisie])
 
   useEffect(() => {
     let alive = true
@@ -2655,8 +2959,6 @@ export default function SyntheseMultiClientsPage() {
           codes.length ? fetchCacheMonthRowsForNumeros(codes) : Promise.resolve([]),
           codes.length ? fetchAlertesConfigForTiers(codes) : Promise.resolve([]),
         ])
-        // RÈGLE B : ne garder que les lignes mensuelles de la même part que
-        // la ligne client (part collaborateur, part agence ou ligne complète).
         const monthSummaries = filterMonthRowsForClients(
           rawMonthRows
             .map(cacheRowToSummary)
@@ -2695,8 +2997,7 @@ export default function SyntheseMultiClientsPage() {
   )
   const totalRow = useMemo(() => buildTotalFromRows(baseClientRows, showCollaborateurColumn), [baseClientRows, showCollaborateurColumn])
 
-  // Retards de paiement de la sélection courante : clients de baseClientRows
-  // présents dans le dernier fichier compta, triés par montant en retard.
+  // Retards de paiement de la sélection courante.
   const retardsSelection = useMemo(() => {
     const rows: RetardPaiementClient[] = []
     baseClientRows.forEach((row) => {
@@ -2714,6 +3015,324 @@ export default function SyntheseMultiClientsPage() {
       dateExtraction: rows[0]?.date_extraction || retardsMap.values().next().value?.date_extraction || '',
     }
   }, [baseClientRows, retardsMap])
+
+  // ── Cadeaux : synthèse de la sélection courante ────────────────────────
+  const cadeauxRefById = useMemo(() => {
+    const map = new Map<number, CadeauRef>()
+    cadeauxRef.forEach((ref) => map.set(ref.id, ref))
+    return map
+  }, [cadeauxRef])
+
+  const cadeauxSelection = useMemo(() => {
+    const vus = new Set<string>()
+    const lignes: { row: SummaryRow; cadeau: CadeauClient }[] = []
+    baseClientRows.forEach((row) => {
+      const key = normalize(row.numero)
+      if (vus.has(key)) return
+      vus.add(key)
+      const cadeau = cadeauxMap.get(key)
+      if (cadeau) lignes.push({ row, cadeau })
+    })
+    const parTypeMap = new Map<number, { id: number; libelle: string; prix: number; nbClients: number; qte: number; valeur: number }>()
+    lignes.forEach(({ cadeau }) => {
+      const ref = cadeauxRefById.get(cadeau.cadeau_id)
+      const bucket = parTypeMap.get(cadeau.cadeau_id) || { id: cadeau.cadeau_id, libelle: ref?.libelle || `Cadeau #${cadeau.cadeau_id}`, prix: cadeau.prix_unitaire, nbClients: 0, qte: 0, valeur: 0 }
+      bucket.nbClients += 1
+      bucket.qte += cadeau.quantite
+      bucket.valeur += cadeau.quantite * cadeau.prix_unitaire
+      parTypeMap.set(cadeau.cadeau_id, bucket)
+    })
+    // Tous les types actifs apparaissent (à 0 si non choisis).
+    cadeauxRef.filter((ref) => ref.actif).forEach((ref) => {
+      if (!parTypeMap.has(ref.id)) parTypeMap.set(ref.id, { id: ref.id, libelle: ref.libelle, prix: ref.prix_unitaire, nbClients: 0, qte: 0, valeur: 0 })
+    })
+    const ordre = (id: number) => cadeauxRefById.get(id)?.ordre ?? 999
+    const parType = Array.from(parTypeMap.values()).sort((a, b) => ordre(a.id) - ordre(b.id) || a.libelle.localeCompare(b.libelle, 'fr'))
+    const parLieu = LIEUX_LIVRAISON.map((l) => ({ ...l, nb: lignes.filter((x) => x.cadeau.lieu_livraison === l.value).length }))
+    return {
+      lignes,
+      nbClients: lignes.length,
+      nbClientsSelection: vus.size,
+      qte: lignes.reduce((s, x) => s + x.cadeau.quantite, 0),
+      valeur: lignes.reduce((s, x) => s + x.cadeau.quantite * x.cadeau.prix_unitaire, 0),
+      parType,
+      parLieu,
+    }
+  }, [baseClientRows, cadeauxMap, cadeauxRef, cadeauxRefById])
+
+  async function saveCadeau(numero: string, patch: Partial<CadeauClient> | null) {
+    if (!numero || numero === 'TOTAL') return
+    const key = normalize(numero)
+    setSavingCadeau(key)
+    setCadeauxErreur(null)
+    try {
+      if (patch === null) {
+        const { error: delError } = await supabase.from('client_cadeaux_fin_annee').delete().eq('annee', N).eq('numero_tiers', numero)
+        if (delError) throw delError
+        setCadeauxMap((prev) => { const next = new Map(prev); next.delete(key); return next })
+        return
+      }
+
+      const current = cadeauxMap.get(key)
+      const merged = { ...(current || {}), ...patch } as Partial<CadeauClient>
+      if (!merged.cadeau_id) throw new Error('type de cadeau manquant')
+      const lieu = (merged.lieu_livraison || 'agence') as LieuLivraison
+      const avecAdresse = lieu === 'autre'
+      if (avecAdresse && !safeText(merged.adresse_autre)) throw new Error('adresse de livraison obligatoire pour "Autres"')
+
+      const { data: sessionData } = await supabase.auth.getSession()
+      const payload = {
+        annee: N,
+        numero_tiers: numero,
+        cadeau_id: merged.cadeau_id,
+        prix_unitaire: safeNumber(merged.prix_unitaire),
+        quantite: Math.max(1, Math.round(safeNumber(merged.quantite) || 1)),
+        lieu_livraison: lieu,
+        adresse_autre: avecAdresse ? merged.adresse_autre ?? null : null,
+        adresse_autre_code_postal: avecAdresse ? merged.adresse_autre_code_postal ?? null : null,
+        adresse_autre_ville: avecAdresse ? merged.adresse_autre_ville ?? null : null,
+        adresse_autre_lat: avecAdresse ? merged.adresse_autre_lat ?? null : null,
+        adresse_autre_lon: avecAdresse ? merged.adresse_autre_lon ?? null : null,
+        adresse_autre_ban_id: avecAdresse ? merged.adresse_autre_ban_id ?? null : null,
+        updated_by_email: sessionData.session?.user?.email || null,
+      }
+      const { data, error: upError } = await supabase
+        .from('client_cadeaux_fin_annee')
+        .upsert(payload, { onConflict: 'annee,numero_tiers' })
+        .select('*')
+        .single()
+      if (upError) throw upError
+      const saved = normalizeCadeauClient((data || payload) as Record<string, any>)
+      setCadeauxMap((prev) => { const next = new Map(prev); next.set(key, saved); return next })
+    } catch (err: any) {
+      setCadeauxErreur(`Cadeau non enregistré (${numero}) : ${err?.message || err}`)
+    } finally {
+      setSavingCadeau(null)
+    }
+  }
+
+  function changerTypeCadeau(row: SummaryRow, value: string) {
+    if (!value) { void saveCadeau(row.numero, null); return }
+    const ref = cadeauxRefById.get(Number(value))
+    if (!ref) return
+    const current = cadeauxMap.get(normalize(row.numero))
+    void saveCadeau(row.numero, {
+      cadeau_id: ref.id,
+      prix_unitaire: ref.prix_unitaire,
+      quantite: current?.quantite || 1,
+      lieu_livraison: current?.lieu_livraison || 'agence',
+    })
+  }
+
+  function changerQteCadeau(row: SummaryRow, value: string) {
+    const current = cadeauxMap.get(normalize(row.numero))
+    if (!current) return
+    const qte = Math.round(safeNumber(value))
+    if (qte < 1) { setCadeauxErreur('La quantité doit être au moins 1 (retirez le type de cadeau pour supprimer la ligne).'); return }
+    if (qte === current.quantite) return
+    void saveCadeau(row.numero, { quantite: qte })
+  }
+
+  function ouvrirAdresseAutre(row: SummaryRow) {
+    const current = cadeauxMap.get(normalize(row.numero))
+    setAdresseModal({ numero: row.numero, intitule: row.intitule })
+    setAdresseQuery(current?.adresse_autre || '')
+    setAdresseSuggestions([])
+    setAdresseErreur(null)
+    setAdresseChoisie(current?.adresse_autre ? {
+      id: safeText(current.adresse_autre_ban_id),
+      label: current.adresse_autre,
+      postcode: safeText(current.adresse_autre_code_postal),
+      city: safeText(current.adresse_autre_ville),
+      type: 'housenumber',
+      score: 1,
+      lat: current.adresse_autre_lat,
+      lon: current.adresse_autre_lon,
+    } : null)
+  }
+
+  function changerLieuCadeau(row: SummaryRow, value: string) {
+    const current = cadeauxMap.get(normalize(row.numero))
+    if (!current) return
+    if (value === 'autre') { ouvrirAdresseAutre(row); return }
+    void saveCadeau(row.numero, { lieu_livraison: value as LieuLivraison })
+  }
+
+  function fermerAdresseModal() {
+    setAdresseModal(null)
+    setAdresseQuery('')
+    setAdresseSuggestions([])
+    setAdresseChoisie(null)
+    setAdresseErreur(null)
+  }
+
+  async function validerAdresseAutre() {
+    if (!adresseModal || !adresseChoisie) return
+    if (!adresseSuffisante(adresseChoisie)) {
+      setAdresseErreur('Adresse incomplète : choisissez une adresse avec un numéro et/ou une voie.')
+      return
+    }
+    await saveCadeau(adresseModal.numero, {
+      lieu_livraison: 'autre',
+      adresse_autre: adresseChoisie.label,
+      adresse_autre_code_postal: adresseChoisie.postcode || null,
+      adresse_autre_ville: adresseChoisie.city || null,
+      adresse_autre_lat: adresseChoisie.lat,
+      adresse_autre_lon: adresseChoisie.lon,
+      adresse_autre_ban_id: adresseChoisie.id || null,
+    })
+    fermerAdresseModal()
+  }
+
+  async function exportCadeauxExcel() {
+    if (!cadeauxSelection.lignes.length) return
+    setCadeauExportEnCours(true)
+    try {
+      // Adresses SAGE des clients livrés à leur adresse.
+      const numerosClient = cadeauxSelection.lignes.filter((x) => x.cadeau.lieu_livraison === 'client').map((x) => x.row.numero)
+      const adressesClient = new Map<string, string>()
+      for (const group of chunk(numerosClient, 300)) {
+        const { data, error: adrError } = await supabase
+          .from('ref_tiers')
+          .select('numero,adresse,complement_adresse,code_postal,ville')
+          .in('numero', group)
+        if (adrError) throw adrError
+        ;((data || []) as Record<string, any>[]).forEach((t) => {
+          const ligne = [safeText(t.adresse), safeText(t.complement_adresse), [safeText(t.code_postal), safeText(t.ville)].filter(Boolean).join(' ')].filter(Boolean).join(', ')
+          adressesClient.set(normalize(t.numero), ligne)
+        })
+      }
+
+      // @ts-ignore - xlsx-js-style n'a pas toujours les types TS.
+      const XLSX = await import('xlsx-js-style')
+      const lignes = [...cadeauxSelection.lignes].sort((a, b) =>
+        safeText(a.row.agence).localeCompare(safeText(b.row.agence), 'fr') ||
+        safeText(a.row.collaborateur).localeCompare(safeText(b.row.collaborateur), 'fr') ||
+        safeText(a.row.intitule).localeCompare(safeText(b.row.intitule), 'fr'))
+
+      const header = ['Agence', 'Représentant', 'Client', 'Nom', `CA ${N}`, 'Type cadeau', 'Prix unitaire', 'Qté', 'Valeur', 'Lieu', 'Adresse de livraison']
+      const body = lignes.map(({ row, cadeau }) => {
+        const ref = cadeauxRefById.get(cadeau.cadeau_id)
+        const adresse = cadeau.lieu_livraison === 'autre'
+          ? safeText(cadeau.adresse_autre)
+          : cadeau.lieu_livraison === 'client'
+            ? adressesClient.get(normalize(row.numero)) || 'Adresse SAGE non renseignée'
+            : `Agence ${safeText(row.agence)}`
+        return [
+          safeText(row.agence),
+          safeText(row.collaborateur),
+          row.numero,
+          safeText(row.intitule),
+          Math.round(row.caYtdNComplet * 100) / 100,
+          ref?.libelle || `Cadeau #${cadeau.cadeau_id}`,
+          cadeau.prix_unitaire,
+          cadeau.quantite,
+          Math.round(cadeau.quantite * cadeau.prix_unitaire * 100) / 100,
+          lieuLivraisonLabel(cadeau.lieu_livraison),
+          adresse,
+        ]
+      })
+      const totalLigne = ['TOTAL', '', `${lignes.length} clients`, '', Math.round(lignes.reduce((s, x) => s + x.row.caYtdNComplet, 0) * 100) / 100, '', '', cadeauxSelection.qte, Math.round(cadeauxSelection.valeur * 100) / 100, '', '']
+
+      const ws = XLSX.utils.aoa_to_sheet([header, ...body, totalLigne])
+      const range = XLSX.utils.decode_range(ws['!ref'] || 'A1:A1')
+      const border = { top: { style: 'thin', color: { rgb: 'CBD5E1' } }, bottom: { style: 'thin', color: { rgb: 'CBD5E1' } }, left: { style: 'thin', color: { rgb: 'CBD5E1' } }, right: { style: 'thin', color: { rgb: 'CBD5E1' } } }
+      for (let r = range.s.r; r <= range.e.r; r += 1) {
+        for (let c = range.s.c; c <= range.e.c; c += 1) {
+          const addr = XLSX.utils.encode_cell({ r, c })
+          if (!ws[addr]) ws[addr] = { t: 's', v: '' }
+          const isHeader = r === 0
+          const isTotal = r === range.e.r
+          if (!isHeader && (c === 4 || c === 6 || c === 8) && ws[addr].t === 'n') ws[addr].z = '#,##0.00 "€"'
+          ws[addr].s = {
+            font: { bold: isHeader || isTotal, color: isHeader ? { rgb: 'FFFFFF' } : undefined },
+            fill: { fgColor: { rgb: isHeader ? '0B1220' : isTotal ? 'FFF2CC' : 'FFFFFF' } },
+            alignment: { vertical: 'center', horizontal: [4, 6, 7, 8].includes(c) && !isHeader ? 'right' : 'left', wrapText: isHeader },
+            border,
+          }
+        }
+      }
+      ws['!cols'] = [{ wch: 16 }, { wch: 22 }, { wch: 11 }, { wch: 34 }, { wch: 13 }, { wch: 36 }, { wch: 11 }, { wch: 6 }, { wch: 11 }, { wch: 15 }, { wch: 50 }]
+      ws['!autofilter'] = { ref: XLSX.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: Math.max(0, range.e.r - 1), c: range.e.c } }) }
+      const pane = { xSplit: 0, ySplit: 1, topLeftCell: 'A2', activePane: 'bottomLeft', state: 'frozen' }
+      ws['!freeze'] = pane
+      ws['!pane'] = pane
+
+      // Onglet synthèse par type.
+      const synthAoa = [
+        ['Type cadeau', 'Prix unitaire', 'Nb clients', 'Qté', 'Valeur'],
+        ...cadeauxSelection.parType.filter((t) => t.qte > 0).map((t) => [t.libelle, t.prix, t.nbClients, t.qte, Math.round(t.valeur * 100) / 100]),
+        ['TOTAL', '', cadeauxSelection.nbClients, cadeauxSelection.qte, Math.round(cadeauxSelection.valeur * 100) / 100],
+      ]
+      const wsSynth = XLSX.utils.aoa_to_sheet(synthAoa)
+      const rangeSynth = XLSX.utils.decode_range(wsSynth['!ref'] || 'A1:A1')
+      for (let r = rangeSynth.s.r; r <= rangeSynth.e.r; r += 1) {
+        for (let c = rangeSynth.s.c; c <= rangeSynth.e.c; c += 1) {
+          const addr = XLSX.utils.encode_cell({ r, c })
+          if (!wsSynth[addr]) wsSynth[addr] = { t: 's', v: '' }
+          if (r > 0 && (c === 1 || c === 4) && wsSynth[addr].t === 'n') wsSynth[addr].z = '#,##0.00 "€"'
+          wsSynth[addr].s = {
+            font: { bold: r === 0 || r === rangeSynth.e.r, color: r === 0 ? { rgb: 'FFFFFF' } : undefined },
+            fill: { fgColor: { rgb: r === 0 ? '0B1220' : r === rangeSynth.e.r ? 'FFF2CC' : 'FFFFFF' } },
+            border,
+          }
+        }
+      }
+      wsSynth['!cols'] = [{ wch: 40 }, { wch: 13 }, { wch: 11 }, { wch: 8 }, { wch: 13 }]
+
+      const wb = XLSX.utils.book_new()
+      XLSX.utils.book_append_sheet(wb, ws, 'Cadeaux clients')
+      XLSX.utils.book_append_sheet(wb, wsSynth, 'Synthèse par type')
+      const suffixe = selected === ALL_COLLABORATEURS_VALUE ? 'tous_collaborateurs' : selected || 'selection'
+      XLSX.writeFile(wb, `cadeaux_fin_annee_${N}_${mode}_${suffixe}.xlsx`)
+    } catch (err: any) {
+      setCadeauxErreur(`Export impossible : ${err?.message || err}`)
+    } finally {
+      setCadeauExportEnCours(false)
+    }
+  }
+
+  // ── Visites : ouverture de la liste détaillée d'un client ──────────────
+  async function ouvrirVisites(row: SummaryRow) {
+    if (row.kind !== 'client') return
+    setVisitesClient({ numero: row.numero, intitule: row.intitule, objectif: row.visiteTheorique, realise: row.nbVisitesReel })
+    setVisitesDetail([])
+    setVisitesErreur(null)
+    setCrOuvert(null)
+    setVisitesLoading(true)
+    try {
+      const { data, error: rpcError } = await supabase.rpc('get_smc_visites_client', { p_numero_tiers: row.numero, p_annee: N })
+      if (rpcError) throw rpcError
+      const liste = (Array.isArray(data) ? data : []) as Record<string, any>[]
+      setVisitesDetail(liste.map((v) => ({
+        rdv_id: safeText(v.rdv_id),
+        source: safeText(v.source),
+        type: safeText(v.type),
+        subject: v.subject ?? null,
+        start_date: safeText(v.start_date),
+        end_date: v.end_date ?? null,
+        all_day: Boolean(v.all_day),
+        lieu: v.lieu ?? null,
+        created_by_name: v.created_by_name ?? null,
+        a_venir: Boolean(v.a_venir),
+        comptes_rendus: Array.isArray(v.comptes_rendus) ? v.comptes_rendus : [],
+      })))
+    } catch (err: any) {
+      setVisitesErreur(err?.message || 'Visites indisponibles')
+    } finally {
+      setVisitesLoading(false)
+    }
+  }
+
+  function fermerVisites() {
+    setVisitesClient(null)
+    setVisitesDetail([])
+    setCrOuvert(null)
+    setVisitesErreur(null)
+  }
+
+  const visitesRealisees = useMemo(() => visitesDetail.filter((v) => !v.a_venir), [visitesDetail])
+  const visitesAVenir = useMemo(() => visitesDetail.filter((v) => v.a_venir).sort((a, b) => a.start_date.localeCompare(b.start_date)), [visitesDetail])
 
   const visibleRows = useMemo(() => {
     const sortCol = columns.find((c) => c.key === sort.key) || columns.find((c) => c.key === 'caN1')!
@@ -3042,15 +3661,15 @@ export default function SyntheseMultiClientsPage() {
     else payload.valeur_number = value === '' ? null : safeNumber(value)
 
     const { data, error } = await supabase.rpc('save_objectif_tiers', {
-  p_numero_tiers: payload.numero_tiers,
-  p_annee: payload.annee,
-  p_domaine: payload.domaine,
-  p_rubrique: payload.rubrique,
-  p_valeur_type: payload.valeur_type,
-  p_valeur_text: payload.valeur_text,
-  p_valeur_number: payload.valeur_number,
-  p_valeur_date: payload.valeur_date,
-})
+      p_numero_tiers: payload.numero_tiers,
+      p_annee: payload.annee,
+      p_domaine: payload.domaine,
+      p_rubrique: payload.rubrique,
+      p_valeur_type: payload.valeur_type,
+      p_valeur_text: payload.valeur_text,
+      p_valeur_number: payload.valeur_number,
+      p_valeur_date: payload.valeur_date,
+    })
     setSavingKey(null)
     if (error) {
       setError(`Sauvegarde impossible : ${error.message}`)
@@ -3064,12 +3683,7 @@ export default function SyntheseMultiClientsPage() {
   }
 
   /** Édition directe d'un des 3 seuils d'alerte de comportement
-   * (client_alertes_config), depuis le tableau -- même RPC que la fiche
-   * client sur l'écran mobile (upsert_client_alertes_config), qui prend
-   * les 3 seuils en un seul appel : on part donc des valeurs actuelles de
-   * la ligne (déjà fusionnées via alertesConfigMap) et on ne remplace que
-   * le champ édité. Un champ vidé désactive la règle correspondante
-   * (null), comme sur la fiche client. */
+   * (client_alertes_config) -- même RPC que la fiche client mobile. */
   async function saveAlerteSeuil(row: SummaryRow, field: NonNullable<ColumnDef['editableAlerte']>, rawValue: string) {
     if (!row.numero || row.numero === 'TOTAL') return
     const alerteKey = `${row.numero}§${field}`
@@ -3116,11 +3730,9 @@ export default function SyntheseMultiClientsPage() {
 
     // @ts-ignore - xlsx-js-style est déjà présent dans le projet mais n'a pas toujours les types TS.
     const XLSX = await import('xlsx-js-style')
-    // L'export Excel contient systématiquement le détail Famille macro, même si l'écran l'a masqué.
-    // Les colonnes de détail sont ensuite groupées et réduites par défaut dans le fichier.
-    // Reconstruction indépendante de l'écran : jamais affectée par les pastilles
-    // "afficher/masquer" ci-dessus, qui ne pilotent que displayedColumns.
-    const exportColumns = buildColumns(true, showCollaborateurColumn, encoursDetailMode)
+    // L'export Excel contient systématiquement le détail Famille macro ; il
+    // est reconstruit indépendamment de l'écran (pastilles et cadeaux exclus).
+    const exportColumns = buildColumns(true, showCollaborateurColumn, encoursDetailMode, false)
 
     const sortCol = exportColumns.find((c) => c.key === sort.key) || exportColumns.find((c) => c.key === 'caN1')!
     let exportClientRows = baseClientRows.filter((row) => {
@@ -3144,8 +3756,6 @@ export default function SyntheseMultiClientsPage() {
     })
 
     // Export volontairement limité aux lignes TOTAL + clients.
-    // Le détail mois par mois n'est pas généré ici car il alourdit fortement
-    // la création du fichier pour les portefeuilles/agences volumineux.
     const exportRows: SummaryRow[] = [totalRow, ...exportClientRows]
 
     const KEUR_FORMAT = '#,##0.0 "K€"'
@@ -3207,13 +3817,13 @@ export default function SyntheseMultiClientsPage() {
 
       if (col.format === 'pct' || col.format === 'pctBlank') {
         const n = Number(value)
-        if (!Number.isFinite(n)) return { value: '', type: 's' as const }
+        if (value === null || value === undefined || !Number.isFinite(n)) return { value: '', type: 's' as const }
         return { value: n / 100, type: 'n' as const, z: PCT_FORMAT }
       }
 
       if (col.format === 'points') {
         const n = Number(value)
-        if (!Number.isFinite(n)) return { value: '', type: 's' as const }
+        if (value === null || value === undefined || !Number.isFinite(n)) return { value: '', type: 's' as const }
         return { value: n, type: 'n' as const, z: POINTS_FORMAT }
       }
 
@@ -3329,7 +3939,6 @@ export default function SyntheseMultiClientsPage() {
     ws['!autofilter'] = { ref: XLSX.utils.encode_range({ s: { r: 1, c: 0 }, e: { r: Math.max(1, range.e.r), c: range.e.c } }) }
 
     // Fige les lignes 1 à 3 et les colonnes d'identification client.
-    // En vue tous collaborateurs, la colonne Collaborateur est ajoutée et figée en première colonne.
     const frozenColumnCount = showCollaborateurColumn ? 4 : 3
     const frozenPane = { xSplit: frozenColumnCount, ySplit: 3, topLeftCell: showCollaborateurColumn ? 'E4' : 'D4', activePane: 'bottomRight', state: 'frozen' }
     ws['!freeze'] = frozenPane
@@ -3403,17 +4012,11 @@ export default function SyntheseMultiClientsPage() {
           <section className="kpis">
             <div><span>Tiers</span><strong>{baseClientRows.length}</strong></div>
             <div><span>CA {N - 1}</span><strong>{formatKEur(totalRow.caN1)}</strong></div>
-            {/* FIX (2026-08) : ce pavé affiche désormais caYtdNComplet (CA
-                facturé total à date, y compris le mois en cours) au lieu de
-                caYtdN (qui reste gelé à M-1 pour la colonne "CA RÉEL
-                07-2026" du tableau, inchangée). */}
+            {/* FIX (2026-08) : CA facturé total à date (y compris le mois en cours). */}
             <div><span>CA réel {N}</span><strong>{formatKEur(totalRow.caYtdNComplet)}</strong></div>
             <div><span>Encours commande</span><strong>{formatKEur(totalRow.encoursCommandeN)}</strong></div>
             <div><span>Marge réel {N}</span><strong>{formatPct(totalRow.margePctYtdN)}</strong></div>
             <div><span>Réalisé / objectif</span><strong>{formatPct(totalRow.realiseObjectif)}</strong></div>
-            {/* Retards de paiement (dernier fichier compta) sur la sélection :
-                nb de clients concernés, total en retard, détail par tranche
-                d'ancienneté. Clic -> liste des clients concernés. */}
             <button
               type="button"
               className={`kpiRetard ${retardsSelection.nbClients > 0 ? 'active' : ''}`}
@@ -3461,15 +4064,97 @@ export default function SyntheseMultiClientsPage() {
             })}
           </section>
 
+          {/* ── Cadeau fin d'année : bouton + synthèse ── */}
+          <section className="cadeauBar">
+            <button
+              type="button"
+              className={`cadeauToggle ${showCadeaux ? 'active' : ''}`}
+              onClick={() => setShowCadeaux((v) => !v)}
+              aria-pressed={showCadeaux}
+            >
+              🎁 Cadeau fin d&apos;année
+            </button>
+            {showCadeaux && (
+              <span className="cadeauHint">
+                Choisissez le type, la quantité et le lieu de livraison dans les colonnes « Cadeau fin d&apos;année ». « Autres » impose une adresse vérifiée.
+              </span>
+            )}
+          </section>
+
+          {showCadeaux && (
+            <section className="cadeauSynth">
+              {cadeauxLoading ? (
+                <div className="cadeauSynthLoading">Chargement des cadeaux…</div>
+              ) : (
+                <>
+                  <div className="cadeauKpis">
+                    <div>
+                      <span>Clients sélectionnés</span>
+                      <strong>{cadeauxSelection.nbClients} <small>/ {cadeauxSelection.nbClientsSelection}</small></strong>
+                    </div>
+                    <div>
+                      <span>Cadeaux (qté)</span>
+                      <strong>{formatNumber(cadeauxSelection.qte)}</strong>
+                    </div>
+                    <div>
+                      <span>Valeur totale</span>
+                      <strong>{formatEur(cadeauxSelection.valeur)}</strong>
+                    </div>
+                    <div>
+                      <span>Livraison</span>
+                      <strong className="cadeauLieux">
+                        {cadeauxSelection.parLieu.map((l) => <em key={l.value}>{l.label} {l.nb}</em>)}
+                      </strong>
+                    </div>
+                  </div>
+                  <table className="cadeauTypeTable">
+                    <thead>
+                      <tr><th>Type de cadeau</th><th className="num">Prix unit.</th><th className="num">Clients</th><th className="num">Qté</th><th className="num">Valeur</th></tr>
+                    </thead>
+                    <tbody>
+                      {cadeauxSelection.parType.map((t) => (
+                        <tr key={t.id} className={t.qte > 0 ? '' : 'vide'}>
+                          <td>{t.libelle}</td>
+                          <td className="num">{formatEur(t.prix)}</td>
+                          <td className="num">{t.nbClients || ''}</td>
+                          <td className="num">{t.qte || ''}</td>
+                          <td className="num">{t.valeur ? formatEur(t.valeur) : ''}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  <div className="cadeauActions">
+                    <button type="button" onClick={exportCadeauxExcel} disabled={!cadeauxSelection.nbClients || cadeauExportEnCours}>
+                      {cadeauExportEnCours ? 'Export en cours…' : 'Extraire la liste (Excel)'}
+                    </button>
+                  </div>
+                </>
+              )}
+              {cadeauxErreur && <div className="cadeauErreur">{cadeauxErreur}</div>}
+            </section>
+          )}
+
           <div className="tableShell">
-        <table className={`synthTable ${showCollaborateurColumn ? 'withCollaborateur' : ''}`}>
+        <table className={`synthTable ${showCollaborateurColumn ? 'withCollaborateur' : ''}`} style={{ width: tableWidth }}>
+          <colgroup>
+            {displayedColumns.map((col) => <col key={`${col.key}-col`} style={{ width: col.width }} />)}
+          </colgroup>
           <thead>
             <tr className="groupRow">
-              {displayedColumns.map((col) => <th key={`${col.key}-g`} className={`group ${groupClass(col.group)} ${stickyClass(col.sticky)}`} style={{ width: col.width, minWidth: col.width }}>{col.group}</th>)}
+              {groupHeaderCells.map((cell) => (
+                <th
+                  key={`${cell.key}-g`}
+                  colSpan={cell.span}
+                  className={`group ${groupClass(cell.group)} ${stickyClass(cell.sticky)}`}
+                  style={{ width: cell.width, minWidth: cell.width }}
+                >
+                  {cell.group}
+                </th>
+              ))}
             </tr>
             <tr className="headerRow">
               {displayedColumns.map((col) => (
-                <th key={col.key} className={`${col.className || ''} ${stickyClass(col.sticky)} ${col.rotate ? 'rotate' : ''}`} style={{ width: col.width, minWidth: col.width }} onClick={() => toggleSort(col.key)} title="Cliquer pour trier">
+                <th key={col.key} className={`${col.className || ''} ${stickyClass(col.sticky)} ${col.rotate ? 'rotate' : ''} ${col.cadeau ? 'cadeauHead' : ''}`} style={{ width: col.width, minWidth: col.width }} onClick={() => !col.cadeau && toggleSort(col.key)} title={col.cadeau ? undefined : 'Cliquer pour trier'}>
                   <span>{col.label}</span>
                   {sort.key === col.key ? <b>{sort.direction === 'asc' ? '▲' : '▼'}</b> : null}
                 </th>
@@ -3499,16 +4184,14 @@ export default function SyntheseMultiClientsPage() {
                   const saveKey = col.editable ? objectiveKey(row.numero, N, col.editable.domaine, col.editable.rubrique) : ''
                   const canEditAlerte = row.kind === 'client' && Boolean(col.editableAlerte)
                   const alerteSaveKey = col.editableAlerte ? `${row.numero}§${col.editableAlerte}` : ''
-                  // Numéro et intitulé du client : cliquables (bleu) sur les
-                  // lignes clients, ouvrent la fiche Vision Client dans un
-                  // nouvel onglet. La ligne TOTAL et les lignes mensuelles
-                  // développées ne sont pas cliquables (pas de fiche dédiée).
                   const isClientLinkColumn = row.kind === 'client' && (col.key === 'numero' || col.key === 'intitule')
-                  // Retard de paiement du client (dernier fichier compta) :
-                  // pictogramme ⚠ à côté du numéro, clic -> fiche compta.
                   const retardClient = col.key === 'numero' && row.kind === 'client' ? retardsMap.get(cleTiers(row.numero)) || null : null
+                  const isVisitesCell = col.key === 'nbVisitesReel' && row.kind !== 'month'
+                  const statutVisites = isVisitesCell ? visitesStatut(row.nbVisitesReel, row.visiteTheorique) : 'none'
+                  const cadeauClient = col.cadeau && row.kind === 'client' ? cadeauxMap.get(normalize(row.numero)) || null : null
+                  const cadeauSaving = Boolean(col.cadeau) && row.kind === 'client' && savingCadeau === normalize(row.numero)
                   return (
-                    <td key={`${row.id}-${col.key}`} className={`${col.className || ''} ${stickyClass(col.sticky)} ${['keur', 'keurBlank', 'keurCompare', 'pct', 'pctBlank', 'pctCompare', 'points', 'number', 'numberBlank'].includes(col.format || '') ? 'num' : ''}`} style={{ width: col.width, minWidth: col.width }}>
+                    <td key={`${row.id}-${col.key}`} className={`${col.className || ''} ${stickyClass(col.sticky)} ${['keur', 'keurBlank', 'keurCompare', 'pct', 'pctBlank', 'pctCompare', 'points', 'number', 'numberBlank'].includes(col.format || '') ? 'num' : ''} ${col.cadeau ? 'cadeauCell' : ''} ${isVisitesCell ? 'visitesCell' : ''}`} style={{ width: col.width, minWidth: col.width }}>
                       {col.key === 'numero' && row.kind === 'client' ? (
                         <button type="button" className="expandBtn" onClick={() => toggleExpanded(row.numero)}>{expanded.has(row.numero) ? '−' : '+'}</button>
                       ) : null}
@@ -3532,7 +4215,78 @@ export default function SyntheseMultiClientsPage() {
                           ⚠
                         </button>
                       ) : null}
-                      {col.format === 'caBand' ? (
+                      {col.cadeau ? (
+                        row.kind === 'client' ? (
+                          col.cadeau === 'type' ? (
+                            <select
+                              className={`cadeauSelect ${cadeauSaving ? 'saving' : ''} ${cadeauClient ? 'rempli' : ''}`}
+                              value={cadeauClient ? String(cadeauClient.cadeau_id) : ''}
+                              disabled={!cadeauxCharges || cadeauSaving}
+                              onChange={(e) => changerTypeCadeau(row, e.target.value)}
+                            >
+                              <option value="">—</option>
+                              {cadeauxRef
+                                .filter((ref) => ref.actif || ref.id === cadeauClient?.cadeau_id)
+                                .map((ref) => <option key={ref.id} value={ref.id}>{ref.libelle} — {formatEur(ref.prix_unitaire)}</option>)}
+                            </select>
+                          ) : col.cadeau === 'qte' ? (
+                            <input
+                              key={`${row.numero}-qte-${cadeauClient?.quantite ?? 'x'}`}
+                              className={`cadeauQte ${cadeauSaving ? 'saving' : ''}`}
+                              type="number"
+                              min={1}
+                              step={1}
+                              defaultValue={cadeauClient ? cadeauClient.quantite : ''}
+                              disabled={!cadeauClient || cadeauSaving}
+                              onBlur={(e) => changerQteCadeau(row, e.target.value)}
+                              onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur() }}
+                            />
+                          ) : (
+                            <span className="cadeauLieu">
+                              <select
+                                className={`cadeauSelect ${cadeauSaving ? 'saving' : ''}`}
+                                value={cadeauClient?.lieu_livraison || ''}
+                                disabled={!cadeauClient || cadeauSaving}
+                                onChange={(e) => changerLieuCadeau(row, e.target.value)}
+                              >
+                                {!cadeauClient && <option value="">—</option>}
+                                {LIEUX_LIVRAISON.map((l) => <option key={l.value} value={l.value}>{l.label}</option>)}
+                              </select>
+                              {cadeauClient?.lieu_livraison === 'autre' ? (
+                                <button type="button" className="cadeauAdresseBtn" title={`${cadeauClient.adresse_autre || ''} — cliquer pour modifier`} onClick={() => ouvrirAdresseAutre(row)}>
+                                  ✎ {cadeauClient.adresse_autre}
+                                </button>
+                              ) : null}
+                            </span>
+                          )
+                        ) : row.kind === 'total' ? (
+                          col.cadeau === 'type' ? (
+                            <span>{cadeauxSelection.nbClients} client{cadeauxSelection.nbClients > 1 ? 's' : ''} · {formatEur(cadeauxSelection.valeur)}</span>
+                          ) : col.cadeau === 'qte' ? (
+                            <span>{cadeauxSelection.qte || ''}</span>
+                          ) : null
+                        ) : null
+                      ) : isVisitesCell ? (
+                        row.kind === 'client' ? (
+                          <button
+                            type="button"
+                            className={`visitesBtn ${statutVisites}`}
+                            onClick={() => void ouvrirVisites(row)}
+                            title={row.visiteTheorique > 0
+                              ? `Objectif ${formatNumber(row.visiteTheorique)}/an · attendu à date ${formatAttendu(visitesAttenduesADate(row.visiteTheorique))} · cliquer pour la liste des visites`
+                              : 'Pas d’objectif de visites saisi · cliquer pour la liste des visites'}
+                          >
+                            {formatNumber(row.nbVisitesReel)}
+                          </button>
+                        ) : (
+                          <span
+                            className={`visitesPill ${statutVisites}`}
+                            title={row.visiteTheorique > 0 ? `Objectif ${formatNumber(row.visiteTheorique)}/an · attendu à date ${formatAttendu(visitesAttenduesADate(row.visiteTheorique))}` : undefined}
+                          >
+                            {formatNumber(row.nbVisitesReel)}
+                          </span>
+                        )
+                      ) : col.format === 'caBand' ? (
                         <CaBandPill band={String(col.value(row) || 'Sans CA')} />
                       ) : canEdit ? (
                         <EditableCell
@@ -3550,8 +4304,6 @@ export default function SyntheseMultiClientsPage() {
                         />
                       ) : isClientLinkColumn ? (
                         <>
-                          {/* "i" placé AVANT l'intitulé : la cellule tronque les
-                              noms longs (ellipsis), il resterait sinon invisible. */}
                           {col.key === 'intitule' && (
                             <span className="clientNoteSlot">
                               <ClientNoteButton
@@ -3837,6 +4589,181 @@ export default function SyntheseMultiClientsPage() {
         </div>
       )}
 
+      {/* ── Visites d'un client (clic sur "Réalisées N") ── */}
+      {visitesClient && (
+        <div className="retardOverlay" onClick={fermerVisites}>
+          <div className="retardModal visitesModal" onClick={(e) => e.stopPropagation()}>
+            <div className="retardHeader">
+              <div>
+                <h2>Visites {N} — {visitesClient.intitule || visitesClient.numero} <span className="mono">{visitesClient.numero}</span></h2>
+                <p>
+                  {formatNumber(visitesClient.realise)} réalisée{visitesClient.realise > 1 ? 's' : ''}
+                  {visitesClient.objectif > 0
+                    ? ` · objectif ${formatNumber(visitesClient.objectif)}/an · attendu à date ${formatAttendu(visitesAttenduesADate(visitesClient.objectif))}`
+                    : ' · aucun objectif saisi'}
+                  {' '}· RDV BLG + compagnon (rendez-vous, appels, rappels)
+                </p>
+              </div>
+              <div className="retardHeaderActions">
+                <button type="button" className="secondary" onClick={() => openVisionClient(visitesClient.numero)}>Fiche client ↗</button>
+                <button type="button" onClick={fermerVisites}>Fermer</button>
+              </div>
+            </div>
+
+            {visitesLoading ? (
+              <div className="visitesVide">Chargement des visites…</div>
+            ) : visitesErreur ? (
+              <div className="cadeauErreur visitesErreurBox">Visites indisponibles : {visitesErreur}</div>
+            ) : (
+              <div className={`visitesCorps ${crOuvert ? 'avecCr' : ''}`}>
+                <div className="visitesListe">
+                  <h3>Réalisées ({visitesRealisees.length})</h3>
+                  {visitesRealisees.length === 0 ? (
+                    <div className="visitesVide">Aucune visite enregistrée en {N}.</div>
+                  ) : (
+                    <table className="retardTable visitesTable">
+                      <thead>
+                        <tr><th>Date</th><th>Type</th><th>Objet</th><th>Par</th><th>CR</th></tr>
+                      </thead>
+                      <tbody>
+                        {visitesRealisees.map((v) => {
+                          const cr = v.comptes_rendus[0]
+                          const actif = crOuvert?.visite.rdv_id === v.rdv_id
+                          return (
+                            <tr key={v.rdv_id} className={`${cr ? 'avecCr' : ''} ${actif ? 'actif' : ''}`} onClick={() => cr && setCrOuvert({ visite: v, cr })} title={cr ? 'Afficher le compte rendu' : undefined}>
+                              <td className="mono">{formatDateHeureFr(v.start_date, Boolean(v.all_day))}</td>
+                              <td><span className={`visiteType ${v.type}`}>{typeVisiteLabel(v.type)}</span></td>
+                              <td className="visiteObjet">{safeText(v.subject, '—')}{v.lieu ? <small> · {v.lieu}</small> : null}</td>
+                              <td>{safeText(v.created_by_name, v.source === 'blg' ? 'BLG' : '—')}</td>
+                              <td>{cr ? <button type="button" className="crBtn" onClick={(e) => { e.stopPropagation(); setCrOuvert({ visite: v, cr }) }}>📄 CR{v.comptes_rendus.length > 1 ? ` (${v.comptes_rendus.length})` : ''}</button> : <span className="vide">—</span>}</td>
+                            </tr>
+                          )
+                        })}
+                      </tbody>
+                    </table>
+                  )}
+
+                  {visitesAVenir.length > 0 && (
+                    <>
+                      <h3>À venir ({visitesAVenir.length})</h3>
+                      <table className="retardTable visitesTable">
+                        <tbody>
+                          {visitesAVenir.map((v) => (
+                            <tr key={v.rdv_id} className="aVenir">
+                              <td className="mono">{formatDateHeureFr(v.start_date, Boolean(v.all_day))}</td>
+                              <td><span className={`visiteType ${v.type}`}>{typeVisiteLabel(v.type)}</span></td>
+                              <td className="visiteObjet">{safeText(v.subject, '—')}{v.lieu ? <small> · {v.lieu}</small> : null}</td>
+                              <td>{safeText(v.created_by_name, v.source === 'blg' ? 'BLG' : '—')}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </>
+                  )}
+                </div>
+
+                {crOuvert && (
+                  <div className="crPanel">
+                    <div className="crPanelHead">
+                      <div>
+                        <strong>Compte rendu</strong>
+                        <span>{typeVisiteLabel(crOuvert.visite.type)} du {formatDateHeureFr(crOuvert.visite.start_date, Boolean(crOuvert.visite.all_day))}</span>
+                        <span>Rédigé {crOuvert.cr.created_by_name ? `par ${crOuvert.cr.created_by_name} ` : ''}le {formatDateHeureFr(crOuvert.cr.created_at)}</span>
+                      </div>
+                      <button type="button" className="secondary" onClick={() => setCrOuvert(null)}>✕</button>
+                    </div>
+                    {crOuvert.visite.comptes_rendus.length > 1 && (
+                      <div className="crSwitch">
+                        {crOuvert.visite.comptes_rendus.map((c, i) => (
+                          <button key={c.id} type="button" className={c.id === crOuvert.cr.id ? 'active' : ''} onClick={() => setCrOuvert({ visite: crOuvert.visite, cr: c })}>CR {i + 1}</button>
+                        ))}
+                      </div>
+                    )}
+                    <div className="crSection">
+                      <h4>Résumé</h4>
+                      <p>{safeText(crOuvert.cr.resume, 'Pas de résumé.')}</p>
+                    </div>
+                    {listeTaches(crOuvert.cr.taches_detectees).length > 0 && (
+                      <div className="crSection">
+                        <h4>Tâches détectées</h4>
+                        <ul>
+                          {listeTaches(crOuvert.cr.taches_detectees).map((t, i) => <li key={i}>{tacheLabel(t)}</li>)}
+                        </ul>
+                      </div>
+                    )}
+                    {safeText(crOuvert.cr.transcript) && (
+                      <details className="crSection crTranscript">
+                        <summary>Transcription complète</summary>
+                        <p>{crOuvert.cr.transcript}</p>
+                      </details>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ── Cadeau : adresse de livraison "Autres" (vérifiée BAN) ── */}
+      {adresseModal && (
+        <div className="retardOverlay" onClick={fermerAdresseModal}>
+          <div className="retardModal adresseModal" onClick={(e) => e.stopPropagation()}>
+            <div className="retardHeader">
+              <div>
+                <h2>Adresse de livraison du cadeau</h2>
+                <p>{adresseModal.intitule || adresseModal.numero} · {adresseModal.numero} — l&apos;adresse doit exister dans la Base Adresse Nationale.</p>
+              </div>
+              <button type="button" onClick={fermerAdresseModal}>Annuler</button>
+            </div>
+            <div className="adresseCorps">
+              <label className="adresseLabel">
+                Adresse (numéro, voie, code postal, ville)
+                <input
+                  autoFocus
+                  value={adresseQuery}
+                  onChange={(e) => { setAdresseQuery(e.target.value); setAdresseChoisie(null) }}
+                  placeholder="ex. 12 rue des Lilas 85270 Saint-Hilaire-de-Riez"
+                />
+              </label>
+              {adresseRecherche && <div className="adresseInfo">Vérification…</div>}
+              {adresseErreur && <div className="cadeauErreur">{adresseErreur}</div>}
+              {!adresseChoisie && adresseSuggestions.length > 0 && (
+                <ul className="adresseSuggestions">
+                  {adresseSuggestions.map((s) => {
+                    const ok = adresseSuffisante(s)
+                    return (
+                      <li key={`${s.id}-${s.label}`}>
+                        <button
+                          type="button"
+                          disabled={!ok}
+                          onClick={() => { setAdresseChoisie(s); setAdresseQuery(s.label); setAdresseSuggestions([]); setAdresseErreur(null) }}
+                          title={ok ? 'Choisir cette adresse' : 'Adresse trop imprécise (commune seule)'}
+                        >
+                          <strong>{s.label}</strong>
+                          <span>{ok ? (s.type === 'housenumber' ? 'Adresse exacte' : 'Voie') : 'Commune seule — préciser la rue'}{s.score ? ` · confiance ${Math.round(s.score * 100)} %` : ''}</span>
+                        </button>
+                      </li>
+                    )
+                  })}
+                </ul>
+              )}
+              {adresseChoisie && (
+                <div className="adresseValidee">
+                  ✓ Adresse vérifiée : <strong>{adresseChoisie.label}</strong>
+                </div>
+              )}
+              <div className="adresseActions">
+                <button type="button" className="secondary" onClick={fermerAdresseModal}>Annuler</button>
+                <button type="button" onClick={() => void validerAdresseAutre()} disabled={!adresseChoisie || !adresseSuffisante(adresseChoisie)}>
+                  Enregistrer l&apos;adresse
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* ── Retards de paiement : liste des clients de la sélection ── */}
       {retardsListeOuverte && (
         <div className="retardOverlay" onClick={() => setRetardsListeOuverte(false)}>
@@ -3923,14 +4850,10 @@ export default function SyntheseMultiClientsPage() {
         .error { background: #fee2e2; color: #991b1b; border: 1px solid #fecaca; padding: 10px 12px; border-radius: 10px; margin-bottom: 10px; font-weight: 700; }
         .accessBadge { background: #fffbeb; color: #92400e; border: 1px solid #fcd34d; padding: 10px 12px; border-radius: 10px; margin-bottom: 10px; font-weight: 900; }
         .loading { position: fixed; right: 18px; bottom: 18px; background: #0f172a; color: white; padding: 8px 12px; border-radius: 999px; z-index: 20; font-weight: 900; }
-        /* 7 pavés (Tiers, CA N-1, CA réel N, Encours, Marge réel N, Réalisé/objectif,
-           Retards paiement) sur UNE seule ligne -- le dernier, plus large,
-           porte le détail par tranche. */
         .kpis { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)) minmax(0, 1.9fr); gap: 8px; margin-bottom: 10px; align-items: stretch; }
         .kpis div { background: white; border: 1px solid #e2e8f0; border-radius: 12px; padding: 8px 10px; box-shadow: 0 2px 8px rgba(15,23,42,.05); min-width: 0; }
         .kpis span { display: block; color: #64748b; font-size: 10px; font-weight: 900; text-transform: uppercase; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
         .kpis strong { display: block; margin-top: 2px; font-size: 16px; font-weight: 950; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-        /* Pavé "Retards paiement" : bouton (cliquable), même habillage que les autres pavés. */
         .kpiRetard { display: block; text-align: left; background: white; border: 1px solid #e2e8f0; border-top: 3px solid #C1683C; border-radius: 12px; padding: 6px 10px 7px; box-shadow: 0 2px 8px rgba(15,23,42,.05); min-width: 0; color: #0f172a; font: inherit; }
         .kpiRetard:disabled { opacity: 1; cursor: default; }
         .kpiRetard.active { cursor: pointer; }
@@ -3942,7 +4865,6 @@ export default function SyntheseMultiClientsPage() {
         .kpiRetard strong.ok { color: #047857; }
         .kpiRetard strong.muted { color: #94a3b8; }
         .kpiRetardTranches { display: flex; flex-wrap: wrap; gap: 3px 8px; margin-top: 3px; font-size: 10.5px; font-weight: 800; color: #334155; }
-        /* Surcharge de ".kpis div" (fond/bordure de pavé) pour ce sous-bloc. */
         .kpis .kpiRetard .kpiRetardTranches { background: none; border: none; padding: 0; border-radius: 0; box-shadow: none; }
         .kpiRetardTranches span { display: inline; text-transform: none; color: #334155; font-size: 10.5px; white-space: nowrap; }
         .kpiRetardTranches span.vide { color: #cbd5e1; }
@@ -3950,10 +4872,53 @@ export default function SyntheseMultiClientsPage() {
         .columnToggleLabel { font-size: 11px; font-weight: 900; text-transform: uppercase; color: #64748b; margin-right: 2px; }
         .columnTogglePill { border-radius: 999px; padding: 5px 11px; font-size: 11px; font-weight: 800; background: white; color: #64748b; border: 1px solid #cbd5e1; }
         .columnTogglePill.active { background: #0f172a; color: white; border-color: #0f172a; }
+
+        /* ── Cadeau fin d'année ── */
+        .cadeauBar { display: flex; align-items: center; gap: 12px; margin-bottom: 10px; flex-wrap: wrap; }
+        .cadeauToggle { border-radius: 999px; padding: 7px 16px; font-size: 12.5px; font-weight: 900; background: white; color: #7A5EA8; border: 2px solid #7A5EA8; }
+        .cadeauToggle.active { background: #7A5EA8; color: white; }
+        .cadeauHint { font-size: 12px; color: #64748b; font-weight: 700; }
+        .cadeauSynth { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, 1.4fr) auto; gap: 14px; align-items: start; background: white; border: 1px solid #e2e8f0; border-left: 4px solid #7A5EA8; border-radius: 12px; padding: 10px 14px; margin-bottom: 10px; box-shadow: 0 2px 8px rgba(15,23,42,.05); }
+        .cadeauSynthLoading { grid-column: 1 / -1; font-weight: 800; color: #64748b; }
+        .cadeauKpis { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+        .cadeauKpis > div { background: #f8f6fc; border: 1px solid #e9e3f4; border-radius: 10px; padding: 6px 10px; min-width: 0; }
+        .cadeauKpis span { display: block; color: #64748b; font-size: 10px; font-weight: 900; text-transform: uppercase; }
+        .cadeauKpis strong { display: block; margin-top: 2px; font-size: 17px; font-weight: 950; color: #3b2a5c; }
+        .cadeauKpis strong small { font-size: 12px; color: #64748b; font-weight: 800; }
+        .cadeauLieux { display: flex !important; flex-wrap: wrap; gap: 4px 10px; font-size: 12px !important; }
+        .cadeauLieux em { font-style: normal; font-weight: 850; }
+        .cadeauTypeTable { width: 100%; border-collapse: collapse; font-size: 12px; }
+        .cadeauTypeTable th { text-align: left; font-size: 10px; text-transform: uppercase; color: #94a3b8; font-weight: 900; padding: 3px 8px; border-bottom: 1px solid #e2e8f0; }
+        .cadeauTypeTable td { padding: 4px 8px; border-bottom: 1px solid #f1f5f9; font-weight: 750; }
+        .cadeauTypeTable .num { text-align: right; font-variant-numeric: tabular-nums; }
+        .cadeauTypeTable tr.vide td { color: #cbd5e1; }
+        .cadeauActions { display: flex; flex-direction: column; gap: 6px; }
+        .cadeauActions button { background: #7A5EA8; border-color: #7A5EA8; white-space: nowrap; }
+        .cadeauErreur { grid-column: 1 / -1; background: #fee2e2; color: #991b1b; border: 1px solid #fecaca; padding: 7px 10px; border-radius: 8px; font-weight: 750; font-size: 12px; }
+        th.cadeauHead, th.cadeauHead span { color: #5b3f8c; }
+        .groupCadeau { background: #efe9f8 !important; color: #5b3f8c; }
+        td.cadeauCell { background: #f8f6fc !important; overflow: visible; }
+        tbody tr.total td.cadeauCell { background: #fff2cc !important; }
+        .cadeauSelect { width: 100%; height: 20px; padding: 0 3px; border-radius: 4px; font-size: 11px; background: white; }
+        .cadeauSelect.rempli { border-color: #7A5EA8; font-weight: 800; color: #3b2a5c; }
+        .cadeauQte { width: 100%; height: 20px; padding: 0 4px; border-radius: 4px; font-size: 11px; text-align: right; }
+        .cadeauLieu { display: flex; gap: 3px; align-items: center; min-width: 0; }
+        .cadeauLieu .cadeauSelect { width: 96px; flex: 0 0 96px; }
+        .cadeauAdresseBtn { flex: 1; min-width: 0; height: 20px; padding: 0 5px; border-radius: 4px; font-size: 10.5px; font-weight: 750; background: #efe9f8; color: #3b2a5c; border: 1px solid #d6c9ec; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: left; }
+
+        /* ── Fréquence visite ── */
+        td.visitesCell { text-align: center !important; }
+        .visitesBtn, .visitesPill { display: inline-flex; align-items: center; justify-content: center; min-width: 34px; height: 19px; padding: 0 8px; border-radius: 999px; font-size: 11px; font-weight: 950; border: 1px solid #cbd5e1; background: #f1f5f9; color: #475569; }
+        .visitesBtn { cursor: pointer; }
+        .visitesBtn:hover { filter: brightness(.94); text-decoration: underline; }
+        .visitesBtn.ok, .visitesPill.ok { background: #dcfce7; color: #047857; border-color: #86efac; }
+        .visitesBtn.warn, .visitesPill.warn { background: #fef3c7; color: #92400e; border-color: #fde68a; }
+        .visitesBtn.bad, .visitesPill.bad { background: #fee2e2; color: #dc2626; border-color: #fecaca; }
+        .groupFréquencevisite { background: #fff7ed !important; }
+
         .clientLink { background: none; border: none; padding: 0; margin: 0; font: inherit; color: #1d4ed8; text-decoration: none; cursor: pointer; text-align: left; }
         .clientLink:hover { text-decoration: underline; }
         .clientNoteSlot { display: inline-flex; margin-right: 5px; vertical-align: middle; }
-        /* Pictogramme retard de paiement, à côté du numéro de client. */
         .retardIcon { background: #fee2e2; color: #dc2626; border: 1px solid #fecaca; border-radius: 4px; width: 17px; height: 17px; padding: 0; margin-right: 3px; font-size: 11px; line-height: 1; display: inline-flex; align-items: center; justify-content: center; vertical-align: middle; cursor: pointer; }
         .retardIcon.ancien { background: #dc2626; color: white; border-color: #b91c1c; }
         .retardIcon:hover { filter: brightness(.92); }
@@ -3972,7 +4937,7 @@ export default function SyntheseMultiClientsPage() {
         .headerComparisonPill.warn { background: #fef3c7; color: #92400e; border: 1px solid #fde68a; }
         .headerComparisonPill.bad { background: #fee2e2; color: #dc2626; border: 1px solid #fecaca; }
         .headerComparisonPill.neutral { background: #e5e7eb; color: #475569; border: 1px solid #cbd5e1; }
-        .rotate span { writing-mode: vertical-rl; transform: rotate(180deg); display: inline-block; max-height: 96px; }
+        .rotate span { writing-mode: vertical-rl; transform: rotate(180deg); display: inline-block; max-height: 96px; white-space: normal; }
         .client, .stickyCollaborateur, .stickyCode, .stickyLabel, .stickyMonth { background: #e2f0d9; }
         .stickyCollaborateur { position: sticky; left: 0; z-index: 4; }
         .stickyCode { position: sticky; left: 0; z-index: 4; }
@@ -3994,10 +4959,9 @@ export default function SyntheseMultiClientsPage() {
         .orderBacklog, .orderBacklog span { color: #008CFF !important; font-weight: 950; }
         th.orderBacklog, th.orderBacklog span { color: #006FE6 !important; }
         .groupEncourscommande { background: #e0f2fe !important; color: #006FE6 !important; }
-        .groupComparatif, .groupComparatif { background: #f3e8ff !important; }
+        .groupComparatif { background: #f3e8ff !important; }
         .groupQRC { background: #e9f7e6 !important; }
         .groupDynamismeClient { background: #eff6ff !important; }
-        .groupFréquencevisite, .groupVisite { background: #fff7ed !important; }
         .expandBtn { padding: 0; margin-right: 3px; width: 17px; height: 17px; border-radius: 4px; font-size: 11px; line-height: 12px; display: inline-flex; align-items: center; justify-content: center; }
         .partageIcon { background: #ede9fe; color: #7A5EA8; border: 1px solid #ddd6fe; border-radius: 4px; width: 17px; height: 17px; margin-right: 3px; font-size: 11px; line-height: 1; display: inline-flex; align-items: center; justify-content: center; vertical-align: middle; cursor: help; }
         .editInput, .editSelect { width: 100%; height: 20px; padding: 1px 3px; border-radius: 3px; font-size: 11px; background: #ffffff; }
@@ -4100,7 +5064,7 @@ export default function SyntheseMultiClientsPage() {
         :global(.profileHoverRow span) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
         :global(.profileHoverRow em) { font-style: normal; text-align: right; font-weight: 900; color: #0f172a; }
 
-        /* ── Retards de paiement : liste et fiche compta ── */
+        /* ── Fenêtres (retards, visites, adresse) ── */
         .retardOverlay { position: fixed; inset: 0; background: rgba(15,23,42,.45); z-index: 9998; padding: 24px; display: flex; align-items: flex-start; justify-content: center; overflow: auto; }
         .retardModal { width: min(1400px, calc(100vw - 48px)); max-height: calc(100vh - 48px); overflow: auto; background: #ffffff; border-radius: 18px; box-shadow: 0 24px 70px rgba(15,23,42,.35); border: 1px solid #e2e8f0; }
         .retardModalDetail { width: min(720px, calc(100vw - 48px)); }
@@ -4109,10 +5073,10 @@ export default function SyntheseMultiClientsPage() {
         .retardHeader h2 .mono { font-family: monospace; font-size: 14px; font-weight: 700; color: #64748b; background: #e2e8f0; border-radius: 6px; padding: 2px 8px; margin-left: 8px; vertical-align: middle; }
         .retardHeader p { margin: 4px 0 0; font-size: 12.5px; color: #64748b; }
         .retardHeaderActions { display: flex; gap: 8px; flex-shrink: 0; }
-        .retardHeaderActions .secondary { background: #f8fafc; color: #0f172a; border-color: #cbd5e1; }
+        .secondary { background: #f8fafc; color: #0f172a; border-color: #cbd5e1; }
         .retardTable { width: 100%; border-collapse: collapse; font-size: 12px; }
         .retardTable th { position: sticky; top: 74px; text-align: left; font-size: 10px; text-transform: uppercase; color: #94a3b8; padding: 6px 10px; border-bottom: 1px solid #e2e8f0; background: #f8fafc; font-weight: 800; z-index: 1; }
-        .retardTable td { padding: 7px 10px; border-bottom: 1px solid #f1f5f9; background: white; white-space: nowrap; }
+        .retardTable td { padding: 7px 10px; border-bottom: 1px solid #f1f5f9; border-right: none; background: white; white-space: nowrap; height: auto; }
         .retardTable tbody tr { cursor: pointer; }
         .retardTable tbody tr:hover td { background: #fff8f4; }
         .retardTable tbody tr.litige td:nth-child(2) { color: #92400e; font-weight: 800; }
@@ -4124,6 +5088,56 @@ export default function SyntheseMultiClientsPage() {
         .retardField { display: flex; justify-content: space-between; gap: 16px; padding: 8px 0; border-bottom: 1px solid #f1f5f9; font-size: 13px; }
         .retardField span { color: #64748b; font-weight: 800; flex-shrink: 0; }
         .retardField strong { color: #0f172a; font-weight: 700; text-align: right; white-space: pre-wrap; }
+
+        .visitesModal { width: min(1250px, calc(100vw - 48px)); }
+        .visitesCorps { display: grid; grid-template-columns: minmax(0, 1fr); gap: 0; }
+        .visitesCorps.avecCr { grid-template-columns: minmax(0, 1.3fr) minmax(320px, 1fr); }
+        .visitesListe { padding: 6px 0 14px; min-width: 0; }
+        .visitesListe h3 { margin: 12px 18px 6px; font-size: 13px; font-weight: 950; text-transform: uppercase; color: #475569; }
+        .visitesTable th { top: 0; }
+        .visitesTable td { white-space: normal; }
+        .visitesTable tbody tr { cursor: default; }
+        .visitesTable tbody tr.avecCr { cursor: pointer; }
+        .visitesTable tbody tr.actif td { background: #eef2ff; }
+        .visitesTable tbody tr.aVenir td { color: #64748b; }
+        .visiteObjet { max-width: 420px; }
+        .visiteObjet small { color: #94a3b8; font-weight: 700; }
+        .visiteType { display: inline-flex; padding: 1px 8px; border-radius: 999px; font-size: 10.5px; font-weight: 900; background: #e2e8f0; color: #334155; }
+        .visiteType.meeting { background: #dcfce7; color: #047857; }
+        .visiteType.phoneCall { background: #dbeafe; color: #1d4ed8; }
+        .visiteType.reminder { background: #fef3c7; color: #92400e; }
+        .crBtn { padding: 2px 8px; border-radius: 999px; font-size: 11px; background: #7A5EA8; border-color: #7A5EA8; }
+        .visitesVide { padding: 14px 18px; color: #64748b; font-weight: 800; }
+        .visitesErreurBox { margin: 14px 18px; }
+        .crPanel { border-left: 1px solid #e2e8f0; padding: 12px 16px 18px; background: #fbfaff; min-width: 0; }
+        .crPanelHead { display: flex; justify-content: space-between; gap: 10px; align-items: flex-start; margin-bottom: 8px; }
+        .crPanelHead strong { display: block; font-size: 15px; font-weight: 950; }
+        .crPanelHead span { display: block; font-size: 12px; color: #64748b; font-weight: 700; }
+        .crPanelHead button { padding: 3px 9px; }
+        .crSwitch { display: flex; gap: 6px; margin-bottom: 8px; }
+        .crSwitch button { padding: 3px 10px; border-radius: 999px; font-size: 11px; background: white; color: #475569; border-color: #cbd5e1; }
+        .crSwitch button.active { background: #7A5EA8; color: white; border-color: #7A5EA8; }
+        .crSection { margin-top: 10px; }
+        .crSection h4 { margin: 0 0 4px; font-size: 11px; text-transform: uppercase; color: #7A5EA8; font-weight: 950; }
+        .crSection p { margin: 0; font-size: 13px; color: #0f172a; white-space: pre-wrap; line-height: 1.45; }
+        .crSection ul { margin: 0; padding-left: 18px; font-size: 13px; }
+        .crTranscript summary { cursor: pointer; font-size: 12px; font-weight: 900; color: #475569; }
+        .crTranscript p { margin-top: 6px; font-size: 12.5px; color: #334155; }
+
+        .adresseModal { width: min(640px, calc(100vw - 48px)); }
+        .adresseCorps { padding: 14px 18px 18px; display: flex; flex-direction: column; gap: 10px; }
+        .adresseLabel { text-transform: none; font-size: 12px; }
+        .adresseLabel input { font-size: 14px; padding: 9px 11px; }
+        .adresseInfo { font-size: 12px; color: #64748b; font-weight: 800; }
+        .adresseSuggestions { list-style: none; margin: 0; padding: 0; border: 1px solid #e2e8f0; border-radius: 10px; overflow: hidden; }
+        .adresseSuggestions li + li { border-top: 1px solid #f1f5f9; }
+        .adresseSuggestions button { width: 100%; text-align: left; background: white; color: #0f172a; border: none; border-radius: 0; padding: 8px 12px; display: flex; flex-direction: column; gap: 2px; }
+        .adresseSuggestions button:hover:not(:disabled) { background: #f8f6fc; }
+        .adresseSuggestions button strong { font-size: 13px; }
+        .adresseSuggestions button span { font-size: 11px; color: #64748b; font-weight: 700; }
+        .adresseValidee { background: #dcfce7; color: #065f46; border: 1px solid #86efac; border-radius: 10px; padding: 8px 12px; font-size: 13px; font-weight: 700; }
+        .adresseActions { display: flex; justify-content: flex-end; gap: 8px; }
+        .adresseActions button:last-child { background: #7A5EA8; border-color: #7A5EA8; }
       `}</style>
     </main>
   )
@@ -4148,6 +5162,7 @@ function stickyClass(sticky?: ColumnDef['sticky']) {
 }
 
 function groupClass(group: string) {
+  if (group === GROUPE_CADEAU) return 'groupCadeau'
   return `group${group.replace(/[^A-Za-zÀ-ÿ0-9]/g, '')}`
 }
 
@@ -4174,8 +5189,7 @@ function EditableCell({ type, value, saving, onSave }: { type: ObjectiveType; va
       step={type === 'montant' ? '100' : '1'}
       value={local}
       onChange={(e) => setLocal(e.target.value)}
-      onBlur={() => onSave(local)}
+      onBlur={() => { if (local !== value) onSave(local) }}
     />
   )
 }
- 
