@@ -3560,7 +3560,7 @@ const styles: Record<string, React.CSSProperties> = themed({
     maxHeight: '86vh',
     overflow: 'hidden',
     borderRadius: 18,
-    background: '#F5F3EC',
+    background: 'var(--cg-card)',
     color: '#141A26',
     boxShadow: '0 30px 80px rgba(0,0,0,0.5)',
     border: '1px solid rgba(20,26,38,0.12)',
@@ -3657,7 +3657,7 @@ const styles: Record<string, React.CSSProperties> = themed({
   cerfaTh: {
     position: 'sticky',
     top: 0,
-    background: '#EDEAE0',
+    background: 'var(--cg-card-2)',
     border: '1px solid rgba(20,26,38,0.10)',
     padding: '10px 8px',
     textAlign: 'left',
@@ -3744,4 +3744,27 @@ const styles: Record<string, React.CSSProperties> = themed({
     maxWidth: 'none',
     overflowX: 'hidden',
   },
-}, ['logo'])
+}, [
+  'logo',
+  // Fenêtres « papier » (CERFA KO, Capacité gaz, Cohérence des données) :
+  // fond carte clair et encre marine dans les deux thèmes, donc exclues de la
+  // conversion themed() (sinon, en mode clair, le fond crème devenait marine
+  // alors que le texte restait foncé). Le fond suit --cg-card / --cg-card-2.
+  'cerfaModal',
+  'modalHeader',
+  'modalTitle',
+  'modalSubtitle',
+  'modalSecondaryButton',
+  'modalCloseButton',
+  'modalInfo',
+  'modalError',
+  'cerfaTable',
+  'cerfaTh',
+  'cerfaTd',
+  'cerfaTdStrong',
+  'cerfaTdCenter',
+  'cerfaEmptyCell',
+  'cerfaLink',
+  'cerfaInput',
+  'cerfaOkButton',
+])
