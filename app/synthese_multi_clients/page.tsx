@@ -293,7 +293,7 @@ type ColumnDef = {
   // distincte de `editable` (qui cible objectif_tiers via save_objectif_tiers).
   editableAlerte?: 'min_appels_visites_mois' | 'max_jours_sans_devis' | 'max_jours_sans_commande'
   // Colonnes "Cadeau fin d'année" (rendu spécifique, hors export principal).
-  cadeau?: { kind: 'qte'; cadeauId: number } | { kind: 'total' }
+  cadeau?: { kind: 'qte'; cadeauId: number } | { kind: 'total' } | { kind: 'destinataire' }
   value: (row: SummaryRow) => any
   format?: 'text' | 'keur' | 'keurBlank' | 'keurCompare' | 'pct' | 'pctBlank' | 'pctCompare' | 'points' | 'number' | 'numberBlank' | 'date' | 'action' | 'caBand'
   compareValue?: (row: SummaryRow) => any
@@ -1196,6 +1196,18 @@ function normalizeCadeauClient(row: Record<string, any>): CadeauClient {
   }
 }
 
+/** Nom(s) / prénom(s) des personnes à qui les cadeaux sont remis : une
+ * saisie par client et par année (table client_cadeaux_destinataires). */
+async function fetchCadeauxDestinataires(annee: number) {
+  const rows = await fetchAll('client_cadeaux_destinataires', 'numero_tiers,destinataires', (q) => q.eq('annee', annee))
+  const map = new Map<string, string>()
+  rows.forEach((row) => {
+    const texte = safeText(row.destinataires)
+    if (texte) map.set(normalize(row.numero_tiers), texte)
+  })
+  return map
+}
+
 async function fetchCadeauxClients(annee: number) {
   const rows = await fetchAll('client_cadeaux_fin_annee', 'id,annee,numero_tiers,cadeau_id,prix_unitaire,quantite', (q) => q.eq('annee', annee))
   const map = new Map<string, CadeauClient>()
@@ -1510,6 +1522,8 @@ function buildColumns(showFamilies: boolean, showCollaborateurColumn = false, en
       format: 'text',
     }))
     cols.push({ key: 'cadeauTotal', label: 'Valeur cadeaux', group: GROUPE_CADEAU, width: 74, rotate: true, cadeau: { kind: 'total' }, value: () => '', format: 'text' })
+    // Obligatoire dès qu'au moins un cadeau est saisi pour le client.
+    cols.push({ key: 'cadeauDestinataire', label: 'Remis à (nom, prénom) *', group: GROUPE_CADEAU, width: 220, cadeau: { kind: 'destinataire' }, value: () => '', format: 'text' })
   }
 
   cols.push(
@@ -2587,6 +2601,8 @@ export default function SyntheseMultiClientsPage() {
   const [showCadeaux, setShowCadeaux] = useState(false)
   const [cadeauxRef, setCadeauxRef] = useState<CadeauRef[]>([])
   const [cadeauxMap, setCadeauxMap] = useState<Map<string, CadeauClient>>(new Map())
+  const [destinatairesMap, setDestinatairesMap] = useState<Map<string, string>>(new Map())
+  const [savingDestinataire, setSavingDestinataire] = useState<string | null>(null)
   const [cadeauxCharges, setCadeauxCharges] = useState(false)
   const [cadeauxLoading, setCadeauxLoading] = useState(false)
   const [cadeauxErreur, setCadeauxErreur] = useState<string | null>(null)
@@ -2743,10 +2759,20 @@ export default function SyntheseMultiClientsPage() {
       setCadeauxLoading(true)
       setCadeauxErreur(null)
       try {
-        const [refs, map] = await Promise.all([fetchCadeauxRef(), fetchCadeauxClients(N)])
+        const [refs, map, destinataires] = await Promise.all([
+          fetchCadeauxRef(),
+          fetchCadeauxClients(N),
+          // Tolérant : si la table des destinataires n'est pas encore créée,
+          // les cadeaux restent utilisables (la saisie du nom échouera seule).
+          fetchCadeauxDestinataires(N).catch((err) => {
+            console.warn('[SMC] client_cadeaux_destinataires indisponible :', err)
+            return new Map<string, string>()
+          }),
+        ])
         if (!alive) return
         setCadeauxRef(refs)
         setCadeauxMap(map)
+        setDestinatairesMap(destinataires)
         setCadeauxCharges(true)
       } catch (err: any) {
         if (alive) setCadeauxErreur(err?.message || 'Cadeaux indisponibles')
@@ -2960,16 +2986,21 @@ export default function SyntheseMultiClientsPage() {
         }
       })
       .filter((t) => t.actif || t.qte > 0)
+    const sansDestinataire = baseClientRows.filter((row, i, arr) => {
+      const key = normalize(row.numero)
+      return clientsAvecCadeau.has(key) && !destinatairesMap.get(key) && arr.findIndex((r) => normalize(r.numero) === key) === i
+    })
     return {
       lignes,
       parClient,
+      sansDestinataire,
       nbClients: clientsAvecCadeau.size,
       nbClientsSelection: vus.size,
       qte: lignes.reduce((s, x) => s + x.cadeau.quantite, 0),
       valeur: lignes.reduce((s, x) => s + x.cadeau.quantite * x.cadeau.prix_unitaire, 0),
       parType,
     }
-  }, [baseClientRows, cadeauxMap, cadeauxRef])
+  }, [baseClientRows, cadeauxMap, cadeauxRef, destinatairesMap])
 
   /** Enregistre la quantité d'un type de cadeau pour un client ; vide ou 0
    * supprime la ligne. Le prix unitaire est figé au moment de la saisie. */
@@ -3022,8 +3053,48 @@ export default function SyntheseMultiClientsPage() {
     }
   }
 
+  /** Enregistre le(s) destinataire(s) d'un client ; vide = suppression
+   * (le champ redevient alors "à saisir" si le client a des cadeaux). */
+  async function saveDestinataire(row: SummaryRow, rawValue: string) {
+    const numero = row.numero
+    if (!numero || numero === 'TOTAL') return
+    const key = normalize(numero)
+    const texte = rawValue.replace(/\s+/g, ' ').trim()
+    if ((destinatairesMap.get(key) || '') === texte) return
+    setSavingDestinataire(key)
+    setCadeauxErreur(null)
+    try {
+      if (!texte) {
+        const { error: delError } = await supabase
+          .from('client_cadeaux_destinataires')
+          .delete()
+          .eq('annee', N)
+          .eq('numero_tiers', numero)
+        if (delError) throw delError
+        setDestinatairesMap((prev) => { const next = new Map(prev); next.delete(key); return next })
+        return
+      }
+      const { data: sessionData } = await supabase.auth.getSession()
+      const { error: upError } = await supabase
+        .from('client_cadeaux_destinataires')
+        .upsert({ annee: N, numero_tiers: numero, destinataires: texte, updated_by_email: sessionData.session?.user?.email || null }, { onConflict: 'annee,numero_tiers' })
+      if (upError) throw upError
+      setDestinatairesMap((prev) => { const next = new Map(prev); next.set(key, texte); return next })
+    } catch (err: any) {
+      setCadeauxErreur(`Destinataire non enregistré (${numero}) : ${err?.message || err}`)
+    } finally {
+      setSavingDestinataire(null)
+    }
+  }
+
   async function exportCadeauxExcel() {
     if (!cadeauxSelection.lignes.length) return
+    if (cadeauxSelection.sansDestinataire.length) {
+      const liste = cadeauxSelection.sansDestinataire.slice(0, 10).map((r) => `${r.numero} ${safeText(r.intitule)}`).join(', ')
+      const reste = cadeauxSelection.sansDestinataire.length > 10 ? ` et ${cadeauxSelection.sansDestinataire.length - 10} autre(s)` : ''
+      setCadeauxErreur(`Export impossible : saisissez le nom et prénom du destinataire pour ${cadeauxSelection.sansDestinataire.length} client(s) : ${liste}${reste}.`)
+      return
+    }
     setCadeauExportEnCours(true)
     try {
       // @ts-ignore - xlsx-js-style n'a pas toujours les types TS.
@@ -3036,7 +3107,7 @@ export default function SyntheseMultiClientsPage() {
         ordreRef(a.cadeau.cadeau_id) - ordreRef(b.cadeau.cadeau_id))
 
       // Une ligne par client et par type de cadeau.
-      const header = ['Agence', 'Représentant', 'Client', 'Nom', `CA ${N}`, 'Type cadeau', 'Prix unitaire', 'Qté', 'Valeur']
+      const header = ['Agence', 'Représentant', 'Client', 'Nom', 'Remis à', `CA ${N}`, 'Type cadeau', 'Prix unitaire', 'Qté', 'Valeur']
       const body = lignes.map(({ row, cadeau }) => {
         const ref = cadeauxRefById.get(cadeau.cadeau_id)
         return [
@@ -3044,6 +3115,7 @@ export default function SyntheseMultiClientsPage() {
           safeText(row.collaborateur),
           row.numero,
           safeText(row.intitule),
+          destinatairesMap.get(normalize(row.numero)) || '',
           Math.round(row.caYtdNComplet * 100) / 100,
           ref?.libelle || `Cadeau #${cadeau.cadeau_id}`,
           cadeau.prix_unitaire,
@@ -3051,7 +3123,7 @@ export default function SyntheseMultiClientsPage() {
           Math.round(cadeau.quantite * cadeau.prix_unitaire * 100) / 100,
         ]
       })
-      const totalLigne = ['TOTAL', '', `${cadeauxSelection.nbClients} clients`, '', '', '', '', cadeauxSelection.qte, Math.round(cadeauxSelection.valeur * 100) / 100]
+      const totalLigne = ['TOTAL', '', `${cadeauxSelection.nbClients} clients`, '', '', '', '', '', cadeauxSelection.qte, Math.round(cadeauxSelection.valeur * 100) / 100]
 
       const ws = XLSX.utils.aoa_to_sheet([header, ...body, totalLigne])
       const range = XLSX.utils.decode_range(ws['!ref'] || 'A1:A1')
@@ -3062,16 +3134,16 @@ export default function SyntheseMultiClientsPage() {
           if (!ws[addr]) ws[addr] = { t: 's', v: '' }
           const isHeader = r === 0
           const isTotal = r === range.e.r
-          if (!isHeader && (c === 4 || c === 6 || c === 8) && ws[addr].t === 'n') ws[addr].z = '#,##0.00 "€"'
+          if (!isHeader && (c === 5 || c === 7 || c === 9) && ws[addr].t === 'n') ws[addr].z = '#,##0.00 "€"'
           ws[addr].s = {
             font: { bold: isHeader || isTotal, color: isHeader ? { rgb: 'FFFFFF' } : undefined },
             fill: { fgColor: { rgb: isHeader ? '0B1220' : isTotal ? 'FFF2CC' : 'FFFFFF' } },
-            alignment: { vertical: 'center', horizontal: [4, 6, 7, 8].includes(c) && !isHeader ? 'right' : 'left', wrapText: isHeader },
+            alignment: { vertical: 'center', horizontal: [5, 7, 8, 9].includes(c) && !isHeader ? 'right' : 'left', wrapText: isHeader },
             border,
           }
         }
       }
-      ws['!cols'] = [{ wch: 16 }, { wch: 22 }, { wch: 11 }, { wch: 34 }, { wch: 13 }, { wch: 40 }, { wch: 11 }, { wch: 6 }, { wch: 11 }]
+      ws['!cols'] = [{ wch: 16 }, { wch: 22 }, { wch: 11 }, { wch: 34 }, { wch: 30 }, { wch: 13 }, { wch: 40 }, { wch: 11 }, { wch: 6 }, { wch: 11 }]
       ws['!autofilter'] = { ref: XLSX.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: Math.max(0, range.e.r - 1), c: range.e.c } }) }
       const pane = { xSplit: 0, ySplit: 1, topLeftCell: 'A2', activePane: 'bottomLeft', state: 'frozen' }
       ws['!freeze'] = pane
@@ -3919,6 +3991,10 @@ export default function SyntheseMultiClientsPage() {
                       <span>Valeur totale</span>
                       <strong>{formatEur(cadeauxSelection.valeur)}</strong>
                     </div>
+                    <div className={cadeauxSelection.sansDestinataire.length ? 'manquant' : 'complet'}>
+                      <span>Destinataires à saisir</span>
+                      <strong>{cadeauxSelection.sansDestinataire.length ? cadeauxSelection.sansDestinataire.length : '✓ complet'}</strong>
+                    </div>
                   </div>
                   <table className="cadeauTypeTable">
                     <thead>
@@ -4055,6 +4131,30 @@ export default function SyntheseMultiClientsPage() {
                             <span className="cadeauValeur">{cadeauxSelection.parClient.get(normalize(row.numero))?.valeur ? formatEur(cadeauxSelection.parClient.get(normalize(row.numero))!.valeur) : ''}</span>
                           ) : row.kind === 'total' ? (
                             <span className="cadeauValeur">{cadeauxSelection.valeur ? formatEur(cadeauxSelection.valeur) : ''}</span>
+                          ) : null
+                        ) : col.cadeau.kind === 'destinataire' ? (
+                          row.kind === 'client' ? (() => {
+                            const key = normalize(row.numero)
+                            const valeur = destinatairesMap.get(key) || ''
+                            const aDesCadeaux = Boolean(cadeauxSelection.parClient.get(key)?.qte)
+                            const manquant = aDesCadeaux && !valeur
+                            return (
+                              <input
+                                key={`${row.numero}-dest-${valeur}`}
+                                className={`cadeauDestinataire ${manquant ? 'manquant' : ''} ${valeur ? 'rempli' : ''} ${savingDestinataire === key ? 'saving' : ''}`}
+                                type="text"
+                                defaultValue={valeur}
+                                placeholder={aDesCadeaux ? 'Obligatoire : Nom Prénom' : ''}
+                                disabled={!cadeauxCharges || savingDestinataire === key}
+                                title={manquant ? 'Saisie obligatoire : nom et prénom de la (des) personne(s) à qui le cadeau est remis' : 'Nom et prénom (plusieurs personnes : séparer par une virgule)'}
+                                onBlur={(e) => void saveDestinataire(row, e.target.value)}
+                                onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur() }}
+                              />
+                            )
+                          })() : row.kind === 'total' ? (
+                            <span className={cadeauxSelection.sansDestinataire.length ? 'destManquantTotal' : ''}>
+                              {cadeauxSelection.sansDestinataire.length ? `${cadeauxSelection.sansDestinataire.length} à saisir` : ''}
+                            </span>
                           ) : null
                         ) : null
                       ) : isVisitesCell ? (
@@ -4635,6 +4735,14 @@ export default function SyntheseMultiClientsPage() {
         .cadeauQte { width: 100%; height: 20px; padding: 0 3px; border-radius: 4px; font-size: 11px; text-align: right; }
         .cadeauQte.rempli { border-color: #7A5EA8; font-weight: 900; color: #3b2a5c; background: #efe9f8; }
         .cadeauValeur { display: block; text-align: right; font-weight: 900; color: #3b2a5c; }
+        .cadeauDestinataire { width: 100%; height: 20px; padding: 0 5px; border-radius: 4px; font-size: 11px; }
+        .cadeauDestinataire.rempli { border-color: #7A5EA8; font-weight: 800; color: #3b2a5c; }
+        .cadeauDestinataire.manquant { border: 2px solid #dc2626; background: #fef2f2; }
+        .cadeauDestinataire.manquant::placeholder { color: #dc2626; font-weight: 800; }
+        .destManquantTotal { color: #dc2626; font-weight: 950; }
+        .cadeauKpis > div.manquant { background: #fef2f2; border-color: #fecaca; }
+        .cadeauKpis > div.manquant strong { color: #dc2626; }
+        .cadeauKpis > div.complet strong { color: #047857; font-size: 14px; }
 
         /* ── Fréquence visite ── */
         td.visitesCell { text-align: center !important; }
