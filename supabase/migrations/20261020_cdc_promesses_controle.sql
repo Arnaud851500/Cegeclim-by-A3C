@@ -147,6 +147,179 @@ grant select on public.cdc_promesses_controle to authenticated;
 grant select, insert, update, delete on public.cdc_promesses_actions to authenticated;
 
 -- ── Calcul ensembliste ──────────────────────────────────────────────────────
+-- Délais par référence (20/10/2026, voir 20261020e pour la liste Hitachi).
+create table if not exists public.cdc_promesses_delais (
+  reference_article text primary key,
+  delai_jours integer not null check (delai_jours >= 0),
+  securite_jours integer not null default 0 check (securite_jours >= 0),
+  fournisseur text,
+  maj_le timestamptz not null default now()
+);
+alter table public.cdc_promesses_delais enable row level security;
+drop policy if exists cdc_promesses_delais_select on public.cdc_promesses_delais;
+create policy cdc_promesses_delais_select on public.cdc_promesses_delais for select to authenticated using (true);
+grant select on public.cdc_promesses_delais to authenticated;
+
+insert into public.cdc_promesses_delais (reference_article, delai_jours, securite_jours, fournisseur) values
+  ('SPX-WTA1', 180, 0, 'H0001'),
+  ('RAW-35RHC', 180, 0, 'H0001'),
+  ('TAW-270RHC', 180, 0, 'H0001'),
+  ('RAK-DJ18RHAE', 180, 0, 'H0001'),
+  ('RAK-DJ35RHAE', 180, 0, 'H0001'),
+  ('RAK-DJ25RHAE', 180, 0, 'H0001'),
+  ('RAK-DJ15QHAE', 180, 0, 'H0001'),
+  ('TAW-190RHC', 180, 0, 'H0001'),
+  ('RAK-DJ50RHAE', 180, 0, 'H0001'),
+  ('RAC-DJ35WHAE', 180, 0, 'H0001'),
+  ('SPX-URFG1', 180, 0, 'H0001'),
+  ('RAC-DJ50WHAE', 180, 0, 'H0001'),
+  ('RAK-VJ18RHAE', 180, 0, 'H0001'),
+  ('RAK-VJ35RHAE', 180, 0, 'H0001'),
+  ('SPX-URFG', 180, 0, 'H0001'),
+  ('RAK-18RPE', 180, 0, 'H0001'),
+  ('RAK-VJ25RHAE', 180, 0, 'H0001'),
+  ('SPX-WKT5M', 180, 0, 'H0001'),
+  ('RAM-53NYP3E', 180, 0, 'H0001'),
+  ('RAM-G68N3HCE', 180, 0, 'H0001'),
+  ('RAK-VJ15QHAE', 180, 0, 'H0001'),
+  ('RAC-DJ25WHAE', 180, 0, 'H0001'),
+  ('RAM-Y53N3HAE', 180, 0, 'H0001'),
+  ('RAC-DJ18WHAE', 180, 0, 'H0001'),
+  ('RAM-G55N2HCE', 180, 0, 'H0001'),
+  ('RAK-CJ35PHAE', 180, 0, 'H0001'),
+  ('TAW-270RHD', 180, 0, 'H0001'),
+  ('RAK-VJ50RHAE', 180, 0, 'H0001'),
+  ('RAK-35RPE', 180, 0, 'H0001'),
+  ('RAM-G55N3HCE', 180, 0, 'H0001'),
+  ('TAW-190RHD', 180, 0, 'H0001'),
+  ('RAK-15QPE', 180, 0, 'H0001'),
+  ('RAM-G85N5HCE', 180, 0, 'H0001'),
+  ('RAD-50RPE', 180, 0, 'H0001'),
+  ('RAC-CJ35WHAE', 180, 0, 'H0001'),
+  ('RAM-G43N2HCE', 180, 0, 'H0001'),
+  ('RAM-G68N3HAE', 180, 0, 'H0001'),
+  ('RAK-CJ25PHAE', 180, 0, 'H0001'),
+  ('RAC-VJ35WHAE', 180, 0, 'H0001'),
+  ('RAM-G70N4HCE', 180, 0, 'H0001'),
+  ('RAM-G85N5HAE', 180, 0, 'H0001'),
+  ('RAK-VJ42RHAE', 180, 0, 'H0001'),
+  ('RAK-XJ35RHAE', 180, 0, 'H0001'),
+  ('RAM-90NYP5E', 180, 0, 'H0001'),
+  ('RAC-VJ50WHAE', 180, 0, 'H0001'),
+  ('RAM-70NYP4E', 180, 0, 'H0001'),
+  ('RAM-G36N2HCE', 180, 0, 'H0001'),
+  ('RAM-G55N3HAE', 180, 0, 'H0001'),
+  ('RAM-G55N2HBE', 180, 0, 'H0001'),
+  ('RAM-G70N4HAE', 180, 0, 'H0001'),
+  ('RAM-Y85N5HAE', 180, 0, 'H0001'),
+  ('RAD-DJ35QHAE', 180, 0, 'H0001'),
+  ('RAD-DJ50QHAE', 180, 0, 'H0001'),
+  ('RAM-Y70N4HAE', 180, 0, 'H0001'),
+  ('RAD-60RPE', 180, 0, 'H0001'),
+  ('RAC-XJ35WHAE', 180, 0, 'H0001'),
+  ('RAD-35RPE', 180, 0, 'H0001'),
+  ('RAK-DJ60RHAE', 180, 0, 'H0001'),
+  ('RAC-60NPE', 180, 0, 'H0001'),
+  ('RAM-G110N5HCE', 180, 0, 'H0001'),
+  ('RAC-CJ25WHAE', 180, 0, 'H0001'),
+  ('RAC-VJ25WHAE', 180, 0, 'H0001'),
+  ('RAM-G55N2HAE', 180, 0, 'H0001'),
+  ('RAF-XJ25RHAE', 180, 0, 'H0001'),
+  ('RAF-XJ35RHAE', 180, 0, 'H0001'),
+  ('RAK-XJ25RHAE', 180, 0, 'H0001'),
+  ('RAF-XJ50RHAE', 180, 0, 'H0001'),
+  ('RAK-XJ50RHAE', 180, 0, 'H0001'),
+  ('HAQ-RTU-01', 180, 0, 'H0001'),
+  ('RAC-VJ42WHAE', 180, 0, 'H0001'),
+  ('RAC-35NPE', 180, 0, 'H0001'),
+  ('RAM-G110N5HAE', 180, 0, 'H0001'),
+  ('RAC-50FXE', 180, 0, 'H0001'),
+  ('RAM-G43N2HBE', 180, 0, 'H0001'),
+  ('RAF-50RXE', 180, 0, 'H0001'),
+  ('RAC-DJ60WHAE', 180, 0, 'H0001'),
+  ('RAM-G36N2HBE', 180, 0, 'H0001'),
+  ('RAD-DJ25QHAE', 180, 0, 'H0001'),
+  ('RAK-CJ20PHAE', 180, 0, 'H0001'),
+  ('RAC-VJ60NHAE', 180, 0, 'H0001'),
+  ('RAD-DJ60QHAE', 180, 0, 'H0001'),
+  ('RAK-XJ18QHAE', 180, 0, 'H0001'),
+  ('RAD-VJ50RHAE', 180, 0, 'H0001'),
+  ('RAD-VJ60RHAE', 180, 0, 'H0001'),
+  ('RAD-DJ18QHAE', 180, 0, 'H0001'),
+  ('RAK-VJ60RHAE', 180, 0, 'H0001'),
+  ('HAQ-WTS-01', 180, 0, 'H0001'),
+  ('RAC-VJ50NHAE', 180, 0, 'H0001'),
+  ('RAC-XJ50WHAE', 180, 0, 'H0001'),
+  ('RAC-VJ35NHAE', 180, 0, 'H0001'),
+  ('RAC-XJ25WHAE', 180, 0, 'H0001'),
+  ('RAF-XJ25QHAE', 180, 0, 'H0001'),
+  ('HZKF12KSE-Q', 180, 0, 'H0001'),
+  ('RAM-G43N2HAE', 180, 0, 'H0001'),
+  ('HZKF08KSE-Q', 180, 0, 'H0001'),
+  ('RAC-XJ35FHAE', 180, 0, 'H0001'),
+  ('RAC-XJ50FHAE', 180, 0, 'H0001'),
+  ('RAC-VJ60WHAE', 180, 0, 'H0001'),
+  ('RAM-G36N2HAE', 180, 0, 'H0001'),
+  ('RAC-70NPD', 180, 0, 'H0001'),
+  ('RAC-VJ70NHAE', 180, 0, 'H0001'),
+  ('RAK-DJ70RHAE', 180, 0, 'H0001'),
+  ('RAC-CJ20WHAE', 180, 0, 'H0001'),
+  ('RAF-XJ50QHAE', 180, 0, 'H0001'),
+  ('RAC-XJ25FHAE', 180, 0, 'H0001'),
+  ('RAF-XJ35QHAE', 180, 0, 'H0001'),
+  ('RAD-VJ35RHAE', 180, 0, 'H0001'),
+  ('RAC-VJ18WHAE', 180, 0, 'H0001'),
+  ('RAC-25NPE', 180, 0, 'H0001'),
+  ('RAK-XJ50RHBEG', 180, 0, 'H0001'),
+  ('HZKF12KIE-Q', 180, 0, 'H0001'),
+  ('RAC-VJ25NHAE', 180, 0, 'H0001'),
+  ('HZKF08KIE-Q', 180, 0, 'H0001'),
+  ('RAK-XJ50RHBE', 180, 0, 'H0001'),
+  ('HZKF16KSE-Q', 180, 0, 'H0001'),
+  ('RAK-XJ35RHBEG', 180, 0, 'H0001'),
+  ('RAC-XJ50WHBE', 180, 0, 'H0001'),
+  ('RAD-VJ25RHAE', 180, 0, 'H0001'),
+  ('RAC-25FXE', 180, 0, 'H0001'),
+  ('RAC-DJ70WHAE', 180, 0, 'H0001'),
+  ('HZKF12KSO-Q', 180, 0, 'H0001'),
+  ('RAD-VJ18QHAE', 180, 0, 'H0001'),
+  ('RAD-VJ70RHAE', 180, 0, 'H0001'),
+  ('HZKF12KW230E-Q', 180, 0, 'H0001'),
+  ('RAF-35RXE', 180, 0, 'H0001'),
+  ('RAK-XJ25RHBEG', 180, 0, 'H0001'),
+  ('RAK-VJ70RHAE', 180, 0, 'H0001'),
+  ('HZKF08KW230E-Q', 180, 0, 'H0001'),
+  ('RAC-XJ35WHBE', 180, 0, 'H0001'),
+  ('RAC-35FXE', 180, 0, 'H0001'),
+  ('HZKF16KIE-Q', 180, 0, 'H0001'),
+  ('RAK-XJ35RHBE', 180, 0, 'H0001'),
+  ('HZKF12KIO-Q', 180, 0, 'H0001'),
+  ('RAD-DJ70QHAE', 180, 0, 'H0001'),
+  ('RAC-XJ25WHBE', 180, 0, 'H0001'),
+  ('RAC-VJ70WHAE', 180, 0, 'H0001'),
+  ('HZKF16KW230E-Q', 180, 0, 'H0001'),
+  ('HZKF16KW230O-Q', 180, 0, 'H0001'),
+  ('RAK-XJ25RHBE', 180, 0, 'H0001'),
+  ('HZKF12KW230O-Q', 180, 0, 'H0001'),
+  ('HZKF16KIO-Q', 180, 0, 'H0001'),
+  ('HZKF16KSO-Q', 180, 0, 'H0001'),
+  ('RAK-XJ18QHBEG', 180, 0, 'H0001'),
+  ('RAK-XJ18QHBE', 180, 0, 'H0001'),
+  ('RAK-18QXE', 180, 0, 'H0001'),
+  ('ATW-CKS-04', 180, 0, 'H0001'),
+  ('RAD-18QPE', 180, 0, 'H0001'),
+  ('PDF-71C1', 180, 0, 'H0001'),
+  ('PSC-5HR1', 180, 0, 'H0001'),
+  ('RAS-5FSXNP2E', 180, 0, 'H0001')
+on conflict (reference_article) do update set
+  delai_jours = excluded.delai_jours, securite_jours = excluded.securite_jours,
+  fournisseur = excluded.fournisseur, maj_le = now();
+
+insert into public.appro_parametres (cle, valeur, description) values
+  ('promesses_delai_defaut_jours', 90, 'Dates de livraison interdites : délai par défaut (jours) hors table cdc_promesses_delais'),
+  ('promesses_securite_defaut_jours', 7, 'Dates de livraison interdites : sécurité par défaut (jours) ajoutée à la date proposée')
+on conflict (cle) do update set valeur = excluded.valeur, description = excluded.description;
+
 create or replace function public.refresh_cdc_promesses_controle(p_jours integer default 7)
 returns jsonb
 language plpgsql
@@ -161,7 +334,8 @@ declare
   v_nb_refs integer;
   v_nb_anal integer;
   v_nb_interdites integer;
-  v_delai_defaut integer := coalesce((select valeur from public.appro_parametres where cle = 'delai_appro_defaut_jours'), 30)::int;
+  v_delai_defaut integer := coalesce((select valeur from public.appro_parametres where cle = 'promesses_delai_defaut_jours'), 90)::int;
+  v_secu_defaut integer := coalesce((select valeur from public.appro_parametres where cle = 'promesses_securite_defaut_jours'), 7)::int;
 begin
   -- Un seul calcul à la fois.
   if not pg_try_advisory_xact_lock(hashtext('refresh_cdc_promesses_controle')) then
@@ -353,22 +527,29 @@ begin
   ) v
   where v.ref = a.ref and v.bc = a.bc;
 
-  -- Exclusions (mêmes règles que le Portefeuille livraison).
+  -- Exclusions (mêmes règles que le Portefeuille livraison). Délai de
+  -- référence (20/10/2026) : table cdc_promesses_delais (Hitachi H0001 :
+  -- 180 j sans sécurité), sinon 90 j + 7 j de sécurité (paramètres
+  -- promesses_delai_defaut_jours / promesses_securite_defaut_jours).
+  -- L'arrêt appro reste lu dans v_appro_delai_article.
   update _pc_anal a set
     arret_appro = coalesce(d.arret_appro, false),
     date_appro = case when coalesce(d.arret_appro, false) then null
-                      else current_date + coalesce(d.delai_appro_jours, v_delai_defaut) + 7 end,
+                      else current_date + d.delai + d.secu end,
     motif_exclusion = case
       when not exists (select 1 from sage.stock_depot sd where sd.sto_art_num = a.ref) then 'HORS_STOCK'
       -- La rupture créée (ou, à défaut, la date promise) tombe après la
-      -- période figée (création + délai d'appro) : un appro passé à la
-      -- saisie arrive avant que quiconque manque de stock.
+      -- période figée (création + délai) : un appro passé à la saisie
+      -- arrive avant que quiconque manque de stock.
       when not coalesce(d.arret_appro, false)
-           and coalesce(a.date_rupture, a.echeance) >= a.date_bc + coalesce(d.delai_appro_jours, v_delai_defaut) then 'APPRO_POSSIBLE'
+           and coalesce(a.date_rupture, a.echeance) >= a.date_bc + d.delai then 'APPRO_POSSIBLE'
     end
-  from (select r.ref, dl.delai_appro_jours, dl.arret_appro
+  from (select r.ref, dl.arret_appro,
+               coalesce(pd.delai_jours, v_delai_defaut) delai,
+               case when pd.reference_article is not null then pd.securite_jours else v_secu_defaut end secu
         from (select distinct ref from _pc_anal) r
-        left join public.v_appro_delai_article dl on dl.reference_article = r.ref) d
+        left join public.v_appro_delai_article dl on dl.reference_article = r.ref
+        left join public.cdc_promesses_delais pd on pd.reference_article = r.ref) d
   where d.ref = a.ref and a.verdict <> 'OK';
 
   -- ── Écriture du résultat ──
