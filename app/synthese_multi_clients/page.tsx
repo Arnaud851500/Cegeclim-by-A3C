@@ -2759,7 +2759,16 @@ export default function SyntheseMultiClientsPage() {
       setCadeauxLoading(true)
       setCadeauxErreur(null)
       try {
-        const [refs, map, destinataires] = await Promise.all([fetchCadeauxRef(), fetchCadeauxClients(N), fetchCadeauxDestinataires(N)])
+        const [refs, map, destinataires] = await Promise.all([
+          fetchCadeauxRef(),
+          fetchCadeauxClients(N),
+          // Tolérant : si la table des destinataires n'est pas encore créée,
+          // les cadeaux restent utilisables (la saisie du nom échouera seule).
+          fetchCadeauxDestinataires(N).catch((err) => {
+            console.warn('[SMC] client_cadeaux_destinataires indisponible :', err)
+            return new Map<string, string>()
+          }),
+        ])
         if (!alive) return
         setCadeauxRef(refs)
         setCadeauxMap(map)
