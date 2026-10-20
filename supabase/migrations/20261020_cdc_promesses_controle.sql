@@ -52,6 +52,13 @@ create table if not exists public.cdc_promesses_controle (
   nb_victimes integer not null default 0,
   q_victimes numeric not null default 0,
   victimes text,
+  -- Exclusion (mêmes règles que le Portefeuille livraison, 20/10/2026) :
+  --   HORS_STOCK     : référence absente de sage.stock_depot (non gérée en stock) ;
+  --   APPRO_POSSIBLE : la rupture créée tombe après création + délai d'appro
+  --                    de la référence (hors arrêt appro) -- un appro lancé à
+  --                    la saisie arrive avant que quiconque manque de stock.
+  -- Une ligne exclue est traitée comme tenable dans les écrans et l'alerte.
+  motif_exclusion text,
   premiere_analyse timestamptz not null default now(),
   premiere_detection timestamptz,
   calcule_le timestamptz not null default now(),
@@ -149,6 +156,7 @@ declare
   v_nb_refs integer;
   v_nb_anal integer;
   v_nb_interdites integer;
+  v_delai_defaut integer := coalesce((select valeur from public.appro_parametres where cle = 'delai_appro_defaut_jours'), 30)::int;
 begin
   -- Un seul calcul à la fois.
   if not pg_try_advisory_xact_lock(hashtext('refresh_cdc_promesses_controle')) then
@@ -276,7 +284,7 @@ begin
             from _pc_cdc j where j.ref = i.ref and j.date_bc <= i.date_bc and j.bc <> i.bc) promesses_ouvertes,
          null::numeric solde_echeance, null::numeric atp_echeance,
          null::text verdict, null::numeric q_manque, null::date date_exacte, null::date date_rupture,
-         0::int nb_victimes, 0::numeric q_victimes, null::text victimes
+         0::int nb_victimes, 0::numeric q_victimes, null::text victimes, null::text motif_exclusion
   from _pc_cdc i
   join _pc_stock st on st.ref = i.ref
   where i.bc in (select bc from _pc_bc)
@@ -339,6 +347,20 @@ begin
   ) v
   where v.ref = a.ref and v.bc = a.bc;
 
+  -- Exclusions (mêmes règles que le Portefeuille livraison).
+  update _pc_anal a set motif_exclusion = case
+      when not exists (select 1 from sage.stock_depot sd where sd.sto_art_num = a.ref) then 'HORS_STOCK'
+      -- La rupture créée (ou, à défaut, la date promise) tombe après la
+      -- période figée (création + délai d'appro) : un appro passé à la
+      -- saisie arrive avant que quiconque manque de stock.
+      when not coalesce(d.arret_appro, false)
+           and coalesce(a.date_rupture, a.echeance) >= a.date_bc + coalesce(d.delai_appro_jours, v_delai_defaut) then 'APPRO_POSSIBLE'
+    end
+  from (select r.ref, dl.delai_appro_jours, dl.arret_appro
+        from (select distinct ref from _pc_anal) r
+        left join public.v_appro_delai_article dl on dl.reference_article = r.ref) d
+  where d.ref = a.ref and a.verdict <> 'OK';
+
   -- ── Écriture du résultat ──
   -- Les CDC sorties du périmètre (livrées, soldées, hors fenêtre sans action) disparaissent.
   delete from public.cdc_promesses_controle c
@@ -348,14 +370,14 @@ begin
     numero_document, reference_article, numero_tiers, nom_tiers, collaborateur, representant, agence,
     date_creation, date_livraison, echeance, date_bl, ouverte, quantite, quantite_ouverte,
     stock_phys, promesses_ouvertes, stock_projete_creation, solde_echeance, atp_echeance,
-    verdict, q_manque, date_exacte, date_rupture, nb_victimes, q_victimes, victimes,
+    verdict, q_manque, date_exacte, date_rupture, nb_victimes, q_victimes, victimes, motif_exclusion,
     premiere_analyse, premiere_detection, calcule_le)
   select a.bc, a.ref, a.tiers, a.nom, a.collaborateur, rt.representant,
          coalesce(ag.agence, 'NON AFFECTE'),
          a.date_bc, a.date_livraison, a.echeance, a.date_bl, a.ouverte, a.q, a.q_ouverte,
          a.stock_phys, a.promesses_ouvertes, a.stock_phys - a.promesses_ouvertes, a.solde_echeance, a.atp_echeance,
-         a.verdict, a.q_manque, a.date_exacte, a.date_rupture, a.nb_victimes, a.q_victimes, a.victimes,
-         now(), case when a.verdict <> 'OK' then now() end, now()
+         a.verdict, a.q_manque, a.date_exacte, a.date_rupture, a.nb_victimes, a.q_victimes, a.victimes, a.motif_exclusion,
+         now(), case when a.verdict <> 'OK' and a.motif_exclusion is null then now() end, now()
   from _pc_anal a
   left join public.ref_tiers rt on rt.numero = a.tiers
   left join lateral (
@@ -371,7 +393,7 @@ begin
     stock_projete_creation = excluded.stock_projete_creation, solde_echeance = excluded.solde_echeance,
     atp_echeance = excluded.atp_echeance, verdict = excluded.verdict, q_manque = excluded.q_manque,
     date_exacte = excluded.date_exacte, date_rupture = excluded.date_rupture, nb_victimes = excluded.nb_victimes,
-    q_victimes = excluded.q_victimes, victimes = excluded.victimes,
+    q_victimes = excluded.q_victimes, victimes = excluded.victimes, motif_exclusion = excluded.motif_exclusion,
     premiere_detection = coalesce(c.premiere_detection, excluded.premiere_detection),
     calcule_le = excluded.calcule_le;
 
@@ -383,7 +405,7 @@ begin
   with etat as (
     select a.numero_document,
            exists (select 1 from public.cdc_promesses_controle c where c.numero_document = a.numero_document and c.ouverte) ouverte,
-           not exists (select 1 from public.cdc_promesses_controle c where c.numero_document = a.numero_document and c.verdict <> 'OK') cdc_ok,
+           not exists (select 1 from public.cdc_promesses_controle c where c.numero_document = a.numero_document and c.verdict <> 'OK' and c.motif_exclusion is null) cdc_ok,
            case when a.action = 'deprioriser' then
              not exists (select 1 from public.alerte_couverture_stock_cache k
                          where upper(btrim(k.numero_document)) = a.cdc_depriorisee
@@ -409,7 +431,7 @@ begin
   where e.numero_document = a.numero_document;
 
   select count(distinct numero_document) into v_nb_interdites
-  from public.cdc_promesses_controle where verdict <> 'OK' and ouverte;
+  from public.cdc_promesses_controle where verdict <> 'OK' and motif_exclusion is null and ouverte;
 
   return jsonb_build_object(
     'depuis', v_d0, 'references', v_nb_refs, 'lignes_analysees', v_nb_anal,
@@ -421,9 +443,16 @@ $function$;
 revoke all on function public.refresh_cdc_promesses_controle(integer) from public, anon, authenticated;
 
 -- ── Lecture pour les écrans (RLS appliquée : security invoker) ──────────────
-create or replace view public.v_cdc_promesses_interdites
+drop view if exists public.v_cdc_promesses_interdites;
+create view public.v_cdc_promesses_interdites
 with (security_invoker = true) as
-select c.*,
+select c.numero_document, c.reference_article, c.numero_tiers, c.nom_tiers, c.collaborateur, c.representant, c.agence,
+       c.date_creation, c.date_livraison, c.echeance, c.date_bl, c.ouverte, c.quantite, c.quantite_ouverte,
+       c.stock_phys, c.promesses_ouvertes, c.stock_projete_creation, c.solde_echeance, c.atp_echeance,
+       -- Verdict effectif : une ligne exclue (hors stock / appro possible) est tenable.
+       case when c.motif_exclusion is null then c.verdict else 'OK' end verdict,
+       c.q_manque, c.date_exacte, c.date_rupture, c.nb_victimes, c.q_victimes, c.victimes,
+       c.premiere_analyse, c.premiere_detection, c.calcule_le, c.motif_exclusion, c.verdict verdict_brut,
        a.action, a.nouvelle_date, a.cdc_depriorisee, a.commentaire, a.statut statut_action,
        a.verification, a.verifie_le, a.saisi_par_nom, a.saisi_par_email, a.saisi_le,
        case
@@ -434,7 +463,7 @@ select c.*,
 from public.cdc_promesses_controle c
 left join public.cdc_promesses_actions a on a.numero_document = c.numero_document
 where c.ouverte
-  and (c.verdict <> 'OK' or (a.numero_document is not null and a.statut <> 'resolue'));
+  and ((c.verdict <> 'OK' and c.motif_exclusion is null) or (a.numero_document is not null and a.statut <> 'resolue'));
 
 grant select on public.v_cdc_promesses_interdites to authenticated;
 
@@ -473,7 +502,7 @@ as $$
     select c.reference_article, c.date_creation, coalesce(c.date_exacte, c.echeance + 365) horizon,
            (select rt.representant from public.ref_tiers rt where rt.numero = c.numero_tiers) representant
     from public.cdc_promesses_controle c
-    where c.numero_document = btrim(p_numero_document) and c.verdict <> 'OK'
+    where c.numero_document = btrim(p_numero_document) and c.verdict <> 'OK' and c.motif_exclusion is null
   ), lignes as (
     select coalesce(a.numero_piece_bc, a.numero_piece) bc, a.numero_tiers_entete tiers, a.intitule_tiers_entete nom,
            upper(btrim(a.reference_article)) ref, coalesce(a.date_bc, a.date_piece) date_bc,

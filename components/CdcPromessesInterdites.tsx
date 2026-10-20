@@ -168,6 +168,7 @@ export default function CdcPromessesInterdites({
           <h2 className="text-lg font-semibold text-slate-900">Commandes à date de livraison interdite</h2>
           <p className="mt-1 max-w-5xl text-sm text-slate-500">
             CDC ouvertes créées depuis {PROMESSES_FENETRE_JOURS} jours dont la date de livraison promise ne tient pas compte du stock : <b className="text-rose-700">intenable</b> (le stock n’y sera pas à la date, même avec les arrivages) ou <b className="text-amber-700">crée un retard</b> (livrable, mais sur le stock d’une commande plus ancienne qu’aucun arrivage ne recouvre à temps). Même calcul que l’écran Reconstruction du stock projeté, refait après chaque synchro SAGE{calculeLe ? ` (dernier calcul ${new Date(calculeLe).toLocaleString('fr-FR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })})` : ''}.
+            {' '}Ne sont pas retenues, comme dans le reste du portefeuille : les références non gérées en stock, et les commandes dont la rupture créée tombe après le délai d'appro (un appro passé à la saisie la couvre).
             {' '}Pour chaque commande : <b>décaler la date</b> (au plus tôt la date exacte) ou <b>déprioriser une autre commande</b> de votre portefeuille, avec un commentaire. L’action est vérifiée à la synchro suivante.
           </p>
           <div className="mt-2 flex flex-wrap gap-2 text-xs font-semibold">
