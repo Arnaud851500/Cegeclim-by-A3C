@@ -25,6 +25,8 @@ import {
   grouperParCommande,
   joursEntre,
   lienStockArticle,
+  promessesExportCommandes,
+  promessesExportLignes,
   supprimerAction,
   verifierSaisie,
   type PromesseAction,
@@ -130,37 +132,9 @@ export default function CdcPromessesInterdites({
   const calculeLe = useMemo(() => lignes.reduce<string | null>((m, l) => (l.calcule_le && (!m || l.calcule_le > m) ? l.calcule_le : m), null), [lignes])
 
   function exporter() {
-    const rows = commandesAffichees.flatMap((c) => c.lignes.map((l) => ({
-      Document: c.numero_document,
-      Client: c.nom_tiers || '',
-      'N° tiers': c.numero_tiers || '',
-      Agence: c.agence || '',
-      Représentant: c.representant || '',
-      'Créée le': formatDateCourte(c.date_creation),
-      'Livraison promise': formatDateCourte(l.echeance),
-      Référence: l.reference_article,
-      Qté: l.quantite,
-      'Stock fin de journée': l.stock_phys,
-      'Solde à la date promise': l.solde_echeance,
-      'Dispo réelle': l.atp_echeance,
-      Verdict: VERDICT_INFO[l.verdict].label,
-      'Pièces en défaut': l.q_manque,
-      'Date exacte': l.date_exacte ? formatDateCourte(l.date_exacte) : 'aucune',
-      'Date proposée': l.date_proposee ? formatDateCourte(l.date_proposee) : (l.arret_appro ? 'aucune (arrêt appro)' : 'aucune'),
-      'Origine date proposée': l.date_proposee && l.date_proposee !== l.date_exacte ? 'appro lancé aujourd’hui (délai + sécurité)' : l.date_proposee ? 'stock et arrivages connus' : '',
-      'Exacte − promise (j)': joursEntre(l.echeance, l.date_exacte),
-      'Rupture créée le': formatDateCourte(l.date_rupture),
-      'Promesses exposées': l.nb_victimes ? `${l.nb_victimes} CDC · ${l.q_victimes} p. : ${l.victimes || ''}` : '',
-      Statut: STATUT_INFO[c.statut_traitement].label,
-      Action: c.action ? ACTION_INFO[c.action].label : '',
-      'Nouvelle date': c.nouvelle_date ? formatDateCourte(c.nouvelle_date) : '',
-      'CDC dépriorisée': c.cdc_depriorisee || '',
-      Commentaire: c.commentaire || '',
-      'Saisi par': c.saisi_par_nom || '',
-      Vérification: c.verification || '',
-    })))
     const wb = XLSX.utils.book_new()
-    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rows), 'Dates interdites')
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(promessesExportCommandes(commandesAffichees)), 'Dates interdites')
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(promessesExportLignes(commandesAffichees)), 'Dates interdites detail')
     XLSX.writeFile(wb, `dates-livraison-interdites-${new Date().toISOString().slice(0, 10)}.xlsx`)
   }
 

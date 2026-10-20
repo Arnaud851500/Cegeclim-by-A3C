@@ -23,7 +23,7 @@ import {
 // dédié avec action / commentaire par CDC. URL ?promesse=interdite ou
 // événement cegeclim:open-promesses-interdites. Voir lib/cdcPromesses.ts.
 import CdcPromessesInterdites from '@/components/CdcPromessesInterdites'
-import { PROMESSES_ALERT_LABEL, PROMESSES_FENETRE_JOURS, PROMESSES_OPEN_EVENT, fetchPromessesAlerte } from '@/lib/cdcPromesses'
+import { PROMESSES_ALERT_LABEL, PROMESSES_FENETRE_JOURS, PROMESSES_OPEN_EVENT, commandesDansPerimetre, fetchPromessesAlerte, fetchPromessesInterdites, promessesExportCommandes, promessesExportLignes } from '@/lib/cdcPromesses'
 
 type LignePortefeuille = {
   id: number | string | null
@@ -1690,7 +1690,7 @@ export default function PortefeuilleLivraisonPage() {
     setLigneSort((current) => !current || current.key !== key ? { key, direction: 'asc' } : { key, direction: current.direction === 'asc' ? 'desc' : 'asc' })
   }
 
-  function exportExcel() {
+  async function exportExcel() {
     const syntheseExport: Record<string, string | number>[] = synthese.map((row) => {
       const base: Record<string, string | number> = { Representant: row.representant, Agence: row.agence, Type_document: row.type_document }
       for (const mois of moisLivraison) {
@@ -1730,6 +1730,20 @@ export default function PortefeuilleLivraisonPage() {
     XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(documentsExport), 'Documents')
     XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(lignesExport), 'Detail lignes')
     if (isCdcSelected) XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(couvertureExport), 'Non completes a date liv')
+    if (isCdcSelected) {
+      // (2026-10-21) Onglets « Date de livraison interdite » : même liste et même périmètre que le panneau dédié.
+      try {
+        const commandesInterdites = commandesDansPerimetre(
+          await fetchPromessesInterdites(),
+          access.allowedAgences.length > 0 ? '' : selectedAgence,
+          access.allowedCollaborateurs.length > 0 ? '' : selectedRepresentant,
+        )
+        XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(promessesExportCommandes(commandesInterdites)), 'Dates interdites')
+        XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(promessesExportLignes(commandesInterdites)), 'Dates interdites detail')
+      } catch (e: any) {
+        XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet([{ Erreur: `Liste des dates de livraison interdites indisponible : ${e?.message || e}` }]), 'Dates interdites')
+      }
+    }
     XLSX.writeFile(workbook, `portefeuille_livraison_${new Date().toISOString().slice(0, 10)}.xlsx`)
   }
 
@@ -1753,7 +1767,7 @@ export default function PortefeuilleLivraisonPage() {
               <button type="button" onClick={loadData} disabled={loading} className="rounded-xl bg-slate-900 px-4 py-2 text-sm font-medium text-white shadow-sm disabled:opacity-50">
                 {loading ? 'Chargement...' : 'Actualiser'}
               </button>
-              <button type="button" onClick={exportExcel} disabled={loading || lignes.length === 0} className="rounded-xl bg-emerald-600 px-4 py-2 text-sm font-medium text-white shadow-sm disabled:opacity-50">
+              <button type="button" onClick={() => void exportExcel()} disabled={loading || lignes.length === 0} className="rounded-xl bg-emerald-600 px-4 py-2 text-sm font-medium text-white shadow-sm disabled:opacity-50">
                 Export Excel
               </button>
             </div>

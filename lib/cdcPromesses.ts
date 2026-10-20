@@ -349,3 +349,86 @@ export function joursEntre(a?: string | null, b?: string | null): number | null 
   if (!a || !b) return null
   return Math.round((new Date(`${b.slice(0, 10)}T00:00:00`).getTime() - new Date(`${a.slice(0, 10)}T00:00:00`).getTime()) / 86400000)
 }
+
+// ----------------------------------------------------------------------------
+// (2026-10-21) Export Excel partagé : utilisé par le bouton Excel du panneau
+// « Date de livraison interdite » et par l'export du Portefeuille livraison.
+// ----------------------------------------------------------------------------
+
+function normPerimetre(v: string | null | undefined) {
+  return String(v || '').trim().toUpperCase()
+}
+
+/** Commandes à afficher / exporter (hors résolues sans ligne) dans le périmètre agence / représentant. */
+export function commandesDansPerimetre(lignes: PromesseLigne[], agenceFiltre?: string, representantFiltre?: string): PromesseCommande[] {
+  return grouperParCommande(lignes)
+    .filter((c) => c.lignes.length > 0 || c.statut_traitement !== 'resolue')
+    .filter((c) => {
+      if (agenceFiltre && normPerimetre(c.agence) !== normPerimetre(agenceFiltre)) return false
+      if (representantFiltre && normPerimetre(c.representant) !== normPerimetre(representantFiltre)
+        && !c.lignes.some((l) => normPerimetre(l.collaborateur) === normPerimetre(representantFiltre))) return false
+      return true
+    })
+}
+
+/** Onglet « une ligne par commande ». */
+export function promessesExportCommandes(commandes: PromesseCommande[]): Record<string, string | number>[] {
+  return commandes.map((c) => ({
+    Document: c.numero_document,
+    Client: c.nom_tiers || '',
+    'N° tiers': c.numero_tiers || '',
+    Agence: c.agence || '',
+    Représentant: c.representant || '',
+    'Créée le': formatDateCourte(c.date_creation),
+    'Livraison promise': formatDateCourte(c.echeance),
+    Verdict: c.lignes.length ? VERDICT_INFO[c.verdict].label : 'Désormais tenable',
+    'Nb références en défaut': c.lignes.length,
+    'Références en défaut': c.lignes.map((l) => l.reference_article).join(', '),
+    'Pièces en défaut': Math.round(c.lignes.reduce((s, l) => s + l.q_manque, 0)),
+    'Date exacte': c.lignes.length ? (c.date_exacte ? formatDateCourte(c.date_exacte) : 'aucune') : '',
+    'Date proposée': c.lignes.length ? (c.date_proposee ? formatDateCourte(c.date_proposee) : (c.arret_appro ? 'aucune (arrêt appro)' : 'aucune')) : '',
+    'Origine date proposée': c.date_proposee ? (c.via_appro ? 'appro lancé aujourd’hui (délai + sécurité)' : 'stock et arrivages connus') : '',
+    'Exacte − promise (j)': joursEntre(c.echeance, c.date_exacte) ?? '',
+    'Promesses exposées (CDC)': c.lignes.reduce((s, l) => s + l.nb_victimes, 0),
+    Statut: STATUT_INFO[c.statut_traitement].label,
+    Action: c.action ? ACTION_INFO[c.action].label : '',
+    'Nouvelle date': c.nouvelle_date ? formatDateCourte(c.nouvelle_date) : '',
+    'CDC dépriorisée': c.cdc_depriorisee || '',
+    Commentaire: c.commentaire || '',
+    'Saisi par': c.saisi_par_nom || '',
+    Vérification: c.verification || '',
+  }))
+}
+
+/** Onglet « une ligne par commande × référence » (détail). */
+export function promessesExportLignes(commandes: PromesseCommande[]): Record<string, string | number>[] {
+  return commandes.flatMap((c) => c.lignes.map((l) => ({
+    Document: c.numero_document,
+    Client: c.nom_tiers || '',
+    'N° tiers': c.numero_tiers || '',
+    Agence: c.agence || '',
+    Représentant: c.representant || '',
+    'Créée le': formatDateCourte(c.date_creation),
+    'Livraison promise': formatDateCourte(l.echeance),
+    Référence: l.reference_article,
+    Qté: l.quantite,
+    'Stock fin de journée': l.stock_phys,
+    'Solde à la date promise': l.solde_echeance,
+    'Dispo réelle': l.atp_echeance,
+    Verdict: VERDICT_INFO[l.verdict].label,
+    'Pièces en défaut': l.q_manque,
+    'Date exacte': l.date_exacte ? formatDateCourte(l.date_exacte) : 'aucune',
+    'Date proposée': l.date_proposee ? formatDateCourte(l.date_proposee) : (l.arret_appro ? 'aucune (arrêt appro)' : 'aucune'),
+    'Origine date proposée': l.date_proposee && l.date_proposee !== l.date_exacte ? 'appro lancé aujourd’hui (délai + sécurité)' : l.date_proposee ? 'stock et arrivages connus' : '',
+    'Exacte − promise (j)': joursEntre(l.echeance, l.date_exacte) ?? '',
+    'Rupture créée le': formatDateCourte(l.date_rupture),
+    'Promesses exposées': l.nb_victimes ? `${l.nb_victimes} CDC · ${l.q_victimes} p. : ${l.victimes || ''}` : '',
+    Statut: STATUT_INFO[c.statut_traitement].label,
+    Action: c.action ? ACTION_INFO[c.action].label : '',
+    'Nouvelle date': c.nouvelle_date ? formatDateCourte(c.nouvelle_date) : '',
+    'CDC dépriorisée': c.cdc_depriorisee || '',
+    Commentaire: c.commentaire || '',
+    'Saisi par': c.saisi_par_nom || '',
+    Vérification: c.verification || '',
+  })))
+}
