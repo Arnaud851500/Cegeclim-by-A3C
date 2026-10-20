@@ -224,13 +224,20 @@ begin
   create index on _pc_cdc (ref, date_bc);
 
   -- Flux réels depuis v_d0 (un seul passage pour toutes les références).
+  -- Réceptions réelles = lignes de CDF BLG livrées. Lues directement dans
+  -- les tables BLG (mêmes données que v_appro_cdf_lignes : sale_quote de type
+  -- 'purchase', delivery_date_actual, quantity_delivered) : la vue, qui
+  -- recalcule tout l'entête des CDF, dépasse à elle seule le plafond de
+  -- 2 minutes des requêtes sur ~900 références (correctif du 20/10/2026).
   create temp table _pc_rec on commit drop as
-  select upper(btrim(l.article_reference)) ref, l.date_livraison::date d, sum(l.quantite_livree) q
-  from public.v_appro_cdf_lignes l
-  where l.quantite_livree > 0
-    and l.date_livraison >= v_d0
-    and l.date_livraison::date <= current_date
-    and upper(btrim(l.article_reference)) in (select ref from _pc_refs)
+  select upper(btrim(ap.reference)) ref, sl.delivery_date_actual::date d, sum(sl.quantity_delivered)::numeric q
+  from blg.sale_quote_line sl
+  join blg.sale_quote sq on sq.id = sl.quote_fk and sq.type = 'purchase'
+  join blg.article_part ap on ap.id = sl.article_fk
+  where sl.quantity_delivered > 0
+    and sl.delivery_date_actual >= v_d0
+    and sl.delivery_date_actual::date <= current_date
+    and upper(btrim(ap.reference)) in (select ref from _pc_refs)
   group by 1, 2;
 
   create temp table _pc_sor on commit drop as
@@ -495,5 +502,9 @@ grant execute on function public.get_cdc_promesses_candidats(text) to authentica
 do $$
 begin
   perform cron.unschedule(jobid) from cron.job where jobname = 'cdc-promesses-controle-hourly';
-  perform cron.schedule('cdc-promesses-controle-hourly', '35 * * * *', 'select public.refresh_cdc_promesses_controle(7);');
+  -- Le plafond de 2 minutes s'applique à toute l'instruction lancée par
+  -- pg_cron : le « set statement_timeout » de la fonction ne le lève pas, il
+  -- faut le poser dans la commande de la tâche (comme les synchros SAGE).
+  perform cron.schedule('cdc-promesses-controle-hourly', '35 * * * *',
+    $cmd$SET statement_timeout = '900s'; select public.refresh_cdc_promesses_controle(7);$cmd$);
 end $$;
