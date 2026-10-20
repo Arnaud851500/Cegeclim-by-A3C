@@ -22,6 +22,11 @@ import {
 // voir lib/cdcRetard.ts). Le droit d'accès garde son nom historique
 // show_alert_cdc_liv_avant_2026, aucune migration côté base.
 import { CDC_RETARD_LABEL, getCdcRetardDescription, getCdcRetardThresholdIso } from '@/lib/cdcRetard'
+// ÉVOLUTION (2026-10-20) : alerte « Date de livraison interdite » (CDC créées
+// depuis 30 jours dont la date promise ne tient pas compte du stock) -- voir
+// lib/cdcPromesses.ts. Suit le droit show_alert_cdc_liv_avant_2026, comme
+// l'alerte « Commande non complète ».
+import { PROMESSES_ALERT_LABEL, PROMESSES_OPEN_EVENT, PROMESSES_URL, fetchPromessesAlerte } from '@/lib/cdcPromesses'
 
 // ÉVOLUTION (2026-09-15) : navigation desktop alignée sur le mobile.
 // - L'arborescence (blocs → écrans) vit dans lib/navigation.ts, partagée avec
@@ -492,6 +497,7 @@ function AppShell({ children }: { children: React.ReactNode }) {
     nbClients: 0,
   })
   const [alertCenterOpen, setAlertCenterOpen] = useState(false)
+  const [promessesSignal, setPromessesSignal] = useState<{ count: number; enAttente: number; nonConfirmee: number; indisponible: boolean }>({ count: 0, enAttente: 0, nonConfirmee: 0, indisponible: true })
   const [controleFraisPortSignal, setControleFraisPortSignal] = useState<ControleFraisPortSignal>({
     status: 'green',
     count: 0,
@@ -1511,6 +1517,19 @@ const lastAppliedScopeSignatureRef = useRef<string | null>(null)
     }
   }
 
+  /** Alerte « Date de livraison interdite » : CDC à traiter (sans action ou
+   * action non confirmée après synchro), périmètre via RLS. Si le contrôle
+   * n'est pas encore installé en base, l'alerte reste à 0. */
+  async function refreshPromessesSignal() {
+    const a = await fetchPromessesAlerte()
+    setPromessesSignal({ count: a.aTraiter, enAttente: a.enAttente, nonConfirmee: a.nonConfirmee, indisponible: a.indisponible })
+  }
+
+  function openPromessesInterdites() {
+    router.push(`${PROMESSES_URL}&open=${Date.now()}`)
+    window.dispatchEvent(new CustomEvent(PROMESSES_OPEN_EVENT))
+  }
+
   /** Ouvre le portefeuille filtré sur les commandes non complètes à la date
    * de livraison : l'écran lit ?couverture=non-servable au montage (types
    * CDC, filtre couverture, horizon 2 mois) et l'événement couvre le cas où
@@ -1730,9 +1749,11 @@ const lastAppliedScopeSignatureRef = useRef<string | null>(null)
       // user_page_access / AccessContext et remplacer le test ici et dans
       // le bandeau.
       tasks.push(refreshCouvertureStockSignal(profile))
+      tasks.push(refreshPromessesSignal())
     } else {
       setCdcLivAvant2026Signal({ status: 'green', count: 0 })
       setCouvertureStockSignal({ status: 'green', count: 0, nbLignes: 0, nbClients: 0 })
+      setPromessesSignal({ count: 0, enAttente: 0, nonConfirmee: 0, indisponible: true })
     }
 
     if (rights.show_alert_controle_frais_port) {
@@ -1853,6 +1874,25 @@ const lastAppliedScopeSignatureRef = useRef<string | null>(null)
       ],
       clickable: couvertureStockSignal.count > 0,
       onOpen: openCouvertureStock,
+    })
+    // Masquée tant que le contrôle n'est pas installé en base.
+    if (!promessesSignal.indisponible) alertItems.push({
+      key: 'promesses-interdites',
+      label: PROMESSES_ALERT_LABEL,
+      description: `Commandes clients créées depuis 30 jours avec une date de livraison promise sans tenir compte du stock : intenable, ou prise sur le stock d'une commande plus ancienne qu'aucun arrivage ne recouvre à temps${promessesSignal.nonConfirmee > 0 ? ` — dont ${promessesSignal.nonConfirmee} action(s) non confirmée(s) après synchro` : ''}${promessesSignal.enAttente > 0 ? ` · ${promessesSignal.enAttente} en attente de synchro` : ''}.`,
+      status: promessesSignal.count > 0 ? 'red' : 'green',
+      count: promessesSignal.count,
+      unit: 'commande(s)',
+      objective: '0',
+      objectiveLabel: 'commande avec une date de livraison interdite',
+      expected: 'Pour chaque commande de la liste (Portefeuille livraison), dès sa saisie :',
+      expectedSteps: [
+        'Décaler la date de livraison dans SAGE / BLG — au plus tôt la « date exacte » proposée — après accord du client ;',
+        'ou déprioriser une autre commande de votre portefeuille (liste d’aide) en lui donnant une date de livraison tenable dans SAGE / BLG ;',
+        'Saisir l’action et un commentaire : la vérification se fait à la synchro suivante.',
+      ],
+      clickable: true,
+      onOpen: openPromessesInterdites,
     })
   }
   if (rights.show_alert_controle_frais_port) {
