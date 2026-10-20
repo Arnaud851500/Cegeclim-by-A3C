@@ -69,7 +69,7 @@ export type PromesseLigne = {
   q_manque: number
   date_exacte: string | null
   date_rupture: string | null
-  /** Aujourd'hui + 180 j (Hitachi H0001) ou 90 j + 7 j (autres) ; null si arrêt appro. */
+  /** Aujourd'hui + délai + sécurité (liste Hitachi 180 j/0, autres H0001 90 j/7, autres délai article/7) ; null si arrêt appro. */
   date_appro: string | null
   arret_appro: boolean
   /** Date proposée : date exacte si plus proche, sinon date_appro ; null = aucune. */

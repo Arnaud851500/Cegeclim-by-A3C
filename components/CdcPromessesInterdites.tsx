@@ -147,7 +147,7 @@ export default function CdcPromessesInterdites({
       'Pièces en défaut': l.q_manque,
       'Date exacte': l.date_exacte ? formatDateCourte(l.date_exacte) : 'aucune',
       'Date proposée': l.date_proposee ? formatDateCourte(l.date_proposee) : (l.arret_appro ? 'aucune (arrêt appro)' : 'aucune'),
-      'Origine date proposée': l.date_proposee && l.date_proposee !== l.date_exacte ? 'appro lancé aujourd’hui (Hitachi 180 j, autres 90 j + 7 j)' : l.date_proposee ? 'stock et arrivages connus' : '',
+      'Origine date proposée': l.date_proposee && l.date_proposee !== l.date_exacte ? 'appro lancé aujourd’hui (délai + sécurité)' : l.date_proposee ? 'stock et arrivages connus' : '',
       'Exacte − promise (j)': joursEntre(l.echeance, l.date_exacte),
       'Rupture créée le': formatDateCourte(l.date_rupture),
       'Promesses exposées': l.nb_victimes ? `${l.nb_victimes} CDC · ${l.q_victimes} p. : ${l.victimes || ''}` : '',
@@ -255,7 +255,7 @@ export default function CdcPromessesInterdites({
                         <span className="ml-1 text-[11px] text-slate-500">{Math.round(l.q_manque)} p.</span>
                       </td>
                       <td className="px-3 py-2 whitespace-nowrap font-semibold text-amber-800">{l.date_exacte ? formatDateCourte(l.date_exacte) : <span className="text-rose-700">aucune</span>}</td>
-                      <td className="px-3 py-2 whitespace-nowrap" title={l.date_proposee && l.date_proposee !== l.date_exacte ? 'Au plus court si un appro est lancé aujourd’hui : aujourd’hui + 180 j (Hitachi H0001, sans sécurité) ou 90 j + 7 j de sécurité (autres références)' : 'Date exacte : stock et arrivages déjà connus'}>
+                      <td className="px-3 py-2 whitespace-nowrap" title={l.date_proposee && l.date_proposee !== l.date_exacte ? 'Au plus court si un appro est lancé aujourd’hui : aujourd’hui + délai d’appro + 7 j ; Hitachi H0001 : 180 j sans sécurité pour la liste ciblée, 90 j + 7 j pour les autres réf. Hitachi' : 'Date exacte : stock et arrivages déjà connus'}>
                         {l.date_proposee
                           ? <><span className="font-semibold text-emerald-800">{formatDateCourte(l.date_proposee)}</span>{l.date_proposee !== l.date_exacte ? <span className="ml-1 text-[11px] text-slate-500">si appro</span> : null}</>
                           : <span className="font-semibold text-rose-700">{l.arret_appro ? 'arrêt appro' : 'aucune'}</span>}
@@ -402,7 +402,7 @@ function EditionAction({ commande, onClose, onSaved }: { commande: PromesseComma
                 <span className="mt-1 block text-xs font-semibold text-amber-700">Avant la date proposée ({formatDateCourte(commande.date_proposee)}) : la date restera probablement interdite à la vérification.</span>
               )}
               {commande.via_appro && (
-                <span className="mt-1 block text-xs text-slate-500">La date proposée suppose qu’un appro soit lancé aujourd’hui (Hitachi H0001 : 180 j ; autres : 90 j + 7 j de sécurité).</span>
+                <span className="mt-1 block text-xs text-slate-500">La date proposée suppose qu’un appro soit lancé aujourd’hui (délai d’appro + 7 j ; Hitachi H0001 : 180 j sans sécurité pour la liste ciblée, 90 j + 7 j pour les autres réf. Hitachi).</span>
               )}
             </label>
           )}

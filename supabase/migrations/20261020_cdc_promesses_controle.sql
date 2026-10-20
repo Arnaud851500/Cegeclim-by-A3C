@@ -334,7 +334,8 @@ declare
   v_nb_refs integer;
   v_nb_anal integer;
   v_nb_interdites integer;
-  v_delai_defaut integer := coalesce((select valeur from public.appro_parametres where cle = 'promesses_delai_defaut_jours'), 90)::int;
+  v_delai_defaut integer := coalesce((select valeur from public.appro_parametres where cle = 'delai_appro_defaut_jours'), 30)::int;
+  v_delai_h0001 integer := coalesce((select valeur from public.appro_parametres where cle = 'promesses_delai_h0001_jours'), 90)::int;
   v_secu_defaut integer := coalesce((select valeur from public.appro_parametres where cle = 'promesses_securite_defaut_jours'), 7)::int;
 begin
   -- Un seul calcul à la fois.
@@ -527,11 +528,12 @@ begin
   ) v
   where v.ref = a.ref and v.bc = a.bc;
 
-  -- Exclusions (mêmes règles que le Portefeuille livraison). Délai de
-  -- référence (20/10/2026) : table cdc_promesses_delais (Hitachi H0001 :
-  -- 180 j sans sécurité), sinon 90 j + 7 j de sécurité (paramètres
-  -- promesses_delai_defaut_jours / promesses_securite_defaut_jours).
-  -- L'arrêt appro reste lu dans v_appro_delai_article.
+  -- Exclusions (mêmes règles que le Portefeuille livraison). Délai
+  -- (20/10/2026) : 1) table cdc_promesses_delais (150 réf. Hitachi : 180 j
+  -- sans sécurité) ; 2) autres références du fournisseur H0001 : 90 j
+  -- (paramètre promesses_delai_h0001_jours) ; 3) toutes les autres : délai
+  -- d'appro de l'article, inchangé. Sécurité hors table : 7 j (paramètre
+  -- promesses_securite_defaut_jours). Arrêt appro : v_appro_delai_article.
   update _pc_anal a set
     arret_appro = coalesce(d.arret_appro, false),
     date_appro = case when coalesce(d.arret_appro, false) then null
@@ -545,7 +547,9 @@ begin
            and coalesce(a.date_rupture, a.echeance) >= a.date_bc + d.delai then 'APPRO_POSSIBLE'
     end
   from (select r.ref, dl.arret_appro,
-               coalesce(pd.delai_jours, v_delai_defaut) delai,
+               case when pd.reference_article is not null then pd.delai_jours
+                    when dl.fournisseur_principal = 'H0001' then v_delai_h0001
+                    else coalesce(dl.delai_appro_jours, v_delai_defaut) end delai,
                case when pd.reference_article is not null then pd.securite_jours else v_secu_defaut end secu
         from (select distinct ref from _pc_anal) r
         left join public.v_appro_delai_article dl on dl.reference_article = r.ref
