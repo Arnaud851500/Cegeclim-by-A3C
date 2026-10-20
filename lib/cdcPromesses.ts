@@ -26,8 +26,13 @@
 import { supabase } from '@/lib/supabaseClient'
 
 export const PROMESSES_ALERT_LABEL = 'Date de livraison interdite'
+/** Fenêtre de contrôle : CDC créées depuis N jours (20/10/2026 : 7 jours,
+ * choix d'Arnaud). Doit correspondre au paramètre passé à
+ * refresh_cdc_promesses_controle() par la tâche pg_cron
+ * « cdc-promesses-controle-hourly ». Sert uniquement aux libellés. */
+export const PROMESSES_FENETRE_JOURS = 7
 export const PROMESSES_ALERT_DESCRIPTION =
-  'CDC ouvertes créées depuis 30 jours dont la date de livraison promise ne tient pas compte du stock disponible : intenable, ou prend le stock d’une commande plus ancienne.'
+  `CDC ouvertes créées depuis ${PROMESSES_FENETRE_JOURS} jours dont la date de livraison promise ne tient pas compte du stock disponible : intenable, ou prend le stock d’une commande plus ancienne.`
 export const PROMESSES_OPEN_EVENT = 'cegeclim:open-promesses-interdites'
 export const PROMESSES_URL = '/portefeuille-livraison?promesse=interdite'
 

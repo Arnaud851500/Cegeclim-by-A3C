@@ -23,7 +23,7 @@ import {
 // dédié avec action / commentaire par CDC. URL ?promesse=interdite ou
 // événement cegeclim:open-promesses-interdites. Voir lib/cdcPromesses.ts.
 import CdcPromessesInterdites from '@/components/CdcPromessesInterdites'
-import { PROMESSES_ALERT_LABEL, PROMESSES_OPEN_EVENT, fetchPromessesAlerte } from '@/lib/cdcPromesses'
+import { PROMESSES_ALERT_LABEL, PROMESSES_FENETRE_JOURS, PROMESSES_OPEN_EVENT, fetchPromessesAlerte } from '@/lib/cdcPromesses'
 
 type LignePortefeuille = {
   id: number | string | null
@@ -1981,7 +1981,7 @@ export default function PortefeuilleLivraisonPage() {
                 setPromessesOpen((v) => !v)
                 if (!promessesOpen) window.setTimeout(() => promessesPanelRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 200)
               }}
-              title={promessesOpen ? 'Masquer la liste des commandes à date de livraison interdite' : 'Afficher les CDC créées depuis 30 jours dont la date de livraison promise ne tient pas compte du stock disponible'}
+              title={promessesOpen ? 'Masquer la liste des commandes à date de livraison interdite' : `Afficher les CDC créées depuis ${PROMESSES_FENETRE_JOURS} jours dont la date de livraison promise ne tient pas compte du stock disponible`}
               className={[
                 'rounded-2xl border p-4 text-left shadow-sm',
                 (promessesCount || 0) > 0 ? 'border-rose-300 bg-rose-50' : 'border-emerald-200 bg-white',
@@ -1990,7 +1990,7 @@ export default function PortefeuilleLivraisonPage() {
             >
               <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">{PROMESSES_ALERT_LABEL}</div>
               <div className={['mt-1 text-2xl font-semibold', (promessesCount || 0) > 0 ? 'text-rose-700' : 'text-emerald-700'].join(' ')}>{promessesCount === null ? '—' : promessesCount.toLocaleString('fr-FR')}</div>
-              <div className="mt-1 text-[11px] text-slate-500">CDC à traiter (sans action ou action non confirmée) · créées depuis 30 j · date promise sans tenir compte du stock{promessesOpen ? ' · liste affichée' : ''}</div>
+              <div className="mt-1 text-[11px] text-slate-500">CDC à traiter (sans action ou action non confirmée) · créées depuis {PROMESSES_FENETRE_JOURS} j · date promise sans tenir compte du stock{promessesOpen ? ' · liste affichée' : ''}</div>
             </button>
           )}
           {isBlSelected && (

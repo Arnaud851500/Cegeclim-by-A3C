@@ -23,10 +23,10 @@ import {
 // show_alert_cdc_liv_avant_2026, aucune migration côté base.
 import { CDC_RETARD_LABEL, getCdcRetardDescription, getCdcRetardThresholdIso } from '@/lib/cdcRetard'
 // ÉVOLUTION (2026-10-20) : alerte « Date de livraison interdite » (CDC créées
-// depuis 30 jours dont la date promise ne tient pas compte du stock) -- voir
+// récemment dont la date promise ne tient pas compte du stock) -- voir
 // lib/cdcPromesses.ts. Suit le droit show_alert_cdc_liv_avant_2026, comme
 // l'alerte « Commande non complète ».
-import { PROMESSES_ALERT_LABEL, PROMESSES_OPEN_EVENT, PROMESSES_URL, fetchPromessesAlerte } from '@/lib/cdcPromesses'
+import { PROMESSES_ALERT_LABEL, PROMESSES_FENETRE_JOURS, PROMESSES_OPEN_EVENT, PROMESSES_URL, fetchPromessesAlerte } from '@/lib/cdcPromesses'
 
 // ÉVOLUTION (2026-09-15) : navigation desktop alignée sur le mobile.
 // - L'arborescence (blocs → écrans) vit dans lib/navigation.ts, partagée avec
@@ -1879,7 +1879,7 @@ const lastAppliedScopeSignatureRef = useRef<string | null>(null)
     if (!promessesSignal.indisponible) alertItems.push({
       key: 'promesses-interdites',
       label: PROMESSES_ALERT_LABEL,
-      description: `Commandes clients créées depuis 30 jours avec une date de livraison promise sans tenir compte du stock : intenable, ou prise sur le stock d'une commande plus ancienne qu'aucun arrivage ne recouvre à temps${promessesSignal.nonConfirmee > 0 ? ` — dont ${promessesSignal.nonConfirmee} action(s) non confirmée(s) après synchro` : ''}${promessesSignal.enAttente > 0 ? ` · ${promessesSignal.enAttente} en attente de synchro` : ''}.`,
+      description: `Commandes clients créées depuis ${PROMESSES_FENETRE_JOURS} jours avec une date de livraison promise sans tenir compte du stock : intenable, ou prise sur le stock d'une commande plus ancienne qu'aucun arrivage ne recouvre à temps${promessesSignal.nonConfirmee > 0 ? ` — dont ${promessesSignal.nonConfirmee} action(s) non confirmée(s) après synchro` : ''}${promessesSignal.enAttente > 0 ? ` · ${promessesSignal.enAttente} en attente de synchro` : ''}.`,
       status: promessesSignal.count > 0 ? 'red' : 'green',
       count: promessesSignal.count,
       unit: 'commande(s)',

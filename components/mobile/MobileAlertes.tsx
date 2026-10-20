@@ -29,6 +29,7 @@ import {
 import {
   ACTION_INFO,
   PROMESSES_ALERT_LABEL,
+  PROMESSES_FENETRE_JOURS,
   STATUT_INFO,
   VERDICT_INFO,
   formatDateCourte,
@@ -865,7 +866,7 @@ export default function MobileAlertes({
               <span style={{ fontSize: 11.5, color: 'rgba(255,255,255,0.55)' }}>{getCdcRetardDescription()}</span>
             )}
             {d.label === PROMESSES_ALERT_LABEL && (
-              <span style={{ fontSize: 11.5, color: 'rgba(255,255,255,0.55)' }}>CDC des 30 derniers jours promises sans tenir compte du stock · action + commentaire</span>
+              <span style={{ fontSize: 11.5, color: 'rgba(255,255,255,0.55)' }}>CDC des {PROMESSES_FENETRE_JOURS} derniers jours promises sans tenir compte du stock · action + commentaire</span>
             )}
             {d.label === NON_COMPLETE_ALERT_LABEL && (
               <span style={{ fontSize: 11.5, color: 'rgba(255,255,255,0.55)' }}>À livrer dans les 2 mois · article(s) non disponible(s) à la date</span>

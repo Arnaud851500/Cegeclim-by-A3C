@@ -7,7 +7,7 @@ import { useAccess } from '@/components/AccessContext'
 import type { AlertDetailItem } from './MobileAlertes'
 // ÉVOLUTION (2026-10-20) : deux alertes ajoutées sous le droit
 // show_alert_cdc_liv_avant_2026 (comme côté PC) :
-//   • « Date de livraison interdite » (CDC créées depuis 30 j dont la date
+//   • « Date de livraison interdite » (CDC créées récemment dont la date
 //     promise ne tient pas compte du stock -- lib/cdcPromesses.ts) ;
 //   • « Cde non complète à la date liv client » (CDC à livrer dans les 2 mois
 //     dont une ligne est en rupture ou en réception tardive -- même cache
