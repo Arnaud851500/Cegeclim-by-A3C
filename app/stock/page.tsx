@@ -1340,11 +1340,12 @@ function ArticleDetail({
       (acc, r) => ({
         stock_reel: acc.stock_reel + toNumber(r.stock_reel),
         stock_reserve: acc.stock_reserve + toNumber(r.stock_reserve),
+        stock_prepare: acc.stock_prepare + toNumber(r.stock_prepare),
         stock_disponible: acc.stock_disponible + toNumber(r.stock_disponible),
         stock_a_terme: acc.stock_a_terme + toNumber(r.stock_a_terme),
         stock_commande_fournisseur: acc.stock_commande_fournisseur + toNumber(r.stock_commande_fournisseur),
       }),
-      { stock_reel: 0, stock_reserve: 0, stock_disponible: 0, stock_a_terme: 0, stock_commande_fournisseur: 0 },
+      { stock_reel: 0, stock_reserve: 0, stock_prepare: 0, stock_disponible: 0, stock_a_terme: 0, stock_commande_fournisseur: 0 },
     )
   }, [depotRows])
 
@@ -1435,9 +1436,15 @@ function ArticleDetail({
           sub="physique − préparations, avant les CDC en portefeuille"
           variante="neutre"
         />
-        <Kpi label="Réel" value={loading || !totalDepot ? '…' : formatNumber(totalDepot.stock_reel)} />
-        <Kpi label="Réservé" value={loading || !totalDepot ? '…' : formatNumber(totalDepot.stock_reserve)} color={totalDepot && totalDepot.stock_reserve > 0 ? 'var(--cg-warn)' : undefined} />
-        <Kpi label="À terme (SAGE)" value={loading || !totalDepot ? '…' : formatNumber(totalDepot.stock_a_terme)} color={totalDepot && totalDepot.stock_a_terme < 0 ? C_ROUGE : undefined} />
+        <Kpi label="Réel" value={loading || !totalDepot ? '…' : formatNumber(totalDepot.stock_reel)} sub="physique en dépôt" />
+        <Kpi label="Préparé (PL)" value={loading || !totalDepot ? '…' : formatNumber(totalDepot.stock_prepare)} color={totalDepot && totalDepot.stock_prepare > 0 ? 'var(--cg-warn)' : undefined} sub="en préparation de livraison" />
+        <Kpi label="Réservé" value={loading || !totalDepot ? '…' : formatNumber(totalDepot.stock_reserve)} color={totalDepot && totalDepot.stock_reserve > 0 ? 'var(--cg-warn)' : undefined} sub="CDC pas encore préparées" />
+        <Kpi
+          label="À terme (SAGE)"
+          value={loading || !totalDepot ? '…' : formatNumber(totalDepot.stock_a_terme)}
+          color={totalDepot && totalDepot.stock_a_terme < 0 ? C_ROUGE : undefined}
+          sub={totalDepot ? `réel ${formatNumber(totalDepot.stock_reel)} − préparé ${formatNumber(totalDepot.stock_prepare)} − réservé ${formatNumber(totalDepot.stock_reserve)} + commandé ${formatNumber(totalDepot.stock_commande_fournisseur)}` : undefined}
+        />
         <Kpi label="Réceptions attendues" value={loading ? '…' : `+ ${formatNumber(totalReceptions)}`} color={C_BLEU} sub={receptionsAvecHypothese > 0 ? `${receptionsAvecHypothese} CDF en retard / sans date → demain` : `${receptions.length} ligne(s) CDF`} />
         <Kpi label="Besoins CDC fermes" value={loading ? '…' : `− ${formatNumber(totalBesoins)}`} color={C_ORANGE} sub={`${couverture.length} ligne(s) · ${nonCompletes.length} non complète(s)`} />
         <Kpi label="Stock projeté fin de besoins" value={loading ? '…' : formatNumber(stockFinal)} color={stockFinal < 0 ? C_ROUGE : 'var(--cg-ink)'} sub="après toutes réceptions et CDC connus" />
@@ -1934,7 +1941,7 @@ const styles: Record<string, React.CSSProperties> = themed({
   detailRef: { fontFamily: 'var(--font-mono)', fontSize: 24, fontWeight: 800, color: '#fff', letterSpacing: '-0.01em' },
   detailDesignation: { marginTop: 2, fontSize: 14, color: 'rgba(255,255,255,0.65)' },
 
-  kpiRow: { display: 'grid', gridTemplateColumns: '1.35fr 1.15fr repeat(6, minmax(0, 1fr))', gap: 10 },
+  kpiRow: { display: 'grid', gridTemplateColumns: '1.35fr 1.15fr repeat(7, minmax(0, 1fr))', gap: 10 },
   kpi: { borderRadius: 14, border: '1px solid rgba(255,255,255,0.10)', background: 'var(--cg-tile)', padding: '12px 14px', minWidth: 0 },
   kpiDispo: { border: '1px solid rgba(143,212,168,0.5)', background: 'rgba(143,212,168,0.10)' },
   kpiRupture: { border: '1px solid rgba(193,104,60,0.55)', background: 'rgba(193,104,60,0.12)' },
