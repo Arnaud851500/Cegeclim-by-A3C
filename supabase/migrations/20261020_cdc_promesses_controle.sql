@@ -59,6 +59,11 @@ create table if not exists public.cdc_promesses_controle (
   --                    la saisie arrive avant que quiconque manque de stock.
   -- Une ligne exclue est traitée comme tenable dans les écrans et l'alerte.
   motif_exclusion text,
+  -- Date au plus court si un appro est lancé le jour du calcul (même règle que
+  -- l'écran Stock articles : aujourd'hui + délai d'appro + 7 j de sécurité) ;
+  -- null si la référence est en arrêt / blocage appro.
+  date_appro date,
+  arret_appro boolean,
   premiere_analyse timestamptz not null default now(),
   premiere_detection timestamptz,
   calcule_le timestamptz not null default now(),
@@ -284,7 +289,8 @@ begin
             from _pc_cdc j where j.ref = i.ref and j.date_bc <= i.date_bc and j.bc <> i.bc) promesses_ouvertes,
          null::numeric solde_echeance, null::numeric atp_echeance,
          null::text verdict, null::numeric q_manque, null::date date_exacte, null::date date_rupture,
-         0::int nb_victimes, 0::numeric q_victimes, null::text victimes, null::text motif_exclusion
+         0::int nb_victimes, 0::numeric q_victimes, null::text victimes, null::text motif_exclusion,
+         null::date date_appro, null::boolean arret_appro
   from _pc_cdc i
   join _pc_stock st on st.ref = i.ref
   where i.bc in (select bc from _pc_bc)
@@ -348,7 +354,11 @@ begin
   where v.ref = a.ref and v.bc = a.bc;
 
   -- Exclusions (mêmes règles que le Portefeuille livraison).
-  update _pc_anal a set motif_exclusion = case
+  update _pc_anal a set
+    arret_appro = coalesce(d.arret_appro, false),
+    date_appro = case when coalesce(d.arret_appro, false) then null
+                      else current_date + coalesce(d.delai_appro_jours, v_delai_defaut) + 7 end,
+    motif_exclusion = case
       when not exists (select 1 from sage.stock_depot sd where sd.sto_art_num = a.ref) then 'HORS_STOCK'
       -- La rupture créée (ou, à défaut, la date promise) tombe après la
       -- période figée (création + délai d'appro) : un appro passé à la
@@ -371,13 +381,13 @@ begin
     date_creation, date_livraison, echeance, date_bl, ouverte, quantite, quantite_ouverte,
     stock_phys, promesses_ouvertes, stock_projete_creation, solde_echeance, atp_echeance,
     verdict, q_manque, date_exacte, date_rupture, nb_victimes, q_victimes, victimes, motif_exclusion,
-    premiere_analyse, premiere_detection, calcule_le)
+    date_appro, arret_appro, premiere_analyse, premiere_detection, calcule_le)
   select a.bc, a.ref, a.tiers, a.nom, a.collaborateur, rt.representant,
          coalesce(ag.agence, 'NON AFFECTE'),
          a.date_bc, a.date_livraison, a.echeance, a.date_bl, a.ouverte, a.q, a.q_ouverte,
          a.stock_phys, a.promesses_ouvertes, a.stock_phys - a.promesses_ouvertes, a.solde_echeance, a.atp_echeance,
          a.verdict, a.q_manque, a.date_exacte, a.date_rupture, a.nb_victimes, a.q_victimes, a.victimes, a.motif_exclusion,
-         now(), case when a.verdict <> 'OK' and a.motif_exclusion is null then now() end, now()
+         a.date_appro, a.arret_appro, now(), case when a.verdict <> 'OK' and a.motif_exclusion is null then now() end, now()
   from _pc_anal a
   left join public.ref_tiers rt on rt.numero = a.tiers
   left join lateral (
@@ -394,6 +404,7 @@ begin
     atp_echeance = excluded.atp_echeance, verdict = excluded.verdict, q_manque = excluded.q_manque,
     date_exacte = excluded.date_exacte, date_rupture = excluded.date_rupture, nb_victimes = excluded.nb_victimes,
     q_victimes = excluded.q_victimes, victimes = excluded.victimes, motif_exclusion = excluded.motif_exclusion,
+    date_appro = excluded.date_appro, arret_appro = excluded.arret_appro,
     premiere_detection = coalesce(c.premiere_detection, excluded.premiere_detection),
     calcule_le = excluded.calcule_le;
 
@@ -453,6 +464,13 @@ select c.numero_document, c.reference_article, c.numero_tiers, c.nom_tiers, c.co
        case when c.motif_exclusion is null then c.verdict else 'OK' end verdict,
        c.q_manque, c.date_exacte, c.date_rupture, c.nb_victimes, c.q_victimes, c.victimes,
        c.premiere_analyse, c.premiere_detection, c.calcule_le, c.motif_exclusion, c.verdict verdict_brut,
+       c.date_appro, c.arret_appro,
+       -- Date proposée au commercial : la date exacte (stock + arrivages connus)
+       -- si elle est plus proche, sinon la date au plus court avec un appro
+       -- lancé aujourd'hui ; null = aucune date possible (arrêt appro).
+       case when c.date_exacte is null then c.date_appro
+            when c.date_appro is null then c.date_exacte
+            else least(c.date_exacte, c.date_appro) end date_proposee,
        a.action, a.nouvelle_date, a.cdc_depriorisee, a.commentaire, a.statut statut_action,
        a.verification, a.verifie_le, a.saisi_par_nom, a.saisi_par_email, a.saisi_le,
        case

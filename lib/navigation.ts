@@ -48,6 +48,7 @@ export type MenuAccessKey = Exclude<
   | 'show_alert_capacite_gaz'
   | 'show_alert_todo'
   | 'show_alert_data_coherence'
+  | 'show_alert_dates_interdites'
   | 'can_change_scope'
 >
 

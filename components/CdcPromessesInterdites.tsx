@@ -24,6 +24,7 @@ import {
   formatSigne,
   grouperParCommande,
   joursEntre,
+  lienStockArticle,
   supprimerAction,
   verifierSaisie,
   type PromesseAction,
@@ -145,6 +146,8 @@ export default function CdcPromessesInterdites({
       Verdict: VERDICT_INFO[l.verdict].label,
       'Pièces en défaut': l.q_manque,
       'Date exacte': l.date_exacte ? formatDateCourte(l.date_exacte) : 'aucune',
+      'Date proposée': l.date_proposee ? formatDateCourte(l.date_proposee) : (l.arret_appro ? 'aucune (arrêt appro)' : 'aucune'),
+      'Origine date proposée': l.date_proposee && l.date_proposee !== l.date_exacte ? 'appro lancé aujourd’hui (délai + 7 j)' : l.date_proposee ? 'stock et arrivages connus' : '',
       'Exacte − promise (j)': joursEntre(l.echeance, l.date_exacte),
       'Rupture créée le': formatDateCourte(l.date_rupture),
       'Promesses exposées': l.nb_victimes ? `${l.nb_victimes} CDC · ${l.q_victimes} p. : ${l.victimes || ''}` : '',
@@ -169,7 +172,7 @@ export default function CdcPromessesInterdites({
           <p className="mt-1 max-w-5xl text-sm text-slate-500">
             CDC ouvertes créées depuis {PROMESSES_FENETRE_JOURS} jours dont la date de livraison promise ne tient pas compte du stock : <b className="text-rose-700">intenable</b> (le stock n’y sera pas à la date, même avec les arrivages) ou <b className="text-amber-700">crée un retard</b> (livrable, mais sur le stock d’une commande plus ancienne qu’aucun arrivage ne recouvre à temps). Même calcul que l’écran Reconstruction du stock projeté, refait après chaque synchro SAGE{calculeLe ? ` (dernier calcul ${new Date(calculeLe).toLocaleString('fr-FR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })})` : ''}.
             {' '}Ne sont pas retenues, comme dans le reste du portefeuille : les références non gérées en stock, et les commandes dont la rupture créée tombe après le délai d'appro (un appro passé à la saisie la couvre).
-            {' '}Pour chaque commande : <b>décaler la date</b> (au plus tôt la date exacte) ou <b>déprioriser une autre commande</b> de votre portefeuille, avec un commentaire. L’action est vérifiée à la synchro suivante.
+            {' '}Pour chaque commande : <b>décaler la date</b> (au plus tôt la date proposée, qui suppose au besoin un appro lancé le jour même) ou <b>déprioriser une autre commande</b> de votre portefeuille, avec un commentaire. L’action est vérifiée à la synchro suivante.
           </p>
           <div className="mt-2 flex flex-wrap gap-2 text-xs font-semibold">
             <span className="rounded-full border border-rose-300 bg-rose-50 px-2.5 py-1 text-rose-800">{compteurs.aTraiter} à traiter</span>
@@ -206,7 +209,7 @@ export default function CdcPromessesInterdites({
           <table className="min-w-full border-collapse text-sm">
             <thead className="sticky top-0 z-10 bg-slate-100 text-left text-[11px] uppercase tracking-wide text-slate-500">
               <tr>
-                {['Document', 'Client', 'Agence', 'Créée', 'Promise', 'Référence', 'Qté', 'Stock fin de journée', 'Solde à la date promise', 'Dispo réelle', 'Verdict', 'Date exacte', 'Exacte − promise', 'Rupture créée le', 'Promesses exposées', 'Action / commentaire'].map((h) => (
+                {['Document', 'Client', 'Agence', 'Créée', 'Promise', 'Référence', 'Qté', 'Stock fin de journée', 'Solde à la date promise', 'Dispo réelle', 'Verdict', 'Date exacte', 'Date proposée', 'Exacte − promise', 'Rupture créée le', 'Promesses exposées', 'Action / commentaire'].map((h) => (
                   <th key={h} className="whitespace-nowrap border-b border-slate-200 px-3 py-2 font-semibold">{h}</th>
                 ))}
               </tr>
@@ -222,7 +225,7 @@ export default function CdcPromessesInterdites({
                       <td className="px-3 py-2">{c.nom_tiers}<div className="text-[11px] text-slate-500">{c.numero_tiers}</div></td>
                       <td className="px-3 py-2">{c.agence}</td>
                       <td className="px-3 py-2 whitespace-nowrap">{formatDateCourte(c.date_creation)}</td>
-                      <td colSpan={11} className="px-3 py-2 text-slate-500">Date désormais tenable — vérification de l’action à la prochaine synchro (CDC dépriorisée à contrôler).</td>
+                      <td colSpan={12} className="px-3 py-2 text-slate-500">Date désormais tenable — vérification de l’action à la prochaine synchro (CDC dépriorisée à contrôler).</td>
                       <td className="px-3 py-2 align-top"><CelluleAction c={c} onEdit={() => setEdition(c)} /></td>
                     </tr>
                   )
@@ -241,7 +244,7 @@ export default function CdcPromessesInterdites({
                       )}
                       <td className="px-3 py-2 whitespace-nowrap">{formatDateCourte(l.echeance)}</td>
                       <td className="px-3 py-2 whitespace-nowrap">
-                        <a href={`/stock/reconstruction?ref=${encodeURIComponent(l.reference_article)}&depuis=${l.date_creation.slice(0, 8)}01`} target="_blank" rel="noopener noreferrer" className="font-mono text-blue-700 hover:underline" title="Ouvrir la reconstruction du stock de la référence">{l.reference_article}</a>
+                        <a href={lienStockArticle(l.reference_article)} target="_blank" rel="noopener noreferrer" className="font-mono text-blue-700 hover:underline" title="Ouvrir la fiche de la référence dans Stock articles">{l.reference_article}</a>
                       </td>
                       <td className="px-3 py-2 text-right font-mono">{Math.round(l.quantite).toLocaleString('fr-FR')}</td>
                       <td className="px-3 py-2 text-right font-mono" title={`Promesses ouvertes toutes dates : ${Math.round(l.promesses_ouvertes)} · stock projeté ${formatSigne(l.stock_projete_creation)}`}>{Math.round(l.stock_phys).toLocaleString('fr-FR')}</td>
@@ -252,6 +255,11 @@ export default function CdcPromessesInterdites({
                         <span className="ml-1 text-[11px] text-slate-500">{Math.round(l.q_manque)} p.</span>
                       </td>
                       <td className="px-3 py-2 whitespace-nowrap font-semibold text-amber-800">{l.date_exacte ? formatDateCourte(l.date_exacte) : <span className="text-rose-700">aucune</span>}</td>
+                      <td className="px-3 py-2 whitespace-nowrap" title={l.date_proposee && l.date_proposee !== l.date_exacte ? 'Au plus court si un appro est lancé aujourd’hui : aujourd’hui + délai d’appro + 7 j (comme « Livraison client dès » de l’écran Stock articles)' : 'Date exacte : stock et arrivages déjà connus'}>
+                        {l.date_proposee
+                          ? <><span className="font-semibold text-emerald-800">{formatDateCourte(l.date_proposee)}</span>{l.date_proposee !== l.date_exacte ? <span className="ml-1 text-[11px] text-slate-500">si appro</span> : null}</>
+                          : <span className="font-semibold text-rose-700">{l.arret_appro ? 'arrêt appro' : 'aucune'}</span>}
+                      </td>
                       <td className={['px-3 py-2 text-right font-mono', ecart !== null && ecart > 0 ? 'text-rose-700' : ''].join(' ')}>{ecart === null ? '—' : `${ecart > 0 ? '+' : ''}${ecart} j`}</td>
                       <td className="px-3 py-2 whitespace-nowrap text-rose-700">{formatDateCourte(l.date_rupture)}</td>
                       <td className="min-w-[220px] px-3 py-2">{l.nb_victimes > 0 ? <><div className="font-mono text-amber-800">{l.nb_victimes} CDC · {Math.round(l.q_victimes)} p.</div><div className="text-[11px] text-slate-500">{l.victimes}{l.nb_victimes > 5 ? ' …' : ''}</div></> : '—'}</td>
@@ -263,7 +271,7 @@ export default function CdcPromessesInterdites({
                 })
               })}
               {commandesAffichees.length === 0 && (
-                <tr><td colSpan={16} className="px-3 py-6 text-center text-sm text-slate-500">{commandesPerimetre.length === 0 ? 'Aucune commande à date de livraison interdite dans votre périmètre.' : 'Aucune commande pour ces filtres.'}</td></tr>
+                <tr><td colSpan={17} className="px-3 py-6 text-center text-sm text-slate-500">{commandesPerimetre.length === 0 ? 'Aucune commande à date de livraison interdite dans votre périmètre.' : 'Aucune commande pour ces filtres.'}</td></tr>
               )}
             </tbody>
           </table>
@@ -309,7 +317,7 @@ function CelluleAction({ c, onEdit }: { c: PromesseCommande; onEdit: () => void 
 
 function EditionAction({ commande, onClose, onSaved }: { commande: PromesseCommande; onClose: () => void; onSaved: () => void }) {
   const [action, setAction] = useState<PromesseAction>(commande.action || 'decaler')
-  const [nouvelleDate, setNouvelleDate] = useState(commande.nouvelle_date || commande.date_exacte || '')
+  const [nouvelleDate, setNouvelleDate] = useState(commande.nouvelle_date || commande.date_proposee || '')
   const [cdcDepriorisee, setCdcDepriorisee] = useState(commande.cdc_depriorisee || '')
   const [commentaire, setCommentaire] = useState(commande.commentaire || '')
   const [candidats, setCandidats] = useState<PromesseCandidat[]>([])
@@ -367,7 +375,7 @@ function EditionAction({ commande, onClose, onSaved }: { commande: PromesseComma
             <h3 className="text-lg font-semibold">Traiter {commande.numero_document}</h3>
             <p className="text-sm text-slate-500">
               {commande.nom_tiers} ({commande.numero_tiers}) · créée le {formatDateCourte(commande.date_creation)} · promise le {formatDateCourte(commande.echeance)} ·{' '}
-              <span className="font-semibold text-amber-800">date exacte {commande.date_exacte ? formatDateCourte(commande.date_exacte) : 'aucune'}</span>
+              <span className="font-semibold text-emerald-800">date proposée {commande.date_proposee ? `${formatDateCourte(commande.date_proposee)}${commande.via_appro ? ' (si appro lancé aujourd’hui)' : ''}` : commande.arret_appro ? 'aucune (arrêt appro)' : 'aucune'}</span>
             </p>
             <p className="mt-1 text-xs text-slate-500">Références : {commande.lignes.map((l) => `${l.reference_article} (${VERDICT_INFO[l.verdict].court}, ${Math.round(l.q_manque)} p.)`).join(' · ')}</p>
           </div>
@@ -390,8 +398,11 @@ function EditionAction({ commande, onClose, onSaved }: { commande: PromesseComma
             <label className="block text-sm">
               <span className="font-semibold">Nouvelle date de livraison</span>
               <input type="date" value={nouvelleDate} onChange={(e) => setNouvelleDate(e.target.value)} className="mt-1 block h-10 rounded-xl border border-slate-300 px-3" />
-              {commande.date_exacte && nouvelleDate && nouvelleDate < commande.date_exacte && (
-                <span className="mt-1 block text-xs font-semibold text-amber-700">Avant la date exacte ({formatDateCourte(commande.date_exacte)}) : la date restera probablement interdite à la vérification.</span>
+              {commande.date_proposee && nouvelleDate && nouvelleDate < commande.date_proposee && (
+                <span className="mt-1 block text-xs font-semibold text-amber-700">Avant la date proposée ({formatDateCourte(commande.date_proposee)}) : la date restera probablement interdite à la vérification.</span>
+              )}
+              {commande.via_appro && (
+                <span className="mt-1 block text-xs text-slate-500">La date proposée suppose qu’un appro soit lancé aujourd’hui (délai d’appro + 7 j de sécurité).</span>
               )}
             </label>
           )}

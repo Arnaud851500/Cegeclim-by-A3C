@@ -36,6 +36,11 @@ export const PROMESSES_ALERT_DESCRIPTION =
 export const PROMESSES_OPEN_EVENT = 'cegeclim:open-promesses-interdites'
 export const PROMESSES_URL = '/portefeuille-livraison?promesse=interdite'
 
+/** Lien vers la fiche de la référence dans l'écran Stock articles. */
+export function lienStockArticle(reference: string) {
+  return `/stock?ref=${encodeURIComponent(reference)}`
+}
+
 export type PromesseVerdict = 'OK' | 'INTENABLE' | 'CREE_RETARD'
 export type PromesseAction = 'decaler' | 'deprioriser' | 'autre'
 export type PromesseStatut = 'a_traiter' | 'en_attente' | 'non_confirmee' | 'resolue'
@@ -64,6 +69,11 @@ export type PromesseLigne = {
   q_manque: number
   date_exacte: string | null
   date_rupture: string | null
+  /** Aujourd'hui + délai d'appro + 7 j (null si arrêt / blocage appro). */
+  date_appro: string | null
+  arret_appro: boolean
+  /** Date proposée : date exacte si plus proche, sinon date_appro ; null = aucune. */
+  date_proposee: string | null
   nb_victimes: number
   q_victimes: number
   victimes: string | null
@@ -92,6 +102,11 @@ export type PromesseCommande = {
   echeance: string
   verdict: PromesseVerdict
   date_exacte: string | null
+  /** Date au plus court pour toute la commande (la plus tardive de ses lignes) ; null = aucune. */
+  date_proposee: string | null
+  /** Vrai si la date proposée vient d'un appro à lancer (et non du stock / arrivages connus). */
+  via_appro: boolean
+  arret_appro: boolean
   statut_traitement: PromesseStatut
   action: PromesseAction | null
   nouvelle_date: string | null
@@ -124,7 +139,7 @@ export const VERDICT_INFO: Record<PromesseVerdict, { label: string; court: strin
 }
 
 export const ACTION_INFO: Record<PromesseAction, { label: string; aide: string }> = {
-  decaler: { label: 'Décaler la date de livraison', aide: 'Nouvelle date à saisir dans SAGE / BLG — au plus tôt la date exacte.' },
+  decaler: { label: 'Décaler la date de livraison', aide: 'Nouvelle date à saisir dans SAGE / BLG — au plus tôt la date proposée (stock et arrivages connus, ou appro lancé aujourd’hui).' },
   deprioriser: { label: 'Déprioriser une autre commande', aide: 'Une autre CDC de votre portefeuille prend une date plus tardive (à saisir dans SAGE / BLG) pour laisser passer celle-ci.' },
   autre: { label: 'Autre (commentaire)', aide: 'Substitution, livraison partielle, accord client… à préciser dans le commentaire.' },
 }
@@ -165,6 +180,9 @@ function normaliserLigne(r: Record<string, any>): PromesseLigne {
     q_manque: num(r.q_manque),
     date_exacte: dateIso(r.date_exacte),
     date_rupture: dateIso(r.date_rupture),
+    date_appro: dateIso(r.date_appro),
+    arret_appro: Boolean(r.arret_appro),
+    date_proposee: dateIso(r.date_proposee) ?? (r.date_proposee === undefined ? dateIso(r.date_exacte) : null),
     nb_victimes: num(r.nb_victimes),
     q_victimes: num(r.q_victimes),
     victimes: txt(r.victimes),
@@ -195,6 +213,7 @@ export function grouperParCommande(lignes: PromesseLigne[]): PromesseCommande[] 
       c = {
         numero_document: l.numero_document, numero_tiers: l.numero_tiers, nom_tiers: l.nom_tiers, representant: l.representant,
         agence: l.agence, date_creation: l.date_creation, echeance: l.echeance, verdict: l.verdict, date_exacte: l.date_exacte,
+        date_proposee: l.date_proposee, via_appro: false, arret_appro: false,
         statut_traitement: l.statut_traitement, action: l.action, nouvelle_date: l.nouvelle_date, cdc_depriorisee: l.cdc_depriorisee,
         commentaire: l.commentaire, verification: l.verification, saisi_par_nom: l.saisi_par_nom, saisi_le: l.saisi_le, lignes: [],
       }
@@ -212,6 +231,11 @@ export function grouperParCommande(lignes: PromesseLigne[]): PromesseCommande[] 
     c.date_exacte = c.lignes.some((l) => l.date_exacte === null)
       ? null
       : c.lignes.reduce((d, l) => (l.date_exacte! > d ? l.date_exacte! : d), c.lignes[0].date_exacte!)
+    c.date_proposee = c.lignes.some((l) => l.date_proposee === null)
+      ? null
+      : c.lignes.reduce((d, l) => (l.date_proposee! > d ? l.date_proposee! : d), c.lignes[0].date_proposee!)
+    c.via_appro = c.lignes.some((l) => l.date_proposee !== null && l.date_proposee !== l.date_exacte)
+    c.arret_appro = c.lignes.some((l) => l.arret_appro)
   }
   return Array.from(map.values())
     .sort((a, b) => b.date_creation.localeCompare(a.date_creation) || a.numero_document.localeCompare(b.numero_document))

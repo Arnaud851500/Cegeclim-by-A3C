@@ -5,9 +5,8 @@ import { usePathname } from 'next/navigation'
 import { supabase } from '@/lib/supabaseClient'
 import { useAccess } from '@/components/AccessContext'
 import type { AlertDetailItem } from './MobileAlertes'
-// ÉVOLUTION (2026-10-20) : deux alertes ajoutées sous le droit
-// show_alert_cdc_liv_avant_2026 (comme côté PC) :
-//   • « Date de livraison interdite » (CDC créées récemment dont la date
+// ÉVOLUTION (2026-10-20) : deux alertes ajoutées :
+//   • « Date de livraison interdite » (droit dédié show_alert_dates_interdites) (CDC créées récemment dont la date
 //     promise ne tient pas compte du stock -- lib/cdcPromesses.ts) ;
 //   • « Cde non complète à la date liv client » (CDC à livrer dans les 2 mois
 //     dont une ligne est en rupture ou en réception tardive -- même cache
@@ -231,8 +230,8 @@ export function useMobileAlertsCount() {
           }
         }
 
-        if (rights.show_alert_cdc_liv_avant_2026) {
-          // Date de livraison interdite (périmètre via RLS).
+        if (rights.show_alert_dates_interdites) {
+          // Date de livraison interdite (périmètre via RLS) -- droit dédié.
           const promesses = await fetchPromessesAlerte()
           if (!promesses.indisponible) {
             items.push({
@@ -243,7 +242,9 @@ export function useMobileAlertsCount() {
               subLabel: 'non confirmée(s)',
             })
           }
+        }
 
+        if (rights.show_alert_cdc_liv_avant_2026) {
           // Commandes non complètes à la date de livraison (2 mois).
           try {
             let requete = supabase
@@ -383,6 +384,7 @@ export function useMobileAlertsCount() {
     rights.show_alert_controle_frais_port,
     rights.show_alert_capacite_gaz,
     rights.show_alert_data_coherence,
+    rights.show_alert_dates_interdites,
     pathname,
   ])
 

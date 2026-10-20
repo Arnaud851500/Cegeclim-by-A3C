@@ -38,7 +38,7 @@ export default function MobilePromesseActionSheet({
   onSaved: () => void
 }) {
   const [action, setAction] = useState<PromesseAction>(commande.action || 'decaler')
-  const [nouvelleDate, setNouvelleDate] = useState(commande.nouvelle_date || commande.date_exacte || '')
+  const [nouvelleDate, setNouvelleDate] = useState(commande.nouvelle_date || commande.date_proposee || '')
   const [cdcDepriorisee, setCdcDepriorisee] = useState(commande.cdc_depriorisee || '')
   const [commentaire, setCommentaire] = useState(commande.commentaire || '')
   const [candidats, setCandidats] = useState<PromesseCandidat[] | null>(null)
@@ -91,7 +91,7 @@ export default function MobilePromesseActionSheet({
         <div>
           <div style={{ fontSize: 16, fontWeight: 700, color: '#fff' }}>Traiter {commande.numero_document}</div>
           <div style={{ fontSize: 12.5, color: 'rgba(255,255,255,0.55)', marginTop: 2 }}>
-            {commande.nom_tiers} · promise le {formatDateCourte(commande.echeance)} · <span style={{ color: '#E0A961', fontWeight: 700 }}>date exacte {commande.date_exacte ? formatDateCourte(commande.date_exacte) : 'aucune'}</span>
+            {commande.nom_tiers} · promise le {formatDateCourte(commande.echeance)} · <span style={{ color: '#8fd4a8', fontWeight: 700 }}>date proposée {commande.date_proposee ? `${formatDateCourte(commande.date_proposee)}${commande.via_appro ? ' (si appro lancé aujourd’hui)' : ''}` : commande.arret_appro ? 'aucune (arrêt appro)' : 'aucune'}</span>
           </div>
           <div style={{ fontSize: 11.5, color: 'rgba(255,255,255,0.4)', marginTop: 2 }}>
             {commande.lignes.map((l) => `${l.reference_article} (${VERDICT_INFO[l.verdict].court}, ${Math.round(l.q_manque)} p.)`).join(' · ')}
@@ -118,8 +118,8 @@ export default function MobilePromesseActionSheet({
           <div>
             <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.55)', marginBottom: 6 }}>Nouvelle date de livraison</div>
             <input type="date" value={nouvelleDate} onChange={(e) => setNouvelleDate(e.target.value)} style={champ} />
-            {commande.date_exacte && nouvelleDate && nouvelleDate < commande.date_exacte && (
-              <div style={{ fontSize: 12, color: '#E0A961', marginTop: 4 }}>Avant la date exacte : la date restera probablement interdite.</div>
+            {commande.date_proposee && nouvelleDate && nouvelleDate < commande.date_proposee && (
+              <div style={{ fontSize: 12, color: '#E0A961', marginTop: 4 }}>Avant la date proposée : la date restera probablement interdite.</div>
             )}
           </div>
         )}

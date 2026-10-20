@@ -30,6 +30,7 @@ type AlertKey =
   | 'show_alert_capacite_gaz'
   | 'show_alert_todo'
   | 'show_alert_data_coherence'
+  | 'show_alert_dates_interdites'
 
 type AccessProfile = Record<PermissionKey | AlertKey, boolean> & {
   id: string
@@ -149,6 +150,7 @@ const ALERTS: Array<{ key: AlertKey; label: string; description: string }> = [
   { key: 'show_alert_capacite_gaz', label: 'Capacité gaz', description: 'Certifications échues ou proches de l’échéance.' },
   { key: 'show_alert_todo', label: 'À faire', description: 'Actions ouvertes et en retard.' },
   { key: 'show_alert_data_coherence', label: 'Cohérence données', description: 'Écarts entre lignes sources, caches, indicateurs et flux articles (hors SMC).' },
+  { key: 'show_alert_dates_interdites', label: 'Date de livraison interdite', description: 'CDC récentes promises sans tenir compte du stock (action + commentaire du commercial).' },
 ]
 
 const LANDING_PAGES = [
@@ -207,6 +209,7 @@ const EMPTY_PROFILE: AccessProfile = {
   show_alert_capacite_gaz: false,
   show_alert_todo: false,
   show_alert_data_coherence: false,
+  show_alert_dates_interdites: false,
 }
 
 const EMPTY_USER: UserAccess = {

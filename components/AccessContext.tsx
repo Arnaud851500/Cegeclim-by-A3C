@@ -37,6 +37,8 @@ export type AccessRights = {
   show_alert_capacite_gaz: boolean
   show_alert_todo: boolean
   show_alert_data_coherence: boolean
+  /** (2026-10-20) Alerte « Date de livraison interdite », indépendante de l'alerte CDC. */
+  show_alert_dates_interdites: boolean
 }
 
 type AccessContextType = {
@@ -87,6 +89,7 @@ type AccessProfileRow = {
   show_alert_capacite_gaz?: boolean | null
   show_alert_todo?: boolean | null
   show_alert_data_coherence?: boolean | null
+  show_alert_dates_interdites?: boolean | null
 }
 
 function normalizeList(value: unknown, fallback: string[] = []): string[] {
@@ -158,6 +161,7 @@ export const defaultRights: AccessRights = {
   show_alert_capacite_gaz: false,
   show_alert_todo: false,
   show_alert_data_coherence: false,
+  show_alert_dates_interdites: false,
 }
 
 const AccessContext = createContext<AccessContextType>({
@@ -340,6 +344,21 @@ async function fetchAccess(): Promise<{ email: string | null; rights: AccessRigh
     }
 
     const profile = profileData as AccessProfileRow
+
+    // (2026-10-20) Droit « Date de livraison interdite » lu à part et sans
+    // bloquer : tant que la colonne n'existe pas (script SQL 20261020d non
+    // passé), la requête échoue et l'alerte reste simplement masquée -- les
+    // autres droits ne sont pas touchés.
+    let datesInterdites = false
+    {
+      const { data: diData, error: diError } = await supabase
+        .from('access_profiles')
+        .select('show_alert_dates_interdites')
+        .eq('id', profileId)
+        .maybeSingle()
+      if (!diError) datesInterdites = !!(diData as { show_alert_dates_interdites?: boolean | null } | null)?.show_alert_dates_interdites
+    }
+
     if (profile.is_active === false) {
       return {
         email: normalizedEmail,
@@ -395,6 +414,9 @@ async function fetchAccess(): Promise<{ email: string | null; rights: AccessRigh
         show_alert_capacite_gaz: !!profile.show_alert_capacite_gaz,
         show_alert_todo: !!profile.show_alert_todo,
         show_alert_data_coherence: !!profile.show_alert_data_coherence,
+        // Colonne lue à part (voir plus haut) : absente tant que le script SQL
+        // 20261020d n'est pas passé -- l'alerte reste alors masquée.
+        show_alert_dates_interdites: datesInterdites,
       },
     }
   } catch (error) {

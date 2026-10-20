@@ -695,7 +695,7 @@ export default function MobileAlertes({
           id: c.numero_document,
           primary: `${icone}${c.numero_document}`,
           secondary: [c.nom_tiers || c.numero_tiers, c.lignes.map((l) => l.reference_article).join(', ')].filter(Boolean).join(' · '),
-          trailing: `${formatDateCourte(c.echeance)} → ${c.date_exacte ? formatDateCourte(c.date_exacte) : 'aucune'}`,
+          trailing: `${formatDateCourte(c.echeance)} → ${c.date_proposee ? formatDateCourte(c.date_proposee) : 'aucune'}`,
           trailingColor: c.verdict === 'INTENABLE' ? '#e0a685' : '#E0A961',
           onClick: () => openPromesseDetail(c),
         }
@@ -707,7 +707,8 @@ export default function MobileAlertes({
     const champs: DetailField[] = [
       { label: 'Client', value: `${c.nom_tiers || ''}${c.numero_tiers ? ` (${c.numero_tiers})` : ''}` },
       { label: 'Créée le / promise le', value: `${formatDateCourte(c.date_creation)} / ${formatDateCourte(c.echeance)}` },
-      { label: 'Date exacte (sans léser personne)', value: c.date_exacte ? formatDateCourte(c.date_exacte) : 'aucune (pas d’arrivage suffisant connu)' },
+      { label: 'Date exacte (stock et arrivages connus)', value: c.date_exacte ? formatDateCourte(c.date_exacte) : 'aucune (pas d’arrivage suffisant connu)' },
+      { label: 'Date proposée', value: c.date_proposee ? `${formatDateCourte(c.date_proposee)}${c.via_appro ? ' — si un appro est lancé aujourd’hui (délai + 7 j)' : ''}` : c.arret_appro ? 'aucune (arrêt appro)' : 'aucune' },
       { label: 'Statut', value: `${STATUT_INFO[c.statut_traitement].label}${c.verification ? ` — ${c.verification}` : ''}` },
       ...c.lignes.map((l) => {
         const ecart = joursEntre(l.echeance, l.date_exacte)
