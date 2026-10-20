@@ -205,12 +205,42 @@ export default function CdcPromessesInterdites({
       {loading && <div className="px-4 py-6 text-sm text-slate-500">Chargement…</div>}
 
       {!loading && !erreur && (
-        <div className="max-h-[640px] overflow-auto">
-          <table className="min-w-full border-collapse text-sm">
-            <thead className="sticky top-0 z-10 bg-slate-100 text-left text-[11px] uppercase tracking-wide text-slate-500">
+        <div className="max-h-[640px] overflow-y-auto overflow-x-hidden">
+          {/* (2026-10-21) Tableau ramené à une seule largeur d'écran : colonne « Commande » unique
+              (document, création, client, agence, statut et boutons d'action sous le numéro),
+              largeurs fixes, en-têtes sur deux lignes, date exacte et écart regroupés. */}
+          <table className="w-full table-fixed border-collapse text-[13px]">
+            <colgroup>
+              <col style={{ width: '17%' }} />
+              <col style={{ width: '6%' }} />
+              <col style={{ width: '10%' }} />
+              <col style={{ width: '3.5%' }} />
+              <col style={{ width: '5.5%' }} />
+              <col style={{ width: '6%' }} />
+              <col style={{ width: '5.5%' }} />
+              <col style={{ width: '9%' }} />
+              <col style={{ width: '7%' }} />
+              <col style={{ width: '7%' }} />
+              <col style={{ width: '6.5%' }} />
+              <col />
+            </colgroup>
+            <thead className="sticky top-0 z-10 bg-slate-100 text-left text-[10px] uppercase leading-tight tracking-wide text-slate-500">
               <tr>
-                {['Document', 'Client', 'Agence', 'Créée', 'Promise', 'Référence', 'Qté', 'Stock fin de journée', 'Solde à la date promise', 'Dispo réelle', 'Verdict', 'Date exacte', 'Date proposée', 'Exacte − promise', 'Rupture créée le', 'Promesses exposées', 'Action / commentaire'].map((h) => (
-                  <th key={h} className="whitespace-nowrap border-b border-slate-200 px-3 py-2 font-semibold">{h}</th>
+                {[
+                  { h: 'Commande · client · action', align: '' },
+                  { h: 'Promise', align: '' },
+                  { h: 'Référence', align: '' },
+                  { h: 'Qté', align: 'text-right' },
+                  { h: 'Stock fin de journée', align: 'text-right' },
+                  { h: 'Solde à la date promise', align: 'text-right' },
+                  { h: 'Dispo réelle', align: 'text-right' },
+                  { h: 'Verdict', align: '' },
+                  { h: 'Date exacte (écart)', align: '' },
+                  { h: 'Date proposée', align: '' },
+                  { h: 'Rupture créée le', align: '' },
+                  { h: 'Promesses exposées', align: '' },
+                ].map(({ h, align }) => (
+                  <th key={h} className={['border-b border-slate-200 px-2 py-2 align-bottom font-semibold', align].join(' ')}>{h}</th>
                 ))}
               </tr>
             </thead>
@@ -221,12 +251,8 @@ export default function CdcPromessesInterdites({
                   // CDC redevenue tenable mais action non encore vérifiée : une ligne de rappel.
                   return (
                     <tr key={c.numero_document} className="border-t-2 border-slate-200 bg-emerald-50/40">
-                      <td className="px-3 py-2 font-mono font-semibold">{c.numero_document}</td>
-                      <td className="px-3 py-2">{c.nom_tiers}<div className="text-[11px] text-slate-500">{c.numero_tiers}</div></td>
-                      <td className="px-3 py-2">{c.agence}</td>
-                      <td className="px-3 py-2 whitespace-nowrap">{formatDateCourte(c.date_creation)}</td>
-                      <td colSpan={12} className="px-3 py-2 text-slate-500">Date désormais tenable — vérification de l’action à la prochaine synchro (CDC dépriorisée à contrôler).</td>
-                      <td className="px-3 py-2 align-top"><CelluleAction c={c} onEdit={() => setEdition(c)} /></td>
+                      <td className="px-2 py-2 align-top"><CelluleCommande c={c} onEdit={() => setEdition(c)} /></td>
+                      <td colSpan={11} className="px-2 py-2 align-top text-slate-500">Date désormais tenable — vérification de l’action à la prochaine synchro (CDC dépriorisée à contrôler).</td>
                     </tr>
                   )
                 }
@@ -235,43 +261,41 @@ export default function CdcPromessesInterdites({
                   return (
                     <tr key={`${c.numero_document}-${l.reference_article}`} className={[i === 0 ? 'border-t-2 border-slate-200' : 'border-t border-slate-100', c.statut_traitement === 'a_traiter' || c.statut_traitement === 'non_confirmee' ? '' : 'bg-slate-50/60'].join(' ')}>
                       {i === 0 && (
-                        <>
-                          <td rowSpan={lignesAff.length} className="px-3 py-2 align-top font-mono font-semibold whitespace-nowrap">{c.numero_document}</td>
-                          <td rowSpan={lignesAff.length} className="px-3 py-2 align-top"><div className="font-medium">{c.nom_tiers || c.numero_tiers}</div><div className="text-[11px] text-slate-500">{c.numero_tiers}{c.representant ? ` · ${c.representant}` : ''}</div></td>
-                          <td rowSpan={lignesAff.length} className="px-3 py-2 align-top">{c.agence}</td>
-                          <td rowSpan={lignesAff.length} className="px-3 py-2 align-top whitespace-nowrap">{formatDateCourte(c.date_creation)}</td>
-                        </>
+                        <td rowSpan={lignesAff.length} className="border-r border-slate-100 px-2 py-2 align-top"><CelluleCommande c={c} onEdit={() => setEdition(c)} /></td>
                       )}
-                      <td className="px-3 py-2 whitespace-nowrap">{formatDateCourte(l.echeance)}</td>
-                      <td className="px-3 py-2 whitespace-nowrap">
-                        <a href={lienStockArticle(l.reference_article)} target="_blank" rel="noopener noreferrer" className="font-mono text-blue-700 hover:underline" title="Ouvrir la fiche de la référence dans Stock articles">{l.reference_article}</a>
+                      <td className="px-2 py-1.5 whitespace-nowrap">{formatDateCourte(l.echeance)}</td>
+                      <td className="truncate px-2 py-1.5">
+                        <a href={lienStockArticle(l.reference_article)} target="_blank" rel="noopener noreferrer" className="font-mono text-[12px] text-blue-700 hover:underline" title={`${l.reference_article} — ouvrir la fiche dans Stock articles`}>{l.reference_article}</a>
                       </td>
-                      <td className="px-3 py-2 text-right font-mono">{Math.round(l.quantite).toLocaleString('fr-FR')}</td>
-                      <td className="px-3 py-2 text-right font-mono" title={`Promesses ouvertes toutes dates : ${Math.round(l.promesses_ouvertes)} · stock projeté ${formatSigne(l.stock_projete_creation)}`}>{Math.round(l.stock_phys).toLocaleString('fr-FR')}</td>
-                      <td className={['px-3 py-2 text-right font-mono', l.solde_echeance >= l.quantite ? 'text-emerald-700' : 'text-rose-700'].join(' ')}>{formatSigne(l.solde_echeance)}</td>
-                      <td className={['px-3 py-2 text-right font-mono font-semibold', l.atp_echeance >= l.quantite ? 'text-emerald-700' : 'text-rose-700'].join(' ')}>{formatSigne(l.atp_echeance)}</td>
-                      <td className="px-3 py-2 whitespace-nowrap" title={VERDICT_INFO[l.verdict].aide}>
-                        <span className={['inline-flex rounded-full border px-2 py-0.5 text-xs font-semibold', VERDICT_CLASS[l.verdict]].join(' ')}>{VERDICT_INFO[l.verdict].label}</span>
-                        <span className="ml-1 text-[11px] text-slate-500">{Math.round(l.q_manque)} p.</span>
+                      <td className="px-2 py-1.5 text-right font-mono">{Math.round(l.quantite).toLocaleString('fr-FR')}</td>
+                      <td className="px-2 py-1.5 text-right font-mono" title={`Promesses ouvertes toutes dates : ${Math.round(l.promesses_ouvertes)} · stock projeté ${formatSigne(l.stock_projete_creation)}`}>{Math.round(l.stock_phys).toLocaleString('fr-FR')}</td>
+                      <td className={['px-2 py-1.5 text-right font-mono', l.solde_echeance >= l.quantite ? 'text-emerald-700' : 'text-rose-700'].join(' ')}>{formatSigne(l.solde_echeance)}</td>
+                      <td className={['px-2 py-1.5 text-right font-mono font-semibold', l.atp_echeance >= l.quantite ? 'text-emerald-700' : 'text-rose-700'].join(' ')}>{formatSigne(l.atp_echeance)}</td>
+                      <td className="px-2 py-1.5" title={VERDICT_INFO[l.verdict].aide}>
+                        <span className={['inline-flex whitespace-nowrap rounded-full border px-1.5 py-0.5 text-[11px] font-semibold', VERDICT_CLASS[l.verdict]].join(' ')}>{VERDICT_INFO[l.verdict].label}</span>
+                        <span className="ml-1 whitespace-nowrap text-[11px] text-slate-500">{Math.round(l.q_manque)} p.</span>
                       </td>
-                      <td className="px-3 py-2 whitespace-nowrap font-semibold text-amber-800">{l.date_exacte ? formatDateCourte(l.date_exacte) : <span className="text-rose-700">aucune</span>}</td>
-                      <td className="px-3 py-2 whitespace-nowrap" title={l.date_proposee && l.date_proposee !== l.date_exacte ? 'Au plus court si un appro est lancé aujourd’hui : aujourd’hui + délai d’appro + 7 j ; Hitachi H0001 : 180 j sans sécurité pour la liste ciblée, 90 j + 7 j pour les autres réf. Hitachi' : 'Date exacte : stock et arrivages déjà connus'}>
+                      <td className="px-2 py-1.5 whitespace-nowrap">
+                        {l.date_exacte ? <span className="font-semibold text-amber-800">{formatDateCourte(l.date_exacte)}</span> : <span className="font-semibold text-rose-700">aucune</span>}
+                        {ecart !== null && <span className={['block font-mono text-[11px]', ecart > 0 ? 'text-rose-700' : 'text-slate-500'].join(' ')}>{ecart > 0 ? '+' : ''}{ecart} j</span>}
+                      </td>
+                      <td className="px-2 py-1.5 whitespace-nowrap" title={l.date_proposee && l.date_proposee !== l.date_exacte ? 'Au plus court si un appro est lancé aujourd’hui : aujourd’hui + délai d’appro + 7 j ; Hitachi H0001 : 180 j sans sécurité pour la liste ciblée, 90 j + 7 j pour les autres réf. Hitachi' : 'Date exacte : stock et arrivages déjà connus'}>
                         {l.date_proposee
-                          ? <><span className="font-semibold text-emerald-800">{formatDateCourte(l.date_proposee)}</span>{l.date_proposee !== l.date_exacte ? <span className="ml-1 text-[11px] text-slate-500">si appro</span> : null}</>
+                          ? <><span className="font-semibold text-emerald-800">{formatDateCourte(l.date_proposee)}</span>{l.date_proposee !== l.date_exacte ? <span className="block text-[11px] text-slate-500">si appro</span> : null}</>
                           : <span className="font-semibold text-rose-700">{l.arret_appro ? 'arrêt appro' : 'aucune'}</span>}
                       </td>
-                      <td className={['px-3 py-2 text-right font-mono', ecart !== null && ecart > 0 ? 'text-rose-700' : ''].join(' ')}>{ecart === null ? '—' : `${ecart > 0 ? '+' : ''}${ecart} j`}</td>
-                      <td className="px-3 py-2 whitespace-nowrap text-rose-700">{formatDateCourte(l.date_rupture)}</td>
-                      <td className="min-w-[220px] px-3 py-2">{l.nb_victimes > 0 ? <><div className="font-mono text-amber-800">{l.nb_victimes} CDC · {Math.round(l.q_victimes)} p.</div><div className="text-[11px] text-slate-500">{l.victimes}{l.nb_victimes > 5 ? ' …' : ''}</div></> : '—'}</td>
-                      {i === 0 && (
-                        <td rowSpan={lignesAff.length} className="min-w-[260px] px-3 py-2 align-top"><CelluleAction c={c} onEdit={() => setEdition(c)} /></td>
-                      )}
+                      <td className="px-2 py-1.5 whitespace-nowrap text-rose-700">{formatDateCourte(l.date_rupture)}</td>
+                      <td className="px-2 py-1.5" title={l.nb_victimes > 0 ? `${l.nb_victimes} CDC · ${Math.round(l.q_victimes)} p. : ${l.victimes || ''}` : undefined}>
+                        {l.nb_victimes > 0
+                          ? <><div className="font-mono text-[12px] text-amber-800">{l.nb_victimes} CDC · {Math.round(l.q_victimes)} p.</div><div className="line-clamp-2 break-words text-[11px] text-slate-500">{l.victimes}{l.nb_victimes > 5 ? ' …' : ''}</div></>
+                          : '—'}
+                      </td>
                     </tr>
                   )
                 })
               })}
               {commandesAffichees.length === 0 && (
-                <tr><td colSpan={17} className="px-3 py-6 text-center text-sm text-slate-500">{commandesPerimetre.length === 0 ? 'Aucune commande à date de livraison interdite dans votre périmètre.' : 'Aucune commande pour ces filtres.'}</td></tr>
+                <tr><td colSpan={12} className="px-3 py-6 text-center text-sm text-slate-500">{commandesPerimetre.length === 0 ? 'Aucune commande à date de livraison interdite dans votre périmètre.' : 'Aucune commande pour ces filtres.'}</td></tr>
               )}
             </tbody>
           </table>
@@ -292,15 +316,33 @@ export default function CdcPromessesInterdites({
   )
 }
 
+/** Colonne « Commande » : n° + date de création, statut et boutons d'action juste dessous,
+ *  puis client, n° tiers · représentant, agence, et l'action saisie. */
+function CelluleCommande({ c, onEdit }: { c: PromesseCommande; onEdit: () => void }) {
+  return (
+    <div className="min-w-0 space-y-1">
+      <div className="flex items-baseline justify-between gap-2">
+        <span className="font-mono text-[13px] font-semibold text-slate-900">{c.numero_document}</span>
+        <span className="whitespace-nowrap text-[11px] text-slate-500" title="Date de création">créée {formatDateCourte(c.date_creation)}</span>
+      </div>
+      <CelluleAction c={c} onEdit={onEdit} />
+      <div className="pt-0.5">
+        <div className="break-words font-medium leading-snug text-slate-800">{c.nom_tiers || c.numero_tiers}</div>
+        <div className="break-words text-[11px] text-slate-500">{c.numero_tiers}{c.representant ? ` · ${c.representant}` : ''}{c.agence ? ` · ${c.agence}` : ''}</div>
+      </div>
+    </div>
+  )
+}
+
 function CelluleAction({ c, onEdit }: { c: PromesseCommande; onEdit: () => void }) {
   return (
     <div className="space-y-1">
-      <div className="flex items-center gap-2">
-        <span className={['inline-flex rounded-full border px-2 py-0.5 text-xs font-semibold', STATUT_CLASS[c.statut_traitement]].join(' ')} title={c.verification || STATUT_INFO[c.statut_traitement].aide}>{STATUT_INFO[c.statut_traitement].label}</span>
-        <button type="button" onClick={onEdit} className="rounded-lg border border-slate-300 bg-white px-2 py-0.5 text-xs font-semibold text-slate-700 hover:bg-slate-50">{c.action ? 'Modifier' : 'Traiter'}</button>
+      <div className="flex flex-wrap items-center gap-1.5">
+        <span className={['inline-flex rounded-full border px-2 py-0.5 text-[11px] font-semibold', STATUT_CLASS[c.statut_traitement]].join(' ')} title={c.verification || STATUT_INFO[c.statut_traitement].aide}>{STATUT_INFO[c.statut_traitement].label}</span>
+        <button type="button" onClick={onEdit} className="rounded-lg border border-slate-300 bg-white px-2 py-0.5 text-[11px] font-semibold text-slate-700 hover:bg-slate-50">{c.action ? 'Modifier' : 'Traiter'}</button>
       </div>
       {c.action && (
-        <div className="text-xs text-slate-700">
+        <div className="break-words text-xs text-slate-700">
           <div className="font-semibold">
             {ACTION_INFO[c.action].label}
             {c.action === 'decaler' && c.nouvelle_date ? ` → ${formatDateCourte(c.nouvelle_date)}` : ''}
