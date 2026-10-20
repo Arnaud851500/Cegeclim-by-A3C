@@ -22,6 +22,24 @@ import {
   getCdcRetardDescription,
   isCdcEnRetard,
 } from '@/lib/cdcRetard'
+// ÉVOLUTION (2026-10-20) : alertes « Date de livraison interdite » (avec
+// saisie action / commentaire) et « Cde non complète à la date liv client »
+// (CDC à livrer dans les 2 mois avec une ligne en rupture / réception
+// tardive) -- voir lib/cdcPromesses.ts et useMobileAlertsCount.ts.
+import {
+  ACTION_INFO,
+  PROMESSES_ALERT_LABEL,
+  STATUT_INFO,
+  VERDICT_INFO,
+  formatDateCourte,
+  formatSigne,
+  grouperParCommande,
+  joursEntre,
+  type PromesseCommande,
+  type PromesseLigne,
+} from '@/lib/cdcPromesses'
+import MobilePromesseActionSheet from './MobilePromesseActionSheet'
+import { NON_COMPLETE_ALERT_LABEL } from './useMobileAlertsCount'
 
 export interface AlertDetailItem {
   label: string
@@ -179,6 +197,8 @@ export default function MobileAlertes({
   fetchFraisPortList,
   fetchCapaciteGazList,
   fetchDataCoherenceList,
+  fetchPromessesList,
+  fetchNonCompletesList,
   userEmail,
   userName,
 }: {
@@ -193,6 +213,9 @@ export default function MobileAlertes({
   // encore depuis useMobileAlertsCount(), on ne doit pas casser le build --
   // le tiroir "Cohérence données" reste simplement vide si absente.
   fetchDataCoherenceList?: () => Promise<DataCoherenceMonthRow[]>
+  // (2026-10-20) Optionnelles pour la même raison : le tiroir reste vide si absentes.
+  fetchPromessesList?: () => Promise<PromesseLigne[]>
+  fetchNonCompletesList?: () => Promise<Record<string, any>[]>
   userEmail: string
   userName: string
 }) {
@@ -226,6 +249,8 @@ export default function MobileAlertes({
   // source de vérité affichée, tenue à jour localement après ajout,
   // édition ou complétion, sans refaire un fetch complet à chaque fois.
   const [todoDrawerOpen, setTodoDrawerOpen] = useState(false)
+  // (2026-10-20) Saisie d'action sur une CDC à date de livraison interdite.
+  const [promesseAction, setPromesseAction] = useState<PromesseCommande | null>(null)
   const [todoRows, setTodoRows] = useState<TodoRow[]>([])
 
   const [ajoutMode, setAjoutMode] = useState<'menu' | 'manuel' | 'vocal' | null>(null)
@@ -648,7 +673,153 @@ export default function MobileAlertes({
     })
   }
 
+  /** Tiroir « Date de livraison interdite » : une ligne par CDC (à traiter
+   * et non confirmées d'abord), fiche avec le détail par référence et le
+   * bouton de saisie de l'action. */
+  async function openPromessesDrawer() {
+    setListOpen({ title: PROMESSES_ALERT_LABEL, items: [] })
+    if (!fetchPromessesList) return
+    setListLoading(true)
+    const rows = await fetchPromessesList()
+    setListLoading(false)
+    const ordre: Record<string, number> = { non_confirmee: 0, a_traiter: 1, en_attente: 2, resolue: 3 }
+    const commandes = grouperParCommande(rows)
+      .filter((c) => c.lignes.length > 0 || c.statut_traitement !== 'resolue')
+      .sort((a, b) => (ordre[a.statut_traitement] - ordre[b.statut_traitement]) || b.date_creation.localeCompare(a.date_creation))
+    setListOpen({
+      title: PROMESSES_ALERT_LABEL,
+      items: commandes.map((c) => {
+        const icone = c.statut_traitement === 'a_traiter' ? '🔴 ' : c.statut_traitement === 'non_confirmee' ? '⚠️ ' : c.statut_traitement === 'en_attente' ? '⏳ ' : '✓ '
+        return {
+          id: c.numero_document,
+          primary: `${icone}${c.numero_document}`,
+          secondary: [c.nom_tiers || c.numero_tiers, c.lignes.map((l) => l.reference_article).join(', ')].filter(Boolean).join(' · '),
+          trailing: `${formatDateCourte(c.echeance)} → ${c.date_exacte ? formatDateCourte(c.date_exacte) : 'aucune'}`,
+          trailingColor: c.verdict === 'INTENABLE' ? '#e0a685' : '#E0A961',
+          onClick: () => openPromesseDetail(c),
+        }
+      }),
+    })
+  }
+
+  function openPromesseDetail(c: PromesseCommande) {
+    const champs: DetailField[] = [
+      { label: 'Client', value: `${c.nom_tiers || ''}${c.numero_tiers ? ` (${c.numero_tiers})` : ''}` },
+      { label: 'Créée le / promise le', value: `${formatDateCourte(c.date_creation)} / ${formatDateCourte(c.echeance)}` },
+      { label: 'Date exacte (sans léser personne)', value: c.date_exacte ? formatDateCourte(c.date_exacte) : 'aucune (pas d’arrivage suffisant connu)' },
+      { label: 'Statut', value: `${STATUT_INFO[c.statut_traitement].label}${c.verification ? ` — ${c.verification}` : ''}` },
+      ...c.lignes.map((l) => {
+        const ecart = joursEntre(l.echeance, l.date_exacte)
+        return {
+          label: `${l.reference_article} · ${VERDICT_INFO[l.verdict].label}`,
+          value: `${Math.round(l.quantite)} p. · solde ${formatSigne(l.solde_echeance)} · dispo réelle ${formatSigne(l.atp_echeance)}${ecart !== null ? ` · exacte ${ecart > 0 ? '+' : ''}${ecart} j` : ''}${l.nb_victimes > 0 ? ` · expose ${l.nb_victimes} CDC (${l.victimes || ''})` : ''}`,
+        }
+      }),
+    ]
+    if (c.action) {
+      champs.push({
+        label: 'Action saisie',
+        value: `${ACTION_INFO[c.action].label}${c.action === 'decaler' && c.nouvelle_date ? ` → ${formatDateCourte(c.nouvelle_date)}` : ''}${c.action === 'deprioriser' && c.cdc_depriorisee ? ` : ${c.cdc_depriorisee}` : ''} — ${c.commentaire || ''}${c.saisi_par_nom ? ` (${c.saisi_par_nom})` : ''}`,
+      })
+    }
+    setOpenDetail({
+      title: c.numero_document,
+      subtitle: `${PROMESSES_ALERT_LABEL} · ${VERDICT_INFO[c.verdict].label}`,
+      fields: champs,
+      footer: (
+        <button
+          type="button"
+          onClick={() => { setOpenDetail(null); setPromesseAction(c) }}
+          style={{ padding: '13px', borderRadius: 12, border: 'none', background: '#A6A181', color: '#141A26', fontSize: 14, fontWeight: 700 }}
+        >
+          {c.action ? '✎ Modifier l’action' : '✓ Traiter : action + commentaire'}
+        </button>
+      ),
+    })
+  }
+
+  /** Tiroir « Cde non complète à la date liv client » (2 mois) : une ligne
+   * par CDC, fiche avec les articles non disponibles à la date et la date
+   * à laquelle la commande sera complète. */
+  async function openNonCompletesDrawer() {
+    setListOpen({ title: NON_COMPLETE_ALERT_LABEL, items: [] })
+    if (!fetchNonCompletesList) return
+    setListLoading(true)
+    const rows = await fetchNonCompletesList()
+    setListLoading(false)
+    const parDoc = new Map<string, Record<string, any>[]>()
+    for (const r of rows) {
+      const doc = safeText(r.numero_document)
+      if (!doc) continue
+      if (!parDoc.has(doc)) parDoc.set(doc, [])
+      parDoc.get(doc)!.push(r)
+    }
+    const docs = Array.from(parDoc.entries())
+      .map(([doc, lignes]) => {
+        const manquantes = lignes.filter((l) => ['RUPTURE', 'RECEPTION_TARDIVE'].includes(safeText(l.statut_couverture)))
+        const dateComplete = manquantes.some((l) => !l.date_couverture_estimee)
+          ? null
+          : manquantes.reduce<string | null>((m, l) => { const d = normalizeDateIso(l.date_couverture_estimee); return !m || d > m ? d : m }, null)
+        return { doc, lignes, manquantes, dateComplete, premiere: lignes[0] }
+      })
+      .filter((d) => d.manquantes.length > 0)
+      .sort((a, b) => normalizeDateIso(a.premiere.date_livraison).localeCompare(normalizeDateIso(b.premiere.date_livraison)))
+    setListOpen({
+      title: NON_COMPLETE_ALERT_LABEL,
+      items: docs.map((d) => ({
+        id: d.doc,
+        primary: `${transformationsCommandeParPiece[d.doc] ? '⭐ ' : ''}${d.doc}`,
+        secondary: [safeText(d.premiere.nom_tiers) || safeText(d.premiere.numero_tiers), d.manquantes.map((l) => safeText(l.reference_article)).join(', ')].filter(Boolean).join(' · '),
+        trailing: `liv. ${formatDateFr(d.premiere.date_livraison)} → ${d.dateComplete ? formatDateFr(d.dateComplete) : 'sans date'}`,
+        trailingColor: '#e0a685',
+        onClick: () => {
+          const agrege: CdcDocAgrege = {
+            numeroDocument: d.doc,
+            numeroTiers: safeText(d.premiere.numero_tiers),
+            nomTiers: safeText(d.premiere.nom_tiers),
+            agence: safeText(d.premiere.agence),
+            representant: safeText(d.premiere.representant),
+            dateLivraison: d.premiere.date_livraison,
+            moisLivraison: '',
+            reference: '',
+            montantHt: d.lignes.reduce((s, l) => s + Number(l.montant_ht || 0), 0),
+            lignes: d.lignes.map((l) => ({ reference_article: safeText(l.reference_article), designation: safeText(l.designation_article), quantite: Number(l.quantite || 0), montant_ht: Number(l.montant_ht || 0) })),
+          }
+          setOpenDetail({
+            title: d.doc,
+            subtitle: `${NON_COMPLETE_ALERT_LABEL} · ${formatMoney(agrege.montantHt)}`,
+            fields: [
+              { label: 'Client', value: `${agrege.nomTiers}${agrege.numeroTiers ? ` (${agrege.numeroTiers})` : ''}` },
+              { label: 'Date de livraison saisie', value: formatDateFr(d.premiere.date_livraison) },
+              { label: 'Commande complète le', value: d.dateComplete ? formatDateFr(d.dateComplete) : 'pas de réception connue suffisante' },
+              { label: 'Représentant · agence', value: [agrege.representant, agrege.agence].filter(Boolean).join(' · ') },
+              ...d.manquantes.map((l) => ({
+                label: `${safeText(l.reference_article)}${l.designation_article ? ` — ${safeText(l.designation_article)}` : ''}`,
+                value: `${safeText(l.statut_couverture) === 'RUPTURE' ? 'Rupture' : 'Réception tardive'} · manque ${Math.round(Number(l.manque_a_date || 0))} / ${Math.round(Number(l.quantite || 0))} · dispo ${l.date_couverture_estimee ? formatDateFr(l.date_couverture_estimee) : 'inconnue'}${l.prochaine_reception_date ? ` · prochaine réception ${formatDateFr(l.prochaine_reception_date)} (${Math.round(Number(l.prochaine_reception_quantite || 0))})` : ''}`,
+              })),
+            ],
+            footer: (
+              <button
+                type="button"
+                onClick={() => { setOpenDetail(null); setCommandeAModifierCdc(agrege) }}
+                style={{
+                  display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
+                  padding: '13px', borderRadius: 12, border: '1px solid rgba(75,146,172,0.4)',
+                  background: 'rgba(75,146,172,0.14)', color: '#8FC7DA', fontSize: 14, fontWeight: 700,
+                }}
+              >
+                📅 Modifier livraison / référence chantier
+              </button>
+            ),
+          })
+        },
+      })),
+    })
+  }
+
   function handleOpen(label: string) {
+    if (label === PROMESSES_ALERT_LABEL) { void openPromessesDrawer(); return }
+    if (label === NON_COMPLETE_ALERT_LABEL) { void openNonCompletesDrawer(); return }
     if (label === 'À faire') void openTodoDrawer()
     else if (label === 'CERFA à régulariser') void openCerfaDrawer()
     else if (label === CDC_RETARD_LABEL || label === CDC_RETARD_LEGACY_LABEL) void openCdcDrawer()
@@ -692,6 +863,12 @@ export default function MobileAlertes({
             <span style={{ fontSize: 15.5, fontWeight: 600 }}>{displayLabel(d.label)}</span>
             {(d.label === CDC_RETARD_LABEL || d.label === CDC_RETARD_LEGACY_LABEL) && (
               <span style={{ fontSize: 11.5, color: 'rgba(255,255,255,0.55)' }}>{getCdcRetardDescription()}</span>
+            )}
+            {d.label === PROMESSES_ALERT_LABEL && (
+              <span style={{ fontSize: 11.5, color: 'rgba(255,255,255,0.55)' }}>CDC des 30 derniers jours promises sans tenir compte du stock · action + commentaire</span>
+            )}
+            {d.label === NON_COMPLETE_ALERT_LABEL && (
+              <span style={{ fontSize: 11.5, color: 'rgba(255,255,255,0.55)' }}>À livrer dans les 2 mois · article(s) non disponible(s) à la date</span>
             )}
           </span>
           <span style={{ display: 'flex', alignItems: 'baseline', gap: 6 }}>
@@ -917,6 +1094,16 @@ export default function MobileAlertes({
           fields={openDetail.fields}
           footer={openDetail.footer}
           onClose={() => setOpenDetail(null)}
+        />
+      )}
+
+      {promesseAction && (
+        <MobilePromesseActionSheet
+          commande={promesseAction}
+          userEmail={userEmail}
+          userName={userName}
+          onClose={() => setPromesseAction(null)}
+          onSaved={() => { setPromesseAction(null); void openPromessesDrawer() }}
         />
       )}
 

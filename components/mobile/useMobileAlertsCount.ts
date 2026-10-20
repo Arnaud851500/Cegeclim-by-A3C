@@ -5,6 +5,24 @@ import { usePathname } from 'next/navigation'
 import { supabase } from '@/lib/supabaseClient'
 import { useAccess } from '@/components/AccessContext'
 import type { AlertDetailItem } from './MobileAlertes'
+// ÉVOLUTION (2026-10-20) : deux alertes ajoutées sous le droit
+// show_alert_cdc_liv_avant_2026 (comme côté PC) :
+//   • « Date de livraison interdite » (CDC créées depuis 30 j dont la date
+//     promise ne tient pas compte du stock -- lib/cdcPromesses.ts) ;
+//   • « Cde non complète à la date liv client » (CDC à livrer dans les 2 mois
+//     dont une ligne est en rupture ou en réception tardive -- même cache
+//     alerte_couverture_stock_cache que la pastille PC).
+import { PROMESSES_ALERT_LABEL, fetchPromessesAlerte, fetchPromessesInterdites, type PromesseLigne } from '@/lib/cdcPromesses'
+
+/** Libellé de l'alerte « commande non complète » (identique au PC). */
+export const NON_COMPLETE_ALERT_LABEL = 'Cde non complète à la date liv client'
+export const NON_COMPLETE_HORIZON_MOIS = 2
+
+function horizonIso(mois: number) {
+  const d = new Date()
+  d.setMonth(d.getMonth() + mois)
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+}
 
 /**
  * ⚠️ Version simplifiée (comptages SANS filtrage fin par agence/
@@ -213,6 +231,38 @@ export function useMobileAlertsCount() {
           }
         }
 
+        if (rights.show_alert_cdc_liv_avant_2026) {
+          // Date de livraison interdite (périmètre via RLS).
+          const promesses = await fetchPromessesAlerte()
+          if (!promesses.indisponible) {
+            items.push({
+              label: PROMESSES_ALERT_LABEL,
+              count: promesses.aTraiter,
+              status: promesses.aTraiter > 0 ? 'red' : 'green',
+              subCount: promesses.nonConfirmee,
+              subLabel: 'non confirmée(s)',
+            })
+          }
+
+          // Commandes non complètes à la date de livraison (2 mois).
+          try {
+            let requete = supabase
+              .from('alerte_couverture_stock_cache')
+              .select('numero_document')
+              .in('statut_couverture', ['RUPTURE', 'RECEPTION_TARDIVE'])
+              .lte('date_livraison', horizonIso(NON_COMPLETE_HORIZON_MOIS))
+            if (allowedAgences.length > 0) requete = requete.in('agence', allowedAgences)
+            if (allowedCollaborateurs.length > 0) requete = requete.in('representant', allowedCollaborateurs)
+            const { data, error } = await requete.limit(50000)
+            if (error) throw error
+            const docs = new Set(((data || []) as Record<string, any>[]).map((r) => String(r.numero_document || '').trim()).filter(Boolean))
+            items.push({ label: NON_COMPLETE_ALERT_LABEL, count: docs.size, status: docs.size > 0 ? 'red' : 'green' })
+          } catch (e) {
+            console.error('Commandes non complètes (mobile)', e)
+            items.push({ label: NON_COMPLETE_ALERT_LABEL, count: 0, status: 'orange' })
+          }
+        }
+
         if (rights.show_alert_controle_frais_port) {
           try {
             const { data, error } = await supabase
@@ -393,6 +443,49 @@ export function useMobileAlertsCount() {
     return (data || []) as Record<string, any>[]
   }
 
+  /** Lignes (CDC × référence) à date de livraison interdite -- RLS = périmètre. */
+  async function fetchPromessesList(): Promise<PromesseLigne[]> {
+    if (!email) return []
+    try {
+      return await fetchPromessesInterdites()
+    } catch (e) {
+      console.error('fetchPromessesList', e)
+      return []
+    }
+  }
+
+  /** Lignes non complètes à la date de livraison (2 mois) avec le détail
+   * article : CDC repérées dans le cache, détail lu dans
+   * v_portefeuille_couverture_stock pour ces seules commandes. */
+  async function fetchNonCompletesList(): Promise<Record<string, any>[]> {
+    if (!email) return []
+    await resolveIdentities()
+    const { agences: allowedAgences, collaborateurs: allowedCollaborateurs } = perimetreRef.current
+    let requete = supabase
+      .from('alerte_couverture_stock_cache')
+      .select('numero_document')
+      .in('statut_couverture', ['RUPTURE', 'RECEPTION_TARDIVE'])
+      .lte('date_livraison', horizonIso(NON_COMPLETE_HORIZON_MOIS))
+    if (allowedAgences.length > 0) requete = requete.in('agence', allowedAgences)
+    if (allowedCollaborateurs.length > 0) requete = requete.in('representant', allowedCollaborateurs)
+    const { data, error } = await requete.limit(50000)
+    if (error) { console.error('fetchNonCompletesList (cache)', error); return [] }
+    const docs = Array.from(new Set(((data || []) as Record<string, any>[]).map((r) => String(r.numero_document || '').trim()).filter(Boolean)))
+    if (docs.length === 0) return []
+    const out: Record<string, any>[] = []
+    for (let i = 0; i < docs.length; i += 150) {
+      const { data: lignes, error: err } = await supabase
+        .from('v_portefeuille_couverture_stock')
+        .select('numero_document,numero_tiers,nom_tiers,agence,representant,date_livraison,reference_article,designation_article,quantite,montant_ht,statut_couverture,manque_a_date,date_couverture_estimee,retard_estime_jours,prochaine_reception_date,prochaine_reception_quantite')
+        .eq('type_document', 'CDC')
+        .in('numero_document', docs.slice(i, i + 150))
+        .limit(5000)
+      if (err) { console.error('fetchNonCompletesList (détail)', err); break }
+      out.push(...((lignes || []) as Record<string, any>[]))
+    }
+    return out
+  }
+
   /** Liste des groupes en écart sur le contrôle des frais de port. */
   async function fetchFraisPortList() {
     if (!email) return []
@@ -488,5 +581,7 @@ export function useMobileAlertsCount() {
     fetchFraisPortList,
     fetchCapaciteGazList,
     fetchDataCoherenceList,
+    fetchPromessesList,
+    fetchNonCompletesList,
   }
 }

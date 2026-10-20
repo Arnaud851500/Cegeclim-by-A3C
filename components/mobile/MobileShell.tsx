@@ -100,6 +100,7 @@ export default function MobileShell() {
   const {
     total, detail, loading, fetchTodoList, fetchCerfaList,
     fetchCdcAvant2026List, fetchFraisPortList, fetchCapaciteGazList,
+    fetchDataCoherenceList, fetchPromessesList, fetchNonCompletesList,
   } = useMobileAlertsCount()
 
   const courant = pile.length > 0 ? pile[pile.length - 1] : null
@@ -340,6 +341,9 @@ export default function MobileShell() {
                 fetchCdcAvant2026List={fetchCdcAvant2026List}
                 fetchFraisPortList={fetchFraisPortList}
                 fetchCapaciteGazList={fetchCapaciteGazList}
+                fetchDataCoherenceList={fetchDataCoherenceList}
+                fetchPromessesList={fetchPromessesList}
+                fetchNonCompletesList={fetchNonCompletesList}
                 userEmail={email || ''}
                 userName={email ? email.split('@')[0] : ''}
               />

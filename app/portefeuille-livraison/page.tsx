@@ -18,6 +18,12 @@ import {
   isCdcEnRetard,
   isMoisLivraisonEnRetard,
 } from '@/lib/cdcRetard'
+// ÉVOLUTION (2026-10-20) : commandes à date de livraison interdite (même
+// règle que l'écran Reconstruction du stock projeté) -- carte KPI + panneau
+// dédié avec action / commentaire par CDC. URL ?promesse=interdite ou
+// événement cegeclim:open-promesses-interdites. Voir lib/cdcPromesses.ts.
+import CdcPromessesInterdites from '@/components/CdcPromessesInterdites'
+import { PROMESSES_ALERT_LABEL, PROMESSES_OPEN_EVENT, fetchPromessesAlerte } from '@/lib/cdcPromesses'
 
 type LignePortefeuille = {
   id: number | string | null
@@ -713,6 +719,7 @@ const KPI_GRID_COLS: Record<number, string> = {
   2: 'xl:grid-cols-2',
   3: 'xl:grid-cols-3',
   4: 'xl:grid-cols-4',
+  5: 'xl:grid-cols-5',
   6: 'xl:grid-cols-6',
   7: 'xl:grid-cols-7',
   8: 'xl:grid-cols-8',
@@ -767,6 +774,10 @@ export default function PortefeuilleLivraisonPage() {
   // événement cegeclim:open-couverture-stock).
   const [horizonMois, setHorizonMois] = useState('')
   const [selectedCouverture, setSelectedCouverture] = useState<CouvertureFilterMode>('TOUS')
+  // Panneau « Date de livraison interdite » (2026-10-20).
+  const [promessesOpen, setPromessesOpen] = useState(false)
+  const [promessesCount, setPromessesCount] = useState<number | null>(null)
+  const promessesPanelRef = useRef<HTMLDivElement | null>(null)
 
   const isBlSelected = selectedTypes.includes('BL')
   const isCdcSelected = selectedTypes.includes('CDC')
@@ -885,19 +896,45 @@ export default function PortefeuilleLivraisonPage() {
     function handleOpenCdcRetard() { applyCdcRetardFilter() }
     function handleOpenCouverture() { applyCouvertureFilter('NON_SERVABLE') }
 
+    function applyPromessesFilter() {
+      setSelectedTypes(['CDC'])
+      setPromessesOpen(true)
+      window.setTimeout(() => promessesPanelRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 300)
+    }
+    function handleOpenPromesses() { applyPromessesFilter() }
+    function applyPromessesFromUrl() {
+      const params = new URLSearchParams(window.location.search)
+      const requested = String(params.get('promesse') || params.get('promesses') || '').trim().toLowerCase()
+      if (requested === 'interdite' || requested === 'interdites') applyPromessesFilter()
+    }
+
     applyControlFromUrl()
+    applyPromessesFromUrl()
     window.addEventListener('popstate', applyControlFromUrl)
+    window.addEventListener('popstate', applyPromessesFromUrl)
+    window.addEventListener(PROMESSES_OPEN_EVENT, handleOpenPromesses)
     window.addEventListener('cegeclim:open-controle-frais-port', handleOpenControl)
     window.addEventListener('cegeclim:open-frais-port-manquant', handleOpenMissingPort)
     window.addEventListener('cegeclim:open-cdc-retard', handleOpenCdcRetard)
     window.addEventListener('cegeclim:open-couverture-stock', handleOpenCouverture)
     return () => {
       window.removeEventListener('popstate', applyControlFromUrl)
+      window.removeEventListener('popstate', applyPromessesFromUrl)
+      window.removeEventListener(PROMESSES_OPEN_EVENT, handleOpenPromesses)
       window.removeEventListener('cegeclim:open-controle-frais-port', handleOpenControl)
       window.removeEventListener('cegeclim:open-frais-port-manquant', handleOpenMissingPort)
       window.removeEventListener('cegeclim:open-cdc-retard', handleOpenCdcRetard)
       window.removeEventListener('cegeclim:open-couverture-stock', handleOpenCouverture)
     }
+  }, [])
+
+  // Compteur de la carte « Date de livraison interdite » (périmètre RLS de
+  // l'utilisateur) ; remplacé par celui du panneau une fois ouvert (qui tient
+  // compte des filtres agence / représentant de la page).
+  useEffect(() => {
+    let alive = true
+    fetchPromessesAlerte().then((a) => { if (alive && !a.indisponible) setPromessesCount((n) => (n === null ? a.aTraiter : n)) })
+    return () => { alive = false }
   }, [])
 
   // Références en « Blocage appro » SAGE : chargées une seule fois, paginées
@@ -1624,7 +1661,8 @@ export default function PortefeuilleLivraisonPage() {
 
   const showCdcRetardCard = isCdcSelected
   const showCouvertureCard = isCdcSelected
-  const kpiGridColsClass = KPI_GRID_COLS[2 + (showCdcRetardCard ? 1 : 0) + (showCouvertureCard ? 1 : 0) + (isBlSelected ? 4 : 0)] || 'xl:grid-cols-2'
+  const showPromessesCard = isCdcSelected
+  const kpiGridColsClass = KPI_GRID_COLS[2 + (showCdcRetardCard ? 1 : 0) + (showCouvertureCard ? 1 : 0) + (showPromessesCard ? 1 : 0) + (isBlSelected ? 4 : 0)] || 'xl:grid-cols-2'
   const isCouvertureFilterActive = selectedCouverture !== 'TOUS'
 
   function toggleType(type: string) {
@@ -1708,7 +1746,7 @@ export default function PortefeuilleLivraisonPage() {
                 {' '}Couverture stock des CDC : stock global tous dépôts + réceptions fournisseurs attendues (commandes SAGE non réceptionnées), besoins servis par date de livraison puis date de création ; les commandes fournisseurs en retard ou sans date sont supposées reçues demain. Une ligne livrable après la période figée (aujourd'hui + délai d'appro de la référence) n'est pas en alerte : elle est « à couvrir par appro ». Dates de prochaine dispo par référence : écran Références en pénurie.
               </p>
               <div className="mt-2 inline-flex rounded-full border border-blue-200 bg-blue-50 px-2.5 py-1 text-xs font-semibold text-blue-800">
-                Version 2026-10-07 v3.8 — contrôle frais de port groupé · {CDC_RETARD_LABEL} · commandes non complètes à la date de livraison client · pastille arrêt appro · période figée d'appro
+                Version 2026-10-20 v3.9 — contrôle frais de port groupé · {CDC_RETARD_LABEL} · commandes non complètes à la date de livraison client · dates de livraison interdites · pastille arrêt appro · période figée d'appro
               </div>
             </div>
             <div className="flex flex-wrap gap-2">
@@ -1936,6 +1974,25 @@ export default function PortefeuilleLivraisonPage() {
               </div>
             </button>
           )}
+          {showPromessesCard && (
+            <button
+              type="button"
+              onClick={() => {
+                setPromessesOpen((v) => !v)
+                if (!promessesOpen) window.setTimeout(() => promessesPanelRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 200)
+              }}
+              title={promessesOpen ? 'Masquer la liste des commandes à date de livraison interdite' : 'Afficher les CDC créées depuis 30 jours dont la date de livraison promise ne tient pas compte du stock disponible'}
+              className={[
+                'rounded-2xl border p-4 text-left shadow-sm',
+                (promessesCount || 0) > 0 ? 'border-rose-300 bg-rose-50' : 'border-emerald-200 bg-white',
+                promessesOpen ? 'ring-2 ring-rose-400' : '',
+              ].join(' ')}
+            >
+              <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">{PROMESSES_ALERT_LABEL}</div>
+              <div className={['mt-1 text-2xl font-semibold', (promessesCount || 0) > 0 ? 'text-rose-700' : 'text-emerald-700'].join(' ')}>{promessesCount === null ? '—' : promessesCount.toLocaleString('fr-FR')}</div>
+              <div className="mt-1 text-[11px] text-slate-500">CDC à traiter (sans action ou action non confirmée) · créées depuis 30 j · date promise sans tenir compte du stock{promessesOpen ? ' · liste affichée' : ''}</div>
+            </button>
+          )}
           {isBlSelected && (
             <>
               <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
@@ -1957,6 +2014,16 @@ export default function PortefeuilleLivraisonPage() {
             </>
           )}
         </section>
+
+        {showPromessesCard && promessesOpen && (
+          <div ref={promessesPanelRef} className="scroll-mt-24">
+            <CdcPromessesInterdites
+              agenceFiltre={access.allowedAgences.length > 0 ? '' : selectedAgence}
+              representantFiltre={access.allowedCollaborateurs.length > 0 ? '' : selectedRepresentant}
+              onCountChange={setPromessesCount}
+            />
+          </div>
+        )}
 
         {isBlSelected && (
           <section className="rounded-2xl border border-slate-200 bg-white shadow-sm">
