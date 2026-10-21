@@ -28,9 +28,14 @@ export type AccessRights = {
   allowed_codes_postaux: string[]
   display_name: string
   default_landing_page: string
+  /** Profil principal : page d'accueil, disposition One Page, nom affiché. */
   profile_id: string | null
   profile_code: string
+  /** Nom affiché : profil principal, suivi des profils complémentaires (« A + B »). */
   profile_name: string
+  /** (2026-10-22) Tous les profils actifs appliqués : principal puis complémentaires. */
+  profile_ids: string[]
+  profile_names: string[]
   show_alert_cerfa_ko: boolean
   show_alert_cdc_liv_avant_2026: boolean
   show_alert_controle_frais_port: boolean
@@ -57,6 +62,7 @@ type UserAccessRow = {
   allowed_departements?: unknown
   allowed_codes_postaux?: unknown
   access_profile_id?: string | null
+  profils_complementaires?: unknown
   can_financement?: boolean | null
 }
 
@@ -155,6 +161,8 @@ export const defaultRights: AccessRights = {
   profile_id: null,
   profile_code: '',
   profile_name: 'Aucun profil',
+  profile_ids: [],
+  profile_names: [],
   show_alert_cerfa_ko: false,
   show_alert_cdc_liv_avant_2026: false,
   show_alert_controle_frais_port: false,
@@ -232,6 +240,46 @@ export function getFirstAllowedPath(rights: AccessRights) {
   return '/unauthorized'
 }
 
+// (2026-10-22) Droits « écrans » et « pastilles » cumulables entre profils :
+// un droit est accordé dès qu'UN des profils actifs de la personne l'accorde.
+const PROFILE_FLAG_KEYS = [
+  'can_dashboard',
+  'can_territoire',
+  'can_cartographie',
+  'can_clients',
+  'can_carte',
+  'can_todo',
+  'can_clients_cegeclim',
+  'can_suivi_prospects',
+  'can_agences',
+  'can_autorisation',
+  'can_documents',
+  'can_stocks',
+  'can_activites',
+  'can_financement',
+  'can_objectifs',
+  'can_suivi_agences',
+  'can_change_scope',
+  'show_alert_cerfa_ko',
+  'show_alert_cdc_liv_avant_2026',
+  'show_alert_controle_frais_port',
+  'show_alert_capacite_gaz',
+  'show_alert_todo',
+  'show_alert_data_coherence',
+  'show_alert_dates_interdites',
+] as const satisfies ReadonlyArray<keyof AccessRights & keyof AccessProfileRow>
+
+function personalScope(userRow: UserAccessRow) {
+  return {
+    display_name: String(userRow.display_name || '').trim(),
+    allowed_scopes: normalizeList(userRow.allowed_scopes, ['Global']),
+    allowed_agences: normalizeList(userRow.allowed_agences, []),
+    allowed_collaborateurs: normalizeList(userRow.allowed_collaborateurs, []),
+    allowed_departements: normalizeList(userRow.allowed_departements, []),
+    allowed_codes_postaux: normalizeList(userRow.allowed_codes_postaux, []),
+  }
+}
+
 async function fetchAccess(): Promise<{ email: string | null; rights: AccessRights }> {
   try {
     const {
@@ -250,19 +298,11 @@ async function fetchAccess(): Promise<{ email: string | null; rights: AccessRigh
 
     const normalizedEmail = session.user.email.toLowerCase().trim()
 
+    // select('*') : tolère l'absence de colonnes récentes (profils_complementaires
+    // tant que la migration 20261022 n'est pas passée).
     const { data: userData, error: userError } = await supabase
       .from('user_page_access')
-      .select(`
-        email,
-        display_name,
-        allowed_scopes,
-        allowed_agences,
-        allowed_collaborateurs,
-        allowed_departements,
-        allowed_codes_postaux,
-        access_profile_id,
-        can_financement
-      `)
+      .select('*')
       .eq('email', normalizedEmail)
       .maybeSingle()
 
@@ -272,151 +312,73 @@ async function fetchAccess(): Promise<{ email: string | null; rights: AccessRigh
     }
 
     const userRow = userData as UserAccessRow
-    const profileId = String(userRow.access_profile_id || '').trim()
-    if (!profileId) {
+    const scope = personalScope(userRow)
+    const individualFinancement = !!userRow.can_financement
+
+    const principalId = String(userRow.access_profile_id || '').trim()
+    const complementaryIds = normalizeList(userRow.profils_complementaires, []).filter((id) => id !== principalId)
+    const allIds = [principalId, ...complementaryIds].filter(Boolean)
+
+    if (!allIds.length) {
       return {
         email: normalizedEmail,
-        rights: {
-          ...defaultRights,
-          display_name: String(userRow.display_name || '').trim(),
-          allowed_scopes: normalizeList(userRow.allowed_scopes, ['Global']),
-          allowed_agences: normalizeList(userRow.allowed_agences, []),
-          allowed_collaborateurs: normalizeList(userRow.allowed_collaborateurs, []),
-          allowed_departements: normalizeList(userRow.allowed_departements, []),
-          allowed_codes_postaux: normalizeList(userRow.allowed_codes_postaux, []),
-          can_financement: !!userRow.can_financement,
-        },
+        rights: { ...defaultRights, ...scope, can_financement: individualFinancement },
       }
     }
 
-    const { data: profileData, error: profileError } = await supabase
+    const { data: profilesData, error: profilesError } = await supabase
       .from('access_profiles')
-      .select(`
-        id,
-        code,
-        name,
-        is_active,
-        can_dashboard,
-        can_territoire,
-        can_cartographie,
-        can_clients,
-        can_carte,
-        can_todo,
-        can_clients_cegeclim,
-        can_suivi_prospects,
-        can_agences,
-        can_autorisation,
-        can_documents,
-        can_stocks,
-        can_activites,
-        can_financement,
-        can_objectifs,
-        can_suivi_agences,
-        can_change_scope,
-        default_landing_page,
-        show_alert_cerfa_ko,
-        show_alert_cdc_liv_avant_2026,
-        show_alert_controle_frais_port,
-        show_alert_capacite_gaz,
-        show_alert_todo,
-        show_alert_data_coherence
-      `)
-      .eq('id', profileId)
-      .maybeSingle()
+      .select('*')
+      .in('id', allIds)
 
-    if (profileError || !profileData) {
-      if (profileError) console.error('ACCESS - lecture access_profiles', profileError)
-      return {
-        email: normalizedEmail,
-        rights: {
-          ...defaultRights,
-          display_name: String(userRow.display_name || '').trim(),
-          allowed_scopes: normalizeList(userRow.allowed_scopes, ['Global']),
-          allowed_agences: normalizeList(userRow.allowed_agences, []),
-          allowed_collaborateurs: normalizeList(userRow.allowed_collaborateurs, []),
-          allowed_departements: normalizeList(userRow.allowed_departements, []),
-          allowed_codes_postaux: normalizeList(userRow.allowed_codes_postaux, []),
-          profile_id: profileId,
-          profile_name: 'Profil introuvable',
-          can_financement: !!userRow.can_financement,
-        },
-      }
-    }
+    if (profilesError) console.error('ACCESS - lecture access_profiles', profilesError)
 
-    const profile = profileData as AccessProfileRow
+    const profileById = new Map<string, AccessProfileRow>()
+    ;((profilesData || []) as AccessProfileRow[]).forEach((row) => {
+      if (row?.id) profileById.set(String(row.id), row)
+    })
 
-    // (2026-10-20) Droit « Date de livraison interdite » lu à part et sans
-    // bloquer : tant que la colonne n'existe pas (script SQL 20261020d non
-    // passé), la requête échoue et l'alerte reste simplement masquée -- les
-    // autres droits ne sont pas touchés.
-    let datesInterdites = false
-    {
-      const { data: diData, error: diError } = await supabase
-        .from('access_profiles')
-        .select('show_alert_dates_interdites')
-        .eq('id', profileId)
-        .maybeSingle()
-      if (!diError) datesInterdites = !!(diData as { show_alert_dates_interdites?: boolean | null } | null)?.show_alert_dates_interdites
-    }
+    const principal = principalId ? profileById.get(principalId) || null : null
+    // Profils réellement appliqués : actifs, principal en tête.
+    const applied = allIds
+      .map((id) => profileById.get(id))
+      .filter((row): row is AccessProfileRow => Boolean(row) && row!.is_active !== false)
 
-    if (profile.is_active === false) {
-      return {
-        email: normalizedEmail,
-        rights: {
-          ...defaultRights,
-          display_name: String(userRow.display_name || '').trim(),
-          allowed_scopes: normalizeList(userRow.allowed_scopes, ['Global']),
-          allowed_agences: normalizeList(userRow.allowed_agences, []),
-          allowed_collaborateurs: normalizeList(userRow.allowed_collaborateurs, []),
-          allowed_departements: normalizeList(userRow.allowed_departements, []),
-          allowed_codes_postaux: normalizeList(userRow.allowed_codes_postaux, []),
-          profile_id: profileId,
-          profile_code: String(profile.code || '').trim(),
-          profile_name: `${String(profile.name || 'Profil').trim()} (inactif)`,
-          can_financement: !!userRow.can_financement,
-        },
-      }
-    }
+    const merged: Partial<Record<(typeof PROFILE_FLAG_KEYS)[number], boolean>> = {}
+    PROFILE_FLAG_KEYS.forEach((key) => {
+      merged[key] = applied.some((row) => !!row[key])
+    })
+
+    const appliedNames = applied.map((row) => String(row.name || 'Profil sans nom').trim())
+
+    let profileName: string
+    if (!principalId) profileName = appliedNames.length ? appliedNames.join(' + ') : 'Aucun profil'
+    else if (!principal) profileName = ['Profil introuvable', ...appliedNames].join(' + ')
+    else if (principal.is_active === false) {
+      profileName = [`${String(principal.name || 'Profil').trim()} (inactif)`, ...appliedNames].join(' + ')
+    } else profileName = appliedNames.join(' + ')
+
+    // Page d'accueil : celle du profil principal actif, sinon du premier profil
+    // complémentaire qui en définit une autre que l'accueil.
+    const landingSource =
+      (principal && principal.is_active !== false ? principal : null) ||
+      applied.find((row) => String(row.default_landing_page || '').trim() && row.default_landing_page !== '/accueil') ||
+      null
+    const landing = String(landingSource?.default_landing_page || '/accueil').trim() || '/accueil'
 
     return {
       email: normalizedEmail,
       rights: {
-        can_dashboard: !!profile.can_dashboard,
-        can_territoire: !!profile.can_territoire,
-        can_cartographie: !!profile.can_cartographie,
-        can_clients: !!profile.can_clients,
-        can_carte: !!profile.can_carte,
-        can_todo: !!profile.can_todo,
-        can_clients_cegeclim: !!profile.can_clients_cegeclim,
-        can_suivi_prospects: !!profile.can_suivi_prospects,
-        can_agences: !!profile.can_agences,
-        can_autorisation: !!profile.can_autorisation,
-        can_documents: !!profile.can_documents,
-        can_stocks: !!profile.can_stocks,
-        can_activites: !!profile.can_activites,
-        can_financement: !!profile.can_financement || !!userRow.can_financement,
-        can_objectifs: !!profile.can_objectifs,
-        can_suivi_agences: !!profile.can_suivi_agences,
-        can_change_scope: !!profile.can_change_scope,
-        allowed_scopes: normalizeList(userRow.allowed_scopes, ['Global']),
-        allowed_agences: normalizeList(userRow.allowed_agences, []),
-        allowed_collaborateurs: normalizeList(userRow.allowed_collaborateurs, []),
-        allowed_departements: normalizeList(userRow.allowed_departements, []),
-        allowed_codes_postaux: normalizeList(userRow.allowed_codes_postaux, []),
-        display_name: String(userRow.display_name || '').trim(),
-        default_landing_page: String(profile.default_landing_page || '/accueil').trim() || '/accueil',
-        profile_id: String(profile.id || profileId),
-        profile_code: String(profile.code || '').trim(),
-        profile_name: String(profile.name || 'Profil sans nom').trim(),
-        show_alert_cerfa_ko: !!profile.show_alert_cerfa_ko,
-        show_alert_cdc_liv_avant_2026: !!profile.show_alert_cdc_liv_avant_2026,
-        show_alert_controle_frais_port: !!profile.show_alert_controle_frais_port,
-        show_alert_capacite_gaz: !!profile.show_alert_capacite_gaz,
-        show_alert_todo: !!profile.show_alert_todo,
-        show_alert_data_coherence: !!profile.show_alert_data_coherence,
-        // Colonne lue à part (voir plus haut) : absente tant que le script SQL
-        // 20261020d n'est pas passé -- l'alerte reste alors masquée.
-        show_alert_dates_interdites: datesInterdites,
+        ...defaultRights,
+        ...merged,
+        ...scope,
+        can_financement: !!merged.can_financement || individualFinancement,
+        default_landing_page: landing,
+        profile_id: principalId || null,
+        profile_code: String(principal?.code || '').trim(),
+        profile_name: profileName,
+        profile_ids: applied.map((row) => String(row.id)),
+        profile_names: appliedNames,
       },
     }
   } catch (error) {

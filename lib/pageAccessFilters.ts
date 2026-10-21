@@ -138,26 +138,35 @@ export function usePageFilterAccess() {
           return
         }
 
+        // select('*') : tolère l'absence de profils_complementaires avant migration.
         const { data, error } = await supabase
           .from('user_page_access')
-          .select('email, access_profile_id, allowed_agences, allowed_collaborateurs, allowed_departements, allowed_codes_postaux')
+          .select('*')
           .eq('email', email)
           .maybeSingle()
 
         if (error) throw error
 
         const profileId = String((data as any)?.access_profile_id || '').trim() || null
+        const complementaryIds = normalizeAccessList((data as any)?.profils_complementaires).filter((id) => id !== profileId)
+        const allIds = [profileId, ...complementaryIds].filter(Boolean) as string[]
         let profileName = ''
 
-        if (profileId) {
+        if (allIds.length) {
           const { data: profileData, error: profileError } = await supabase
             .from('access_profiles')
-            .select('name')
-            .eq('id', profileId)
-            .maybeSingle()
+            .select('id, name, is_active')
+            .in('id', allIds)
 
           if (profileError) throw profileError
-          profileName = String((profileData as any)?.name || '').trim()
+          const byId = new Map(((profileData || []) as any[]).map((row) => [String(row.id), row]))
+          // (2026-10-22) Profil principal puis profils complémentaires actifs.
+          profileName = allIds
+            .map((id) => byId.get(id))
+            .filter((row) => row && (row.id === profileId || row.is_active !== false))
+            .map((row) => String(row.name || '').trim())
+            .filter(Boolean)
+            .join(' + ')
         }
 
         const allowedAgences = normalizeAccessList((data as any)?.allowed_agences)

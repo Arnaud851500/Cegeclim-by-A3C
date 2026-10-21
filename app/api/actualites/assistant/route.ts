@@ -65,22 +65,30 @@ async function peutPublier(email: string) {
   const { data: redacteur } = await supabaseAdmin.from('actualites_redacteurs').select('email').eq('email', email).maybeSingle()
   if (redacteur) return true
 
+  // select('*') : tolère l'absence de profils_complementaires avant migration.
   const { data: userRow } = await supabaseAdmin
     .from('user_page_access')
-    .select('can_autorisation, access_profile_id')
+    .select('*')
     .ilike('email', email)
     .maybeSingle()
   if (!userRow) return false
   if (userRow.can_autorisation) return true
-  const profileId = String(userRow.access_profile_id || '').trim()
-  if (!profileId) return false
-  const { data: profil } = await supabaseAdmin
+
+  // (2026-10-22) Profil principal + profils complémentaires : un seul suffit.
+  const principalId = String(userRow.access_profile_id || '').trim()
+  const complementaires = Array.isArray(userRow.profils_complementaires) ? userRow.profils_complementaires : []
+  const profileIds = Array.from(new Set([principalId, ...complementaires.map((id: unknown) => String(id || '').trim())].filter(Boolean)))
+  if (!profileIds.length) return false
+
+  const { data: profils } = await supabaseAdmin
     .from('access_profiles')
     .select('name, can_autorisation, is_active')
-    .eq('id', profileId)
-    .maybeSingle()
-  if (!profil) return false
-  return Boolean(profil.can_autorisation) || (profil.is_active !== false && String(profil.name || '').trim().toLowerCase() === 'administrateur')
+    .in('id', profileIds)
+  return (profils || []).some(
+    (profil: any) =>
+      Boolean(profil.can_autorisation) ||
+      (profil.is_active !== false && String(profil.name || '').trim().toLowerCase() === 'administrateur')
+  )
 }
 
 // ── Appel OpenAI (API Responses, même usage que /api/financement) ─────────

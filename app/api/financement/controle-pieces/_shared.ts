@@ -126,26 +126,30 @@ export async function checkFinancementAccess(rawEmail: unknown): Promise<boolean
   const email = String(rawEmail || '').toLowerCase().trim()
   if (!email) return false
 
+  // select('*') : tolère l'absence de profils_complementaires avant migration.
   const { data: userRow } = await supabaseAdmin
     .from('user_page_access')
-    .select('can_financement, can_autorisation, access_profile_id')
+    .select('*')
     .eq('email', email)
     .maybeSingle()
 
   if (!userRow) return false
   if (userRow.can_financement || userRow.can_autorisation) return true
 
-  const profileId = String(userRow.access_profile_id || '').trim()
-  if (!profileId) return false
+  // (2026-10-22) Profil principal + profils complémentaires : un seul suffit.
+  const principalId = String(userRow.access_profile_id || '').trim()
+  const complementaires = Array.isArray(userRow.profils_complementaires) ? userRow.profils_complementaires : []
+  const profileIds = Array.from(new Set([principalId, ...complementaires.map((id: unknown) => String(id || '').trim())].filter(Boolean)))
+  if (!profileIds.length) return false
 
-  const { data: profileRow } = await supabaseAdmin
+  const { data: profileRows } = await supabaseAdmin
     .from('access_profiles')
     .select('can_financement, can_autorisation, is_active')
-    .eq('id', profileId)
-    .maybeSingle()
+    .in('id', profileIds)
 
-  if (!profileRow || profileRow.is_active === false) return false
-  return Boolean(profileRow.can_financement || profileRow.can_autorisation)
+  return (profileRows || []).some(
+    (row: any) => row.is_active !== false && Boolean(row.can_financement || row.can_autorisation)
+  )
 }
 
 export function extractOutputText(data: any): string {

@@ -39,7 +39,10 @@ type AccessProfile = Record<PermissionKey | AlertKey, boolean> & {
   description: string
   is_active: boolean
   default_landing_page: string
+  /** Personnes dont c'est le profil principal. */
   user_count: number
+  /** (2026-10-22) Personnes qui l'ont en profil complémentaire. */
+  complement_count: number
   default_vision_tci_layout_id: string | null
 }
 
@@ -49,6 +52,8 @@ type UserAccess = {
   email: string
   display_name: string
   access_profile_id: string
+  /** (2026-10-22) Profils ajoutés au profil principal : droits cumulés. */
+  profils_complementaires: string[]
   allowed_scopes: string[]
   allowed_agences: string[]
   allowed_collaborateurs: string[]
@@ -185,6 +190,7 @@ const EMPTY_PROFILE: AccessProfile = {
   is_active: true,
   default_landing_page: '/accueil',
   user_count: 0,
+  complement_count: 0,
   default_vision_tci_layout_id: null,
   can_dashboard: false,
   can_territoire: false,
@@ -216,6 +222,7 @@ const EMPTY_USER: UserAccess = {
   email: '',
   display_name: '',
   access_profile_id: '',
+  profils_complementaires: [],
   allowed_scopes: ['Global'],
   allowed_agences: [],
   allowed_collaborateurs: [],
@@ -276,6 +283,7 @@ function userSignature(user: UserAccess) {
   return JSON.stringify({
     display_name: user.display_name,
     access_profile_id: user.access_profile_id,
+    profils_complementaires: [...user.profils_complementaires].sort(),
     allowed_scopes: [...user.allowed_scopes].sort(),
     allowed_agences: [...user.allowed_agences].sort(),
     allowed_collaborateurs: [...user.allowed_collaborateurs].sort(),
@@ -301,6 +309,24 @@ function perimeterSummary(user: UserAccess) {
   if (user.allowed_agences.length) parts.push(`${user.allowed_agences.length} agence${user.allowed_agences.length > 1 ? 's' : ''}`)
   if (user.allowed_collaborateurs.length) parts.push(`${user.allowed_collaborateurs.length} collab.`)
   return parts.length ? parts.join(' · ') : 'Périmètre national'
+}
+
+/** Profil principal puis profils complémentaires (sans doublon ni vide). */
+function userProfileIds(user: UserAccess) {
+  return Array.from(new Set([user.access_profile_id, ...user.profils_complementaires].filter(Boolean)))
+}
+
+function userHasProfile(user: UserAccess, profileId: string) {
+  return user.access_profile_id === profileId || user.profils_complementaires.includes(profileId)
+}
+
+/** Droits cumulés des profils actifs d'une personne (OU logique, comme en base). */
+function mergeProfiles(profiles: AccessProfile[]) {
+  const active = profiles.filter((profile) => profile.is_active)
+  const merged = {} as Record<PermissionKey | AlertKey, boolean>
+  PERMISSIONS.forEach(({ key }) => { merged[key] = active.some((profile) => profile[key]) })
+  ALERTS.forEach(({ key }) => { merged[key] = active.some((profile) => profile[key]) })
+  return merged
 }
 
 export default function AutorisationPage() {
@@ -338,7 +364,7 @@ export default function AutorisationPage() {
       supabase.from('access_profiles').select('*').order('name', { ascending: true }),
       supabase
         .from('user_page_access')
-        .select('email, display_name, access_profile_id, allowed_scopes, allowed_agences, allowed_collaborateurs, allowed_departements, allowed_codes_postaux, soumis_objectif, agence_objectif, collaborateur_objectif')
+        .select('*')
         .order('email', { ascending: true }),
       supabase.from('vision_tci_layouts').select('id, nom').order('nom', { ascending: true }),
     ])
@@ -356,6 +382,9 @@ export default function AutorisationPage() {
       email: String(row.email || '').toLowerCase().trim(),
       display_name: String(row.display_name || '').trim(),
       access_profile_id: String(row.access_profile_id || '').trim(),
+      profils_complementaires: normalizeList(row.profils_complementaires).filter(
+        (id) => id !== String(row.access_profile_id || '').trim()
+      ),
       allowed_scopes: normalizeList(row.allowed_scopes, ['Global']),
       allowed_agences: normalizeList(row.allowed_agences),
       allowed_collaborateurs: normalizeList(row.allowed_collaborateurs),
@@ -367,9 +396,14 @@ export default function AutorisationPage() {
     }))
 
     const countByProfile = new Map<string, number>()
+    const complementCountByProfile = new Map<string, number>()
     formattedUsers.forEach((user) => {
-      if (!user.access_profile_id) return
-      countByProfile.set(user.access_profile_id, (countByProfile.get(user.access_profile_id) || 0) + 1)
+      if (user.access_profile_id) {
+        countByProfile.set(user.access_profile_id, (countByProfile.get(user.access_profile_id) || 0) + 1)
+      }
+      user.profils_complementaires.forEach((id) => {
+        complementCountByProfile.set(id, (complementCountByProfile.get(id) || 0) + 1)
+      })
     })
 
     const formattedProfiles: AccessProfile[] = ((profileData || []) as any[]).map((row) => ({
@@ -381,6 +415,7 @@ export default function AutorisationPage() {
       is_active: row.is_active !== false,
       default_landing_page: String(row.default_landing_page || '/accueil').trim() || '/accueil',
       user_count: countByProfile.get(String(row.id || '')) || 0,
+      complement_count: complementCountByProfile.get(String(row.id || '')) || 0,
       default_vision_tci_layout_id: row.default_vision_tci_layout_id ? String(row.default_vision_tci_layout_id) : null,
       ...Object.fromEntries(PERMISSIONS.map(({ key }) => [key, !!row[key]])),
       ...Object.fromEntries(ALERTS.map(({ key }) => [key, !!row[key]])),
@@ -438,17 +473,22 @@ export default function AutorisationPage() {
     [users, selectedProfileId]
   )
 
+  const complementUsersOfSelectedProfile = useMemo(
+    () => users.filter((user) => user.profils_complementaires.includes(selectedProfileId)),
+    [users, selectedProfileId]
+  )
+
   const filteredUsers = useMemo(() => {
     const term = search.trim().toLowerCase()
     return users.filter((user) => {
       if (profileFilter !== 'TOUS') {
-        if (profileFilter === 'AUCUN' ? Boolean(user.access_profile_id) : user.access_profile_id !== profileFilter) {
+        if (profileFilter === 'AUCUN' ? Boolean(user.access_profile_id) : !userHasProfile(user, profileFilter)) {
           return false
         }
       }
       if (!term) return true
-      const profileName = profileById.get(user.access_profile_id)?.name || ''
-      return [user.email, user.display_name, profileName].some((value) => value.toLowerCase().includes(term))
+      const profileNames = userProfileIds(user).map((id) => profileById.get(id)?.name || '')
+      return [user.email, user.display_name, ...profileNames].some((value) => value.toLowerCase().includes(term))
     })
   }, [users, search, profileFilter, profileById])
 
@@ -522,10 +562,11 @@ export default function AutorisationPage() {
       return
     }
 
+    const touched = profileDraft.user_count + profileDraft.complement_count
     setToast({
       tone: 'success',
-      text: profileDraft.user_count
-        ? `Profil « ${name} » enregistré pour ${profileDraft.user_count} utilisateur${profileDraft.user_count > 1 ? 's' : ''}.`
+      text: touched
+        ? `Profil « ${name} » enregistré pour ${touched} utilisateur${touched > 1 ? 's' : ''}.`
         : `Profil « ${name} » enregistré.`,
     })
     dispatchAccessChanged()
@@ -577,11 +618,21 @@ export default function AutorisationPage() {
 
     setSavingKey(`user:${email}`)
 
+    const complementaires = user.profils_complementaires.filter((id) => id && id !== user.access_profile_id)
+    const original = users.find((item) => item.email === email)
+    // La colonne n'est envoyée que si elle sert : la page reste utilisable tant
+    // que la migration 20261022_profils_complementaires n'est pas passée.
+    const complementPatch =
+      complementaires.length || original?.profils_complementaires.length
+        ? { profils_complementaires: complementaires }
+        : {}
+
     const { error } = await supabase
       .from('user_page_access')
       .update({
         display_name: user.display_name.trim(),
         access_profile_id: user.access_profile_id,
+        ...complementPatch,
         allowed_scopes: user.allowed_scopes.length ? user.allowed_scopes : ['Global'],
         allowed_agences: user.allowed_agences,
         allowed_collaborateurs: user.allowed_collaborateurs,
@@ -614,10 +665,13 @@ export default function AutorisationPage() {
 
     setSavingKey('user:new')
 
+    const complementaires = newUser.profils_complementaires.filter((id) => id && id !== newUser.access_profile_id)
+
     const { error } = await supabase.from('user_page_access').insert({
       email,
       display_name: newUser.display_name.trim(),
       access_profile_id: newUser.access_profile_id,
+      ...(complementaires.length ? { profils_complementaires: complementaires } : {}),
       allowed_scopes: newUser.allowed_scopes.length ? newUser.allowed_scopes : ['Global'],
       allowed_agences: newUser.allowed_agences,
       allowed_collaborateurs: newUser.allowed_collaborateurs,
@@ -652,6 +706,7 @@ export default function AutorisationPage() {
             <h1 className="mt-2 text-[28px] font-bold leading-tight text-white md:text-[32px]">Accès et permissions</h1>
             <p className="mt-2 max-w-3xl text-sm leading-relaxed text-slate-300">
               Les écrans, la page d’accueil et les pastilles d’alerte se règlent une fois par profil.
+              Une personne peut cumuler plusieurs profils : leurs droits s’additionnent.
               Les agences, collaborateurs, départements, codes postaux et scopes restent propres à chaque personne.
             </p>
           </div>
@@ -750,8 +805,16 @@ export default function AutorisationPage() {
                           <span className="truncate text-[15px] font-semibold">{profile.name || 'Sans nom'}</span>
                           <span
                             className={`shrink-0 text-xs font-bold tabular-nums ${active ? 'text-[#E0A961]' : 'text-slate-500'}`}
+                            title={
+                              profile.complement_count
+                                ? `${profile.user_count} en profil principal, ${profile.complement_count} en complément`
+                                : `${profile.user_count} en profil principal`
+                            }
                           >
                             {profile.user_count}
+                            {profile.complement_count > 0 && (
+                              <span className={`font-semibold ${active ? 'text-slate-300' : 'text-slate-400'}`}> +{profile.complement_count}</span>
+                            )}
                           </span>
                         </div>
                         <div className={`mt-1 flex items-center gap-2 text-[11px] ${active ? 'text-slate-300' : 'text-slate-500'}`}>
@@ -823,7 +886,7 @@ export default function AutorisationPage() {
                     </Field>
                   </div>
 
-                  <ImpactBanner users={usersOfSelectedProfile} />
+                  <ImpactBanner users={usersOfSelectedProfile} complementUsers={complementUsersOfSelectedProfile} />
                 </div>
 
                 <div className="rounded-2xl border border-[#E2DFD8] bg-white">
@@ -906,8 +969,8 @@ export default function AutorisationPage() {
                   saving={savingKey === `profile:${profileDraft.id}`}
                   idleLabel="Aucune modification en attente."
                   dirtyLabel={
-                    profileDraft.user_count
-                      ? `Modifications en attente — elles toucheront ${profileDraft.user_count} utilisateur${profileDraft.user_count > 1 ? 's' : ''}.`
+                    profileDraft.user_count + profileDraft.complement_count
+                      ? `Modifications en attente — elles toucheront ${profileDraft.user_count + profileDraft.complement_count} utilisateur${profileDraft.user_count + profileDraft.complement_count > 1 ? 's' : ''}.`
                       : 'Modifications en attente.'
                   }
                   onCancel={() => originalProfile && setProfileDraft({ ...originalProfile })}
@@ -935,7 +998,12 @@ export default function AutorisationPage() {
                     onChange={setProfileFilter}
                     options={[
                       { value: 'TOUS', label: `Tous les profils (${users.length})` },
-                      ...profiles.map((profile) => ({ value: profile.id, label: `${profile.name} (${profile.user_count})` })),
+                      ...profiles.map((profile) => ({
+                        value: profile.id,
+                        label: profile.complement_count
+                          ? `${profile.name} (${profile.user_count} + ${profile.complement_count} en complément)`
+                          : `${profile.name} (${profile.user_count})`,
+                      })),
                       { value: 'AUCUN', label: `Sans profil (${usersWithoutProfile})` },
                     ]}
                   />
@@ -961,6 +1029,9 @@ export default function AutorisationPage() {
                     filteredUsers.map((user) => {
                       const active = selectedUserEmail === user.email
                       const profile = profileById.get(user.access_profile_id)
+                      const extraNames = user.profils_complementaires
+                        .map((id) => profileById.get(id)?.name)
+                        .filter(Boolean) as string[]
                       return (
                         <button
                           type="button"
@@ -996,6 +1067,7 @@ export default function AutorisationPage() {
                             </span>
                             <span className={`block truncate text-[11px] ${active ? 'text-slate-300' : 'text-slate-500'}`}>
                               {profile ? profile.name : 'Sans profil — aucun accès'}
+                              {extraNames.length > 0 && ` + ${extraNames.join(' + ')}`}
                             </span>
                             <span className={`block truncate text-[11px] ${active ? 'text-slate-400' : 'text-slate-400'}`}>
                               {perimeterSummary(user)}
@@ -1034,14 +1106,28 @@ export default function AutorisationPage() {
                       placeholder="Prénom Nom"
                     />
                   </Field>
-                  <Field label="Profil d’accès" className="md:col-span-2" hint="Détermine les écrans visibles.">
+                  <Field label="Profil principal" hint="Détermine les écrans visibles et la page ouverte à la connexion.">
                     <SelectField
                       value={newUser.access_profile_id}
-                      onChange={(value) => setNewUser((current) => ({ ...current, access_profile_id: value }))}
+                      onChange={(value) =>
+                        setNewUser((current) => ({
+                          ...current,
+                          access_profile_id: value,
+                          profils_complementaires: current.profils_complementaires.filter((id) => id !== value),
+                        }))
+                      }
                       options={[
                         { value: '', label: 'Choisir un profil' },
                         ...profiles.filter((profile) => profile.is_active).map((profile) => ({ value: profile.id, label: profile.name })),
                       ]}
+                    />
+                  </Field>
+                  <Field label="Profils complémentaires" hint="Leurs écrans et alertes s’ajoutent à ceux du profil principal.">
+                    <ProfilesPicker
+                      profiles={profiles}
+                      principalId={newUser.access_profile_id}
+                      selected={newUser.profils_complementaires}
+                      onChange={(values) => setNewUser((current) => ({ ...current, profils_complementaires: values }))}
                     />
                   </Field>
                   <Field label="Soumis à objectif">
@@ -1108,10 +1194,15 @@ export default function AutorisationPage() {
                     <Field label="Nom affiché">
                       <TextField value={userDraft.display_name} onChange={(value) => patchUserDraft({ display_name: value })} placeholder="Prénom Nom" />
                     </Field>
-                    <Field label="Profil d’accès">
+                    <Field label="Profil principal" hint="Donne la page ouverte à la connexion et la disposition One Page par défaut.">
                       <SelectField
                         value={userDraft.access_profile_id}
-                        onChange={(value) => patchUserDraft({ access_profile_id: value })}
+                        onChange={(value) =>
+                          patchUserDraft({
+                            access_profile_id: value,
+                            profils_complementaires: userDraft.profils_complementaires.filter((id) => id !== value),
+                          })
+                        }
                         options={[
                           { value: '', label: 'Aucun profil' },
                           ...profiles.map((profile) => ({
@@ -1119,6 +1210,18 @@ export default function AutorisationPage() {
                             label: profile.is_active ? profile.name : `${profile.name} (inactif)`,
                           })),
                         ]}
+                      />
+                    </Field>
+                    <Field
+                      label="Profils complémentaires"
+                      className="lg:col-span-2"
+                      hint="Juxtapose des droits sans créer de nouveau profil : les écrans et alertes de ces profils s’ajoutent à ceux du profil principal."
+                    >
+                      <ProfilesPicker
+                        profiles={profiles}
+                        principalId={userDraft.access_profile_id}
+                        selected={userDraft.profils_complementaires}
+                        onChange={(values) => patchUserDraft({ profils_complementaires: values })}
                       />
                     </Field>
                   </div>
@@ -1157,7 +1260,12 @@ export default function AutorisationPage() {
                     )}
                   </div>
 
-                  <ProfilePreview profile={profileById.get(userDraft.access_profile_id) || null} />
+                  <ProfilePreview
+                    principal={profileById.get(userDraft.access_profile_id) || null}
+                    complements={userDraft.profils_complementaires
+                      .map((id) => profileById.get(id))
+                      .filter((profile): profile is AccessProfile => Boolean(profile))}
+                  />
                 </div>
 
                 <div className="rounded-2xl border border-[#E2DFD8] bg-white">
@@ -1198,7 +1306,12 @@ export default function AutorisationPage() {
                     </Field>
                   </div>
 
-                  <SuiviPerimetreHint user={userDraft} profile={profileById.get(userDraft.access_profile_id) || null} />
+                  <SuiviPerimetreHint
+                    user={userDraft}
+                    profiles={userProfileIds(userDraft)
+                      .map((id) => profileById.get(id))
+                      .filter((profile): profile is AccessProfile => Boolean(profile))}
+                  />
 
                   <DepartmentPicker
                     selected={userDraft.allowed_departements}
@@ -1689,8 +1802,8 @@ function EmptyState({ title, body, action }: { title: string; body: string; acti
 }
 
 /** Rappel visuel de la portée d'une modification de profil. */
-function ImpactBanner({ users }: { users: UserAccess[] }) {
-  if (users.length === 0) {
+function ImpactBanner({ users, complementUsers }: { users: UserAccess[]; complementUsers: UserAccess[] }) {
+  if (users.length === 0 && complementUsers.length === 0) {
     return (
       <div className="mt-5 rounded-xl border border-[#E7E4DD] bg-[#FAF9F7] px-4 py-3 text-sm text-slate-600">
         Personne n’est encore rattaché à ce profil. Vous pouvez le régler librement.
@@ -1699,57 +1812,190 @@ function ImpactBanner({ users }: { users: UserAccess[] }) {
   }
 
   return (
-    <div className="mt-5 rounded-xl border border-[#EBD8AE] bg-[#FDF7EA] px-4 py-3">
-      <div className="text-sm font-semibold text-[#8A5A11]">
-        {users.length} personne{users.length > 1 ? 's' : ''} héritent de ce profil
-      </div>
-      <div className="mt-2 flex flex-wrap gap-1.5">
-        {users.map((user) => (
-          <span
-            key={user.email}
-            title={user.email}
-            className="rounded-lg bg-white px-2.5 py-1 text-xs font-medium text-slate-700 ring-1 ring-[#EBD8AE]"
+    <div className="mt-5 space-y-3 rounded-xl border border-[#EBD8AE] bg-[#FDF7EA] px-4 py-3">
+      {users.length > 0 && (
+        <div>
+          <div className="text-sm font-semibold text-[#8A5A11]">
+            {users.length} personne{users.length > 1 ? 's' : ''} l’ont en profil principal
+          </div>
+          <div className="mt-2 flex flex-wrap gap-1.5">
+            {users.map((user) => (
+              <span
+                key={user.email}
+                title={user.email}
+                className="rounded-lg bg-white px-2.5 py-1 text-xs font-medium text-slate-700 ring-1 ring-[#EBD8AE]"
+              >
+                {user.display_name || user.email}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+      {complementUsers.length > 0 && (
+        <div>
+          <div className="text-sm font-semibold text-[#8A5A11]">
+            {complementUsers.length} personne{complementUsers.length > 1 ? 's' : ''} l’ont en complément d’un autre profil
+          </div>
+          <div className="mt-2 flex flex-wrap gap-1.5">
+            {complementUsers.map((user) => (
+              <span
+                key={user.email}
+                title={user.email}
+                className="rounded-lg border border-dashed border-[#D9B877] bg-white/60 px-2.5 py-1 text-xs font-medium text-slate-700"
+              >
+                {user.display_name || user.email}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+/**
+ * Choix des profils complémentaires : étiquettes retirables + liste des
+ * profils actifs restants. Le profil principal n'est jamais proposé.
+ */
+function ProfilesPicker({
+  profiles,
+  principalId,
+  selected,
+  onChange,
+}: {
+  profiles: AccessProfile[]
+  principalId: string
+  selected: string[]
+  onChange: (values: string[]) => void
+}) {
+  const byId = new Map(profiles.map((profile) => [profile.id, profile]))
+  const available = profiles.filter(
+    (profile) => profile.is_active && profile.id !== principalId && !selected.includes(profile.id)
+  )
+
+  return (
+    <div className="rounded-xl border border-[#D8D3C8] bg-white p-2 transition focus-within:border-[#B4761A] focus-within:ring-2 focus-within:ring-[#B4761A]/25">
+      <div className="flex flex-wrap items-center gap-1.5">
+        {selected.map((id) => {
+          const profile = byId.get(id)
+          const label = profile ? (profile.is_active ? profile.name : `${profile.name} (inactif)`) : 'Profil supprimé'
+          return (
+            <span
+              key={id}
+              className={`inline-flex items-center gap-1.5 rounded-lg py-1 pl-2.5 pr-1.5 text-xs font-semibold ${
+                profile?.is_active ? 'bg-[#EDEAE3] text-slate-700' : 'bg-[#FBE9E9] text-[#A32C2C]'
+              }`}
+              title={profile?.is_active === false ? 'Profil inactif : ses droits ne sont pas appliqués.' : undefined}
+            >
+              + {label}
+              <button
+                type="button"
+                onClick={() => onChange(selected.filter((item) => item !== id))}
+                className="rounded text-slate-500 transition hover:text-[#A32C2C]"
+                aria-label={`Retirer ${label}`}
+              >
+                ✕
+              </button>
+            </span>
+          )
+        })}
+        {available.length > 0 ? (
+          <select
+            value=""
+            onChange={(event) => {
+              const value = event.target.value
+              if (value) onChange([...selected, value])
+            }}
+            className="min-w-[180px] flex-1 cursor-pointer border-0 bg-transparent px-1.5 py-1 text-sm text-slate-500 outline-none"
+            aria-label="Ajouter un profil complémentaire"
           >
-            {user.display_name || user.email}
-          </span>
-        ))}
+            <option value="">{selected.length ? 'Ajouter un autre profil…' : 'Ajouter un profil…'}</option>
+            {available.map((profile) => (
+              <option key={profile.id} value={profile.id}>
+                {profile.name}
+              </option>
+            ))}
+          </select>
+        ) : (
+          !selected.length && <span className="px-1.5 py-1 text-sm text-slate-400">Aucun autre profil actif.</span>
+        )}
       </div>
     </div>
   )
 }
 
-/** Résumé lisible du profil choisi, pour éviter d'aller vérifier dans l'autre onglet. */
-function ProfilePreview({ profile }: { profile: AccessProfile | null }) {
-  if (!profile) return null
+/**
+ * Résumé lisible des droits de la personne : profil principal + profils
+ * complémentaires, droits cumulés. Un écran apporté uniquement par un profil
+ * complémentaire est signalé (bordure pointillée, nom du profil au survol).
+ */
+function ProfilePreview({ principal, complements }: { principal: AccessProfile | null; complements: AccessProfile[] }) {
+  const all = [principal, ...complements].filter((profile): profile is AccessProfile => Boolean(profile))
+  if (all.length === 0) return null
 
-  const granted = PERMISSIONS.filter(({ key }) => profile[key])
-  const alerts = ALERTS.filter(({ key }) => profile[key])
-  const landing = LANDING_PAGES.find((page) => page.value === profile.default_landing_page)
+  const merged = mergeProfiles(all)
+  const granted = PERMISSIONS.filter(({ key }) => merged[key])
+  const alerts = ALERTS.filter(({ key }) => merged[key])
+  const landing = principal ? LANDING_PAGES.find((page) => page.value === principal.default_landing_page) : null
+  const fromPrincipal = (key: PermissionKey | AlertKey) => Boolean(principal?.is_active && principal[key])
+  const sources = (key: PermissionKey | AlertKey) =>
+    all.filter((profile) => profile.is_active && profile[key]).map((profile) => profile.name).join(', ')
+  const inactive = all.filter((profile) => !profile.is_active)
 
   return (
     <div className="mt-5 rounded-xl border border-[#E7E4DD] bg-[#FAF9F7] px-4 py-3">
       <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
-        <span className="text-sm font-semibold text-slate-900">Ce que donne le profil « {profile.name} »</span>
-        <span className="text-xs text-slate-500">
-          ouvre sur {landing?.label || profile.default_landing_page}
+        <span className="text-sm font-semibold text-slate-900">
+          {all.length > 1
+            ? `Ce que donnent les profils ${all.map((profile) => `« ${profile.name} »`).join(' + ')}`
+            : `Ce que donne le profil « ${all[0].name} »`}
         </span>
+        {principal && (
+          <span className="text-xs text-slate-500">
+            ouvre sur {landing?.label || principal.default_landing_page}
+          </span>
+        )}
       </div>
 
+      {inactive.length > 0 && (
+        <p className="mt-1 text-xs text-[#A32C2C]">
+          {inactive.map((profile) => `« ${profile.name} »`).join(', ')} inactif{inactive.length > 1 ? 's' : ''} : droits non appliqués.
+        </p>
+      )}
+
       {granted.length === 0 ? (
-        <p className="mt-2 text-sm text-[#A32C2C]">Aucun écran n’est ouvert sur ce profil.</p>
+        <p className="mt-2 text-sm text-[#A32C2C]">Aucun écran n’est ouvert par ces profils.</p>
       ) : (
         <div className="mt-2 flex flex-wrap gap-1.5">
           {granted.map((permission) => (
-            <span key={permission.key} className="rounded-lg bg-white px-2.5 py-1 text-xs font-medium text-slate-700 ring-1 ring-[#E2DFD8]">
+            <span
+              key={permission.key}
+              title={`Apporté par : ${sources(permission.key)}`}
+              className={`rounded-lg bg-white px-2.5 py-1 text-xs font-medium text-slate-700 ${
+                fromPrincipal(permission.key) ? 'ring-1 ring-[#E2DFD8]' : 'border border-dashed border-[#B4761A]'
+              }`}
+            >
               {permission.label}
             </span>
           ))}
           {alerts.map((alert) => (
-            <span key={alert.key} className="rounded-lg bg-[#FDF7EA] px-2.5 py-1 text-xs font-medium text-[#8A5A11] ring-1 ring-[#EBD8AE]">
+            <span
+              key={alert.key}
+              title={`Apporté par : ${sources(alert.key)}`}
+              className={`rounded-lg bg-[#FDF7EA] px-2.5 py-1 text-xs font-medium text-[#8A5A11] ${
+                fromPrincipal(alert.key) ? 'ring-1 ring-[#EBD8AE]' : 'border border-dashed border-[#B4761A]'
+              }`}
+            >
               ⬤ {alert.label}
             </span>
           ))}
         </div>
+      )}
+
+      {complements.length > 0 && (
+        <p className="mt-2 text-[11px] text-slate-500">
+          Bordure pointillée : droit apporté uniquement par un profil complémentaire (survol pour voir lequel).
+        </p>
       )}
     </div>
   )
@@ -1757,13 +2003,17 @@ function ProfilePreview({ profile }: { profile: AccessProfile | null }) {
 
 /** Ce que la personne verra dans « Suivi agences – commerciaux ». Rappelle
  * la règle appliquée côté base (suivi_perimetre). */
-function SuiviPerimetreHint({ user, profile }: { user: UserAccess; profile: AccessProfile | null }) {
-  if (!profile) return null
-  const admin = profile.can_autorisation || profile.can_change_scope || profile.name.trim().toLowerCase() === 'administrateur'
+function SuiviPerimetreHint({ user, profiles }: { user: UserAccess; profiles: AccessProfile[] }) {
+  const active = profiles.filter((profile) => profile.is_active)
+  if (profiles.length === 0) return null
+  const admin = active.some(
+    (profile) => profile.can_autorisation || profile.can_change_scope || profile.name.trim().toLowerCase() === 'administrateur'
+  )
+  const ouvert = active.some((profile) => profile.can_suivi_agences || profile.can_objectifs)
   let text: string
   let tone = 'text-slate-600'
-  if (!profile.can_suivi_agences && !profile.can_objectifs && !admin) {
-    text = 'Écran non ouvert sur le profil de cette personne.'
+  if (!ouvert && !admin) {
+    text = 'Écran non ouvert par les profils de cette personne.'
     tone = 'text-slate-500'
   } else if (admin) {
     text = 'Toutes les agences et tous les collaborateurs (profil administrateur / changement de société).'
