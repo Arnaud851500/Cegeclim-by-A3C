@@ -25,6 +25,8 @@
 // (migration 20261013_suivi_agences_droit_perimetre.sql).
 // ÉVOLUTION (2026-10-21) : « Pénuries – vue mensuelle » (/stock/penurie/mensuel)
 // ajoutée sous Références en pénurie (même droit can_activites).
+// ÉVOLUTION (2026-10-21) : « Équivalences R/O AirH2O » (/stock/equivalences-ro),
+// backups d'anciennes générations par glisser-déposer (table stock_equivalences).
 // Le bloc « Mes alertes » de l'accueil n'est pas ici : il n'a pas de page, il
 // ouvre le Centre d'alertes (components/AlertsContext.tsx + ClientRootShell).
 
@@ -171,6 +173,7 @@ export const NAV_BLOCS: NavBloc[] = [
     pages: [
       { label: 'Portefeuille de commandes', path: '/portefeuille-livraison', activeLabel: 'Portefeuille cde', accessKey: 'can_dashboard', description: 'CDC à livrer, contrôle des frais de port, couverture stock.' },
       { label: 'Références en pénurie', path: '/stock/penurie', activeLabel: 'Références en pénurie', accessKey: 'can_activites', description: 'Prochaine date de dispo pour une nouvelle commande client (stock, CDC, CDF, délai d’appro) — vue commandes clients et vue appro.' },
+      { label: 'Équivalences R/O AirH2O', path: '/stock/equivalences-ro', activeLabel: 'Équivalences R/O AirH2O 600 / 800', accessKey: 'can_activites', description: 'Groupes AirH2O 600 / 800 par taille (prix, dispo, arrivages jusqu’à mars, CDC) et groupes d’anciennes générations à proposer en backup, par glisser-déposer.' },
       { label: 'Pénuries – vue mensuelle', path: '/stock/penurie/mensuel', activeLabel: 'Pénuries – vue mensuelle', accessKey: 'can_activites', description: 'Octobre → mars : arrivages, commandes fermes, commandes non tenables et solde projeté, en ferme ou avec prévisions (N-1 × coef.), par référence ou en quantité pertinente, avec courbes.' },
       { label: 'Calcul de besoin - Appro', path: '/stock/calcul-besoin', activeLabel: 'Calcul de besoin - Appro', accessKey: 'can_stocks', description: 'Propositions de commande fournisseur par article, paramètres d’appro, conso retenue et écrêtage des ventes exceptionnelles.' },
       { label: 'Projection stock', path: '/stocks-disponibilites2', accessKey: 'can_stocks', description: 'Stock projeté par référence, hypothèses mensuelles et substitutions.' },
