@@ -129,8 +129,8 @@ const USAGES: Record<Usage, { label: string; sub: string; gamme: '600' | '800' }
 }
 const USAGES_600: Usage[] = ['S', 'S_ECS', 'COMBI']
 const USAGES_800: Usage[] = ['MONO_H', 'MONO_H_COMBI']
-/** (22/10/2026) Tailles retirées de l'écran à la demande d'Arnaud. */
-const TAILLES_MASQUEES = new Set([1.5, 2, 3])
+/** (22/10/2026) Tailles retirées de l'écran à la demande d'Arnaud (1,5 / 2 / 2,5 / 3). */
+const TAILLES_MASQUEES = new Set([1.5, 2, 2.5, 3])
 const tailleMasquee = (t: string) => TAILLES_MASQUEES.has(Number(String(t).replace(',', '.')))
 
 const TAILLE_KW_600: Record<string, string> = { '1.5': '3,5 kW', '2': '4 kW', '2.5': '6 kW', '3': '8 kW', '3.5': '8,5 kW', '4': '10 kW', '5': '12 kW', '6': '14 kW' }
