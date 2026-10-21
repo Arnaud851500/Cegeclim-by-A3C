@@ -43,6 +43,7 @@
 import React, { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import ExcelJS from 'exceljs'
 import { supabase } from '@/lib/supabaseClient'
+import { useAccess } from '@/components/AccessContext'
 
 // ─────────────────────────────────────────────────────────────────────────
 // Types
@@ -128,6 +129,10 @@ const USAGES: Record<Usage, { label: string; sub: string; gamme: '600' | '800' }
 }
 const USAGES_600: Usage[] = ['S', 'S_ECS', 'COMBI']
 const USAGES_800: Usage[] = ['MONO_H', 'MONO_H_COMBI']
+/** (22/10/2026) Tailles retirées de l'écran à la demande d'Arnaud. */
+const TAILLES_MASQUEES = new Set([1.5, 2, 3])
+const tailleMasquee = (t: string) => TAILLES_MASQUEES.has(Number(String(t).replace(',', '.')))
+
 const TAILLE_KW_600: Record<string, string> = { '1.5': '3,5 kW', '2': '4 kW', '2.5': '6 kW', '3': '8 kW', '3.5': '8,5 kW', '4': '10 kW', '5': '12 kW', '6': '14 kW' }
 const TAILLE_KW_800: Record<string, string> = { '2': '4 kW', '3': '6 kW', '3.5': '8 kW', '4': '10 kW', '5': '12 kW', '6': '14 kW' }
 const NOMS_MOIS = ['janv.', 'févr.', 'mars', 'avr.', 'mai', 'juin', 'juil.', 'août', 'sept.', 'oct.', 'nov.', 'déc.']
@@ -282,6 +287,13 @@ function EquivalencesRO() {
   const [survolZone, setSurvolZone] = useState<string | null>(null)
   const [exportEnCours, setExportEnCours] = useState(false)
   const glisse = useRef<Glisse | null>(null)
+  // (22/10/2026) Panneau des articles à glisser masqué par défaut, ouvrable
+  // uniquement par les administrateurs (can_autorisation) : sans lui, l'écran
+  // est en lecture seule (pas de glisser-déposer).
+  const { rights } = useAccess()
+  const peutEditer = rights.can_autorisation
+  const [panneauOuvert, setPanneauOuvert] = useState(false)
+  const edition = peutEditer && panneauOuvert
 
   const charger = useCallback(async () => {
     setLoading(true); setErreur(null)
@@ -327,7 +339,7 @@ function EquivalencesRO() {
   }, [rechercheArt])
 
   const articles = useMemo(() => ({ ...articlesExtra, ...(donnees?.articles ?? {}) }), [donnees, articlesExtra])
-  const cibles = useMemo(() => donnees?.cibles ?? [], [donnees])
+  const cibles = useMemo(() => (donnees?.cibles ?? []).filter((c) => !tailleMasquee(c.taille)), [donnees])
 
   const parUsage = useMemo(() => {
     const m = new Map<string, { actuelle?: Solution; backups: Solution[] }>()
@@ -558,7 +570,7 @@ function EquivalencesRO() {
     const zone = `sol:${sol.id}`
     const actif = survolZone === zone
     return (
-      <div draggable onDragStart={(e) => debut(e, { type: 'solution', id: sol.id, ref_cible: sol.ref_cible, usage: sol.usage, role: sol.role })} onDragEnd={fin}
+      <div draggable={edition} onDragStart={(e) => debut(e, { type: 'solution', id: sol.id, ref_cible: sol.ref_cible, usage: sol.usage, role: sol.role })} onDragEnd={fin}
         onDragOver={(e) => survol(e, zone)} onDrop={(e) => deposerSurSolution(e, sol)}
         className={`w-[330px] shrink-0 cursor-grab rounded-lg border px-2 py-1.5 active:cursor-grabbing ${actif ? 'ring-2 ring-[#B4761A]' : ''} ${sol.role === 'actuelle' ? 'border-[#E2CFA6] bg-[#F7EEDB]' : k.realisableDec > 0 ? 'border-[#CFE3C7] bg-white' : 'border-red-200 bg-red-50/40'}`}>
         <div className="flex items-center justify-between gap-1">
@@ -576,7 +588,7 @@ function EquivalencesRO() {
             const a = articles[c.ref]
             const nb = partages.get(c.ref) || 0
             return (
-              <div key={c.id} draggable onDragStart={(e) => debut(e, { type: 'composant', id: c.id, ref: c.ref, solutionId: sol.id })} onDragEnd={fin}
+              <div key={c.id} draggable={edition} onDragStart={(e) => debut(e, { type: 'composant', id: c.id, ref: c.ref, solutionId: sol.id })} onDragEnd={fin}
                 className="group flex items-center justify-between gap-1 rounded px-0.5 hover:bg-[#FAF8F3]" title={a?.designation || ''}>
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-1 text-[11.5px]">
@@ -630,6 +642,13 @@ function EquivalencesRO() {
           </div>
           <div className="flex flex-wrap items-center gap-2">
             {enCours && <span className="text-[12px] font-semibold text-[#8A8474]">Enregistrement…</span>}
+            {peutEditer && (
+              <button type="button" onClick={() => setPanneauOuvert((v) => !v)} aria-pressed={panneauOuvert}
+                title="Afficher la colonne des articles R/O à glisser dans les solutions (administrateurs)"
+                className={`h-10 rounded-lg border px-3 text-[13px] font-bold ${panneauOuvert ? 'border-[#B4761A] bg-[#FBF5EA] text-[#8A5A08]' : 'border-[#E5E1D8] bg-white text-[#3A362E]'}`}>
+                {panneauOuvert ? '✕ Masquer les articles' : '✎ Articles à glisser'}
+              </button>
+            )}
             <button type="button" onClick={() => void exporterExcel()} disabled={exportEnCours || loading || cibles.length === 0}
               className="h-10 rounded-lg bg-[#111820] px-3 text-[13px] font-bold text-white disabled:opacity-50">{exportEnCours ? 'Export…' : '⬇ Excel'}</button>
             <button type="button" onClick={() => void charger()} disabled={loading} title="Recalculer les stocks" className="h-10 rounded-lg border border-[#E5E1D8] bg-white px-3 text-[14px] font-bold disabled:opacity-50">{loading ? '…' : '↻'}</button>
@@ -669,11 +688,11 @@ function EquivalencesRO() {
           </select>
           <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Référence, composant, solution…" className={`${ctl} w-[260px] font-medium`} />
           <span className="ml-auto text-[11px] text-[#8A8474]">
-            Dispo : <b className="text-emerald-700">auj.</b> | <b className="text-emerald-700 opacity-80">fin déc.</b> · encadré ocre = composant limitant · <b>Ctrl</b> / <b>Alt</b> en glissant = copier
+            Dispo : <b className="text-emerald-700">auj.</b> | <b className="text-emerald-700 opacity-80">fin déc.</b> · encadré ocre = composant limitant{edition && <> · <b>Ctrl</b> / <b>Alt</b> en glissant = copier</>}
           </span>
         </section>
 
-        <div className="grid items-start gap-2.5 xl:grid-cols-[minmax(0,1fr)_320px]">
+        <div className={`grid items-start gap-2.5 ${edition ? 'xl:grid-cols-[minmax(0,1fr)_320px]' : ''}`}>
           <div className="min-w-0 space-y-2.5">
             {loading && <div className="rounded-xl border border-[#E5E1D8] bg-white px-4 py-10 text-center text-[12px] text-[#8A8474]">Calcul en cours…</div>}
             {!loading && tailles.length === 0 && <div className="rounded-xl border border-[#E5E1D8] bg-white px-4 py-10 text-center text-[12px] text-[#8A8474]">Aucun groupe avec ces filtres.</div>}
@@ -735,14 +754,19 @@ function EquivalencesRO() {
                             <div onDragOver={(e) => survol(e, zA)} onDrop={(e) => deposerSurZone(e, c.ref, u, 'actuelle')}
                               className={`rounded-lg bg-[#FBF5EA] p-1 ${survolZone === zA ? 'ring-2 ring-[#B4761A]' : ''}`}>
                               {z?.actuelle ? <CarteSolution sol={z.actuelle} refTotal={null} />
-                                : <div className="flex h-full min-h-[48px] items-center justify-center rounded-lg border border-dashed border-[#E5E1D8] text-[11px] italic text-[#B4AE9F]">Solution catalogue 2026 : déposer les articles</div>}
+                                : <div className="flex h-full min-h-[48px] items-center justify-center rounded-lg border border-dashed border-[#E5E1D8] text-[11px] italic text-[#B4AE9F]">{edition ? 'Solution catalogue 2026 : déposer les articles' : 'Pas de solution catalogue 2026 renseignée'}</div>}
                             </div>
                             <div onDragOver={(e) => survol(e, zB)} onDrop={(e) => deposerSurZone(e, c.ref, u, 'backup')}
                               className={`flex min-h-[52px] flex-wrap items-start gap-1.5 rounded-lg p-0.5 ${survolZone === zB ? 'bg-[#B4761A]/[0.08] outline outline-2 -outline-offset-2 outline-[#B4761A]' : ''}`}>
                               {(z?.backups || []).map((s) => <CarteSolution key={s.id} sol={s} refTotal={refTotal} />)}
-                              <div className="flex min-h-[48px] w-[150px] items-center justify-center rounded-lg border border-dashed border-[#D9D3C5] px-2 text-center text-[10.5px] italic text-[#B4AE9F]">
-                                + glisser un groupe pour une nouvelle solution
-                              </div>
+                              {edition && (
+                                <div className="flex min-h-[48px] w-[150px] items-center justify-center rounded-lg border border-dashed border-[#D9D3C5] px-2 text-center text-[10.5px] italic text-[#B4AE9F]">
+                                  + glisser un groupe pour une nouvelle solution
+                                </div>
+                              )}
+                              {!edition && !(z?.backups || []).length && (
+                                <div className="flex min-h-[48px] items-center px-2 text-[10.5px] italic text-[#B4AE9F]">Aucune solution d’ancienne génération.</div>
+                              )}
                             </div>
                           </div>
                         )
@@ -761,7 +785,8 @@ function EquivalencesRO() {
             )}
           </div>
 
-          {/* Panneau des articles */}
+          {/* Panneau des articles (administrateurs, sur demande) */}
+          {edition && (
           <aside className="space-y-2 xl:sticky xl:top-3">
             <section className="rounded-xl border border-[#E5E1D8] bg-white">
               <div className="border-b border-[#E5E1D8] px-3 py-2">
@@ -818,6 +843,7 @@ function EquivalencesRO() {
               </div>
             </section>
           </aside>
+          )}
         </div>
       </div>
     </main>
