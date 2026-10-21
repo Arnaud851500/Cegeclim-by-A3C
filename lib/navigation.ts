@@ -172,8 +172,8 @@ export const NAV_BLOCS: NavBloc[] = [
     iconBg: 'rgba(255,255,255,0.18)',
     pages: [
       { label: 'Portefeuille de commandes', path: '/portefeuille-livraison', activeLabel: 'Portefeuille cde', accessKey: 'can_dashboard', description: 'CDC à livrer, contrôle des frais de port, couverture stock.' },
-      { label: 'Références en pénurie', path: '/stock/penurie', activeLabel: 'Références en pénurie', accessKey: 'can_activites', description: 'Prochaine date de dispo pour une nouvelle commande client (stock, CDC, CDF, délai d’appro) — vue commandes clients et vue appro.' },
-      { label: 'Équivalences R/O AirH2O', path: '/stock/equivalences-ro', activeLabel: 'Équivalences R/O AirH2O 600 / 800', accessKey: 'can_activites', description: 'Groupes AirH2O 600 / 800 par taille et par usage (S, S + ECS, Combi, monobloc H) : solution actuelle et solutions d’anciennes générations en stock, composant limitant, quantité réalisable et écart de prix, en glisser-déposer.' },
+      { label: 'Références en pénurie', path: '/stock/penurie', activeLabel: 'Références en pénurie', accessKey: 'can_dashboard', description: 'Prochaine date de dispo pour une nouvelle commande client (stock, CDC, CDF, délai d’appro) — vue commandes clients et vue appro.' },
+      { label: 'Équivalences R/O AirH2O', path: '/stock/equivalences-ro', activeLabel: 'Équivalences R/O AirH2O 600 / 800', accessKey: 'can_dashboard', description: 'Groupes AirH2O 600 / 800 par taille et par usage (S, S + ECS, Combi, monobloc H) : solution actuelle et solutions d’anciennes générations en stock, composant limitant, quantité réalisable et écart de prix, en glisser-déposer.' },
       { label: 'Pénuries – vue mensuelle', path: '/stock/penurie/mensuel', activeLabel: 'Pénuries – vue mensuelle', accessKey: 'can_activites', description: 'Octobre → mars : arrivages, commandes fermes, commandes non tenables et solde projeté, en ferme ou avec prévisions (N-1 × coef.), par référence ou en quantité pertinente, avec courbes.' },
       { label: 'Calcul de besoin - Appro', path: '/stock/calcul-besoin', activeLabel: 'Calcul de besoin - Appro', accessKey: 'can_stocks', description: 'Propositions de commande fournisseur par article, paramètres d’appro, conso retenue et écrêtage des ventes exceptionnelles.' },
       { label: 'Projection stock', path: '/stocks-disponibilites2', accessKey: 'can_stocks', description: 'Stock projeté par référence, hypothèses mensuelles et substitutions.' },
@@ -191,8 +191,8 @@ export const NAV_BLOCS: NavBloc[] = [
     gradient: ['#1F5A46', '#0E2A22'],
     iconBg: 'rgba(217,182,92,0.22)',
     pages: [
-      { label: 'Creation Dossier', path: '/financement/dossiers/nouveau', activeLabel: 'Creation d un nouveau dossier', accessKey: 'can_autorisation', description: 'Création d un dossier' },
-      { label: 'Parcours des dossiers CEE', path: '/financement', accessKey: 'can_autorisation', description: 'Tableau de bord des dossiers par étape : prêt, à corriger, bloqué.' },
+      { label: 'Creation Dossier', path: '/financement/dossiers/nouveau', activeLabel: 'Creation d un nouveau dossier', accessKey: 'can_financement', description: 'Création d un dossier' },
+      { label: 'Parcours des dossiers CEE', path: '/financement', accessKey: 'can_financement', description: 'Tableau de bord des dossiers par étape : prêt, à corriger, bloqué.' },
       { label: 'Contrôle des pièces (IA)', path: '/financement/controle-pieces', activeLabel: 'Contrôle des pièces CEE', accessKey: 'can_financement', description: 'Vérification assistée des pièces et de la note de dimensionnement.' },
       { label: 'Clients Convention CEE', path: '/financement/clients-cee', activeLabel: 'Clients Convention-CEE', accessKey: 'can_financement', description: 'Clients SAGE « Convention CEE = OUI » : devis, commandes, BL et factures (R/O, CEE Premium).' },
     ],
@@ -208,9 +208,7 @@ export const NAV_BLOCS: NavBloc[] = [
       { label: 'Articles SAGE – BLG', path: '/controle-sage-blg/articles', activeLabel: 'Contrôle cohérence Articles SAGE-BLG', accessKey: 'can_autorisation', description: 'Contrôle de cohérence des articles entre SAGE et BLG.' },
       { label: 'Clients SAGE – BLG', path: '/controle-sage-blg/clients', activeLabel: 'Contrôle cohérence Client SAGE-BLG', accessKey: 'can_autorisation', description: 'Contrôle de cohérence des tiers, contacts et adresses de livraison.' },
       { label: 'Fournisseurs SAGE – BLG', path: '/controle-sage-blg/fournisseur-sage-blg', activeLabel: 'Contrôle cohérence Fournisseur SAGE-BLG', accessKey: 'can_autorisation', description: 'Contrôle de cohérence fournisseurs et articles entre SAGE et BLG.' },
-      { label: 'Commandes fournisseurs SAGE – BLG', path: '/controle-sage-blg/commandes-fournisseurs-sage-blg', activeLabel: 'Appro Achat SAGE-BLG', accessKey: 'can_autorisation', description: 'Controle de cohérence du portefeuille de commandes fournisseurs.' },
-      { label: 'Commandes clients SAGE – BLG', path: '/controle-sage-blg/commandes-clients-sage-blg', activeLabel: 'Contrôle cohérence Fournisseur SAGE-BLG', accessKey: 'can_autorisation', description: 'Contrôle de cohérence du portefeuille de commandes clients.' },
-      { label: 'Rapprochement SAGE-BLG', path: '/controle-sage-blg/rapprochement-sage-blg', activeLabel: 'Rapprochement Sage-BLG', accessKey: 'can_autorisation', description: 'Contrôle de cohérence SAGE-BLG.' },
+      { label: 'Rapprochement SAGE-BLG', path: '/controle-sage-blg/rapprochement-sage-blg', activeLabel: 'Rapprochement Sage-BLG, CDC, CDF, Stocks', accessKey: 'can_autorisation', description: 'Contrôle de cohérence SAGE-BLG CDC, CDF, Stock' },
       
     ],
   },
