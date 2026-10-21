@@ -17,8 +17,15 @@
  * après les CDC déjà prises), composant limitant, nombre de solutions réalisables
  * (min libre / quantité), prix total et écart avec la solution AirH2O.
  *
- * Usages : Chauffage / réversible (S), Chauffage + ECS (S + ballon séparé), Combi (220 L intégrés),
- *          Monobloc H, Monobloc H Combi.
+ * Usages : Chauffage seul / réversible (S), Chauffage + ECS (S + ballon séparé), Combi (220 L intégrés),
+ *          Monobloc H, Monobloc H Combi — filtrables.
+ *
+ * ÉVOLUTION (21/10/2026 après-midi) : filtre par usage ; colonne « Solution catalogue 2026 »
+ * (AirH2O) sur fond beige ; quantités dispo immédiatement et d'ici fin décembre, par
+ * composant (unité) et par solution (bloc) :
+ *  - dispo immédiate = point bas du stock projeté (stock dispo + CDF − CDC, toutes dates) à partir d'aujourd'hui ;
+ *  - dispo fin décembre = même calcul à partir du 31/12 (arrivages et CDC jusqu'à fin décembre compris) ;
+ *  - bloc = min(dispo du composant ÷ quantité) sur les composants de la solution.
  *
  * Glisser-déposer :
  *  - un article du panneau de droite (ou de la recherche SAGE) sur une solution = l'ajouter
@@ -58,6 +65,8 @@ type Cible = {
   nb_cdc: number | null
   date_prochaine_dispo: string | null
   mois: MoisData[]
+  dispo_immediate?: number | null
+  dispo_fin_dec?: number | null
 }
 
 type Article = {
@@ -66,6 +75,8 @@ type Article = {
   prix: number | null
   stock_disponible: number | null
   libre: number | null
+  dispo_immediate?: number | null
+  dispo_fin_dec?: number | null
   cdc?: number | null
   cdf?: number | null
   prochaine_reception_date?: string | null
@@ -89,14 +100,14 @@ type Solution = {
   composants: Composant[]
 }
 
-type Donnees = { calcule_le: string; cibles: Cible[]; solutions: Solution[]; articles: Record<string, Article> }
+type Donnees = { calcule_le: string; fin_dec?: string; cibles: Cible[]; solutions: Solution[]; articles: Record<string, Article> }
 
 type Glisse =
   | { type: 'article'; ref: string }
   | { type: 'solution'; id: string; ref_cible: string; usage: Usage; role: Role }
   | { type: 'composant'; id: string; ref: string; solutionId: string }
 
-type Calcul = { total: number; realisable: number; limitants: Set<string>; manquePrix: boolean }
+type Calcul = { total: number; realisable: number; realisableDec: number; limitants: Set<string>; limitantsDec: Set<string>; manquePrix: boolean }
 
 type RawSolution = {
   id: string; ref_cible: string; usage: Usage; role: Role; libelle: string | null; rang: number
@@ -109,7 +120,7 @@ type RawSolution = {
 // ─────────────────────────────────────────────────────────────────────────
 
 const USAGES: Record<Usage, { label: string; sub: string; gamme: '600' | '800' }> = {
-  S: { label: 'Chauffage / réversible', sub: 'module hydraulique S', gamme: '600' },
+  S: { label: 'Chauffage seul / réversible', sub: 'module hydraulique S', gamme: '600' },
   S_ECS: { label: 'Chauffage + ECS', sub: 'S + ballon séparé', gamme: '600' },
   COMBI: { label: 'Combi', sub: 'ECS 220 L intégrée', gamme: '600' },
   MONO_H: { label: 'Monobloc H', sub: 'module hydraulique', gamme: '800' },
@@ -176,21 +187,35 @@ function libelleDefaut(ref: string): string {
   return 'Solution'
 }
 
+/** Dispo immédiate / fin décembre d'un article (repli : libre). */
+const dispoImm = (a: Article | undefined) => Math.max(0, n0(a?.dispo_immediate ?? a?.libre))
+const dispoDec = (a: Article | undefined) => Math.max(0, n0(a?.dispo_fin_dec ?? a?.dispo_immediate ?? a?.libre))
+
 function calculer(sol: Solution | undefined, articles: Record<string, Article>): Calcul {
-  if (!sol || sol.composants.length === 0) return { total: 0, realisable: 0, limitants: new Set(), manquePrix: false }
+  if (!sol || sol.composants.length === 0) return { total: 0, realisable: 0, realisableDec: 0, limitants: new Set(), limitantsDec: new Set(), manquePrix: false }
   let total = 0
   let manquePrix = false
   let realisable = Infinity
+  let realisableDec = Infinity
   const parRef = sol.composants.map((c) => {
     const a = articles[c.ref]
     if (a?.prix === null || a?.prix === undefined) manquePrix = true
+    const q = Math.max(n0(c.quantite), 1)
     total += n0(a?.prix) * n0(c.quantite)
-    const r = Math.floor(Math.max(0, n0(a?.libre)) / Math.max(n0(c.quantite), 1))
+    const r = Math.floor(dispoImm(a) / q)
+    const rd = Math.floor(dispoDec(a) / q)
     realisable = Math.min(realisable, r)
-    return { ref: c.ref, r }
+    realisableDec = Math.min(realisableDec, rd)
+    return { ref: c.ref, r, rd }
   })
-  const limitants = new Set(sol.composants.length > 1 ? parRef.filter((x) => x.r === realisable).map((x) => x.ref) : [])
-  return { total, realisable: Number.isFinite(realisable) ? realisable : 0, limitants, manquePrix }
+  const plusieurs = sol.composants.length > 1
+  const limitants = new Set(plusieurs ? parRef.filter((x) => x.r === realisable).map((x) => x.ref) : [])
+  const limitantsDec = new Set(plusieurs ? parRef.filter((x) => x.rd === realisableDec).map((x) => x.ref) : [])
+  return {
+    total, manquePrix, limitants, limitantsDec,
+    realisable: Number.isFinite(realisable) ? realisable : 0,
+    realisableDec: Number.isFinite(realisableDec) ? realisableDec : 0,
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -201,15 +226,33 @@ function Badge({ cls, children, title }: { cls: string; children: React.ReactNod
   return <span title={title} className={`whitespace-nowrap rounded-full px-1.5 py-0.5 text-[10px] font-bold ${cls}`}>{children}</span>
 }
 
-function LibreTag({ a, limitant }: { a: Article | undefined; limitant?: boolean }) {
-  const libre = n0(a?.libre)
-  const stock = n0(a?.stock_disponible)
-  const cls = libre <= 0 ? 'bg-red-50 text-red-700' : libre < 3 ? 'bg-amber-50 text-amber-800' : 'bg-emerald-50 text-emerald-700'
-  const suite = libre <= 0 && a?.date_prochaine_dispo ? ` · ${fmtDate(a.date_prochaine_dispo)}` : ''
+const clsDispo = (v: number) => (v <= 0 ? 'bg-red-50 text-red-700' : v < 3 ? 'bg-amber-50 text-amber-800' : 'bg-emerald-50 text-emerald-700')
+
+/** Quantités dispo d'une unité : immédiatement | d'ici fin décembre. */
+function DispoTag({ a, limitant, limitantDec }: { a: Article | undefined; limitant?: boolean; limitantDec?: boolean }) {
+  const imm = dispoImm(a)
+  const dec = dispoDec(a)
+  const titre = `Dispo immédiate ${fmtNum(imm)} · dispo d’ici fin décembre ${fmtNum(dec)} · stock ${fmtNum(a?.stock_disponible)}`
+    + `${n0(a?.cdc) ? ` · CDC ${fmtNum(a?.cdc)}` : ''}${n0(a?.cdf) ? ` · CDF ${fmtNum(a?.cdf)}` : ''}`
+    + `${a?.prochaine_reception_date ? ` · prochaine réception ${fmtDate(a.prochaine_reception_date)}` : ''}${limitant || limitantDec ? ' — composant limitant' : ''}`
   return (
-    <span className={`whitespace-nowrap rounded-md px-1.5 py-0.5 text-[10.5px] font-bold ${cls} ${limitant ? 'ring-[1.5px] ring-[#B4761A]' : ''}`}
-      title={`Libre (promettable aujourd’hui) ${fmtNum(libre)} · stock dispo ${fmtNum(stock)}${n0(a?.cdc) ? ` · CDC ${fmtNum(a?.cdc)}` : ''}${n0(a?.cdf) ? ` · CDF ${fmtNum(a?.cdf)}` : ''}${a?.date_prochaine_dispo ? ` · prochaine dispo ${fmtDate(a.date_prochaine_dispo)}` : ''}${limitant ? ' — composant limitant' : ''}`}>
-      libre {fmtNum(libre)}{suite}
+    <span className="inline-flex shrink-0 items-center gap-0.5" title={titre}>
+      <span className={`w-[30px] rounded-md px-1 py-0.5 text-center text-[10.5px] font-bold ${clsDispo(imm)} ${limitant ? 'ring-[1.5px] ring-[#B4761A]' : ''}`}>{fmtNum(imm)}</span>
+      <span className={`w-[30px] rounded-md px-1 py-0.5 text-center text-[10.5px] font-semibold opacity-80 ${clsDispo(dec)} ${limitantDec ? 'ring-[1.5px] ring-[#B4761A]' : ''}`}>{fmtNum(dec)}</span>
+    </span>
+  )
+}
+
+/** Quantités réalisables d'un bloc (solution complète). */
+function BlocTag({ imm, dec }: { imm: number; dec: number }) {
+  return (
+    <span className="inline-flex items-center gap-1 text-[10.5px] font-bold">
+      <span className={`whitespace-nowrap rounded-md px-1.5 py-0.5 ${imm > 0 ? 'bg-emerald-100 text-emerald-800' : 'bg-red-100 text-red-700'}`} title="Solutions complètes réalisables immédiatement">
+        auj. {fmtNum(imm)}
+      </span>
+      <span className={`whitespace-nowrap rounded-md px-1.5 py-0.5 ${dec > 0 ? 'bg-emerald-50 text-emerald-700' : 'bg-red-50 text-red-700'}`} title="Solutions complètes réalisables d’ici fin décembre (arrivages compris)">
+        fin déc. {fmtNum(dec)}
+      </span>
     </span>
   )
 }
@@ -230,6 +273,7 @@ function EquivalencesRO() {
   const [gammeF, setGammeF] = useState<'' | '600' | '800'>('')
   const [alimF, setAlimF] = useState('')
   const [tailleF, setTailleF] = useState('')
+  const [usageF, setUsageF] = useState<'' | Usage>('')
   const [search, setSearch] = useState('')
   const [poolSearch, setPoolSearch] = useState('')
   const [poolAvecStock, setPoolAvecStock] = useState(true)
@@ -277,7 +321,7 @@ function EquivalencesRO() {
       if (annule) return
       if (error) { setErreur(messageErreur(error)); return }
       setResultatsArt(((data || []) as { ref: string; designation: string | null; famille: string | null; prix: number | null; stock_disponible: number | null }[])
-        .map((r) => ({ ref: r.ref, designation: r.designation, famille: r.famille, prix: r.prix, stock_disponible: r.stock_disponible, libre: Math.max(0, n0(r.stock_disponible)) })))
+        .map((r) => ({ ref: r.ref, designation: r.designation, famille: r.famille, prix: r.prix, stock_disponible: r.stock_disponible, libre: Math.max(0, n0(r.stock_disponible)), dispo_immediate: Math.max(0, n0(r.stock_disponible)), dispo_fin_dec: Math.max(0, n0(r.stock_disponible)) })))
     }, 300)
     return () => { annule = true; clearTimeout(t) }
   }, [rechercheArt])
@@ -312,6 +356,7 @@ function EquivalencesRO() {
       if (gammeF && c.gamme !== gammeF) return false
       if (alimF && c.alim !== alimF) return false
       if (tailleF && c.taille !== tailleF) return false
+      if (usageF && USAGES[usageF].gamme !== c.gamme) return false
       if (termes.length) {
         const comps = solutions.filter((x) => x.ref_cible === c.ref).flatMap((x) => [x.libelle || '', ...x.composants.map((k) => k.ref)]).join(' ')
         if (!termes.every((t) => normaliser(`${c.ref} ${c.designation} ${comps}`).includes(t))) return false
@@ -322,7 +367,7 @@ function EquivalencesRO() {
     list.forEach((c) => { const a = m.get(c.taille) || []; a.push(c); m.set(c.taille, a) })
     return Array.from(m.entries()).sort((a, b) => Number(a[0]) - Number(b[0]))
       .map(([taille, rows]) => ({ taille, rows: rows.sort((a, b) => a.gamme.localeCompare(b.gamme) || a.alim.localeCompare(b.alim)) }))
-  }, [cibles, gammeF, alimF, tailleF, search, solutions])
+  }, [cibles, gammeF, alimF, tailleF, usageF, search, solutions])
 
   const listeTailles = useMemo(() => Array.from(new Set(cibles.map((c) => c.taille))).sort((a, b) => Number(a) - Number(b)), [cibles])
   const alims = useMemo(() => Array.from(new Set(cibles.map((c) => c.alim))).sort(), [cibles])
@@ -332,7 +377,7 @@ function EquivalencesRO() {
     const termes = s.split(/[\s,;]+/).filter(Boolean)
     const list = Object.entries(donnees?.articles ?? {}).filter(([ref, a]) => {
       if (!a.pool || a.sommeil) return false
-      if (poolAvecStock && n0(a.libre) <= 0 && n0(a.stock_disponible) <= 0) return false
+      if (poolAvecStock && dispoImm(a) <= 0 && dispoDec(a) <= 0 && n0(a.stock_disponible) <= 0) return false
       if (termes.length && !termes.every((t) => normaliser(`${ref} ${a.designation}`).includes(t))) return false
       return true
     })
@@ -367,7 +412,7 @@ function EquivalencesRO() {
   function memoriserArticle(ref: string) {
     if (articles[ref]) return
     const r = resultatsArt.find((x) => x.ref === ref)
-    if (r) setArticlesExtra((p) => ({ ...p, [ref]: { designation: r.designation, famille: r.famille, prix: r.prix, stock_disponible: r.stock_disponible, libre: r.libre } }))
+    if (r) setArticlesExtra((p) => ({ ...p, [ref]: { designation: r.designation, famille: r.famille, prix: r.prix, stock_disponible: r.stock_disponible, libre: r.libre, dispo_immediate: r.dispo_immediate, dispo_fin_dec: r.dispo_fin_dec } }))
   }
 
   async function ajouterComposant(sol: Solution, ref: string) {
@@ -478,19 +523,19 @@ function EquivalencesRO() {
     try {
       const wb = new ExcelJS.Workbook()
       const ws = wb.addWorksheet('Solutions R-O')
-      ws.addRow([`Équivalences R/O AirH2O 600 / 800 — solutions par usage — calculé le ${new Date().toLocaleString('fr-FR')} — libre = promettable aujourd’hui`]).font = { bold: true }
-      ws.addRow(['Taille', 'Gamme', 'Alim.', 'Groupe AirH2O', 'Usage', 'Rôle', 'Solution', 'Composants (réf. × qté · prix · libre)', 'Prix public total', 'Réalisables', 'Composant(s) limitant(s)', 'Écart vs AirH2O (€)', 'Écart (%)', 'Commentaire']).font = { bold: true }
+      ws.addRow([`Équivalences R/O AirH2O 600 / 800 — solutions par usage — calculé le ${new Date().toLocaleString('fr-FR')} — dispo = promettable (stock + CDF − CDC), immédiatement / d’ici fin décembre`]).font = { bold: true }
+      ws.addRow(['Taille', 'Gamme', 'Alim.', 'Groupe AirH2O', 'Usage', 'Rôle', 'Solution', 'Composants (réf. × qté · prix · dispo auj. / fin déc.)', 'Prix public total', 'Réalisables auj.', 'Réalisables fin déc.', 'Composant(s) limitant(s)', 'Écart vs AirH2O (€)', 'Écart (%)', 'Commentaire']).font = { bold: true }
       tailles.forEach(({ taille, rows }) => rows.forEach((c) => {
-        (c.gamme === '600' ? USAGES_600 : USAGES_800).forEach((u) => {
+        (c.gamme === '600' ? USAGES_600 : USAGES_800).filter((u) => !usageF || u === usageF).forEach((u) => {
           const z = parUsage.get(`${c.ref}|${u}`)
           const ref = calculer(z?.actuelle, articles)
           const lignes = [...(z?.actuelle ? [z.actuelle] : []), ...(z?.backups || [])]
           lignes.forEach((s) => {
             const k = calculer(s, articles)
             const ecart = s.role === 'backup' && z?.actuelle ? k.total - ref.total : null
-            ws.addRow([taille, c.gamme, c.alim, c.ref, USAGES[u].label, s.role === 'actuelle' ? 'AirH2O' : 'Backup', s.libelle || '',
-              s.composants.map((x) => `${x.ref}${x.quantite !== 1 ? ` ×${x.quantite}` : ''} · ${fmtPrix(articles[x.ref]?.prix)} · libre ${fmtNum(articles[x.ref]?.libre)}`).join('\n'),
-              Math.round(k.total), k.realisable, Array.from(k.limitants).join(', '),
+            ws.addRow([taille, c.gamme, c.alim, c.ref, USAGES[u].label, s.role === 'actuelle' ? 'Catalogue 2026' : 'Backup', s.libelle || '',
+              s.composants.map((x) => `${x.ref}${x.quantite !== 1 ? ` ×${x.quantite}` : ''} · ${fmtPrix(articles[x.ref]?.prix)} · ${fmtNum(dispoImm(articles[x.ref]))} / ${fmtNum(dispoDec(articles[x.ref]))}`).join('\n'),
+              Math.round(k.total), k.realisable, k.realisableDec, Array.from(new Set([...k.limitants, ...k.limitantsDec])).join(', '),
               ecart === null ? '' : Math.round(ecart), ecart === null || !ref.total ? '' : Math.round((ecart / ref.total) * 100), s.commentaire || ''])
           })
         })
@@ -515,7 +560,7 @@ function EquivalencesRO() {
     return (
       <div draggable onDragStart={(e) => debut(e, { type: 'solution', id: sol.id, ref_cible: sol.ref_cible, usage: sol.usage, role: sol.role })} onDragEnd={fin}
         onDragOver={(e) => survol(e, zone)} onDrop={(e) => deposerSurSolution(e, sol)}
-        className={`w-[300px] shrink-0 cursor-grab rounded-lg border bg-white px-2 py-1.5 active:cursor-grabbing ${actif ? 'ring-2 ring-[#B4761A]' : ''} ${k.realisable > 0 ? 'border-[#CFE3C7]' : 'border-red-200 bg-red-50/40'}`}>
+        className={`w-[330px] shrink-0 cursor-grab rounded-lg border px-2 py-1.5 active:cursor-grabbing ${actif ? 'ring-2 ring-[#B4761A]' : ''} ${sol.role === 'actuelle' ? 'border-[#E2CFA6] bg-[#F7EEDB]' : k.realisableDec > 0 ? 'border-[#CFE3C7] bg-white' : 'border-red-200 bg-red-50/40'}`}>
         <div className="flex items-center justify-between gap-1">
           <input defaultValue={sol.libelle || ''} key={`${sol.id}-${sol.libelle}`} placeholder="Nom de la solution"
             onBlur={(e) => void renommer(sol, e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur() }}
@@ -544,7 +589,7 @@ function EquivalencesRO() {
                 <input type="number" min={1} step={1} defaultValue={c.quantite} key={`${c.id}-${c.quantite}`} title="Quantité"
                   onMouseDown={(e) => e.stopPropagation()} onBlur={(e) => { const q = Number(e.target.value); if (q !== c.quantite) void changerQuantite(c.id, q) }}
                   className={`h-5 w-8 shrink-0 rounded border border-[#E5E1D8] px-0.5 text-right text-[10.5px] ${c.quantite === 1 ? 'text-[#C9C4B8]' : 'font-bold'}`} />
-                <LibreTag a={a} limitant={k.limitants.has(c.ref)} />
+                <DispoTag a={a} limitant={k.limitants.has(c.ref)} limitantDec={k.limitantsDec.has(c.ref)} />
                 <button type="button" onClick={() => void retirerComposant(c.id)} disabled={enCours} aria-label={`Retirer ${c.ref}`}
                   className="h-5 w-4 shrink-0 text-[12px] font-bold text-[#C9C4B8] hover:text-red-700">×</button>
               </div>
@@ -561,9 +606,7 @@ function EquivalencesRO() {
               </b>
             )}
           </span>
-          <span className={`whitespace-nowrap rounded-md px-1.5 py-0.5 text-[10.5px] font-bold ${k.realisable > 0 ? 'bg-emerald-50 text-emerald-700' : 'bg-red-100 text-red-700'}`}>
-            {k.realisable > 0 ? `${fmtNum(k.realisable)} réalisable${k.realisable > 1 ? 's' : ''}` : 'non réalisable'}
-          </span>
+          <BlocTag imm={k.realisable} dec={k.realisableDec} />
         </div>
       </div>
     )
@@ -616,13 +659,17 @@ function EquivalencesRO() {
             <option value="">Taille : toutes</option>
             {listeTailles.map((t) => <option key={t} value={t}>Taille {t.replace('.', ',')}</option>)}
           </select>
+          <select value={usageF} onChange={(e) => setUsageF(e.target.value as '' | Usage)} className={`${ctl} ${usageF ? 'border-[#B4761A] text-[#8A5A08]' : ''}`}>
+            <option value="">Usage : tous</option>
+            {(Object.keys(USAGES) as Usage[]).map((u) => <option key={u} value={u}>{USAGES[u].label} ({USAGES[u].gamme})</option>)}
+          </select>
           <select value={alimF} onChange={(e) => setAlimF(e.target.value)} className={ctl}>
             <option value="">Alimentation : toutes</option>
             {alims.map((a) => <option key={a} value={a}>{a}</option>)}
           </select>
           <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Référence, composant, solution…" className={`${ctl} w-[260px] font-medium`} />
           <span className="ml-auto text-[11px] text-[#8A8474]">
-            Encadré ocre = composant limitant · <b>Ctrl</b> / <b>Alt</b> en glissant = copier · arrivages janv.→mars non confirmés
+            Dispo : <b className="text-emerald-700">auj.</b> | <b className="text-emerald-700 opacity-80">fin déc.</b> · encadré ocre = composant limitant · <b>Ctrl</b> / <b>Alt</b> en glissant = copier
           </span>
         </section>
 
@@ -638,6 +685,11 @@ function EquivalencesRO() {
                     {[TAILLE_KW_600[taille] && `600 : ${TAILLE_KW_600[taille]}`, TAILLE_KW_800[taille] && `800 : ${TAILLE_KW_800[taille]}`].filter(Boolean).join(' · ')}
                   </span>
                 </div>
+                <div className="grid grid-cols-[150px_340px_minmax(0,1fr)] gap-2 border-b border-[#E5E1D8] px-3 py-1 text-[10px] font-bold uppercase tracking-wide text-[#8A8474]">
+                  <span>Usage</span>
+                  <span className="rounded bg-[#F7EEDB] px-1.5 text-[#8A5A08]">Solution catalogue 2026 · AirH2O</span>
+                  <span>Solutions anciennes générations · composants : prix · dispo auj. | fin déc.</span>
+                </div>
                 {rows.map((c) => {
                   const nt = c.mois.reduce((s, m) => s + n0(m.non_tenable), 0)
                   return (
@@ -650,8 +702,10 @@ function EquivalencesRO() {
                           <span className="text-[11px] text-[#8A8474]">{c.alim}</span>
                           <span className="text-[12px] font-bold text-[#3A362E]">{fmtPrix(c.prix)}</span>
                         </div>
-                        <span className="text-[11.5px]">stock <b>{fmtNum(c.stock_disponible)}</b> · libre <b className={n0(c.qte_dispo_aujourdhui) <= 0 ? 'text-[#B42318]' : ''}>{fmtNum(c.qte_dispo_aujourdhui)}</b>
-                          {n0(c.qte_dispo_aujourdhui) <= 0 && c.date_prochaine_dispo && <span className="text-[#8A5A08]"> · dispo {fmtDate(c.date_prochaine_dispo)}</span>}
+                        <span className="flex items-center gap-1 text-[11.5px]">
+                          stock <b>{fmtNum(c.stock_disponible)}</b> · dispo
+                          <span className={`rounded-md px-1.5 py-0.5 font-bold ${clsDispo(n0(c.dispo_immediate))}`} title="Dispo immédiate (promettable)">auj. {fmtNum(c.dispo_immediate)}</span>
+                          <span className={`rounded-md px-1.5 py-0.5 font-semibold ${clsDispo(n0(c.dispo_fin_dec))}`} title="Dispo d’ici fin décembre (arrivages compris)">fin déc. {fmtNum(c.dispo_fin_dec)}</span>
                         </span>
                         <span className="flex flex-wrap items-center gap-1 text-[11px]">
                           <span className="text-[#8A8474]">arrivages</span>
@@ -667,21 +721,21 @@ function EquivalencesRO() {
                         <span className="truncate text-[11px] text-[#8A8474]">{c.designation}</span>
                       </div>
                       {/* Usages */}
-                      {(c.gamme === '600' ? USAGES_600 : USAGES_800).map((u) => {
+                      {(c.gamme === '600' ? USAGES_600 : USAGES_800).filter((u) => !usageF || u === usageF).map((u) => {
                         const z = parUsage.get(`${c.ref}|${u}`)
                         const refTotal = z?.actuelle ? calculer(z.actuelle, articles).total : null
                         const zA = `act:${c.ref}|${u}`
                         const zB = `bk:${c.ref}|${u}`
                         return (
-                          <div key={u} className="grid grid-cols-[150px_310px_minmax(0,1fr)] gap-2 border-t border-[#F0EDE6] px-3 py-1.5">
+                          <div key={u} className="grid grid-cols-[150px_340px_minmax(0,1fr)] gap-2 border-t border-[#F0EDE6] px-3 py-1.5">
                             <div className="pt-1">
                               <div className="text-[12.5px] font-bold">{USAGES[u].label}</div>
                               <div className="text-[10.5px] text-[#8A8474]">{USAGES[u].sub}</div>
                             </div>
                             <div onDragOver={(e) => survol(e, zA)} onDrop={(e) => deposerSurZone(e, c.ref, u, 'actuelle')}
-                              className={`rounded-lg ${survolZone === zA ? 'bg-[#B4761A]/[0.08]' : ''}`}>
+                              className={`rounded-lg bg-[#FBF5EA] p-1 ${survolZone === zA ? 'ring-2 ring-[#B4761A]' : ''}`}>
                               {z?.actuelle ? <CarteSolution sol={z.actuelle} refTotal={null} />
-                                : <div className="flex h-full min-h-[48px] items-center justify-center rounded-lg border border-dashed border-[#E5E1D8] text-[11px] italic text-[#C9C4B8]">Solution AirH2O : déposer les articles</div>}
+                                : <div className="flex h-full min-h-[48px] items-center justify-center rounded-lg border border-dashed border-[#E5E1D8] text-[11px] italic text-[#B4AE9F]">Solution catalogue 2026 : déposer les articles</div>}
                             </div>
                             <div onDragOver={(e) => survol(e, zB)} onDrop={(e) => deposerSurZone(e, c.ref, u, 'backup')}
                               className={`flex min-h-[52px] flex-wrap items-start gap-1.5 rounded-lg p-0.5 ${survolZone === zB ? 'bg-[#B4761A]/[0.08] outline outline-2 -outline-offset-2 outline-[#B4761A]' : ''}`}>
@@ -700,7 +754,8 @@ function EquivalencesRO() {
             ))}
             {!loading && (
               <p className="px-1 text-[10.5px] text-[#8A8474]">
-                Libre = quantité promettable aujourd’hui pour une nouvelle commande (stock SAGE réel − préparé, après les CDC déjà prises). Réalisable = min(libre ÷ quantité) des composants.
+                Dispo auj. = quantité promettable immédiatement (point bas du stock projeté : stock SAGE réel − préparé + CDF − CDC, toutes dates connues) ; dispo fin déc. = même calcul à partir du 31/12, arrivages de novembre-décembre compris.
+                Bloc = min(dispo du composant ÷ quantité) sur les composants de la solution.
                 Un composant ×2, ×3… est utilisé dans plusieurs solutions : son stock est partagé. Prix = prix public SAGE. Arrivages = CDF SAGE en cours, à leur date de réception retenue.
               </p>
             )}
@@ -732,7 +787,7 @@ function EquivalencesRO() {
                           </div>
                           <div className="truncate text-[10.5px] text-[#5E5A50]">{a.designation || '—'}</div>
                           <div className="mt-0.5 flex flex-wrap items-center gap-1">
-                            <LibreTag a={a} />
+                            <DispoTag a={a} />
                             {estNouvelleGen(ref) && <Badge cls="bg-sky-50 text-sky-800">AirH2O</Badge>}
                             {(partages.get(ref) || 0) > 0 && <Badge cls="bg-violet-50 text-violet-800" title="Nombre de solutions qui l’utilisent">dans {partages.get(ref)} sol.</Badge>}
                           </div>
