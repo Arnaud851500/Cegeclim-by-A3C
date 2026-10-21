@@ -33,6 +33,9 @@
  * URL : ?ref=XXXX ouvre la fenêtre article, ?vue=appro ouvre la vue appro,
  * ?mystock=non|tous change le filtre MYSTOCK (oui par défaut).
  * Pastilles par référence : MYSTOCK, Blocage appro (SAGE) / Arrêt appro (manuel), Sommeil.
+ *
+ * ÉVOLUTION (2026-10-21) : onglet « Vue mensuelle » → /stock/penurie/mensuel (arrivages, CDC fermes,
+ * CDC non tenables, solde projeté octobre → mars, ferme / prévisionnel, mode Qté pertinente, courbes).
  */
 
 import React, { Suspense, useCallback, useEffect, useMemo, useState } from 'react'
@@ -667,6 +670,7 @@ function ReferencesPenurie() {
             <div className="flex rounded-lg border border-[#E5E1D8] bg-[#F4F3F0] p-0.5 text-[12.5px] font-bold">
               <button type="button" onClick={() => changerVue('commerce')} className={`rounded-md px-3 py-1.5 ${vue === 'commerce' ? 'bg-white text-[#111820] shadow-sm' : 'text-[#8A8474]'}`}>Vue commandes clients</button>
               <button type="button" onClick={() => changerVue('appro')} className={`rounded-md px-3 py-1.5 ${vue === 'appro' ? 'bg-white text-[#111820] shadow-sm' : 'text-[#8A8474]'}`}>Vue appro</button>
+              <button type="button" onClick={() => router.push('/stock/penurie/mensuel')} title="Arrivages, CDC fermes, CDC non tenables et solde projeté mois par mois (ferme / prévisionnel, qté pertinente)" className="rounded-md px-3 py-1.5 text-[#8A8474] hover:text-[#3A362E]">Vue mensuelle</button>
             </div>
             <button type="button" onClick={() => void exporterExcel()} disabled={exportEnCours || loading || filtres.length === 0} className="h-10 rounded-lg bg-[#111820] px-3 text-[13px] font-bold text-white disabled:opacity-50">
               {exportEnCours ? 'Export…' : `⬇ Excel (${fmtNum(filtres.length)})`}
