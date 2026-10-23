@@ -43,6 +43,13 @@
  *  famille choisie, seules les CDF qui en contiennent restent, et lignes / pièces / montant (liste, indicateurs,
  *  tri, Excel) ne comptent que les lignes de cette famille. Par défaut, seules les CDF à destination de FMS.
  *
+ * 23/10/2026 (suite 4) — plusieurs dates de livraison par CDF (date saisie ligne par ligne dans SAGE) :
+ *  - une ligne par CDF ; « Livraison » = prochaine date à venir + badge « n dates → dernière date » ;
+ *  - ▸ déplie les blocs par date (lignes, pièces, montant, part, CDC qui en ont besoin) ;
+ *  - alertes par bloc : « Date dépassée » dès qu'un bloc est passé (montant concerné), « CDC attendent »
+ *    sur les blocs dus sous N jours ;
+ *  - vue « Par échéance » (lecture) : une ligne par CDF × date, triée par date, pour préparer les réceptions FMS.
+ *
  * Sources : RPC get_appro_portefeuille_cdf / get_appro_cdf_detail ; tables appro_container_releves,
  * appro_cdf_actions, appro_armateurs, appro_cdf_statuts ; sage.cdf_statut et sage.bdcf_commentaires
  * (export TSE à compléter, voir supabase/sql/20261023_export_sage_cdf_complements.sql).
@@ -83,6 +90,12 @@ type Ligne = {
   nb_cdc: number; nb_cdc_tardives: number; qte_cdc: number | null; premiere_livraison_cdc: string | null
   alertes: CodeAlerte[]; alertes_confirmees: CodeAlerte[]
   derniere_action: { action: string; alerte_code: string | null; commentaire: string | null; le: string; par: string | null } | null
+  date_premiere: string | null; date_derniere: string | null; nb_dates: number; blocs: Bloc[]
+  nb_blocs_depasses: number; montant_depasse: number; nb_cdc_horizon: number
+}
+type Bloc = {
+  date: string | null; nb_lignes: number; qte: number; montant_ht: number; nb_cdc: number; depasse: boolean
+  familles: Record<string, { nb_lignes: number; qte: number; montant_ht: number }>
 }
 type Armateur = { code: string; nom: string; url_suivi: string }
 type Parametres = {
@@ -98,7 +111,7 @@ type Detail = {
   lignes: { ligne: string; reference_article: string; designation: string; quantite: number; montant_ht: number; date_livraison: string | null }[]
   commentaires: string[]
   cdc: { numero_document: string; nom_tiers: string | null; numero_tiers: string | null; representant: string | null; agence: string | null
-    reference_article: string; quantite: number; date_livraison: string | null; statut_couverture: string; retard_estime_jours: number | null }[]
+    reference_article: string; quantite: number; date_livraison: string | null; statut_couverture: string; retard_estime_jours: number | null; bloc_date: string | null }[]
   releves: { id: number; container_numero: string | null; armateur: string | null; navire: string | null; port_arrivee: string | null
     eta_port: string | null; statut: StatutSuivi | null; commentaire: string | null; created_at: string; created_by: string | null }[]
   actions: { id: number; alerte_code: string | null; action: string; commentaire: string | null; date_livraison_ref: string | null; created_at: string; created_by: string | null }[]
@@ -217,6 +230,41 @@ function ouvrirSuivi(container: string | null, armateurCode: string | null, arma
   if (container) { try { void navigator.clipboard?.writeText(container) } catch { /* presse-papiers indisponible */ } }
   const url = a.url_suivi.includes('{container}') ? a.url_suivi.replace('{container}', encodeURIComponent(container || '')) : a.url_suivi
   window.open(url, '_blank', 'noopener,noreferrer')
+}
+
+/** Blocs d'une CDF par date de livraison ; avec une famille macro, seulement les lignes de cette famille. */
+function blocsVisibles(blocs: Bloc[], famille?: string): Bloc[] {
+  if (!famille) return blocs
+  return blocs.flatMap((b) => {
+    const f = b.familles?.[famille]
+    return f ? [{ ...b, nb_lignes: f.nb_lignes, qte: f.qte, montant_ht: f.montant_ht }] : []
+  })
+}
+function BlocsTable({ blocs, famille }: { blocs: Bloc[]; famille?: string }) {
+  const liste = blocsVisibles(blocs, famille)
+  const total = liste.reduce((s, b) => s + Number(b.montant_ht || 0), 0)
+  return (
+    <table className="w-full max-w-[820px] text-[11.5px]">
+      <thead><tr className="text-left text-[#8A8474]">
+        <th className="px-1.5 py-1">Date de livraison</th><th className="px-1.5 text-right">Lignes</th><th className="px-1.5 text-right">Qté</th>
+        <th className="px-1.5 text-right">Montant HT{famille ? ` ${famille}` : ''}</th><th className="px-1.5 text-right">Part</th><th className="px-1.5 text-right">CDC qui en ont besoin</th>
+      </tr></thead>
+      <tbody>{liste.map((b, i) => (
+        <tr key={`${b.date}-${i}`} className={`border-t border-[#F0EDE6] ${b.depasse ? 'bg-red-50/60 text-red-800' : ''}`}>
+          <td className="whitespace-nowrap px-1.5 py-0.5 font-semibold">{b.date ? fmtDate(b.date) : 'sans date'}{b.depasse && <span className="ml-1 text-[10.5px] font-bold">dépassée</span>}</td>
+          <td className="px-1.5 text-right">{fmtNum(b.nb_lignes)}</td><td className="px-1.5 text-right">{fmtNum(b.qte)}</td>
+          <td className="px-1.5 text-right">{fmtNum(b.montant_ht)}</td>
+          <td className="px-1.5 text-right">{total ? `${fmtNum((Number(b.montant_ht) / total) * 100)} %` : '—'}</td>
+          <td className="px-1.5 text-right">{b.nb_cdc ? <b>{fmtNum(b.nb_cdc)}</b> : <span className="text-[#C9C3B5]">—</span>}</td>
+        </tr>
+      ))}</tbody>
+    </table>
+  )
+}
+function libelleAlerte(a: CodeAlerte, r: Ligne): string {
+  if (a === 'DATE_DEPASSEE' && r.nb_dates > 1) return `Date dépassée · ${r.nb_blocs_depasses} bloc${r.nb_blocs_depasses > 1 ? 's' : ''} · ${fmtNum(r.montant_depasse / 1000)} k€`
+  if (a === 'CDC_A_CONFIRMER' && r.nb_cdc_horizon) return `CDC attendent · ${fmtNum(r.nb_cdc_horizon)}`
+  return ALERTE[a].label
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -616,12 +664,12 @@ function CdfModal({ ligne, armateurs, parametres, onClose, onSaved, position, on
             {loading ? <p className="text-[12px] text-[#8A8474]">Chargement…</p> : !detail?.cdc?.length ? <p className="text-[12px] text-[#8A8474]">Aucune commande client n’a besoin de cette réception : le stock et les réceptions précédentes suffisent.</p> : (
               <div className="max-h-60 overflow-y-auto">
                 <table className="w-full text-[11.5px]">
-                  <thead className="sticky top-0 bg-white"><tr className="text-left text-[#8A8474]"><th className="px-1.5 py-1">CDC</th><th className="px-1.5">Client</th><th className="px-1.5">Représentant</th><th className="px-1.5">Référence</th><th className="px-1.5 text-right">Qté</th><th className="px-1.5">Livraison</th><th className="px-1.5">Couverture</th></tr></thead>
+                  <thead className="sticky top-0 bg-white"><tr className="text-left text-[#8A8474]"><th className="px-1.5 py-1">CDC</th><th className="px-1.5">Client</th><th className="px-1.5">Représentant</th><th className="px-1.5">Référence</th><th className="px-1.5 text-right">Qté</th><th className="px-1.5">Livraison</th><th className="px-1.5">Bloc CDF</th><th className="px-1.5">Couverture</th></tr></thead>
                   <tbody>{detail.cdc.map((c, i) => (
                     <tr key={`${c.numero_document}-${c.reference_article}-${i}`} className="border-t border-[#F0EDE6]">
                       <td className="px-1.5 py-0.5 font-semibold">{c.numero_document}</td><td className="px-1.5">{c.nom_tiers || c.numero_tiers}</td>
                       <td className="px-1.5">{c.representant || '—'}</td><td className="px-1.5">{c.reference_article}</td>
-                      <td className="px-1.5 text-right">{fmtNum(c.quantite)}</td><td className="whitespace-nowrap px-1.5">{fmtDate(c.date_livraison)}</td>
+                      <td className="px-1.5 text-right">{fmtNum(c.quantite)}</td><td className="whitespace-nowrap px-1.5">{fmtDate(c.date_livraison)}</td><td className="whitespace-nowrap px-1.5">{fmtDate(c.bloc_date)}</td>
                       <td className="px-1.5">{c.statut_couverture === 'RECEPTION_TARDIVE'
                         ? <Badge cls="bg-orange-100 text-orange-800">Réception tardive{c.retard_estime_jours ? ` (+${c.retard_estime_jours} j)` : ''}</Badge>
                         : <Badge cls="bg-sky-50 text-sky-800">Couverte par la réception</Badge>}</td>
@@ -631,15 +679,24 @@ function CdfModal({ ligne, armateurs, parametres, onClose, onSaved, position, on
             )}
           </section>
 
+          {/* Blocs par date de livraison */}
+          {ligne.nb_dates > 1 && (
+            <section className="rounded-xl border border-[#E5E1D8] bg-white p-3 lg:col-span-2">
+              <h3 className="mb-1.5 text-[11px] font-bold uppercase tracking-wide text-[#8A8474]">Livraisons de la CDF par date ({ligne.nb_dates} dates)</h3>
+              <BlocsTable blocs={ligne.blocs} famille={famille} />
+            </section>
+          )}
+
           {/* Lignes */}
           <section className="rounded-xl border border-[#E5E1D8] bg-white p-3 lg:col-span-2">
             <h3 className="mb-1.5 text-[11px] font-bold uppercase tracking-wide text-[#8A8474]">Lignes de la CDF</h3>
             {loading ? <p className="text-[12px] text-[#8A8474]">Chargement…</p> : (
               <div className="max-h-60 overflow-y-auto">
                 <table className="w-full text-[11.5px]">
-                  <thead className="sticky top-0 bg-white"><tr className="text-left text-[#8A8474]"><th className="px-1.5 py-1">Référence</th><th className="px-1.5">Désignation</th><th className="px-1.5 text-right">Qté</th><th className="px-1.5 text-right">Montant HT</th></tr></thead>
+                  <thead className="sticky top-0 bg-white"><tr className="text-left text-[#8A8474]"><th className="px-1.5 py-1">Livraison</th><th className="px-1.5">Référence</th><th className="px-1.5">Désignation</th><th className="px-1.5 text-right">Qté</th><th className="px-1.5 text-right">Montant HT</th></tr></thead>
                   <tbody>{(detail?.lignes || []).map((l, i) => (
                     <tr key={`${l.ligne}-${i}`} className="border-t border-[#F0EDE6]">
+                      <td className="whitespace-nowrap px-1.5 py-0.5">{fmtDate(l.date_livraison)}</td>
                       <td className="px-1.5 py-0.5 font-semibold">{l.reference_article}</td><td className="px-1.5">{l.designation}</td>
                       <td className="px-1.5 text-right">{fmtNum(l.quantite)}</td><td className="px-1.5 text-right">{fmtNum(l.montant_ht, 2)}</td>
                     </tr>))}</tbody>
@@ -670,6 +727,11 @@ function PortefeuilleCdf() {
   const [fournF, setFournF] = useState('')
   const [qualiteF, setQualiteF] = useState('')
   const [familleF, setFamilleF] = useState('')
+  const [vue, setVue] = useState<'commande' | 'echeance'>('commande')
+  const [deplies, setDeplies] = useState<Set<string>>(() => new Set())
+  function basculer(numero: string) {
+    setDeplies((s) => { const n = new Set(s); if (n.has(numero)) n.delete(numero); else n.add(numero); return n })
+  }
   // Par défaut : CDF à destination de FMS uniquement (« Toutes les CDF » pour voir les agences)
   const [perimetre, setPerimetre] = useState<Perimetre>(() => (params.get('perimetre') === 'cont' ? 'cont' : params.get('perimetre') === 'tous' ? 'tous' : 'fms'))
   const [alerteF, setAlerteF] = useState<CodeAlerte | ''>(() => (params.get('alerte') as CodeAlerte) || '')
@@ -784,7 +846,7 @@ function PortefeuilleCdf() {
     if (familleF) {
       const f = r.familles?.[familleF]
       if (!f) return []
-      return [{ ...r, nb_lignes: f.nb_lignes, qte: f.qte, montant_ht: f.montant_ht }]
+      return [{ ...r, nb_lignes: f.nb_lignes, qte: f.qte, montant_ht: f.montant_ht, blocs: blocsVisibles(r.blocs || [], familleF) }]
     }
     return [r]
   }), [rows, perimetre, fournF, qualiteF, familleF])
@@ -822,6 +884,10 @@ function PortefeuilleCdf() {
       return String(va).localeCompare(String(vb), 'fr') * tri.dir
     })
   }, [base, search, alerteF, seulementAlertes, tri])
+
+  // Vue « Par échéance » : une ligne par CDF × date de livraison, triée par date
+  const echeances = useMemo(() => filtres.flatMap((r) => (r.blocs || []).map((b) => ({ r, b })))
+    .sort((x, y) => (x.b.date || '9999').localeCompare(y.b.date || '9999') || x.r.numero.localeCompare(y.r.numero)), [filtres])
 
   const kpis = useMemo(() => ({
     total: base.length,
@@ -973,6 +1039,48 @@ function PortefeuilleCdf() {
           <span className="ml-auto text-[11.5px] text-[#8A8474]">{fmtNum(filtres.length)} CDF affichées</span>
         </section>
 
+        <div className="flex items-center gap-2">
+          <div className="flex rounded-lg border border-[#E5E1D8] bg-white p-0.5 text-[12.5px] font-bold">
+            <button type="button" onClick={() => setVue('commande')} className={`rounded-md px-3 py-1 ${vue === 'commande' ? 'bg-[#111820] text-white' : 'text-[#8A8474]'}`}>Par commande</button>
+            <button type="button" onClick={() => { setVue('echeance'); setSeulementAlertes(false) }} title="Une ligne par CDF et par date de livraison, triée par date : préparation des réceptions FMS"
+              className={`rounded-md px-3 py-1 ${vue === 'echeance' ? 'bg-[#111820] text-white' : 'text-[#8A8474]'}`}>Par échéance</button>
+          </div>
+          {vue === 'echeance' && <span className="text-[11.5px] text-[#8A8474]">{fmtNum(echeances.length)} échéances · {fmtNum(echeances.reduce((s, e) => s + Number(e.b.montant_ht || 0), 0) / 1000)} k€ HT — vue de lecture, les relances se font par commande</span>}
+        </div>
+
+        {vue === 'echeance' && (
+          <section className="overflow-x-auto rounded-xl border border-[#E5E1D8] bg-white">
+            <table className="w-full text-[12px]">
+              <thead className="sticky top-0 z-10 bg-white">
+                <tr className="border-b border-[#E5E1D8] text-left text-[10.5px] font-bold uppercase tracking-wide text-[#8A8474]">
+                  <th className="px-2 py-1.5">Date de livraison</th><th className="px-2">CDF</th><th className="px-2">Fournisseur</th><th className="px-2">Référence</th>
+                  <th className="px-2 text-right">Lignes</th><th className="px-2 text-right">Qté</th><th className="px-2 text-right">Montant HT</th><th className="px-2 text-right">CDC</th><th className="px-2">Statut</th>
+                </tr>
+              </thead>
+              <tbody>
+                {echeances.length === 0 && <tr><td colSpan={9} className="px-3 py-6 text-center text-[#8A8474]">Aucune échéance avec ces filtres.</td></tr>}
+                {echeances.map(({ r, b }, i) => {
+                  const debutSemaine = i === 0 || (echeances[i - 1].b.date || '').slice(0, 10) !== (b.date || '').slice(0, 10)
+                  return (
+                    <tr key={`${r.numero}-${b.date}-${i}`} onClick={() => ouvrirCdf(r.numero)}
+                      className={`cursor-pointer border-b border-[#F0EDE6] hover:bg-[#FAF8F3] ${b.depasse ? 'bg-red-50/50' : ''}`}>
+                      <td className={`whitespace-nowrap px-2 py-1 ${debutSemaine ? 'font-bold' : 'text-[#C9C3B5]'}`}>{b.date ? fmtDate(b.date) : 'sans date'}{b.depasse && <span className="ml-1 text-[10.5px] font-bold text-red-700">dépassée</span>}</td>
+                      <td className="whitespace-nowrap px-2 py-1 font-semibold">{r.numero}{r.est_cont && <span className="ml-1 text-[10px]">🚢</span>}</td>
+                      <td className="max-w-[180px] truncate px-2 py-1">{r.fournisseur_nom || r.fournisseur_code}</td>
+                      <td className="max-w-[170px] truncate px-2 py-1">{r.reference || '—'}</td>
+                      <td className="px-2 py-1 text-right">{fmtNum(b.nb_lignes)}</td><td className="px-2 py-1 text-right">{fmtNum(b.qte)}</td>
+                      <td className="px-2 py-1 text-right">{fmtNum(b.montant_ht)}</td>
+                      <td className="px-2 py-1 text-right">{b.nb_cdc ? <b>{fmtNum(b.nb_cdc)}</b> : <span className="text-[#C9C3B5]">—</span>}</td>
+                      <td className="whitespace-nowrap px-2 py-1">{r.statut_libelle ? <Badge cls={r.ar_recu ? 'bg-emerald-50 text-emerald-700' : 'bg-[#F4F3F0] text-[#5E5A44]'}>{r.statut_libelle}</Badge> : ''}</td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </section>
+        )}
+
+        {vue === 'commande' && (
         <section className="overflow-x-auto rounded-xl border border-[#E5E1D8] bg-white">
           <table className="w-full text-[12px]">
             <thead className="sticky top-0 z-10 bg-white">
@@ -987,13 +1095,27 @@ function PortefeuilleCdf() {
               {loading && !rep && <tr><td colSpan={13} className="px-3 py-6 text-center text-[#8A8474]">Chargement du portefeuille…</td></tr>}
               {!(loading && !rep) && filtres.length === 0 && <tr><td colSpan={13} className="px-3 py-6 text-center font-semibold text-emerald-700">Aucune CDF à traiter avec ces filtres.</td></tr>}
               {!(loading && !rep) && filtres.map((r) => (
-                <tr key={r.numero} onClick={() => ouvrirCdf(r.numero)} className="cursor-pointer border-b border-[#F0EDE6] hover:bg-[#FAF8F3]">
-                  <td className="whitespace-nowrap px-2 py-1 font-semibold">{r.numero}{r.est_cont && <span className="ml-1 text-[10px]" title="Commande container">🚢</span>}</td>
+                <React.Fragment key={r.numero}>
+                <tr onClick={() => ouvrirCdf(r.numero)} className="cursor-pointer border-b border-[#F0EDE6] hover:bg-[#FAF8F3]">
+                  <td className="whitespace-nowrap px-2 py-1 font-semibold">
+                    {r.nb_dates > 1
+                      ? <button type="button" onClick={(e) => { e.stopPropagation(); basculer(r.numero) }} title="Voir les livraisons par date"
+                          className="mr-1 inline-block w-4 text-[#1D5C86]">{deplies.has(r.numero) ? '▾' : '▸'}</button>
+                      : <span className="mr-1 inline-block w-4" />}
+                    {r.numero}{r.est_cont && <span className="ml-1 text-[10px]" title="Commande container">🚢</span>}
+                  </td>
                   <td className="max-w-[180px] truncate px-2 py-1" title={`${r.fournisseur_code} ${r.fournisseur_nom || ''}`}>{r.fournisseur_nom || r.fournisseur_code}</td>
                   <td className="max-w-[170px] truncate px-2 py-1" title={r.reference || ''}>{r.reference || '—'}<span className="ml-1 text-[10.5px] text-[#8A8474]">{r.depot || ''}</span></td>
                   <td className="whitespace-nowrap px-2 py-1">{fmtDate(r.date_commande)}<span className="ml-1 text-[10.5px] text-[#8A8474]">{r.age_jours !== null ? `${r.age_jours} j` : ''}</span></td>
                   <td className="whitespace-nowrap px-2 py-1">
                     {r.date_livraison ? <>{fmtDate(r.date_livraison)} <span className={`text-[10.5px] font-bold ${r.jours_avant_livraison !== null && r.jours_avant_livraison < 0 ? 'text-red-700' : 'text-[#8A8474]'}`}>{libelleJours(r.jours_avant_livraison)}</span></> : <span className="text-violet-800">sans date</span>}
+                    {r.nb_dates > 1 && (
+                      <button type="button" onClick={(e) => { e.stopPropagation(); basculer(r.numero) }}
+                        title={`Livraisons du ${fmtDate(r.date_premiere)} au ${fmtDate(r.date_derniere)}`}
+                        className="ml-1.5 rounded-full bg-[#1D5C86]/10 px-1.5 py-0.5 text-[10.5px] font-bold text-[#1D5C86]">
+                        {r.nb_dates} dates → {r.date_derniere ? new Date(`${r.date_derniere}T12:00:00`).toLocaleDateString('fr-FR', { day: '2-digit', month: '2-digit', year: '2-digit' }) : '?'}
+                      </button>
+                    )}
                   </td>
                   <td className="whitespace-nowrap px-2 py-1">{r.statut_libelle ? <Badge cls={r.ar_recu ? 'bg-emerald-50 text-emerald-700' : 'bg-[#F4F3F0] text-[#5E5A44]'}>{r.statut_libelle}</Badge> : <span className="text-[#C9C3B5]">—</span>}</td>
                   <td className="whitespace-nowrap px-2 py-1 font-mono text-[11.5px]">
@@ -1006,15 +1128,22 @@ function PortefeuilleCdf() {
                   <td className="whitespace-nowrap px-2 py-1">{r.verdict ? <Badge cls={VERDICT[r.verdict].cls}>{r.marge_jours} j · {VERDICT[r.verdict].label}</Badge> : <span className="text-[#C9C3B5]">—</span>}</td>
                   <td className="whitespace-nowrap px-2 py-1 text-right">{r.nb_cdc ? <span title={`1re livraison client ${fmtDate(r.premiere_livraison_cdc)}`}><b>{fmtNum(r.nb_cdc)}</b>{r.nb_cdc_tardives ? <span className="ml-1 text-[10.5px] text-orange-700">({fmtNum(r.nb_cdc_tardives)} tard.)</span> : ''}</span> : <span className="text-[#C9C3B5]">—</span>}</td>
                   <td className="whitespace-nowrap px-2 py-1 text-right" title={familleF ? `${fmtNum(r.nb_lignes)} ligne(s) ${familleF} · ${fmtNum(r.qte)} pièces` : `${fmtNum(r.nb_lignes)} ligne(s) · ${fmtNum(r.qte)} pièces`}>{fmtNum(r.montant_ht)}</td>
-                  <td className="px-2 py-1"><span className="inline-flex flex-wrap gap-1">{r.alertes.map((a) => <Badge key={a} cls={ALERTE[a].cls} title={ALERTE[a].title}>{ALERTE[a].label}</Badge>)}</span></td>
+                  <td className="px-2 py-1"><span className="inline-flex flex-wrap gap-1">{r.alertes.map((a) => <Badge key={a} cls={ALERTE[a].cls} title={ALERTE[a].title}>{libelleAlerte(a, r)}</Badge>)}</span></td>
                   <td className="max-w-[200px] truncate px-2 py-1 text-[11px] text-[#5E5A44]" title={r.derniere_action?.commentaire || ''}>
                     {r.derniere_action ? <>{fmtDate(r.derniere_action.le)} · {r.derniere_action.action === 'confirme' ? '✓' : r.derniere_action.action === 'relance' ? '📨' : '💬'} {r.derniere_action.commentaire || ''}</> : ''}
                   </td>
                 </tr>
+                {deplies.has(r.numero) && (
+                  <tr className="border-b border-[#F0EDE6] bg-[#FAF8F3]">
+                    <td colSpan={13} className="px-8 py-2"><BlocsTable blocs={r.blocs} /></td>
+                  </tr>
+                )}
+                </React.Fragment>
               ))}
             </tbody>
           </table>
         </section>
+        )}
       </div>
 
       {ligneOuverte && (
