@@ -39,6 +39,10 @@
  *  - favori : si le compagnon est déjà ouvert, l'onglet ouvert par le favori transmet la page au
  *    compagnon (BroadcastChannel) puis se ferme — la fiche s'ouvre dans l'onglet existant, sans rechargement.
  *
+ * 23/10/2026 (suite 3) — filtres « Qualité fournisseur » (SAGE CT_Qualite) et « Famille macro » : avec une
+ *  famille choisie, seules les CDF qui en contiennent restent, et lignes / pièces / montant (liste, indicateurs,
+ *  tri, Excel) ne comptent que les lignes de cette famille. Par défaut, seules les CDF à destination de FMS.
+ *
  * Sources : RPC get_appro_portefeuille_cdf / get_appro_cdf_detail ; tables appro_container_releves,
  * appro_cdf_actions, appro_armateurs, appro_cdf_statuts ; sage.cdf_statut et sage.bdcf_commentaires
  * (export TSE à compléter, voir supabase/sql/20261023_export_sage_cdf_complements.sql).
@@ -63,7 +67,8 @@ type StatutSuivi = 'booke' | 'embarque' | 'en_mer' | 'arrive' | 'decharge' | 'li
 
 type Ligne = {
   numero: string
-  fournisseur_code: string | null; fournisseur_nom: string | null
+  fournisseur_code: string | null; fournisseur_nom: string | null; fournisseur_qualite: string | null
+  familles: Record<string, { nb_lignes: number; qte: number; montant_ht: number }>
   reference: string | null; depot: string | null; est_fms: boolean; est_cont: boolean
   date_commande: string | null; date_livraison: string | null; age_jours: number | null; jours_avant_livraison: number | null
   nb_lignes: number; qte: number; montant_ht: number
@@ -259,10 +264,11 @@ function LienFavori() {
   )
 }
 
-function CdfModal({ ligne, armateurs, parametres, onClose, onSaved, position, onPrev, onNext, prefill }: {
+function CdfModal({ ligne, armateurs, parametres, onClose, onSaved, position, onPrev, onNext, prefill, famille }: {
   ligne: Ligne; armateurs: Armateur[]; parametres: Parametres | null
   onClose: () => void; onSaved: (patch: Partial<Ligne>) => void; position: string | null; onPrev?: () => void; onNext?: () => void
   prefill?: SuiviLu | null
+  famille?: string
 }) {
   const [detail, setDetail] = useState<Detail | null>(null)
   const [loading, setLoading] = useState(true)
@@ -415,6 +421,9 @@ function CdfModal({ ligne, armateurs, parametres, onClose, onSaved, position, on
               {ligne.fournisseur_code} {ligne.fournisseur_nom || ''} · dépôt {ligne.depot || '—'} · commandée le {fmtDate(ligne.date_commande)}
               {' '}· livraison {fmtDate(ligne.date_livraison)} {ligne.jours_avant_livraison !== null && <b>({libelleJours(ligne.jours_avant_livraison)})</b>}
               {' '}· {fmtNum(ligne.nb_lignes)} lignes · {fmtNum(ligne.qte)} pièces · {fmtNum(ligne.montant_ht)} € HT
+              {famille && ligne.familles?.[famille] && (
+                <b className="text-[#1D5C86]"> · dont {famille} : {fmtNum(ligne.familles[famille].nb_lignes)} lignes · {fmtNum(ligne.familles[famille].qte)} pièces · {fmtNum(ligne.familles[famille].montant_ht)} € HT</b>
+              )}
             </p>
             <div className="mt-1 flex flex-wrap gap-1">
               {ligne.statut_libelle && <Badge cls={ligne.ar_recu ? 'bg-emerald-50 text-emerald-700' : 'bg-red-50 text-red-700'}>{ligne.statut_libelle}</Badge>}
@@ -659,7 +668,10 @@ function PortefeuilleCdf() {
   const [erreur, setErreur] = useState<string | null>(null)
   const [search, setSearch] = useState('')
   const [fournF, setFournF] = useState('')
-  const [perimetre, setPerimetre] = useState<Perimetre>(() => (params.get('perimetre') === 'cont' ? 'cont' : params.get('perimetre') === 'fms' ? 'fms' : 'tous'))
+  const [qualiteF, setQualiteF] = useState('')
+  const [familleF, setFamilleF] = useState('')
+  // Par défaut : CDF à destination de FMS uniquement (« Toutes les CDF » pour voir les agences)
+  const [perimetre, setPerimetre] = useState<Perimetre>(() => (params.get('perimetre') === 'cont' ? 'cont' : params.get('perimetre') === 'tous' ? 'tous' : 'fms'))
   const [alerteF, setAlerteF] = useState<CodeAlerte | ''>(() => (params.get('alerte') as CodeAlerte) || '')
   const [seulementAlertes, setSeulementAlertes] = useState(true)
   const [tri, setTri] = useState<{ k: CleTri; dir: 1 | -1 }>({ k: 'date_livraison', dir: 1 })
@@ -756,12 +768,26 @@ function PortefeuilleCdf() {
     return Array.from(m.entries()).sort((a, b) => a[1].localeCompare(b[1], 'fr'))
   }, [rows])
 
-  const base = useMemo(() => rows.filter((r) => {
-    if (perimetre === 'cont' && !r.est_cont) return false
-    if (perimetre === 'fms' && !r.est_fms) return false
-    if (fournF && r.fournisseur_code !== fournF) return false
-    return true
-  }), [rows, perimetre, fournF])
+  const qualites = useMemo(() => Array.from(new Set(rows.map((r) => r.fournisseur_qualite || 'Sans qualité'))).sort((a, b) => a.localeCompare(b, 'fr')), [rows])
+  const famillesMacro = useMemo(() => {
+    const s = new Set<string>()
+    rows.forEach((r) => Object.keys(r.familles || {}).forEach((f) => s.add(f)))
+    return Array.from(s).sort((a, b) => a.localeCompare(b, 'fr'))
+  }, [rows])
+
+  // Avec une famille macro : CDF qui en contiennent, lignes / pièces / montant limités à cette famille
+  const base = useMemo(() => rows.flatMap((r): Ligne[] => {
+    if (perimetre === 'cont' && !r.est_cont) return []
+    if (perimetre === 'fms' && !r.est_fms) return []
+    if (fournF && r.fournisseur_code !== fournF) return []
+    if (qualiteF && (r.fournisseur_qualite || 'Sans qualité') !== qualiteF) return []
+    if (familleF) {
+      const f = r.familles?.[familleF]
+      if (!f) return []
+      return [{ ...r, nb_lignes: f.nb_lignes, qte: f.qte, montant_ht: f.montant_ht }]
+    }
+    return [r]
+  }), [rows, perimetre, fournF, qualiteF, familleF])
 
   const compte = useMemo(() => {
     const c = {} as Record<CodeAlerte, number>
@@ -826,7 +852,7 @@ function PortefeuilleCdf() {
       const wb = new ExcelJS.Workbook()
       const ws = wb.addWorksheet('Portefeuille CDF')
       const cols: { h: string; f: (r: Ligne) => unknown; w?: number }[] = [
-        { h: 'N° CDF', f: (r) => r.numero, w: 12 }, { h: 'Fournisseur', f: (r) => r.fournisseur_code }, { h: 'Nom fournisseur', f: (r) => r.fournisseur_nom, w: 26 },
+        { h: 'N° CDF', f: (r) => r.numero, w: 12 }, { h: 'Fournisseur', f: (r) => r.fournisseur_code }, { h: 'Nom fournisseur', f: (r) => r.fournisseur_nom, w: 26 }, { h: 'Qualité fournisseur', f: (r) => r.fournisseur_qualite },
         { h: 'Référence', f: (r) => r.reference, w: 22 }, { h: 'Dépôt', f: (r) => r.depot }, { h: 'Container (CONT)', f: (r) => (r.est_cont ? 'Oui' : '') },
         { h: 'Date commande', f: (r) => fmtDate(r.date_commande) }, { h: 'Date livraison', f: (r) => fmtDate(r.date_livraison) },
         { h: 'Statut SAGE', f: (r) => r.statut_libelle }, { h: 'N° container', f: (r) => r.container, w: 14 },
@@ -835,7 +861,8 @@ function PortefeuilleCdf() {
         { h: 'Statut suivi', f: (r) => (r.statut_suivi ? STATUT_SUIVI[r.statut_suivi] : '') }, { h: 'Relevé le', f: (r) => fmtDateHeure(r.releve_le) },
         { h: 'Marge (j)', f: (r) => r.marge_jours }, { h: 'Verdict', f: (r) => (r.verdict ? VERDICT[r.verdict].label : '') },
         { h: 'CDC en attente', f: (r) => r.nb_cdc }, { h: '1re livraison CDC', f: (r) => fmtDate(r.premiere_livraison_cdc) },
-        { h: 'Lignes', f: (r) => r.nb_lignes }, { h: 'Pièces', f: (r) => r.qte }, { h: 'Montant HT', f: (r) => r.montant_ht },
+        { h: familleF ? `Lignes ${familleF}` : 'Lignes', f: (r) => r.nb_lignes }, { h: familleF ? `Pièces ${familleF}` : 'Pièces', f: (r) => r.qte },
+        { h: familleF ? `Montant HT ${familleF}` : 'Montant HT', f: (r) => r.montant_ht },
         { h: 'Alertes', f: (r) => r.alertes.map((a) => ALERTE[a].label).join(', '), w: 40 },
         { h: 'Commentaires SAGE', f: (r) => r.commentaires.join(' | '), w: 60 },
       ]
@@ -880,7 +907,7 @@ function PortefeuilleCdf() {
           </div>
           <div className="flex flex-wrap items-center gap-2">
             <div className="flex rounded-lg border border-[#E5E1D8] bg-[#F4F3F0] p-0.5 text-[12.5px] font-bold">
-              {([['tous', 'Toutes les CDF'], ['cont', 'Containers (CONT)'], ['fms', 'Destination FMS']] as [Perimetre, string][]).map(([k, l]) => (
+              {([['fms', 'Destination FMS'], ['cont', 'Containers (CONT)'], ['tous', 'Toutes les CDF']] as [Perimetre, string][]).map(([k, l]) => (
                 <button key={k} type="button" onClick={() => setPerimetre(k)} className={`rounded-md px-3 py-1.5 ${perimetre === k ? 'bg-white text-[#111820] shadow-sm' : 'text-[#8A8474]'}`}>{l}</button>
               ))}
             </div>
@@ -927,6 +954,15 @@ function PortefeuilleCdf() {
             <option value="">Tous les fournisseurs</option>
             {fournisseurs.map(([c, n]) => <option key={c} value={c}>{n} ({c})</option>)}
           </select>
+          <select className={`${ctl} w-[190px]`} value={qualiteF} onChange={(e) => setQualiteF(e.target.value)} title="Qualité du fournisseur (fiche tiers SAGE)">
+            <option value="">Toutes les qualités</option>
+            {qualites.map((q) => <option key={q} value={q}>{q}</option>)}
+          </select>
+          <select className={`${ctl} w-[190px]`} value={familleF} onChange={(e) => setFamilleF(e.target.value)}
+            title="CDF contenant des références de cette famille macro ; lignes, pièces et montants limités à cette famille">
+            <option value="">Toutes les familles macro</option>
+            {famillesMacro.map((f) => <option key={f} value={f}>{f}</option>)}
+          </select>
           <select className={`${ctl} w-[200px]`} value={alerteF} onChange={(e) => setAlerteF(e.target.value as CodeAlerte | '')}>
             <option value="">Toutes les alertes</option>
             {ORDRE_ALERTES.map((a) => <option key={a} value={a}>{ALERTE[a].label} ({fmtNum(compte[a])})</option>)}
@@ -969,7 +1005,7 @@ function PortefeuilleCdf() {
                   </td>
                   <td className="whitespace-nowrap px-2 py-1">{r.verdict ? <Badge cls={VERDICT[r.verdict].cls}>{r.marge_jours} j · {VERDICT[r.verdict].label}</Badge> : <span className="text-[#C9C3B5]">—</span>}</td>
                   <td className="whitespace-nowrap px-2 py-1 text-right">{r.nb_cdc ? <span title={`1re livraison client ${fmtDate(r.premiere_livraison_cdc)}`}><b>{fmtNum(r.nb_cdc)}</b>{r.nb_cdc_tardives ? <span className="ml-1 text-[10.5px] text-orange-700">({fmtNum(r.nb_cdc_tardives)} tard.)</span> : ''}</span> : <span className="text-[#C9C3B5]">—</span>}</td>
-                  <td className="whitespace-nowrap px-2 py-1 text-right">{fmtNum(r.montant_ht)}</td>
+                  <td className="whitespace-nowrap px-2 py-1 text-right" title={familleF ? `${fmtNum(r.nb_lignes)} ligne(s) ${familleF} · ${fmtNum(r.qte)} pièces` : `${fmtNum(r.nb_lignes)} ligne(s) · ${fmtNum(r.qte)} pièces`}>{fmtNum(r.montant_ht)}</td>
                   <td className="px-2 py-1"><span className="inline-flex flex-wrap gap-1">{r.alertes.map((a) => <Badge key={a} cls={ALERTE[a].cls} title={ALERTE[a].title}>{ALERTE[a].label}</Badge>)}</span></td>
                   <td className="max-w-[200px] truncate px-2 py-1 text-[11px] text-[#5E5A44]" title={r.derniere_action?.commentaire || ''}>
                     {r.derniere_action ? <>{fmtDate(r.derniere_action.le)} · {r.derniere_action.action === 'confirme' ? '✓' : r.derniere_action.action === 'relance' ? '📨' : '💬'} {r.derniere_action.commentaire || ''}</> : ''}
@@ -982,7 +1018,7 @@ function PortefeuilleCdf() {
       </div>
 
       {ligneOuverte && (
-        <CdfModal key={`${ligneOuverte.numero}${prefill && prefill.cdf === ligneOuverte.numero ? '-suivi' : ''}`} ligne={ligneOuverte} armateurs={armateurs} parametres={rep?.parametres || null}
+        <CdfModal key={`${ligneOuverte.numero}${prefill && prefill.cdf === ligneOuverte.numero ? '-suivi' : ''}`} ligne={ligneOuverte} armateurs={armateurs} parametres={rep?.parametres || null} famille={familleF || undefined}
           position={indexOuvert >= 0 ? `${indexOuvert + 1} / ${listeNav.length}` : null}
           onPrev={indexOuvert > 0 ? () => setUrl({ cdf: listeNav[indexOuvert - 1] }) : undefined}
           onNext={indexOuvert >= 0 && indexOuvert < listeNav.length - 1 ? () => setUrl({ cdf: listeNav[indexOuvert + 1] }) : undefined}
