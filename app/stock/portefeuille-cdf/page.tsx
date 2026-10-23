@@ -25,6 +25,13 @@
  * « Confirmé » masque une alerte tant que la date de livraison de la CDF ne change pas
  * (au plus cdf_confirmation_validite_jours jours).
  *
+ * 23/10/2026 (suite) — relevé semi-automatique du suivi bateau :
+ *  - « Suivre » sans armateur connu (préfixe de loueur TLLU, TXGU, TCNU…) propose MSC / CMA CGM / autre ;
+ *  - « 📋 Coller le suivi » : lit la page de l'armateur copiée (Ctrl+A, Ctrl+C) et remplit le formulaire
+ *    (lib/suiviContainer.ts : MSC, CMA CGM) — l'utilisateur vérifie puis enregistre ;
+ *  - favori « Envoyer au compagnon » (PC) : un clic sur la page de l'armateur ouvre cette page avec
+ *    #suivi=<texte de la page> ; la CDF est retrouvée par son n° de container et sa fiche s'ouvre pré-remplie.
+ *
  * Sources : RPC get_appro_portefeuille_cdf / get_appro_cdf_detail ; tables appro_container_releves,
  * appro_cdf_actions, appro_armateurs, appro_cdf_statuts ; sage.cdf_statut et sage.bdcf_commentaires
  * (export TSE à compléter, voir supabase/sql/20261023_export_sage_cdf_complements.sql).
@@ -35,6 +42,7 @@ import React, { Suspense, useCallback, useEffect, useMemo, useState } from 'reac
 import { useRouter, useSearchParams } from 'next/navigation'
 import ExcelJS from 'exceljs'
 import { supabase } from '@/lib/supabaseClient'
+import { lireSuiviContainer, type SuiviLu } from '@/lib/suiviContainer'
 
 // ─────────────────────────────────────────────────────────────────────────
 // Types
@@ -193,6 +201,7 @@ function Badge({ cls, children, title }: { cls: string; children: React.ReactNod
 function ouvrirSuivi(container: string | null, armateurCode: string | null, armateurs: Armateur[]) {
   const a = armateurs.find((x) => x.code === armateurCode) || armateurs.find((x) => x.code === 'AUTRE') || armateurs[0]
   if (!a) return
+  try { sessionStorage.setItem('portefeuille-cdf:dernier-suivi', container || '') } catch { /* stockage indisponible */ }
   if (container) { try { void navigator.clipboard?.writeText(container) } catch { /* presse-papiers indisponible */ } }
   const url = a.url_suivi.includes('{container}') ? a.url_suivi.replace('{container}', encodeURIComponent(container || '')) : a.url_suivi
   window.open(url, '_blank', 'noopener,noreferrer')
@@ -202,24 +211,98 @@ function ouvrirSuivi(container: string | null, armateurCode: string | null, arma
 // Fenêtre CDF
 // ─────────────────────────────────────────────────────────────────────────
 
-function CdfModal({ ligne, armateurs, parametres, onClose, onSaved, position, onPrev, onNext }: {
+const LIBELLE_ARMATEUR: Record<string, string> = { MSC: 'MSC', CMA: 'CMA CGM' }
+
+type FormSuivi = {
+  container: string; armateur: string; navire: string; port_arrivee: string
+  eta_port: string; statut: StatutSuivi | ''; commentaire: string
+}
+/** Reporte dans le formulaire les champs lus sur la page de l'armateur (les autres restent inchangés). */
+function appliquerLecture(f: FormSuivi, r: SuiviLu): FormSuivi {
+  return {
+    ...f,
+    container: r.container || f.container,
+    armateur: r.armateur || f.armateur,
+    navire: r.navire || f.navire,
+    port_arrivee: r.port_arrivee || f.port_arrivee,
+    eta_port: r.eta_port || f.eta_port,
+    statut: r.statut || f.statut,
+    commentaire: r.voyage && !f.commentaire ? `Voyage ${r.voyage}${r.dernier_evenement ? ` · ${r.dernier_evenement}` : ''}` : f.commentaire,
+  }
+}
+
+/** Favori « Envoyer au compagnon » : envoie le texte de la page de suivi en fragment d'URL (#suivi=…),
+ * jamais transmis au serveur, et ouvre l'écran dans un nouvel onglet. */
+function codeFavori(origine: string): string {
+  return `javascript:(function(){var t=(document.body.innerText||'').slice(0,20000);`
+    + `window.open('${origine}/stock/portefeuille-cdf#suivi='+encodeURIComponent(t),'_blank');})();`
+}
+function LienFavori() {
+  const ref = React.useRef<HTMLAnchorElement | null>(null)
+  useEffect(() => {
+    // React bloque les href « javascript: » écrits en JSX : on pose l'attribut après le rendu
+    if (ref.current) ref.current.setAttribute('href', codeFavori(window.location.origin))
+  }, [])
+  return (
+    <a ref={ref} onClick={(e) => e.preventDefault()} draggable
+      title="Glissez ce bouton dans la barre de favoris de Chrome. Ensuite, sur la page de suivi MSC ou CMA CGM, cliquez sur le favori : la fiche de la CDF s’ouvre pré-remplie."
+      className="inline-flex h-10 cursor-grab items-center rounded-lg border border-dashed border-[#1D5C86] bg-[#1D5C86]/[0.06] px-3 text-[12.5px] font-bold text-[#1D5C86]">
+      ⭐ Envoyer au compagnon
+    </a>
+  )
+}
+
+function CdfModal({ ligne, armateurs, parametres, onClose, onSaved, position, onPrev, onNext, prefill }: {
   ligne: Ligne; armateurs: Armateur[]; parametres: Parametres | null
   onClose: () => void; onSaved: () => void; position: string | null; onPrev?: () => void; onNext?: () => void
+  prefill?: SuiviLu | null
 }) {
   const [detail, setDetail] = useState<Detail | null>(null)
   const [loading, setLoading] = useState(true)
   const [erreur, setErreur] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
   const [ok, setOk] = useState<string | null>(null)
-  const [f, setF] = useState({
-    container: ligne.container || '',
-    armateur: ligne.armateur || ligne.armateur_suggere || '',
-    navire: ligne.navire || '',
-    port_arrivee: ligne.port_arrivee || 'FOS',
-    eta_port: ligne.eta_port || '',
-    statut: (ligne.statut_suivi || '') as StatutSuivi | '',
-    commentaire: '',
+  const [f, setF] = useState(() => {
+    const base = {
+      container: ligne.container || '',
+      armateur: ligne.armateur || ligne.armateur_suggere || '',
+      navire: ligne.navire || '',
+      port_arrivee: ligne.port_arrivee || 'FOS',
+      eta_port: ligne.eta_port || '',
+      statut: (ligne.statut_suivi || '') as StatutSuivi | '',
+      commentaire: '',
+    }
+    return prefill ? appliquerLecture(base, prefill) : base
   })
+  const [lu, setLu] = useState<SuiviLu | null>(prefill || null)
+  const [choixArmateur, setChoixArmateur] = useState(false)
+  const [collerManuel, setCollerManuel] = useState(false)
+  const [texteColle, setTexteColle] = useState('')
+
+  function appliquer(texte: string) {
+    const r = lireSuiviContainer(texte)
+    setLu(r)
+    if (r.champs_lus === 0 && !r.armateur) {
+      setErreur('Page non reconnue : copiez toute la page de suivi MSC ou CMA CGM (Ctrl+A puis Ctrl+C), puis recommencez.')
+      return
+    }
+    setErreur(null)
+    setF((x) => appliquerLecture(x, r))
+    setCollerManuel(false); setTexteColle('')
+  }
+  async function collerSuivi() {
+    setOk(null)
+    try {
+      const texte = await navigator.clipboard.readText()
+      if (texte && texte.trim().length > 20) { appliquer(texte); return }
+    } catch { /* lecture du presse-papiers refusée : saisie manuelle */ }
+    setCollerManuel(true)
+  }
+  function suivre() {
+    const c = f.container || ligne.container
+    if (!f.armateur) { setChoixArmateur((v) => !v); return }
+    ouvrirSuivi(c, f.armateur, armateurs)
+  }
   const [actionAlerte, setActionAlerte] = useState<CodeAlerte | ''>(ligne.alertes[0] || '')
   const [actionCommentaire, setActionCommentaire] = useState('')
 
@@ -336,11 +419,48 @@ function CdfModal({ ligne, armateurs, parametres, onClose, onSaved, position, on
             <section className="rounded-xl border border-[#E5E1D8] bg-white p-3">
               <div className="mb-2 flex items-center justify-between gap-2">
                 <h3 className="text-[11px] font-bold uppercase tracking-wide text-[#8A8474]">Container & suivi bateau</h3>
-                <button type="button" onClick={() => ouvrirSuivi(f.container || ligne.container, f.armateur || null, armateurs)}
-                  disabled={!f.container && !ligne.container}
-                  title="Copie le n° de container et ouvre le site de suivi de l’armateur (collez le n° si la page le demande)"
-                  className="h-8 rounded-lg bg-[#1D5C86] px-3 text-[12.5px] font-bold text-white disabled:opacity-40">🔗 Suivre</button>
+                <div className="flex items-center gap-1.5">
+                  <button type="button" onClick={suivre}
+                    disabled={!f.container && !ligne.container}
+                    title="Copie le n° de container et ouvre le site de suivi de l’armateur (collez le n° si la page le demande)"
+                    className="h-8 rounded-lg bg-[#1D5C86] px-3 text-[12.5px] font-bold text-white disabled:opacity-40">🔗 Suivre</button>
+                  <button type="button" onClick={() => void collerSuivi()}
+                    title="Sur la page de l’armateur : Ctrl+A puis Ctrl+C, puis cliquez ici — le formulaire se remplit, vous vérifiez avant d’enregistrer"
+                    className="h-8 rounded-lg border border-[#1D5C86] bg-white px-3 text-[12.5px] font-bold text-[#1D5C86]">📋 Coller le suivi</button>
+                </div>
               </div>
+              {choixArmateur && !f.armateur && (
+                <div className="mb-2 rounded-lg border border-[#1D5C86]/30 bg-[#1D5C86]/[0.06] px-2.5 py-2 text-[12px]">
+                  <div className="mb-1 font-semibold text-[#1D5C86]">Container de loueur : armateur à choisir (le n° est copié, collez-le sur la page)</div>
+                  <div className="flex flex-wrap gap-1.5">
+                    {armateurs.filter((a) => ['MSC', 'CMA', 'AUTRE'].includes(a.code)).map((a) => (
+                      <button key={a.code} type="button"
+                        onClick={() => { setF((x) => ({ ...x, armateur: a.code === 'AUTRE' ? x.armateur : a.code })); setChoixArmateur(false); ouvrirSuivi(f.container || ligne.container, a.code, armateurs) }}
+                        className="h-7 rounded-md border border-[#E5E1D8] bg-white px-2.5 text-[12px] font-bold">{a.nom}</button>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {collerManuel && (
+                <div className="mb-2 rounded-lg border border-[#E5E1D8] bg-[#FAF8F3] p-2 text-[12px]">
+                  <div className="mb-1 font-semibold">Collez ici la page de suivi (Ctrl+V) :</div>
+                  <textarea autoFocus value={texteColle} onChange={(e) => setTexteColle(e.target.value)}
+                    onPaste={(e) => { const v = e.clipboardData.getData('text'); if (v) { e.preventDefault(); appliquer(v) } }}
+                    className="h-20 w-full rounded-md border border-[#E5E1D8] bg-white p-1.5 font-mono text-[11px]" placeholder="Ctrl+V" />
+                  <div className="mt-1 flex justify-end gap-1.5">
+                    <button type="button" onClick={() => setCollerManuel(false)} className="h-7 rounded-md border border-[#E5E1D8] bg-white px-2.5 text-[12px] font-bold">Annuler</button>
+                    <button type="button" onClick={() => appliquer(texteColle)} disabled={!texteColle.trim()} className="h-7 rounded-md bg-[#111820] px-2.5 text-[12px] font-bold text-white disabled:opacity-40">Lire</button>
+                  </div>
+                </div>
+              )}
+              {lu && lu.champs_lus > 0 && (
+                <div className={`mb-2 rounded-lg px-2.5 py-1.5 text-[12px] ${lu.container && f.container && lu.container !== f.container.replace(/\s/g, '').toUpperCase() ? 'border border-red-200 bg-red-50 text-red-800' : 'border border-emerald-200 bg-emerald-50 text-emerald-900'}`}>
+                  <b>Lu sur la page {lu.armateur ? LIBELLE_ARMATEUR[lu.armateur] : 'de suivi'}</b> : {[lu.container, lu.navire && `${lu.navire}${lu.voyage ? ` (${lu.voyage})` : ''}`, lu.port_arrivee, lu.eta_port && `ETA ${fmtDate(lu.eta_port)}`, lu.dernier_evenement].filter(Boolean).join(' · ')}
+                  {lu.container && ligne.container && lu.container !== ligne.container
+                    ? <div className="font-bold">⚠ Ce n’est pas le container de cette CDF ({ligne.container}) — vérifiez avant d’enregistrer.</div>
+                    : <div>Vérifiez les champs remplis puis cliquez sur « Mettre à jour le suivi ».</div>}
+                </div>
+              )}
               <div className="mb-2 rounded-lg bg-[#F4F3F0] px-2.5 py-1.5 text-[12px]">
                 {ligne.container
                   ? <>N° retenu <b className="font-mono">{ligne.container}</b> ({ligne.container_source === 'sage' ? 'lu dans SAGE' : 'saisi dans l’app'})
@@ -504,6 +624,9 @@ function PortefeuilleCdf() {
   const [tri, setTri] = useState<{ k: CleTri; dir: 1 | -1 }>({ k: 'date_livraison', dir: 1 })
   const [exportEnCours, setExportEnCours] = useState(false)
   const cdfOuverte = params.get('cdf')
+  const [prefill, setPrefill] = useState<{ cdf: string; lu: SuiviLu } | null>(null)
+  const [suiviRecu, setSuiviRecu] = useState<SuiviLu | null>(null)
+  const [infoSuivi, setInfoSuivi] = useState<string | null>(null)
 
   const charger = useCallback(async () => {
     setLoading(true); setErreur(null)
@@ -512,6 +635,31 @@ function PortefeuilleCdf() {
     setLoading(false)
   }, [])
   useEffect(() => { void charger() }, [charger])
+
+  // Favori « Envoyer au compagnon » : texte de la page de suivi reçu dans #suivi=…
+  useEffect(() => {
+    const h = window.location.hash
+    if (!h.startsWith('#suivi=')) return
+    let texte = ''
+    try { texte = decodeURIComponent(h.slice(7)) } catch { texte = '' }
+    window.history.replaceState(null, '', window.location.pathname + window.location.search)
+    const r = lireSuiviContainer(texte)
+    setSuiviRecu(r)
+  }, [])
+
+  // Quand le portefeuille est chargé : on retrouve la CDF du container reçu et on ouvre sa fiche pré-remplie
+  useEffect(() => {
+    if (!suiviRecu || !rep) return
+    const c = suiviRecu.container
+    const cible = c ? rep.rows.find((r) => r.container === c) : undefined
+    setSuiviRecu(null)
+    if (!c) { setInfoSuivi('Page reçue, mais aucun n° de container reconnu : ouvrez la page de résultat du suivi (MSC ou CMA CGM) avant de cliquer sur le favori.'); return }
+    if (!cible) { setInfoSuivi(`Container ${c} introuvable dans les CDF ouvertes : ouvrez la CDF, saisissez le n° puis utilisez « 📋 Coller le suivi ».`); return }
+    setInfoSuivi(null)
+    setPrefill({ cdf: cible.numero, lu: suiviRecu })
+    const sp = new URLSearchParams(params.toString()); sp.set('cdf', cible.numero)
+    router.replace(`/stock/portefeuille-cdf?${sp.toString()}`, { scroll: false })
+  }, [suiviRecu, rep, params, router])
 
   function setUrl(next: { cdf?: string | null }) {
     const sp = new URLSearchParams(params.toString())
@@ -642,6 +790,7 @@ function PortefeuilleCdf() {
                 <button key={k} type="button" onClick={() => setPerimetre(k)} className={`rounded-md px-3 py-1.5 ${perimetre === k ? 'bg-white text-[#111820] shadow-sm' : 'text-[#8A8474]'}`}>{l}</button>
               ))}
             </div>
+            <LienFavori />
             <button type="button" onClick={() => void exporterExcel()} disabled={exportEnCours || loading || filtres.length === 0} className="h-10 rounded-lg bg-[#111820] px-3 text-[13px] font-bold text-white disabled:opacity-50">
               {exportEnCours ? 'Export…' : `⬇ Excel (${fmtNum(filtres.length)})`}
             </button>
@@ -652,6 +801,12 @@ function PortefeuilleCdf() {
         {erreur && (
           <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-[12.5px] font-semibold text-red-800">
             {erreur}{/get_appro_portefeuille_cdf|does not exist/.test(erreur) ? ' — la migration 20261023_portefeuille_cdf.sql est-elle appliquée ?' : ''}
+          </div>
+        )}
+        {infoSuivi && (
+          <div className="flex items-start justify-between gap-3 rounded-lg border border-[#1D5C86]/30 bg-[#1D5C86]/[0.06] px-3 py-2 text-[12.5px] font-semibold text-[#1D5C86]">
+            <span>{infoSuivi}</span>
+            <button type="button" onClick={() => setInfoSuivi(null)} className="text-[14px]">×</button>
           </div>
         )}
         {rep && (!rep.sources.commentaires || !rep.sources.statut_ar) && (
@@ -733,11 +888,12 @@ function PortefeuilleCdf() {
       </div>
 
       {ligneOuverte && (
-        <CdfModal key={ligneOuverte.numero} ligne={ligneOuverte} armateurs={armateurs} parametres={rep?.parametres || null}
+        <CdfModal key={`${ligneOuverte.numero}${prefill && prefill.cdf === ligneOuverte.numero ? '-suivi' : ''}`} ligne={ligneOuverte} armateurs={armateurs} parametres={rep?.parametres || null}
           position={indexOuvert >= 0 ? `${indexOuvert + 1} / ${filtres.length}` : null}
           onPrev={indexOuvert > 0 ? () => setUrl({ cdf: filtres[indexOuvert - 1].numero }) : undefined}
           onNext={indexOuvert >= 0 && indexOuvert < filtres.length - 1 ? () => setUrl({ cdf: filtres[indexOuvert + 1].numero }) : undefined}
-          onClose={() => setUrl({ cdf: null })} onSaved={() => void charger()} />
+          prefill={prefill && prefill.cdf === ligneOuverte.numero ? prefill.lu : null}
+          onClose={() => { setPrefill(null); setUrl({ cdf: null }) }} onSaved={() => void charger()} />
       )}
     </main>
   )
