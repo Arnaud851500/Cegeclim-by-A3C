@@ -43,6 +43,8 @@
  *        non couvertes dépôt par dépôt → transfert agence → FMS, FMS → agence, inter-agences, réappro (MYSTOCK)
  *        ou contremarque (non MYSTOCK) ; besoin ferme : un stock à réception négatif déclenche toujours une
  *        proposition (au moins le manque), même sans conso ni stock min.
+ *        Transferts : seulement pour la part due avant la réception du réappro (tout le manque sans réappro proche),
+ *        l'agence cédante garde transfert_protection_agence_mois mois de ses sorties (appro_article_conso_depot).
  *
  * Hiérarchie des paramètres : article > fournisseur > paramètre global (appro_parametres) ;
  * la méthode peut en plus être forcée sur l'écran.
@@ -2833,7 +2835,7 @@ type CleColArt =
   | 'proposition' | 'retenue' | 'date_liv' | 'montant' | 'prix_qte' | 'palier_suivant' | 'paliers_plus'
 type GroupeCol = 'Article' | 'Paramètres d’appro' | 'Conso' | 'Projection à réception' | 'Stocks min / max' | 'Commande' | 'Tarif'
 type FiltresColArt = Partial<Record<CleColArt, string>>
-type CtxColArt = { fournMap: Map<string, FournRow>; incoherencesParRef: Map<string, string[]>; propositions: Map<string, Proposition>; tarifs: Map<string, AnalyseTarif>; besoinsDepot: Map<string, BesoinDepot>; familleMacro: Map<string, string> }
+type CtxColArt = { fournMap: Map<string, FournRow>; incoherencesParRef: Map<string, string[]>; propositions: Map<string, Proposition>; tarifs: Map<string, AnalyseTarif>; besoinsDepot: Map<string, BesoinDepot>; familleMacro: Map<string, string>; actionsParRef: Map<string, ActionDepot[]> }
 
 // ─────────────────────────────────────────────────────────────────────────
 // Besoin ferme par dépôt : transferts et contremarques (v_appro_article_besoin_depot)
@@ -2841,7 +2843,13 @@ type CtxColArt = { fournMap: Map<string, FournRow>; incoherencesParRef: Map<stri
 
 /** Situation d'un dépôt pour une référence : réservé SAGE (sto_res), disponible (physique − PL), stock en dépôt TRANSIT
  * vers ce dépôt, encours fournisseur livré à ce dépôt, manque (réservé non couvert) et surplus (dispo non réservé). */
-type DepotBesoin = { dep: string; fms: boolean; res: number; dispo: number; transit: number; encours: number; manque: number; surplus: number }
+type EchQ = { d: string | null; q: number }
+type DepotBesoin = {
+  dep: string; fms: boolean; res: number; dispo: number; transit: number; encours: number; manque: number; surplus: number
+  conso_mois?: number            // sorties BL mensuelles du dépôt (12 derniers mois complets)
+  res_ech?: EchQ[]               // réservé CDC du dépôt par date de livraison
+  enc_ech?: EchQ[]               // encours CDF livré au dépôt par date estimée
+}
 type BesoinDepot = {
   reference_article: string
   manque_stock_fms: number; manque_fms: number; surplus_fms: number
@@ -2861,45 +2869,126 @@ const ACTIONS_DEPOT: { code: TypeActionDepot; label: string; className: string }
   { code: 'reappro', label: 'Réappro (rupture MYSTOCK)', className: 'bg-red-100 text-red-700' },
   { code: 'contremarque', label: 'Contremarque à passer', className: 'bg-orange-100 text-orange-800' },
 ]
+const AUCUNE_ACTION: ActionDepot[] = []
 const ACTION_DEPOT_PAR_CODE = Object.fromEntries(ACTIONS_DEPOT.map((x) => [x.code, x])) as Record<TypeActionDepot, typeof ACTIONS_DEPOT[number]>
 const libDep = (d: string) => (d === 'FMS' ? 'FMS' : d.charAt(0) + d.slice(1).toLowerCase())
 
-/** Actions à mener pour couvrir les réservations SAGE dépôt par dépôt :
- *  1. transferts (agences → FMS pour une CDC départ FMS, FMS → agence puis inter-agences pour une CDC départ agence) ;
- *  2. reste non couvert : réappro fournisseur si MYSTOCK, sinon contremarque. */
-function actionsDepot(a: ArtRow, b: BesoinDepot | undefined, p?: Proposition): ActionDepot[] {
+/** Situation d'un dépôt pour le calcul des transferts. */
+type EtatDepot = { d: DepotBesoin; total: number; urgent: number; protection: number; cedable: number }
+
+/** Actions à mener pour couvrir les réservations SAGE dépôt par dépôt (règles fixées le 23/10/2026) :
+ *  - un transfert n'est proposé que pour la part du manque due AVANT la réception du réappro lancé aujourd'hui
+ *    (date de réception de la proposition) ; sans réappro proche (pas de proposition : rotation lente, arrêt appro,
+ *    blocage, non MYSTOCK), tout le manque est transférable ;
+ *  - l'agence cédante garde N mois de ses propres sorties (appro_parametres.transfert_protection_agence_mois) ;
+ *  - ordre : agences → FMS (CDC départ FMS), FMS → agence (flux normal, tout le manque), puis inter-agences (part urgente) ;
+ *  - le reste est couvert par le réappro (MYSTOCK) ou par une contremarque. */
+function actionsDepot(a: ArtRow, b: BesoinDepot | undefined, p: Proposition | undefined, protMois: number): ActionDepot[] {
   if (!b) return []
   const det = b.detail_depots || []
-  const manques = det.filter((d) => d.manque > 0)
-  const surplusAg = det.filter((d) => !d.fms && d.surplus > 0)
-  const surplusFms = det.find((d) => d.fms && d.surplus > 0)
-  const lst = (l: DepotBesoin[], k: 'manque' | 'surplus') => l.map((d) => `${libDep(d.dep)} ${fmtNum(d[k])}`).join(', ')
+  const reapproProche = !!p && p.qteFinale > 0
+  const dateRef = p?.dateReception ?? null
+  const cumul = (l: EchQ[] | undefined, max: string) => (l || []).reduce((t, e) => t + (!e.d || String(e.d).slice(0, 10) <= max ? n0(e.q) : 0), 0)
+  const etats: EtatDepot[] = det.map((d) => {
+    const total = n0(d.manque)
+    let urgent = total
+    if (reapproProche && dateRef && d.res_ech) {
+      const resAvant = Math.min(n0(d.res), cumul(d.res_ech, dateRef))
+      urgent = Math.min(total, Math.max(0, resAvant - n0(d.dispo) - n0(d.transit) - cumul(d.enc_ech, dateRef)))
+    }
+    const protection = d.fms ? 0 : Math.ceil(Math.max(0, protMois) * Math.max(0, n0(d.conso_mois)) - 1e-9)
+    const cedable = d.fms ? n0(d.surplus) : Math.max(0, n0(d.dispo) - n0(d.res) - protection)
+    return { d, total, urgent, protection, cedable }
+  })
+  const pool = etats.filter((e) => !e.d.fms && e.cedable > 0).map((e) => ({ e, reste: e.cedable })).sort((x, y) => y.reste - x.reste)
+  const prendre = (besoin: number, sauf: string) => {
+    const src: { dep: string; q: number }[] = []
+    let r = besoin
+    for (const x of pool) {
+      if (r <= 0) break
+      if (x.e.d.dep === sauf || x.reste <= 0) continue
+      const q = Math.min(r, x.reste)
+      x.reste -= q; r -= q; src.push({ dep: x.e.d.dep, q })
+    }
+    return src
+  }
+  const libSrc = (l: { dep: string; q: number }[]) => l.map((x) => `${libDep(x.dep)} ${fmtNum(x.q)}`).join(', ')
+  const libProtection = (l: { dep: string }[]) => {
+    const t = l.map((x) => etats.find((e) => e.d.dep === x.dep)).filter((e): e is EtatDepot => !!e && e.protection > 0)
+    return t.length ? ` (chaque agence garde ${fmtNum(protMois)} mois de ses sorties : ${t.map((e) => `${libDep(e.d.dep)} ${fmtNum(e.protection)}`).join(', ')})` : ''
+  }
   const out: ActionDepot[] = []
-  if (b.transfert_agences_vers_fms > 0)
-    out.push({ type: 'transfert_ag_fms', qte: b.transfert_agences_vers_fms, libelle: 'Agence → FMS',
-      detail: `FMS manque ${fmtNum(b.manque_fms)} (CDC départ FMS non couvertes) ; stock agence disponible : ${lst(surplusAg, 'surplus')}` })
-  if (b.transfert_fms_vers_agences > 0)
-    out.push({ type: 'transfert_fms_ag', qte: b.transfert_fms_vers_agences, libelle: 'FMS → agence',
-      detail: `Agences en manque : ${lst(manques.filter((d) => !d.fms), 'manque')} ; FMS disponible ${fmtNum(surplusFms?.surplus ?? 0)}` })
-  if (b.transfert_inter_agences > 0)
-    out.push({ type: 'transfert_inter', qte: b.transfert_inter_agences, libelle: 'Inter-agences',
-      detail: `Agences en manque : ${lst(manques.filter((d) => !d.fms), 'manque')} ; autres agences disponibles : ${lst(surplusAg, 'surplus')}` })
-  if (b.manque_net > 0) {
+  let transferts = 0
+
+  // 1. Agences → FMS : part urgente du manque FMS
+  const fms = etats.find((e) => e.d.fms)
+  if (fms && fms.urgent > 0) {
+    const src = prendre(fms.urgent, 'FMS')
+    const q = src.reduce((t, x) => t + x.q, 0)
+    if (q > 0) {
+      transferts += q
+      out.push({ type: 'transfert_ag_fms', qte: q, libelle: 'Agence → FMS',
+        detail: `CDC départ FMS dues${reapproProche ? ` avant la réception du réappro (${fmtDate(dateRef)})` : ' (pas de réappro proche)'} non couvertes : ${fmtNum(fms.urgent)} ; depuis ${libSrc(src)}${libProtection(src)}` })
+    }
+  }
+
+  // 2. FMS → agences : flux normal, part urgente servie en premier
+  const agences = etats.filter((e) => !e.d.fms && e.total > 0).sort((x, y) => y.urgent - x.urgent || y.total - x.total)
+  let dispoFms = fms ? fms.cedable : 0
+  const servi = new Map<string, number>()
+  for (const passe of ['urgent', 'total'] as const) {
+    for (const e of agences) {
+      if (dispoFms <= 0) break
+      const deja = servi.get(e.d.dep) || 0
+      const q = Math.min(dispoFms, Math.max(0, e[passe] - deja))
+      if (q > 0) { servi.set(e.d.dep, deja + q); dispoFms -= q }
+    }
+  }
+  const qFmsAg = Array.from(servi.values()).reduce((t, q) => t + q, 0)
+  if (qFmsAg > 0) {
+    transferts += qFmsAg
+    out.push({ type: 'transfert_fms_ag', qte: qFmsAg, libelle: 'FMS → agence',
+      detail: `Vers ${Array.from(servi.entries()).map(([dep, q]) => `${libDep(dep)} ${fmtNum(q)}`).join(', ')} (FMS disponible non réservé ${fmtNum(fms?.cedable ?? 0)})` })
+  }
+
+  // 3. Inter-agences : part urgente encore non couverte, depuis les autres agences (protection comprise)
+  const interSrc: { dep: string; q: number }[] = []
+  const interDest: string[] = []
+  for (const e of agences) {
+    const besoin = Math.max(0, e.urgent - (servi.get(e.d.dep) || 0))
+    if (besoin <= 0) continue
+    const src = prendre(besoin, e.d.dep)
+    const q = src.reduce((t, x) => t + x.q, 0)
+    if (q > 0) { interSrc.push(...src); interDest.push(`${libDep(e.d.dep)} ${fmtNum(q)}`) }
+  }
+  const qInter = interSrc.reduce((t, x) => t + x.q, 0)
+  if (qInter > 0) {
+    transferts += qInter
+    out.push({ type: 'transfert_inter', qte: qInter, libelle: 'Inter-agences',
+      detail: `Vers ${interDest.join(', ')}${reapproProche ? ` (dû avant la réception du réappro, ${fmtDate(dateRef)})` : ' (pas de réappro proche)'} ; depuis ${libSrc(interSrc)}${libProtection(interSrc)}` })
+  }
+
+  // 4. Reste : réappro (MYSTOCK) ou contremarque
+  const manqueTotal = etats.reduce((t, e) => t + e.total, 0)
+  const manqueNet = Math.max(0, manqueTotal - transferts)
+  if (manqueNet > 0) {
+    const nonUrgent = etats.reduce((t, e) => t + Math.max(0, e.total - e.urgent), 0)
+    const noteDates = reapproProche && nonUrgent > 0 ? ` ; dont ${fmtNum(nonUrgent)} dû après la réception du ${fmtDate(dateRef)} : couvert par le réappro, pas de transfert proposé` : ''
     const mystock = safeText(a.mystock).toUpperCase() === 'OUI'
     out.push(mystock
-      ? { type: 'reappro', qte: b.manque_net, libelle: p && p.qteFinale < b.manque_net ? 'Réappro ⚠' : 'Réappro',
-          detail: `Réservations non couvertes après transferts (toutes dates) : ${fmtNum(b.manque_net)} — ${!p ? 'voir la proposition' : p.qteFinale >= b.manque_net ? `couvert par la quantité commandée ${fmtNum(p.qteFinale)}` : `quantité commandée ${fmtNum(p.qteFinale)} < manque : reste ${fmtNum(b.manque_net - p.qteFinale)} pièces réservées au-delà du ${fmtDate(p.dateReceptionSuivante)} (réception suivante), à couvrir par la prochaine commande`}` }
-      : { type: 'contremarque', qte: b.manque_net, libelle: 'Contremarque', detail: `Référence non MYSTOCK : ${fmtNum(b.manque_net)} à commander en contremarque (réservé non couvert par le stock, les transferts ni l'encours fournisseur du dépôt)` })
+      ? { type: 'reappro', qte: manqueNet, libelle: p && p.qteFinale < manqueNet ? 'Réappro ⚠' : 'Réappro',
+          detail: `Réservations non couvertes après transferts (toutes dates) : ${fmtNum(manqueNet)}${noteDates} — ${!p ? 'voir la proposition' : p.qteFinale >= manqueNet ? `couvert par la quantité commandée ${fmtNum(p.qteFinale)}` : p.qteFinale > 0 ? `quantité commandée ${fmtNum(p.qteFinale)} < manque : reste ${fmtNum(manqueNet - p.qteFinale)} pièces réservées au-delà du ${fmtDate(p.dateReceptionSuivante)} (réception suivante), à couvrir par la prochaine commande` : 'aucune proposition de réappro (arrêt, blocage ou stratégie) : à traiter'}` }
+      : { type: 'contremarque', qte: manqueNet, libelle: 'Contremarque', detail: `Référence non MYSTOCK : ${fmtNum(manqueNet)} à commander en contremarque (réservé non couvert par le stock, les transferts ni l'encours fournisseur du dépôt)` })
   }
   return out
 }
 
-function titreBesoinDepot(b: BesoinDepot, actions: ActionDepot[]): string {
+function titreBesoinDepot(b: BesoinDepot, actions: ActionDepot[], protMois: number): string {
   return [
     ...actions.map((x) => `• ${ACTION_DEPOT_PAR_CODE[x.type].label} : ${fmtNum(x.qte)} — ${x.detail}`),
     '',
-    'Par dépôt (réservé SAGE / disponible / transit / encours CDF → manque | surplus) :',
-    ...(b.detail_depots || []).map((d) => `  ${libDep(d.dep).padEnd(12)} rés. ${fmtNum(d.res)} · dispo ${fmtNum(d.dispo)}${d.transit ? ` · transit ${fmtNum(d.transit)}` : ''}${d.encours ? ` · encours ${fmtNum(d.encours)}` : ''} → ${d.manque > 0 ? `manque ${fmtNum(d.manque)}` : d.surplus > 0 ? `surplus ${fmtNum(d.surplus)}` : 'équilibré'}`),
+    `Par dépôt (réservé SAGE / disponible / transit / encours CDF / sorties par mois → manque | surplus ; protection agence ${fmtNum(protMois)} mois) :`,
+    ...(b.detail_depots || []).map((d) => `  ${libDep(d.dep).padEnd(12)} rés. ${fmtNum(d.res)} · dispo ${fmtNum(d.dispo)}${d.transit ? ` · transit ${fmtNum(d.transit)}` : ''}${d.encours ? ` · encours ${fmtNum(d.encours)}` : ''}${n0(d.conso_mois) ? ` · ${fmtNum(d.conso_mois, 1)}/mois` : ''} → ${d.manque > 0 ? `manque ${fmtNum(d.manque)}` : d.surplus > 0 ? `surplus ${fmtNum(d.surplus)}${!d.fms && n0(d.conso_mois) > 0 ? ` (cédable ${fmtNum(Math.max(0, d.surplus - Math.ceil(protMois * n0(d.conso_mois) - 1e-9)))})` : ''}` : 'équilibré'}`),
   ].join('\n')
 }
 const propDe = (c: CtxColArt, a: ArtRow) => c.propositions.get(a.reference_article)
@@ -2941,7 +3030,7 @@ const COLONNES_ARTICLES: { key: CleColArt; label: string; groupe: GroupeCol; tit
   { key: 'min_sage', label: 'Min SAGE', groupe: 'Stocks min / max', align: 'right', val: (a) => a.sage_stock_min_fms },
   { key: 'min_blg', label: 'Min BLG', groupe: 'Stocks min / max', title: 'Stock min BLG (DPFMS) — rouge si différent du calculé', align: 'right', val: (a) => a.blg_stock_min_fms },
   { key: 'retenu', label: 'Min retenu', groupe: 'Stocks min / max', title: 'Stock min retenu, délais, arrêt appro / vente, remplaçante (✎). Filtre "!vide" = avec saisie', align: 'right', placeholder: '!vide', val: (a) => a.stock_min_retenu },
-  { key: 'action_depot', label: 'Action dépôts', groupe: 'Commande', title: 'Réservations SAGE non couvertes dépôt par dépôt : transfert agence → FMS, FMS → agence, inter-agences, réappro (MYSTOCK) ou contremarque (non MYSTOCK). Filtre : "transfert", "contremarque", "réappro", "inter", ">0"', align: 'left', placeholder: 'transfert', val: (a, c) => { const l = actionsDepot(a, c.besoinsDepot.get(a.reference_article.toUpperCase()), propDe(c, a)); return l.length ? l.map((x) => `${ACTION_DEPOT_PAR_CODE[x.type].label} ${x.qte}`).join(' ; ') : null } },
+  { key: 'action_depot', label: 'Action dépôts', groupe: 'Commande', title: 'Réservations SAGE non couvertes dépôt par dépôt : transfert agence → FMS, FMS → agence, inter-agences, réappro (MYSTOCK) ou contremarque (non MYSTOCK). Filtre : "transfert", "contremarque", "réappro", "inter", ">0"', align: 'left', placeholder: 'transfert', val: (a, c) => { const l = c.actionsParRef.get(a.reference_article) || []; return l.length ? l.map((x) => `${ACTION_DEPOT_PAR_CODE[x.type].label} ${x.qte}`).join(' ; ') : null } },
   { key: 'proposition', label: 'Proposition', groupe: 'Commande', title: 'Quantité proposée (arrondie au colisage). Survole pour le calcul détaillé. Filtre ">0" = à commander', align: 'right', placeholder: '>0', val: (a, c) => { const p = propDe(c, a); return p && p.declenche ? p.qteProposee : null } },
   { key: 'retenue', label: 'Qté retenue', groupe: 'Commande', title: 'Quantité de la commande : saisis pour remplacer la proposition (vide = proposition). C\'est elle qui part dans les fichiers commande', align: 'right', placeholder: '>0', val: (a, c) => { const p = propDe(c, a); return p ? (p.qteFinale > 0 ? p.qteFinale : null) : null } },
   { key: 'date_liv', label: 'Liv. souhaitée', groupe: 'Commande', title: 'Date de livraison souhaitée (défaut = aujourd\'hui + délai d\'appro). Un fichier commande par fournisseur et par date', align: 'right', placeholder: '2026-', val: (a, c) => propDe(c, a)?.dateSouhaitee ?? null },
@@ -3015,9 +3104,9 @@ type PatchSurcharge = Partial<{
 }>
 
 /** Une ligne du tableau — mémorisée : seule la ligne modifiée se redessine. */
-const LigneArticle = React.memo(function LigneArticle({ a, p, t, f, incs, colonnes, profilsOk, besoin, familleMacro, onOuvrirArticle, onOuvrirFournisseur, onEditer, onSurcharge, onPropositionSaved }: {
+const LigneArticle = React.memo(function LigneArticle({ a, p, t, f, incs, colonnes, profilsOk, besoin, familleMacro, actions: actionsDepotLigne, protMois, onOuvrirArticle, onOuvrirFournisseur, onEditer, onSurcharge, onPropositionSaved }: {
   a: ArtRow; p: Proposition; t: AnalyseTarif | undefined; f: FournRow | undefined; incs: string[]; colonnes: Set<CleColArt>; profilsOk: boolean
-  besoin: BesoinDepot | undefined; familleMacro: string | undefined
+  besoin: BesoinDepot | undefined; familleMacro: string | undefined; actions: ActionDepot[]; protMois: number
   onOuvrirArticle: (ref: string) => void; onOuvrirFournisseur: (numero: string) => void; onEditer: (ref: string) => void
   onSurcharge: (a: ArtRow, p: Proposition, patch: PatchSurcharge) => void; onPropositionSaved: (a: ArtRow) => void
 }) {
@@ -3184,9 +3273,9 @@ const LigneArticle = React.memo(function LigneArticle({ a, p, t, f, incs, colonn
         </td>
       )}
       {c('action_depot') && (() => {
-        const actions = actionsDepot(a, besoin, p)
+        const actions = actionsDepotLigne
         return (
-          <td className="px-2 py-1" title={besoin && actions.length ? titreBesoinDepot(besoin, actions) : undefined}>
+          <td className="px-2 py-1" title={besoin && actions.length ? titreBesoinDepot(besoin, actions, protMois) : undefined}>
             {actions.length ? (
               <div className="flex flex-col items-start gap-0.5">
                 {actions.map((x) => (
@@ -3434,12 +3523,13 @@ function OngletCalculBesoin({ articles, fournisseurs, paramsFourn, profils, prof
     })
     return m
   }, [articles, propositions, paliersParCle, lectureBornes])
+  const protMois = valParam(parametres, 'transfert_protection_agence_mois', 3)
   const actionsParRef = useMemo(() => {
     const m = new Map<string, ActionDepot[]>()
-    articles.forEach((a) => { const l = actionsDepot(a, besoinsDepot.get(a.reference_article.toUpperCase()), propositions.get(a.reference_article)); if (l.length) m.set(a.reference_article, l) })
+    articles.forEach((a) => { const l = actionsDepot(a, besoinsDepot.get(a.reference_article.toUpperCase()), propositions.get(a.reference_article), protMois); if (l.length) m.set(a.reference_article, l) })
     return m
-  }, [articles, besoinsDepot, propositions])
-  const ctxCol = useMemo<CtxColArt>(() => ({ fournMap, incoherencesParRef, propositions, tarifs, besoinsDepot, familleMacro }), [fournMap, incoherencesParRef, propositions, tarifs, besoinsDepot, familleMacro])
+  }, [articles, besoinsDepot, propositions, protMois])
+  const ctxCol = useMemo<CtxColArt>(() => ({ fournMap, incoherencesParRef, propositions, tarifs, besoinsDepot, familleMacro, actionsParRef }), [fournMap, incoherencesParRef, propositions, tarifs, besoinsDepot, familleMacro, actionsParRef])
   const groupeActif = useMemo<{ id: string | null; nom: string; refs: string[] } | null>(() => {
     if (groupeId === '__adhoc') return groupeAdHoc ? { id: null, nom: groupeAdHoc.nom, refs: groupeAdHoc.refs } : null
     const g = groupes.find((x) => x.id === groupeId)
@@ -3736,10 +3826,10 @@ function OngletCalculBesoin({ articles, fournisseurs, paramsFourn, profils, prof
         { h: 'Seuil A', f: (a) => P(a)?.seuilA }, { h: 'Stock min retenu (saisie)', f: (a) => a.stock_min_retenu },
         { h: 'Stock min SAGE', f: (a) => a.sage_stock_min_fms }, { h: 'Stock min BLG (DPFMS)', f: (a) => a.blg_stock_min_fms },
         { h: 'Action dépôts', f: (a) => (actionsParRef.get(a.reference_article) || []).map((x) => `${ACTION_DEPOT_PAR_CODE[x.type].label} ${x.qte}`).join(' ; ') },
-        { h: 'Transfert agence → FMS', f: (a) => besoinsDepot.get(a.reference_article.toUpperCase())?.transfert_agences_vers_fms || null },
-        { h: 'Transfert FMS → agences', f: (a) => besoinsDepot.get(a.reference_article.toUpperCase())?.transfert_fms_vers_agences || null },
-        { h: 'Transfert inter-agences', f: (a) => besoinsDepot.get(a.reference_article.toUpperCase())?.transfert_inter_agences || null },
-        { h: 'Manque net après transferts', f: (a) => besoinsDepot.get(a.reference_article.toUpperCase())?.manque_net || null },
+        { h: 'Transfert agence → FMS', f: (a) => (actionsParRef.get(a.reference_article) || []).find((x) => x.type === 'transfert_ag_fms')?.qte ?? null },
+        { h: 'Transfert FMS → agences', f: (a) => (actionsParRef.get(a.reference_article) || []).find((x) => x.type === 'transfert_fms_ag')?.qte ?? null },
+        { h: 'Transfert inter-agences', f: (a) => (actionsParRef.get(a.reference_article) || []).find((x) => x.type === 'transfert_inter')?.qte ?? null },
+        { h: 'Manque net après transferts', f: (a) => (actionsParRef.get(a.reference_article) || []).find((x) => x.type === 'reappro' || x.type === 'contremarque')?.qte ?? null },
         { h: 'Déclenche', f: (a) => (P(a)?.declenche ? 'Oui' : 'Non') }, { h: 'Proposition', f: (a) => P(a)?.qteProposee }, { h: 'Qté retenue (saisie)', f: (a) => a.qte_proposition_manuelle },
         { h: 'Qté commande', f: (a) => P(a)?.qteFinale }, { h: 'Livraison souhaitée', f: (a) => fmtDate(P(a)?.dateSouhaitee) },
         { h: 'Prix unitaire', f: (a) => prixUnitaire(a, tarifs.get(a.reference_article)) },
@@ -4065,6 +4155,7 @@ function OngletCalculBesoin({ articles, fournisseurs, paramsFourn, profils, prof
                 <LigneArticle key={a.reference_article} a={a} p={propositions.get(a.reference_article)!} t={tarifs.get(a.reference_article)}
                   f={a.fournisseur_principal ? fournMap.get(a.fournisseur_principal) : undefined} incs={incoherencesParRef.get(a.reference_article) || []}
                   colonnes={setVisibles} profilsOk={profilsOk} besoin={besoinsDepot.get(a.reference_article.toUpperCase())} familleMacro={familleMacro.get(safeText(a.famille))}
+                  actions={actionsParRef.get(a.reference_article) || AUCUNE_ACTION} protMois={protMois}
                   onOuvrirArticle={onOuvrirArticle} onOuvrirFournisseur={onOuvrirFournisseur} onEditer={onEditer} onSurcharge={onSurcharge} onPropositionSaved={onArticleChange} />
               ))}
               {!loading && affichees.length === 0 && <tr><td colSpan={colonnesVisibles.length} className="px-3 py-8 text-center text-[#8A8474]">Aucune référence pour ces filtres.</td></tr>}
@@ -4153,7 +4244,10 @@ async function chargerBesoinsDepot(): Promise<BesoinDepot[] | null> {
       manque_stock_agences: n(b.manque_stock_agences), manque_agences: n(b.manque_agences), surplus_agences: n(b.surplus_agences),
       encours_total: n(b.encours_total), transfert_agences_vers_fms: n(b.transfert_agences_vers_fms),
       transfert_fms_vers_agences: n(b.transfert_fms_vers_agences), transfert_inter_agences: n(b.transfert_inter_agences), manque_net: n(b.manque_net),
-      detail_depots: (b.detail_depots || []).map((d) => ({ ...d, res: n(d.res), dispo: n(d.dispo), transit: n(d.transit), encours: n(d.encours), manque: n(d.manque), surplus: n(d.surplus) })),
+      detail_depots: (b.detail_depots || []).map((d) => ({ ...d, res: n(d.res), dispo: n(d.dispo), transit: n(d.transit), encours: n(d.encours), manque: n(d.manque), surplus: n(d.surplus),
+        conso_mois: n(d.conso_mois),
+        res_ech: d.res_ech ? d.res_ech.map((e) => ({ d: e.d ? String(e.d).slice(0, 10) : null, q: n(e.q) })) : undefined,
+        enc_ech: d.enc_ech ? d.enc_ech.map((e) => ({ d: e.d ? String(e.d).slice(0, 10) : null, q: n(e.q) })) : undefined })),
     })))
     if (batch.length < pageSize) break
     from += pageSize
