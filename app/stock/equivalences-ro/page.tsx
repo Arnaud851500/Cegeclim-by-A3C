@@ -41,6 +41,13 @@
  *    pouce, remise classique moyenne) réglable, cas le plus fréquent par défaut (H2, classique,
  *    ≥ 90 m², remplacement d'une chaudière fossile).
  *
+ * ÉVOLUTION (23/10/2026 soir) — demande d'Arnaud :
+ *  - dans chaque taille, les groupes sont regroupés par alimentation (grosse pastille MONOPHASÉ 230 V /
+ *    TRIPHASÉ 400 V) et, dans chaque alimentation, Split (AirH2O 600) et Monobloc (AirH2O 800) sont
+ *    superposés : pour une taille recherchée, on voit d'un coup les dispos et solutions des deux types
+ *    d'installation ;
+ *  - en-tête de colonne « Solutions anciennes générations envisageables — NON EXHAUSTIF » en gros.
+ *
  * Glisser-déposer (administrateurs, colonne « Articles à glisser ») :
  *  - un article du panneau de droite (ou de la recherche SAGE) sur une solution = l'ajouter
  *    comme composant (module, ballon, kit…) ; sur la zone vide d'un usage = nouvelle solution ;
@@ -208,6 +215,12 @@ const SURFACES = ['< 70 m²', '70 à 90 m²', '≥ 90 m²']
 const CLE_HYP = 'equivalences-ro:hyp-cee'
 
 const n0 = (v: number | null | undefined) => Number(v ?? 0)
+
+/** Alimentation : monophasé (230 V) avant triphasé (400 V). */
+const estMono = (alim: string) => /230|mono/i.test(alim)
+const rangAlim = (alim: string) => (estMono(alim) ? 0 : 1)
+const LIB_ALIM = (alim: string) => (estMono(alim) ? 'Monophasé 230 V' : 'Triphasé 400 V')
+const LIB_TYPE: Record<'600' | '800', string> = { '600': 'Split', '800': 'Monobloc' }
 function fmtNum(v: number | null | undefined, dec = 0): string {
   if (v === null || v === undefined || Number.isNaN(Number(v))) return '—'
   return Number(v).toLocaleString('fr-FR', { minimumFractionDigits: dec, maximumFractionDigits: dec })
@@ -596,7 +609,7 @@ function EquivalencesRO() {
     const m = new Map<string, Cible[]>()
     list.forEach((c) => { const a = m.get(c.taille) || []; a.push(c); m.set(c.taille, a) })
     return Array.from(m.entries()).sort((a, b) => Number(a[0]) - Number(b[0]))
-      .map(([taille, rows]) => ({ taille, rows: rows.sort((a, b) => a.gamme.localeCompare(b.gamme) || a.alim.localeCompare(b.alim)) }))
+      .map(([taille, rows]) => ({ taille, rows: rows.sort((a, b) => rangAlim(a.alim) - rangAlim(b.alim) || a.alim.localeCompare(b.alim) || a.gamme.localeCompare(b.gamme)) }))
   }, [cibles, gammeF, alimF, tailleF, usageF, search, solutions])
 
   const listeTailles = useMemo(() => Array.from(new Set(cibles.map((c) => c.taille))).sort((a, b) => Number(a) - Number(b)), [cibles])
@@ -1143,19 +1156,37 @@ function EquivalencesRO() {
                   <div className="grid grid-cols-[150px_350px_minmax(0,1fr)] items-center gap-2 px-3 pb-2 pt-1 text-[12.5px] font-bold uppercase tracking-wide text-[#3A362E]">
                     <span>Usage</span>
                     <span className="rounded bg-[#F2E3C4] px-2 py-0.5 text-[#7A4E06]">Solution catalogue 2026 · AirH2O</span>
-                    <span>Solutions anciennes générations <span className="font-semibold normal-case tracking-normal text-[#8A8474]">· prix · dispo auj. | fin déc. · aides · prime CEE</span></span>
+                    <span className="flex flex-wrap items-baseline gap-x-2">
+                      <span className="text-[15px] font-extrabold tracking-wide text-[#111820]">Solutions anciennes générations envisageables</span>
+                      <span className="rounded bg-red-600 px-1.5 py-0.5 text-[12.5px] font-extrabold tracking-wider text-white">NON EXHAUSTIF</span>
+                      <span className="text-[11.5px] font-semibold normal-case tracking-normal text-[#8A8474]">· prix · dispo auj. | fin déc. · aides · prime CEE</span>
+                    </span>
                   </div>
                 </div>
-                {rows.map((c) => {
+                {rows.map((c, idx) => {
                   const nt = c.mois.reduce((s, m) => s + n0(m.non_tenable), 0)
+                  const nouvelleAlim = idx === 0 || rangAlim(rows[idx - 1].alim) !== rangAlim(c.alim)
+                  const typesAlim = rows.filter((x) => rangAlim(x.alim) === rangAlim(c.alim)).map((x) => LIB_TYPE[x.gamme])
                   return (
-                    <div key={c.ref} className="border-b border-[#E5E1D8] last:rounded-b-xl last:border-b-0">
+                    <React.Fragment key={c.ref}>
+                    {nouvelleAlim && (
+                      <div className={`flex items-center gap-3 border-b border-[#E5E1D8] px-3 py-2 ${estMono(c.alim) ? 'bg-[#EEF4F8]' : 'bg-[#F4EFF8]'}`}>
+                        <span className={`rounded-full px-4 py-1.5 text-[15px] font-extrabold uppercase tracking-wide text-white shadow-sm ${estMono(c.alim) ? 'bg-[#1D5C86]' : 'bg-[#7A5EA8]'}`}>
+                          {LIB_ALIM(c.alim)}
+                        </span>
+                        <span className="text-[12px] font-semibold text-[#5E5A50]">
+                          Taille {taille.replace('.', ',')} · {Array.from(new Set(typesAlim)).join(' et ')} {new Set(typesAlim).size > 1 ? 'superposés : comparez les deux types d’installation' : ''}
+                        </span>
+                      </div>
+                    )}
+                    <div className="border-b border-[#E5E1D8] last:rounded-b-xl last:border-b-0">
                       {/* Groupe AirH2O */}
                       <div className="flex flex-wrap items-center gap-x-4 gap-y-1 bg-[#FCFBF8] px-3 py-1.5">
                         <div className="flex items-center gap-1.5">
                           <a href={`/stock/penurie?ref=${encodeURIComponent(c.ref)}&mystock=tous`} className="text-[13.5px] font-bold hover:text-[#B4761A] hover:underline" title="Fiche pénurie">{c.ref}</a>
-                          <Badge cls={c.gamme === '800' ? 'bg-sky-50 text-sky-800' : 'bg-[#EDEAE1] text-[#3A362E]'}>{c.gamme}</Badge>
-                          <span className="text-[11px] text-[#8A8474]">{c.alim}</span>
+                          <span className={`rounded-md px-2 py-0.5 text-[12px] font-extrabold uppercase ${c.gamme === '800' ? 'bg-sky-100 text-sky-900' : 'bg-[#EDEAE1] text-[#3A362E]'}`}>
+                            {LIB_TYPE[c.gamme]} · AirH2O {c.gamme}
+                          </span>
                           <span className="text-[12px] font-bold text-[#3A362E]">{fmtPrix(c.prix)}</span>
                         </div>
                         <span className="flex items-center gap-1 text-[11.5px]">
@@ -1208,6 +1239,7 @@ function EquivalencesRO() {
                         )
                       })}
                     </div>
+                    </React.Fragment>
                   )
                 })}
               </section>
