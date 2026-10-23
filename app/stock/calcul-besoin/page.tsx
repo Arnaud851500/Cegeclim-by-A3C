@@ -1723,6 +1723,7 @@ type Proposition = {
   seuilA: number; stockMaxA: number
   ssBase: number; ajoutFrequence: number; ajoutDelai: number; frequenceJours: number; delaiApproJours: number; cibleA: number
   declenche: boolean; bloque: boolean; strategieExclue: boolean; qteProposee: number; colisage: number
+  dateReceptionSuivante: string; reserveSuivante: number; plancherFerme: number; plancherApplique: boolean
   qteRetenue: number | null; qteFinale: number; dateSouhaitee: string
   eff: ParamsEffectifs
   explication: string[]
@@ -1827,6 +1828,21 @@ function calculerProposition(a: ArtRow, ctx: ContexteProposition): Proposition {
     declenche = true
     qteProposee = Math.max(qteProposee, arrondirColisage(-stockReception, colisage))
   }
+  // Plancher ferme : la commande passée aujourd'hui doit tenir toutes les réservations SAGE datées jusqu'à la réception
+  // de la commande SUIVANTE (aujourd'hui + L + fréquence d'appro, à défaut période de revue), plus le stock de sécurité.
+  // Évite qu'un gros lot de CDC tombant juste après la réception (ex. 44 pièces le 01/12 pour une réception le 20/11)
+  // soit absorbé par la seule conso moyenne.
+  const frequenceSuivanteJours = ctx.frequenceApproJours > 0 ? ctx.frequenceApproJours : ctx.revueJours
+  const dateReceptionSuivante = ajouterJours(ctx.aujourdhui, delaiL + frequenceSuivanteJours)
+  let reserveSuivante = 0, encoursSuivant = 0
+  ;(a.reserve_echeances || []).filter(dansPerimetre).forEach((e) => { if (e.d <= dateReceptionSuivante) reserveSuivante += n0(e.q) })
+  ;(a.encours_echeances || []).filter(dansPerimetre).forEach((e) => { if (e.d >= dateDouteux && e.d <= dateReceptionSuivante) encoursSuivant += n0(e.q) })
+  const plancherFerme = Math.max(0, Math.round((reserveSuivante - stockBase - encoursSuivant + ss) * 10) / 10)
+  const plancherApplique = eligible && reserveSuivante > 0 && plancherFerme > 0 && arrondirColisage(plancherFerme, colisage) > qteProposee
+  if (plancherApplique) {
+    declenche = true
+    qteProposee = arrondirColisage(plancherFerme, colisage)
+  }
   const qteRetenue = a.qte_proposition_manuelle === null || a.qte_proposition_manuelle === undefined ? null : Number(a.qte_proposition_manuelle)
   const qteFinale = qteRetenue ?? qteProposee
   const dateSouhaitee = a.date_livraison_souhaitee ? String(a.date_livraison_souhaitee).slice(0, 10) : ajouterJours(ctx.aujourdhui, delaiAppro)
@@ -1851,6 +1867,7 @@ function calculerProposition(a: ArtRow, ctx: ContexteProposition): Proposition {
       ? `Déclencheur A : stock à réception ${fmtNum(stockReception, 1)} ${stockReception < seuilA ? '<' : '≥'} seuil ${fmtNum(seuilA, 1)} [${detailSeuil}] → ${declenche ? `commander jusqu'à ${cibleA > stockMaxA ? 'le seuil ' + fmtNum(cibleA, 1) + ' (stock max ' + fmtNum(stockMaxA) + ' inférieur)' : 'au stock max ' + fmtNum(stockMaxA)}` : 'pas de commande'}`
       : `Déclencheur B : couverture ${couvReception === null ? '—' : fmtNum(couvReception, 1)} ${couvReception !== null && couvReception < couvMin ? '<' : '≥'} min ${fmtNum(couvMin, 1)} mois (${couvSource}) → ${declenche ? 'recompléter à cible ' + fmtNum(couvCible, 1) + ' mois = ' + fmtNum(couvCible * mu, 1) : 'pas de commande'}`,
     besoinFerme ? `Besoin ferme : stock à réception négatif → au moins ${fmtNum(arrondirColisage(-stockReception, colisage))} à commander, même sans conso ni stock min` : null,
+    reserveSuivante > 0 ? `Plancher ferme jusqu'à la réception suivante (${fmtDate(dateReceptionSuivante)} = L ${delaiL} j + ${frequenceSuivanteJours} j) : réservé ${fmtNum(reserveSuivante)} − dispo ${fmtNum(stockBase)} − encours ${fmtNum(encoursSuivant)} + SS ${fmtNum(ss, 1)} = ${fmtNum(plancherFerme, 1)}${plancherApplique ? ' → appliqué (supérieur au calcul de la méthode)' : ' (déjà couvert par le calcul de la méthode)'}` : null,
     bloque ? (a.blocage_appro ? '⛔ Blocage appro SAGE : aucune proposition' : 'Arrêt appro (saisie) : aucune proposition') : strategieExclue ? 'Stratégie « A la demande » sur l\'article : aucune proposition' : !a.pertinent_calcul_besoin ? 'Hors MYSTOCK actif : aucune proposition de réappro (voir colonne « Action dépôts » : transfert ou contremarque)' : null,
     `Proposition : ${fmtNum(qteProposee)}${colisage > 1 ? ` (colisage ${fmtNum(colisage)})` : ''}${qteRetenue !== null ? ` · retenue : ${fmtNum(qteRetenue)}` : ''}`,
     reserveApres > 0 ? `Réservé après le ${fmtDate(dateReception)} : ${fmtNum(reserveApres)} (non déduit)` : null,
@@ -1862,7 +1879,8 @@ function calculerProposition(a: ArtRow, ctx: ContexteProposition): Proposition {
     mu12, mu3, muFut3, sigma,
     stockBase, reservePeriode, reserveApres, reserveTotal, encoursPeriode, encoursApres, encoursDouteux, consoDelai, demande, demandeMode,
     stockReception, couvReception, ss, minEff, maxEff, recalcule, seuilA, stockMaxA, ssBase, ajoutFrequence, ajoutDelai, frequenceJours, delaiApproJours: delaiAppro, cibleA,
-    declenche, bloque, strategieExclue, qteProposee, colisage, qteRetenue, qteFinale, dateSouhaitee, eff, explication }
+    declenche, bloque, strategieExclue, qteProposee, colisage, qteRetenue, qteFinale, dateSouhaitee, eff, explication,
+    dateReceptionSuivante, reserveSuivante, plancherFerme, plancherApplique }
 }
 
 // ── Tarifs d'achat par quantité (sage.tarif_f_qte via v_appro_tarif_qte_fournisseur) ─────────
@@ -2849,7 +2867,7 @@ const libDep = (d: string) => (d === 'FMS' ? 'FMS' : d.charAt(0) + d.slice(1).to
 /** Actions à mener pour couvrir les réservations SAGE dépôt par dépôt :
  *  1. transferts (agences → FMS pour une CDC départ FMS, FMS → agence puis inter-agences pour une CDC départ agence) ;
  *  2. reste non couvert : réappro fournisseur si MYSTOCK, sinon contremarque. */
-function actionsDepot(a: ArtRow, b: BesoinDepot | undefined): ActionDepot[] {
+function actionsDepot(a: ArtRow, b: BesoinDepot | undefined, p?: Proposition): ActionDepot[] {
   if (!b) return []
   const det = b.detail_depots || []
   const manques = det.filter((d) => d.manque > 0)
@@ -2869,7 +2887,8 @@ function actionsDepot(a: ArtRow, b: BesoinDepot | undefined): ActionDepot[] {
   if (b.manque_net > 0) {
     const mystock = safeText(a.mystock).toUpperCase() === 'OUI'
     out.push(mystock
-      ? { type: 'reappro', qte: b.manque_net, libelle: 'Réappro', detail: `Réservations non couvertes après transferts : ${fmtNum(b.manque_net)} — couvert par la proposition de réappro (besoin ferme)` }
+      ? { type: 'reappro', qte: b.manque_net, libelle: p && p.qteFinale < b.manque_net ? 'Réappro ⚠' : 'Réappro',
+          detail: `Réservations non couvertes après transferts (toutes dates) : ${fmtNum(b.manque_net)} — ${!p ? 'voir la proposition' : p.qteFinale >= b.manque_net ? `couvert par la quantité commandée ${fmtNum(p.qteFinale)}` : `quantité commandée ${fmtNum(p.qteFinale)} < manque : reste ${fmtNum(b.manque_net - p.qteFinale)} pièces réservées au-delà du ${fmtDate(p.dateReceptionSuivante)} (réception suivante), à couvrir par la prochaine commande`}` }
       : { type: 'contremarque', qte: b.manque_net, libelle: 'Contremarque', detail: `Référence non MYSTOCK : ${fmtNum(b.manque_net)} à commander en contremarque (réservé non couvert par le stock, les transferts ni l'encours fournisseur du dépôt)` })
   }
   return out
@@ -2922,7 +2941,7 @@ const COLONNES_ARTICLES: { key: CleColArt; label: string; groupe: GroupeCol; tit
   { key: 'min_sage', label: 'Min SAGE', groupe: 'Stocks min / max', align: 'right', val: (a) => a.sage_stock_min_fms },
   { key: 'min_blg', label: 'Min BLG', groupe: 'Stocks min / max', title: 'Stock min BLG (DPFMS) — rouge si différent du calculé', align: 'right', val: (a) => a.blg_stock_min_fms },
   { key: 'retenu', label: 'Min retenu', groupe: 'Stocks min / max', title: 'Stock min retenu, délais, arrêt appro / vente, remplaçante (✎). Filtre "!vide" = avec saisie', align: 'right', placeholder: '!vide', val: (a) => a.stock_min_retenu },
-  { key: 'action_depot', label: 'Action dépôts', groupe: 'Commande', title: 'Réservations SAGE non couvertes dépôt par dépôt : transfert agence → FMS, FMS → agence, inter-agences, réappro (MYSTOCK) ou contremarque (non MYSTOCK). Filtre : "transfert", "contremarque", "réappro", "inter", ">0"', align: 'left', placeholder: 'transfert', val: (a, c) => { const l = actionsDepot(a, c.besoinsDepot.get(a.reference_article.toUpperCase())); return l.length ? l.map((x) => `${ACTION_DEPOT_PAR_CODE[x.type].label} ${x.qte}`).join(' ; ') : null } },
+  { key: 'action_depot', label: 'Action dépôts', groupe: 'Commande', title: 'Réservations SAGE non couvertes dépôt par dépôt : transfert agence → FMS, FMS → agence, inter-agences, réappro (MYSTOCK) ou contremarque (non MYSTOCK). Filtre : "transfert", "contremarque", "réappro", "inter", ">0"', align: 'left', placeholder: 'transfert', val: (a, c) => { const l = actionsDepot(a, c.besoinsDepot.get(a.reference_article.toUpperCase()), propDe(c, a)); return l.length ? l.map((x) => `${ACTION_DEPOT_PAR_CODE[x.type].label} ${x.qte}`).join(' ; ') : null } },
   { key: 'proposition', label: 'Proposition', groupe: 'Commande', title: 'Quantité proposée (arrondie au colisage). Survole pour le calcul détaillé. Filtre ">0" = à commander', align: 'right', placeholder: '>0', val: (a, c) => { const p = propDe(c, a); return p && p.declenche ? p.qteProposee : null } },
   { key: 'retenue', label: 'Qté retenue', groupe: 'Commande', title: 'Quantité de la commande : saisis pour remplacer la proposition (vide = proposition). C\'est elle qui part dans les fichiers commande', align: 'right', placeholder: '>0', val: (a, c) => { const p = propDe(c, a); return p ? (p.qteFinale > 0 ? p.qteFinale : null) : null } },
   { key: 'date_liv', label: 'Liv. souhaitée', groupe: 'Commande', title: 'Date de livraison souhaitée (défaut = aujourd\'hui + délai d\'appro). Un fichier commande par fournisseur et par date', align: 'right', placeholder: '2026-', val: (a, c) => propDe(c, a)?.dateSouhaitee ?? null },
@@ -3165,7 +3184,7 @@ const LigneArticle = React.memo(function LigneArticle({ a, p, t, f, incs, colonn
         </td>
       )}
       {c('action_depot') && (() => {
-        const actions = actionsDepot(a, besoin)
+        const actions = actionsDepot(a, besoin, p)
         return (
           <td className="px-2 py-1" title={besoin && actions.length ? titreBesoinDepot(besoin, actions) : undefined}>
             {actions.length ? (
@@ -3350,11 +3369,6 @@ function OngletCalculBesoin({ articles, fournisseurs, paramsFourn, profils, prof
   const fournOptions = useMemo(() => Array.from(new Set(articles.map((a) => a.fournisseur_principal).filter(Boolean) as string[])).sort().map((n) => ({ numero: n, label: fournMap.get(n)?.sage_intitule || n })), [articles, fournMap])
   const familleOptions = useMemo(() => Array.from(new Set(articles.filter((a) => !familleMacroFilter || familleMacro.get(safeText(a.famille)) === familleMacroFilter).map((a) => safeText(a.famille)).filter(Boolean))).sort(), [articles, familleMacro, familleMacroFilter])
   const familleMacroOptions = useMemo(() => Array.from(new Set(articles.map((a) => familleMacro.get(safeText(a.famille)) || '').filter(Boolean))).sort((x, y) => x.localeCompare(y, 'fr')), [articles, familleMacro])
-  const actionsParRef = useMemo(() => {
-    const m = new Map<string, ActionDepot[]>()
-    articles.forEach((a) => { const l = actionsDepot(a, besoinsDepot.get(a.reference_article.toUpperCase())); if (l.length) m.set(a.reference_article, l) })
-    return m
-  }, [articles, besoinsDepot])
   const qualiteOptions = useMemo(() => Array.from(new Set(fournisseurs.map((f) => safeText(f.sage_qualite)).filter(Boolean))).sort(), [fournisseurs])
   const indexArticles = useMemo(() => new Map(articles.map((a) => [a.reference_article.toUpperCase(), a])), [articles])
   const articleParRef = useMemo(() => new Map(articles.map((a) => [a.reference_article, a])), [articles])
@@ -3420,6 +3434,11 @@ function OngletCalculBesoin({ articles, fournisseurs, paramsFourn, profils, prof
     })
     return m
   }, [articles, propositions, paliersParCle, lectureBornes])
+  const actionsParRef = useMemo(() => {
+    const m = new Map<string, ActionDepot[]>()
+    articles.forEach((a) => { const l = actionsDepot(a, besoinsDepot.get(a.reference_article.toUpperCase()), propositions.get(a.reference_article)); if (l.length) m.set(a.reference_article, l) })
+    return m
+  }, [articles, besoinsDepot, propositions])
   const ctxCol = useMemo<CtxColArt>(() => ({ fournMap, incoherencesParRef, propositions, tarifs, besoinsDepot, familleMacro }), [fournMap, incoherencesParRef, propositions, tarifs, besoinsDepot, familleMacro])
   const groupeActif = useMemo<{ id: string | null; nom: string; refs: string[] } | null>(() => {
     if (groupeId === '__adhoc') return groupeAdHoc ? { id: null, nom: groupeAdHoc.nom, refs: groupeAdHoc.refs } : null
