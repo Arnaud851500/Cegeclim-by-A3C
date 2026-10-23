@@ -38,6 +38,12 @@
  *        commandes mensuelles, couverture en quantité, mois et valeur (components/appro/PlanApproModal.tsx,
  *        moteur lib/planAppro.ts, migration supabase/sql/20261006_plan_appro_operation.sql).
  *
+ * 23/10/2026 — filtres « Famille macro » (ref_familles) et « MyStock » OUI / NON / tous (remplace la pastille
+ *        « MYSTOCK actives ») ; colonne « Action dépôts » (v_appro_article_besoin_depot) : réservations SAGE
+ *        non couvertes dépôt par dépôt → transfert agence → FMS, FMS → agence, inter-agences, réappro (MYSTOCK)
+ *        ou contremarque (non MYSTOCK) ; besoin ferme : un stock à réception négatif déclenche toujours une
+ *        proposition (au moins le manque), même sans conso ni stock min.
+ *
  * Hiérarchie des paramètres : article > fournisseur > paramètre global (appro_parametres) ;
  * la méthode peut en plus être forcée sur l'écran.
  *
@@ -1814,6 +1820,13 @@ function calculerProposition(a: ArtRow, ctx: ContexteProposition): Proposition {
     declenche = eligible && mu > 0 && couvReception !== null && couvReception < couvMin
     if (declenche) qteProposee = arrondirColisage(couvCible * mu - stockReception, colisage)
   }
+  // Besoin ferme : stock à réception négatif (réservations SAGE non couvertes) → on commande au moins le manque,
+  // même sans conso historique ni stock min (référence MYSTOCK nouvelle ou sans sortie).
+  const besoinFerme = eligible && stockReception < 0
+  if (besoinFerme) {
+    declenche = true
+    qteProposee = Math.max(qteProposee, arrondirColisage(-stockReception, colisage))
+  }
   const qteRetenue = a.qte_proposition_manuelle === null || a.qte_proposition_manuelle === undefined ? null : Number(a.qte_proposition_manuelle)
   const qteFinale = qteRetenue ?? qteProposee
   const dateSouhaitee = a.date_livraison_souhaitee ? String(a.date_livraison_souhaitee).slice(0, 10) : ajouterJours(ctx.aujourdhui, delaiAppro)
@@ -1837,7 +1850,8 @@ function calculerProposition(a: ArtRow, ctx: ContexteProposition): Proposition {
     methode === 'min_max'
       ? `Déclencheur A : stock à réception ${fmtNum(stockReception, 1)} ${stockReception < seuilA ? '<' : '≥'} seuil ${fmtNum(seuilA, 1)} [${detailSeuil}] → ${declenche ? `commander jusqu'à ${cibleA > stockMaxA ? 'le seuil ' + fmtNum(cibleA, 1) + ' (stock max ' + fmtNum(stockMaxA) + ' inférieur)' : 'au stock max ' + fmtNum(stockMaxA)}` : 'pas de commande'}`
       : `Déclencheur B : couverture ${couvReception === null ? '—' : fmtNum(couvReception, 1)} ${couvReception !== null && couvReception < couvMin ? '<' : '≥'} min ${fmtNum(couvMin, 1)} mois (${couvSource}) → ${declenche ? 'recompléter à cible ' + fmtNum(couvCible, 1) + ' mois = ' + fmtNum(couvCible * mu, 1) : 'pas de commande'}`,
-    bloque ? (a.blocage_appro ? '⛔ Blocage appro SAGE : aucune proposition' : 'Arrêt appro (saisie) : aucune proposition') : strategieExclue ? 'Stratégie « A la demande » sur l\'article : aucune proposition' : !a.pertinent_calcul_besoin ? 'Hors MYSTOCK actif : aucune proposition' : null,
+    besoinFerme ? `Besoin ferme : stock à réception négatif → au moins ${fmtNum(arrondirColisage(-stockReception, colisage))} à commander, même sans conso ni stock min` : null,
+    bloque ? (a.blocage_appro ? '⛔ Blocage appro SAGE : aucune proposition' : 'Arrêt appro (saisie) : aucune proposition') : strategieExclue ? 'Stratégie « A la demande » sur l\'article : aucune proposition' : !a.pertinent_calcul_besoin ? 'Hors MYSTOCK actif : aucune proposition de réappro (voir colonne « Action dépôts » : transfert ou contremarque)' : null,
     `Proposition : ${fmtNum(qteProposee)}${colisage > 1 ? ` (colisage ${fmtNum(colisage)})` : ''}${qteRetenue !== null ? ` · retenue : ${fmtNum(qteRetenue)}` : ''}`,
     reserveApres > 0 ? `Réservé après le ${fmtDate(dateReception)} : ${fmtNum(reserveApres)} (non déduit)` : null,
     encoursApres > 0 ? `Encours livré après le ${fmtDate(dateReception)} : ${fmtNum(encoursApres)} (non compté)` : null,
@@ -2792,15 +2806,83 @@ function ArticleConsoModal({ article, prop, profil, fourn, ctxProp, ecretageDisp
 // ─────────────────────────────────────────────────────────────────────────
 
 type CleColArt =
-  | 'inc' | 'reference' | 'fourn' | 'blocage'
+  | 'inc' | 'reference' | 'fourn' | 'famille_macro' | 'blocage'
   | 'strategie' | 'methode' | 'couv_min' | 'couv_cible' | 'conso' | 'delai_appro' | 'delai_secu' | 'delai_l'
   | 'mu12' | 'mu3' | 'fut3' | 'sigma' | 'derniere_sortie'
   | 'dispo' | 'encours' | 'reserve' | 'projete' | 'couv'
   | 'ss' | 'min_calc' | 'max_calc' | 'min_sage' | 'min_blg' | 'retenu'
+  | 'action_depot'
   | 'proposition' | 'retenue' | 'date_liv' | 'montant' | 'prix_qte' | 'palier_suivant' | 'paliers_plus'
 type GroupeCol = 'Article' | 'Paramètres d’appro' | 'Conso' | 'Projection à réception' | 'Stocks min / max' | 'Commande' | 'Tarif'
 type FiltresColArt = Partial<Record<CleColArt, string>>
-type CtxColArt = { fournMap: Map<string, FournRow>; incoherencesParRef: Map<string, string[]>; propositions: Map<string, Proposition>; tarifs: Map<string, AnalyseTarif> }
+type CtxColArt = { fournMap: Map<string, FournRow>; incoherencesParRef: Map<string, string[]>; propositions: Map<string, Proposition>; tarifs: Map<string, AnalyseTarif>; besoinsDepot: Map<string, BesoinDepot>; familleMacro: Map<string, string> }
+
+// ─────────────────────────────────────────────────────────────────────────
+// Besoin ferme par dépôt : transferts et contremarques (v_appro_article_besoin_depot)
+// ─────────────────────────────────────────────────────────────────────────
+
+/** Situation d'un dépôt pour une référence : réservé SAGE (sto_res), disponible (physique − PL), stock en dépôt TRANSIT
+ * vers ce dépôt, encours fournisseur livré à ce dépôt, manque (réservé non couvert) et surplus (dispo non réservé). */
+type DepotBesoin = { dep: string; fms: boolean; res: number; dispo: number; transit: number; encours: number; manque: number; surplus: number }
+type BesoinDepot = {
+  reference_article: string
+  manque_stock_fms: number; manque_fms: number; surplus_fms: number
+  manque_stock_agences: number; manque_agences: number; surplus_agences: number
+  encours_total: number
+  transfert_agences_vers_fms: number; transfert_fms_vers_agences: number; transfert_inter_agences: number
+  manque_net: number
+  detail_depots: DepotBesoin[] | null
+}
+type TypeActionDepot = 'transfert_ag_fms' | 'transfert_fms_ag' | 'transfert_inter' | 'reappro' | 'contremarque'
+type ActionDepot = { type: TypeActionDepot; qte: number; libelle: string; detail: string }
+
+const ACTIONS_DEPOT: { code: TypeActionDepot; label: string; className: string }[] = [
+  { code: 'transfert_ag_fms', label: 'Transfert agence → FMS', className: 'bg-sky-100 text-sky-800' },
+  { code: 'transfert_fms_ag', label: 'Transfert FMS → agence', className: 'bg-[#EDEAE1] text-[#3A362E]' },
+  { code: 'transfert_inter', label: 'Transfert inter-agences', className: 'bg-violet-100 text-violet-800' },
+  { code: 'reappro', label: 'Réappro (rupture MYSTOCK)', className: 'bg-red-100 text-red-700' },
+  { code: 'contremarque', label: 'Contremarque à passer', className: 'bg-orange-100 text-orange-800' },
+]
+const ACTION_DEPOT_PAR_CODE = Object.fromEntries(ACTIONS_DEPOT.map((x) => [x.code, x])) as Record<TypeActionDepot, typeof ACTIONS_DEPOT[number]>
+const libDep = (d: string) => (d === 'FMS' ? 'FMS' : d.charAt(0) + d.slice(1).toLowerCase())
+
+/** Actions à mener pour couvrir les réservations SAGE dépôt par dépôt :
+ *  1. transferts (agences → FMS pour une CDC départ FMS, FMS → agence puis inter-agences pour une CDC départ agence) ;
+ *  2. reste non couvert : réappro fournisseur si MYSTOCK, sinon contremarque. */
+function actionsDepot(a: ArtRow, b: BesoinDepot | undefined): ActionDepot[] {
+  if (!b) return []
+  const det = b.detail_depots || []
+  const manques = det.filter((d) => d.manque > 0)
+  const surplusAg = det.filter((d) => !d.fms && d.surplus > 0)
+  const surplusFms = det.find((d) => d.fms && d.surplus > 0)
+  const lst = (l: DepotBesoin[], k: 'manque' | 'surplus') => l.map((d) => `${libDep(d.dep)} ${fmtNum(d[k])}`).join(', ')
+  const out: ActionDepot[] = []
+  if (b.transfert_agences_vers_fms > 0)
+    out.push({ type: 'transfert_ag_fms', qte: b.transfert_agences_vers_fms, libelle: 'Agence → FMS',
+      detail: `FMS manque ${fmtNum(b.manque_fms)} (CDC départ FMS non couvertes) ; stock agence disponible : ${lst(surplusAg, 'surplus')}` })
+  if (b.transfert_fms_vers_agences > 0)
+    out.push({ type: 'transfert_fms_ag', qte: b.transfert_fms_vers_agences, libelle: 'FMS → agence',
+      detail: `Agences en manque : ${lst(manques.filter((d) => !d.fms), 'manque')} ; FMS disponible ${fmtNum(surplusFms?.surplus ?? 0)}` })
+  if (b.transfert_inter_agences > 0)
+    out.push({ type: 'transfert_inter', qte: b.transfert_inter_agences, libelle: 'Inter-agences',
+      detail: `Agences en manque : ${lst(manques.filter((d) => !d.fms), 'manque')} ; autres agences disponibles : ${lst(surplusAg, 'surplus')}` })
+  if (b.manque_net > 0) {
+    const mystock = safeText(a.mystock).toUpperCase() === 'OUI'
+    out.push(mystock
+      ? { type: 'reappro', qte: b.manque_net, libelle: 'Réappro', detail: `Réservations non couvertes après transferts : ${fmtNum(b.manque_net)} — couvert par la proposition de réappro (besoin ferme)` }
+      : { type: 'contremarque', qte: b.manque_net, libelle: 'Contremarque', detail: `Référence non MYSTOCK : ${fmtNum(b.manque_net)} à commander en contremarque (réservé non couvert par le stock, les transferts ni l'encours fournisseur du dépôt)` })
+  }
+  return out
+}
+
+function titreBesoinDepot(b: BesoinDepot, actions: ActionDepot[]): string {
+  return [
+    ...actions.map((x) => `• ${ACTION_DEPOT_PAR_CODE[x.type].label} : ${fmtNum(x.qte)} — ${x.detail}`),
+    '',
+    'Par dépôt (réservé SAGE / disponible / transit / encours CDF → manque | surplus) :',
+    ...(b.detail_depots || []).map((d) => `  ${libDep(d.dep).padEnd(12)} rés. ${fmtNum(d.res)} · dispo ${fmtNum(d.dispo)}${d.transit ? ` · transit ${fmtNum(d.transit)}` : ''}${d.encours ? ` · encours ${fmtNum(d.encours)}` : ''} → ${d.manque > 0 ? `manque ${fmtNum(d.manque)}` : d.surplus > 0 ? `surplus ${fmtNum(d.surplus)}` : 'équilibré'}`),
+  ].join('\n')
+}
 const propDe = (c: CtxColArt, a: ArtRow) => c.propositions.get(a.reference_article)
 
 /** Prix unitaire d'achat de la quantité commandée : tarif par quantité, sinon prix fournisseur, sinon prix d'achat. */
@@ -2814,6 +2896,7 @@ const COLONNES_ARTICLES: { key: CleColArt; label: string; groupe: GroupeCol; tit
   { key: 'inc', label: '⚠', groupe: 'Article', title: 'Nombre d\'incohérences détectées (survole pour le détail). Filtre : ">0", "=0", ou un mot du libellé', align: 'left', placeholder: '>0', val: (a, c) => c.incoherencesParRef.get(a.reference_article)?.length ?? 0 },
   { key: 'reference', label: 'Référence', groupe: 'Article', title: 'Référence et désignation SAGE — clic : consommations mensuelles, ventes anormales, écrêtage, conso retenue', align: 'left', placeholder: 'réf. ou désignation', val: (a) => a.reference_article },
   { key: 'fourn', label: 'Fourn.', groupe: 'Article', title: 'Fournisseur principal — clic : fiche fournisseur. Filtre sur le n° ou l\'intitulé', align: 'left', placeholder: 'n° ou nom', val: (a) => a.fournisseur_principal },
+  { key: 'famille_macro', label: 'Fam. macro', groupe: 'Article', title: 'Famille macro (ref_familles) — famille SAGE en dessous', align: 'left', placeholder: 'R/O…', val: (a, c) => c.familleMacro.get(safeText(a.famille)) || null },
   { key: 'blocage', label: 'Blocage', groupe: 'Article', title: 'Blocage appro SAGE, exclusion, vie produit, arrêt appro / vente (✎). Filtre : "blocage", "exclu", "fin", "arrêt", "vide"', align: 'left', placeholder: 'blocage', val: (a) => [a.blocage_appro ? 'Blocage appro' : '', a.exclure_appro ? 'Exclu' : '', a.vie_produit || '', a.arret_appro ? 'Arrêt appro' : '', a.arret_vente ? 'Arrêt vente' : '', a.ref_remplacante ? '→ ' + a.ref_remplacante : ''].filter(Boolean).join(' ') },
   { key: 'strategie', label: 'Stratégie', groupe: 'Paramètres d’appro', title: 'Stratégie d\'appro : celle du fournisseur, surchargeable sur l\'article (en couleur). « A la demande » sur l\'article = aucune proposition.', align: 'left', val: (a, c) => propDe(c, a)?.eff.strategie.v || '' },
   { key: 'methode', label: 'Méth.', groupe: 'Paramètres d’appro', title: 'Méthode A (Min/Max) ou B (couverture cible) — fournisseur, surchargeable sur l\'article. Filtre : "A", "B"', align: 'left', placeholder: 'A / B', val: (a, c) => propDe(c, a)?.lettre ?? '' },
@@ -2839,6 +2922,7 @@ const COLONNES_ARTICLES: { key: CleColArt; label: string; groupe: GroupeCol; tit
   { key: 'min_sage', label: 'Min SAGE', groupe: 'Stocks min / max', align: 'right', val: (a) => a.sage_stock_min_fms },
   { key: 'min_blg', label: 'Min BLG', groupe: 'Stocks min / max', title: 'Stock min BLG (DPFMS) — rouge si différent du calculé', align: 'right', val: (a) => a.blg_stock_min_fms },
   { key: 'retenu', label: 'Min retenu', groupe: 'Stocks min / max', title: 'Stock min retenu, délais, arrêt appro / vente, remplaçante (✎). Filtre "!vide" = avec saisie', align: 'right', placeholder: '!vide', val: (a) => a.stock_min_retenu },
+  { key: 'action_depot', label: 'Action dépôts', groupe: 'Commande', title: 'Réservations SAGE non couvertes dépôt par dépôt : transfert agence → FMS, FMS → agence, inter-agences, réappro (MYSTOCK) ou contremarque (non MYSTOCK). Filtre : "transfert", "contremarque", "réappro", "inter", ">0"', align: 'left', placeholder: 'transfert', val: (a, c) => { const l = actionsDepot(a, c.besoinsDepot.get(a.reference_article.toUpperCase())); return l.length ? l.map((x) => `${ACTION_DEPOT_PAR_CODE[x.type].label} ${x.qte}`).join(' ; ') : null } },
   { key: 'proposition', label: 'Proposition', groupe: 'Commande', title: 'Quantité proposée (arrondie au colisage). Survole pour le calcul détaillé. Filtre ">0" = à commander', align: 'right', placeholder: '>0', val: (a, c) => { const p = propDe(c, a); return p && p.declenche ? p.qteProposee : null } },
   { key: 'retenue', label: 'Qté retenue', groupe: 'Commande', title: 'Quantité de la commande : saisis pour remplacer la proposition (vide = proposition). C\'est elle qui part dans les fichiers commande', align: 'right', placeholder: '>0', val: (a, c) => { const p = propDe(c, a); return p ? (p.qteFinale > 0 ? p.qteFinale : null) : null } },
   { key: 'date_liv', label: 'Liv. souhaitée', groupe: 'Commande', title: 'Date de livraison souhaitée (défaut = aujourd\'hui + délai d\'appro). Un fichier commande par fournisseur et par date', align: 'right', placeholder: '2026-', val: (a, c) => propDe(c, a)?.dateSouhaitee ?? null },
@@ -2912,8 +2996,9 @@ type PatchSurcharge = Partial<{
 }>
 
 /** Une ligne du tableau — mémorisée : seule la ligne modifiée se redessine. */
-const LigneArticle = React.memo(function LigneArticle({ a, p, t, f, incs, colonnes, profilsOk, onOuvrirArticle, onOuvrirFournisseur, onEditer, onSurcharge, onPropositionSaved }: {
+const LigneArticle = React.memo(function LigneArticle({ a, p, t, f, incs, colonnes, profilsOk, besoin, familleMacro, onOuvrirArticle, onOuvrirFournisseur, onEditer, onSurcharge, onPropositionSaved }: {
   a: ArtRow; p: Proposition; t: AnalyseTarif | undefined; f: FournRow | undefined; incs: string[]; colonnes: Set<CleColArt>; profilsOk: boolean
+  besoin: BesoinDepot | undefined; familleMacro: string | undefined
   onOuvrirArticle: (ref: string) => void; onOuvrirFournisseur: (numero: string) => void; onEditer: (ref: string) => void
   onSurcharge: (a: ArtRow, p: Proposition, patch: PatchSurcharge) => void; onPropositionSaved: (a: ArtRow) => void
 }) {
@@ -2961,6 +3046,12 @@ const LigneArticle = React.memo(function LigneArticle({ a, p, t, f, incs, colonn
               <span className="block truncate text-[10px] text-[#8A8474]">{f?.sage_intitule || ''}</span>
             </button>
           ) : <span className="text-[#B3AD9E]">—</span>}
+        </td>
+      )}
+      {c('famille_macro') && (
+        <td className="px-2 py-1" title={a.famille ? `Famille SAGE : ${a.famille}` : undefined}>
+          <span className="block text-[11px] font-bold text-[#3A362E]">{familleMacro || '—'}</span>
+          <span className="block text-[9.5px] text-[#8A8474]">{a.famille || ''}</span>
         </td>
       )}
       {c('blocage') && (
@@ -3073,6 +3164,20 @@ const LigneArticle = React.memo(function LigneArticle({ a, p, t, f, incs, colonn
           </button>
         </td>
       )}
+      {c('action_depot') && (() => {
+        const actions = actionsDepot(a, besoin)
+        return (
+          <td className="px-2 py-1" title={besoin && actions.length ? titreBesoinDepot(besoin, actions) : undefined}>
+            {actions.length ? (
+              <div className="flex flex-col items-start gap-0.5">
+                {actions.map((x) => (
+                  <span key={x.type} className={`whitespace-nowrap rounded px-1.5 py-0.5 text-[10px] font-bold ${ACTION_DEPOT_PAR_CODE[x.type].className}`}>{x.libelle} {fmtNum(x.qte)}</span>
+                ))}
+              </div>
+            ) : <span className="text-[#D5D0C4]">—</span>}
+          </td>
+        )
+      })()}
       {c('proposition') && (
         <td className="px-2 py-1 text-right" title={p.explication.join('\n')}>
           {p.declenche ? <span className="rounded bg-red-100 px-1.5 py-0.5 font-bold text-red-700">{fmtNum(p.qteProposee)}</span> : (p.bloque || p.strategieExclue) && a.pertinent_calcul_besoin ? <span className="text-[10px] font-bold text-red-700">⛔</span> : <span className="text-[#D5D0C4]">—</span>}
@@ -3162,12 +3267,13 @@ function GroupeEditeurModal({ initial, selectionFiltree, articlesConnus, onAppli
 const cacheProposition = new WeakMap<ArtRow, { pr: ProfilConso | undefined; ctx: object; p: Proposition }>()
 const cacheTarif = new WeakMap<Proposition, { paliers: PalierTarif[]; lecture: LectureBornes; t: AnalyseTarif | null }>()
 
-function OngletCalculBesoin({ articles, fournisseurs, paramsFourn, profils, profilsOk, strategies, loading, loadProgress, error, parametres, onParametresChange, onArticleChange, onArticlePatch, onProfilPatch, onProfilSet, onFournisseurChange, onStrategieSaved, onRecharger }: {
+function OngletCalculBesoin({ articles, fournisseurs, paramsFourn, profils, profilsOk, besoinsDepot, besoinsDepotOk, familleMacro, strategies, loading, loadProgress, error, parametres, onParametresChange, onArticleChange, onArticlePatch, onProfilPatch, onProfilSet, onFournisseurChange, onStrategieSaved, onRecharger }: {
   articles: ArtRow[]; fournisseurs: FournRow[]; paramsFourn: Map<string, ParamsFourn>; profils: Map<string, ProfilConso>; profilsOk: boolean
   strategies: StrategieRef[]; loading: boolean; loadProgress: number; error: string | null
   parametres: Parametre[]; onParametresChange: (p: Parametre[]) => void
   onArticleChange: (a: ArtRow) => void; onArticlePatch: (ref: string, patch: Partial<ArtRow>) => void; onProfilPatch: (ref: string, patch: Partial<ProfilConso>) => void; onProfilSet: (p: ProfilConso) => void
   onFournisseurChange: (f: FournRow) => void; onStrategieSaved: () => void; onRecharger: () => Promise<void>
+  besoinsDepot: Map<string, BesoinDepot>; besoinsDepotOk: boolean; familleMacro: Map<string, string>
 }) {
   // Forçage de la méthode de réappro sur l'écran ('' = selon référence / fournisseur / défaut) — mémorisé
   const [methodeForcee, setMethodeForcee] = useState<'' | MethodeCalcul>(() => { try { const v = localStorage.getItem('appro.articles.methode_forcee'); return v === 'min_max' || v === 'couverture' ? v : '' } catch { return '' } })
@@ -3184,7 +3290,10 @@ function OngletCalculBesoin({ articles, fournisseurs, paramsFourn, profils, prof
   const [search, setSearch] = useState('')
   const [fournFilter, setFournFilter] = useState('')
   const [familleFilter, setFamilleFilter] = useState('')
-  const [pertinentsSeuls, setPertinentsSeuls] = useState(true)
+  const [familleMacroFilter, setFamilleMacroFilter] = useState('')
+  // MyStock : OUI = champ libre SAGE MYSTOCK = OUI, NON = autre valeur ou vide (remplace la pastille « MYSTOCK actives »)
+  const [mystockFilter, setMystockFilter] = useState<'tous' | 'oui' | 'non'>('oui')
+  const [actionDepotFilter, setActionDepotFilter] = useState<'' | 'toutes' | 'transferts' | TypeActionDepot>('')
   const [avecConsoSeuls, setAvecConsoSeuls] = useState(false)
   const [ecartMinSeuls, setEcartMinSeuls] = useState(false)
   const [aCommanderSeuls, setACommanderSeuls] = useState(false)
@@ -3192,7 +3301,7 @@ function OngletCalculBesoin({ articles, fournisseurs, paramsFourn, profils, prof
   const [surchargesSeules, setSurchargesSeules] = useState(false)
   const [qualiteFilter, setQualiteFilter] = useState('')
   const [strategieFilter, setStrategieFilter] = useState('')
-  const [sommeilFilter, setSommeilFilter] = useState<'tous' | 'oui' | 'non'>('tous')
+  const [sommeilFilter, setSommeilFilter] = useState<'tous' | 'oui' | 'non'>('non')
   const [arretApproFilter, setArretApproFilter] = useState<'tous' | 'oui' | 'non'>('tous')
   const [blocageFilter, setBlocageFilter] = useState<'tous' | 'oui' | 'non' | 'exclu' | 'findevie'>('tous')
   const [importBlocageEnCours, setImportBlocageEnCours] = useState(false)
@@ -3239,7 +3348,13 @@ function OngletCalculBesoin({ articles, fournisseurs, paramsFourn, profils, prof
 
   const fournMap = useMemo(() => new Map(fournisseurs.map((f) => [f.numero, f])), [fournisseurs])
   const fournOptions = useMemo(() => Array.from(new Set(articles.map((a) => a.fournisseur_principal).filter(Boolean) as string[])).sort().map((n) => ({ numero: n, label: fournMap.get(n)?.sage_intitule || n })), [articles, fournMap])
-  const familleOptions = useMemo(() => Array.from(new Set(articles.map((a) => safeText(a.famille)).filter(Boolean))).sort(), [articles])
+  const familleOptions = useMemo(() => Array.from(new Set(articles.filter((a) => !familleMacroFilter || familleMacro.get(safeText(a.famille)) === familleMacroFilter).map((a) => safeText(a.famille)).filter(Boolean))).sort(), [articles, familleMacro, familleMacroFilter])
+  const familleMacroOptions = useMemo(() => Array.from(new Set(articles.map((a) => familleMacro.get(safeText(a.famille)) || '').filter(Boolean))).sort((x, y) => x.localeCompare(y, 'fr')), [articles, familleMacro])
+  const actionsParRef = useMemo(() => {
+    const m = new Map<string, ActionDepot[]>()
+    articles.forEach((a) => { const l = actionsDepot(a, besoinsDepot.get(a.reference_article.toUpperCase())); if (l.length) m.set(a.reference_article, l) })
+    return m
+  }, [articles, besoinsDepot])
   const qualiteOptions = useMemo(() => Array.from(new Set(fournisseurs.map((f) => safeText(f.sage_qualite)).filter(Boolean))).sort(), [fournisseurs])
   const indexArticles = useMemo(() => new Map(articles.map((a) => [a.reference_article.toUpperCase(), a])), [articles])
   const articleParRef = useMemo(() => new Map(articles.map((a) => [a.reference_article, a])), [articles])
@@ -3305,7 +3420,7 @@ function OngletCalculBesoin({ articles, fournisseurs, paramsFourn, profils, prof
     })
     return m
   }, [articles, propositions, paliersParCle, lectureBornes])
-  const ctxCol = useMemo<CtxColArt>(() => ({ fournMap, incoherencesParRef, propositions, tarifs }), [fournMap, incoherencesParRef, propositions, tarifs])
+  const ctxCol = useMemo<CtxColArt>(() => ({ fournMap, incoherencesParRef, propositions, tarifs, besoinsDepot, familleMacro }), [fournMap, incoherencesParRef, propositions, tarifs, besoinsDepot, familleMacro])
   const groupeActif = useMemo<{ id: string | null; nom: string; refs: string[] } | null>(() => {
     if (groupeId === '__adhoc') return groupeAdHoc ? { id: null, nom: groupeAdHoc.nom, refs: groupeAdHoc.refs } : null
     const g = groupes.find((x) => x.id === groupeId)
@@ -3324,7 +3439,13 @@ function OngletCalculBesoin({ articles, fournisseurs, paramsFourn, profils, prof
       const f = a.fournisseur_principal ? fournMap.get(a.fournisseur_principal) : undefined
       const p = propositions.get(a.reference_article)
       if (refsGroupe && !refsGroupe.has(a.reference_article.toUpperCase())) return false
-      if (!refsGroupe && pertinentsSeuls && !a.pertinent_calcul_besoin) return false
+      const estMystock = safeText(a.mystock).toUpperCase() === 'OUI'
+      if (!refsGroupe && mystockFilter !== 'tous' && estMystock !== (mystockFilter === 'oui')) return false
+      if (familleMacroFilter && familleMacro.get(safeText(a.famille)) !== familleMacroFilter) return false
+      if (actionDepotFilter) {
+        const acts = actionsParRef.get(a.reference_article) || []
+        if (actionDepotFilter === 'toutes' ? acts.length === 0 : actionDepotFilter === 'transferts' ? !acts.some((x) => x.type.startsWith('transfert')) : !acts.some((x) => x.type === actionDepotFilter)) return false
+      }
       if (avecConsoSeuls && !(Number(a.conso_horizon) > 0)) return false
       if (ecartMinSeuls && !(a.champs_en_ecart || []).includes('stock_min')) return false
       if (aCommanderSeuls && !(p?.qteFinale ?? 0)) return false
@@ -3345,7 +3466,7 @@ function OngletCalculBesoin({ articles, fournisseurs, paramsFourn, profils, prof
       for (const k of clesFiltreCol) if (!filtreColArtOk(a, k, filtresCol[k]!, ctxCol)) return false
       return true
     })
-  }, [articles, fournMap, propositions, search, fournFilter, familleFilter, pertinentsSeuls, avecConsoSeuls, ecartMinSeuls, aCommanderSeuls, avecEncoursSeuls, surchargesSeules, qualiteFilter, strategieFilter, sommeilFilter, arretApproFilter, blocageFilter, filtresCol, ctxCol, clesFiltreCol, refsGroupe])
+  }, [articles, fournMap, propositions, search, fournFilter, familleFilter, familleMacroFilter, familleMacro, mystockFilter, actionDepotFilter, actionsParRef, avecConsoSeuls, ecartMinSeuls, aCommanderSeuls, avecEncoursSeuls, surchargesSeules, qualiteFilter, strategieFilter, sommeilFilter, arretApproFilter, blocageFilter, filtresCol, ctxCol, clesFiltreCol, refsGroupe])
 
   const compteursIncoherences = useMemo(() => {
     const c: Record<string, number> = {}
@@ -3385,7 +3506,15 @@ function OngletCalculBesoin({ articles, fournisseurs, paramsFourn, profils, prof
     const pert = baseFiltree.filter((a) => a.pertinent_calcul_besoin)
     const fournisseursCde = new Set<string>()
     let aCommander = 0, qte = 0, montant = 0, sansPrix = 0, retenues = 0, methodeB = 0, rupture = 0, ruptureACommander = 0, surcharges = 0, economiePalier = 0, palierAtteignable = 0, qteAddPalier = 0, ecretes = 0
+    const act = { transfertAgFms: 0, transfertFmsAg: 0, transfertInter: 0, contremarque: 0, qteContremarque: 0, reappro: 0 }
     baseFiltree.forEach((a) => {
+      ;(actionsParRef.get(a.reference_article) || []).forEach((x) => {
+        if (x.type === 'transfert_ag_fms') act.transfertAgFms += 1
+        else if (x.type === 'transfert_fms_ag') act.transfertFmsAg += 1
+        else if (x.type === 'transfert_inter') act.transfertInter += 1
+        else if (x.type === 'contremarque') { act.contremarque += 1; act.qteContremarque += x.qte }
+        else if (x.type === 'reappro') act.reappro += 1
+      })
       const p = propositions.get(a.reference_article)
       if (!p) return
       const t = tarifs.get(a.reference_article)
@@ -3416,9 +3545,9 @@ function OngletCalculBesoin({ articles, fournisseurs, paramsFourn, profils, prof
       sansDate: pert.filter((a) => a.date_livraison_par_defaut).length,
       avecTarifQte: baseFiltree.filter((a) => tarifs.has(a.reference_article)).length,
       aCommander, qte, montant, sansPrix, retenues, methodeB, rupture, ruptureACommander, surcharges, ecretes,
-      fournisseursCde: fournisseursCde.size, economiePalier, palierAtteignable, qteAddPalier,
+      fournisseursCde: fournisseursCde.size, economiePalier, palierAtteignable, qteAddPalier, act,
     }
-  }, [baseFiltree, propositions, tarifs, profils])
+  }, [baseFiltree, propositions, tarifs, profils, actionsParRef])
 
   // ── Enregistrement d'une surcharge article (optimiste, annulée en cas d'erreur) ─────────
   const onSurcharge = useCallback((a: ArtRow, p: Proposition, patch: PatchSurcharge) => {
@@ -3563,7 +3692,7 @@ function OngletCalculBesoin({ articles, fournisseurs, paramsFourn, profils, prof
       const ws = wb.addWorksheet('Calcul de besoin')
       const P = (a: ArtRow) => propositions.get(a.reference_article)
       const cols: { h: string; f: (a: ArtRow) => unknown }[] = [
-        { h: 'Référence', f: (a) => a.reference_article }, { h: 'Désignation', f: (a) => a.sage_designation }, { h: 'Famille', f: (a) => a.famille },
+        { h: 'Référence', f: (a) => a.reference_article }, { h: 'Désignation', f: (a) => a.sage_designation }, { h: 'Famille macro', f: (a) => familleMacro.get(safeText(a.famille)) }, { h: 'Famille', f: (a) => a.famille },
         { h: 'Fournisseur', f: (a) => a.fournisseur_principal }, { h: 'Intitulé fournisseur', f: (a) => (a.fournisseur_principal ? fournMap.get(a.fournisseur_principal)?.sage_intitule : null) },
         { h: 'Qualité fournisseur', f: (a) => (a.fournisseur_principal ? fournMap.get(a.fournisseur_principal)?.sage_qualite : null) },
         { h: 'Incohérences', f: (a) => (incoherencesParRef.get(a.reference_article) || []).map((k) => LABEL_INCOHERENCE_ARTICLE[k]?.label || k).join(' ; ') },
@@ -3587,6 +3716,11 @@ function OngletCalculBesoin({ articles, fournisseurs, paramsFourn, profils, prof
         { h: 'Stock sécurité', f: (a) => P(a)?.ss }, { h: 'Stock min', f: (a) => P(a)?.minEff }, { h: 'Stock max', f: (a) => P(a)?.maxEff }, { h: 'SS/min/max recalculés sur la ligne', f: (a) => (P(a)?.recalcule ? 'Oui' : 'Non') },
         { h: 'Seuil A', f: (a) => P(a)?.seuilA }, { h: 'Stock min retenu (saisie)', f: (a) => a.stock_min_retenu },
         { h: 'Stock min SAGE', f: (a) => a.sage_stock_min_fms }, { h: 'Stock min BLG (DPFMS)', f: (a) => a.blg_stock_min_fms },
+        { h: 'Action dépôts', f: (a) => (actionsParRef.get(a.reference_article) || []).map((x) => `${ACTION_DEPOT_PAR_CODE[x.type].label} ${x.qte}`).join(' ; ') },
+        { h: 'Transfert agence → FMS', f: (a) => besoinsDepot.get(a.reference_article.toUpperCase())?.transfert_agences_vers_fms || null },
+        { h: 'Transfert FMS → agences', f: (a) => besoinsDepot.get(a.reference_article.toUpperCase())?.transfert_fms_vers_agences || null },
+        { h: 'Transfert inter-agences', f: (a) => besoinsDepot.get(a.reference_article.toUpperCase())?.transfert_inter_agences || null },
+        { h: 'Manque net après transferts', f: (a) => besoinsDepot.get(a.reference_article.toUpperCase())?.manque_net || null },
         { h: 'Déclenche', f: (a) => (P(a)?.declenche ? 'Oui' : 'Non') }, { h: 'Proposition', f: (a) => P(a)?.qteProposee }, { h: 'Qté retenue (saisie)', f: (a) => a.qte_proposition_manuelle },
         { h: 'Qté commande', f: (a) => P(a)?.qteFinale }, { h: 'Livraison souhaitée', f: (a) => fmtDate(P(a)?.dateSouhaitee) },
         { h: 'Prix unitaire', f: (a) => prixUnitaire(a, tarifs.get(a.reference_article)) },
@@ -3651,9 +3785,9 @@ function OngletCalculBesoin({ articles, fournisseurs, paramsFourn, profils, prof
 
   const ctl = 'h-8 min-w-0 rounded-md border border-[#E5E1D8] bg-white px-2 text-[12px] font-semibold text-[#3A362E] outline-none focus:border-[#B4761A]'
   const puce = (actif: boolean) => `flex h-7 items-center gap-1.5 rounded-full border px-2.5 text-[11.5px] font-semibold ${actif ? 'border-[#B4761A] bg-[#B4761A]/[0.1] text-[#8A5A08]' : 'border-[#E5E1D8] bg-white text-[#3A362E] hover:bg-[#F4F3F0]'}`
-  const nbFiltresActifs = (groupeActif ? 1 : 0) + [fournFilter, familleFilter, qualiteFilter, strategieFilter, search.trim()].filter(Boolean).length + [sommeilFilter, arretApproFilter, blocageFilter].filter((v) => v !== 'tous').length + (avecConsoSeuls ? 1 : 0) + (ecartMinSeuls ? 1 : 0) + (aCommanderSeuls ? 1 : 0) + (avecEncoursSeuls ? 1 : 0) + (surchargesSeules ? 1 : 0) + clesFiltreCol.length + (incoherenceFilter ? 1 : 0)
+  const nbFiltresActifs = (groupeActif ? 1 : 0) + [fournFilter, familleFilter, familleMacroFilter, actionDepotFilter, qualiteFilter, strategieFilter, search.trim()].filter(Boolean).length + [arretApproFilter, blocageFilter].filter((v) => v !== 'tous').length + (sommeilFilter !== 'non' ? 1 : 0) + (mystockFilter !== 'oui' ? 1 : 0) + (avecConsoSeuls ? 1 : 0) + (ecartMinSeuls ? 1 : 0) + (aCommanderSeuls ? 1 : 0) + (avecEncoursSeuls ? 1 : 0) + (surchargesSeules ? 1 : 0) + clesFiltreCol.length + (incoherenceFilter ? 1 : 0)
   function reinitialiserFiltres() {
-    setGroupeId(''); setSearch(''); setFournFilter(''); setFamilleFilter(''); setQualiteFilter(''); setStrategieFilter(''); setSommeilFilter('tous'); setArretApproFilter('tous'); setBlocageFilter('tous')
+    setGroupeId(''); setSearch(''); setFournFilter(''); setFamilleFilter(''); setFamilleMacroFilter(''); setMystockFilter('oui'); setActionDepotFilter(''); setQualiteFilter(''); setStrategieFilter(''); setSommeilFilter('non'); setArretApproFilter('tous'); setBlocageFilter('tous')
     setAvecConsoSeuls(false); setEcartMinSeuls(false); setACommanderSeuls(false); setAvecEncoursSeuls(false); setSurchargesSeules(false); setFiltresCol({}); setTriCol(null); setIncoherenceFilter(null)
   }
 
@@ -3703,16 +3837,23 @@ function OngletCalculBesoin({ articles, fournisseurs, paramsFourn, profils, prof
           <KpiMini label="Sans date livr." value={kpis.sansDate} loading={loading} title="Délai théorique appliqué" />
           <KpiMini label="Surcharges" value={kpis.surcharges} loading={loading} tone={kpis.surcharges ? 'warn' : undefined} sub={kpis.ecretes ? `${fmtNum(kpis.ecretes)} écrêtée${kpis.ecretes > 1 ? 's' : ''}` : undefined} onClick={() => setSurchargesSeules((v) => !v)} actif={surchargesSeules} title="Références dont au moins un paramètre d'appro est saisi sur l'article. Clic : ne voir qu'elles" />
           <KpiMini label="Tarif qté" value={kpis.avecTarifQte} loading={loading} sub={tarifsErreur ? 'non chargés' : undefined} title={tarifsErreur || undefined} />
+          <KpiMini label="Transf. agence → FMS" value={kpis.act.transfertAgFms} loading={loading} tone={kpis.act.transfertAgFms ? 'warn' : undefined} onClick={() => setActionDepotFilter((v) => (v === 'transfert_ag_fms' ? '' : 'transfert_ag_fms'))} actif={actionDepotFilter === 'transfert_ag_fms'} title="CDC départ FMS non couvertes par le stock FMS alors qu'une agence a du stock non réservé" />
+          <KpiMini label="Transf. vers agences" value={kpis.act.transfertFmsAg + kpis.act.transfertInter} loading={loading} sub={`${fmtNum(kpis.act.transfertInter)} inter-ag.`} onClick={() => setActionDepotFilter((v) => (v === 'transferts' ? '' : 'transferts'))} actif={actionDepotFilter === 'transferts'} title="CDC départ agence non couvertes par le stock de l'agence, couvrables depuis FMS ou une autre agence" />
+          <KpiMini label="Contremarques" value={kpis.act.contremarque} loading={loading} tone={kpis.act.contremarque ? 'alerte' : undefined} sub={`${fmtNum(kpis.act.qteContremarque)} p.`} onClick={() => setActionDepotFilter((v) => (v === 'contremarque' ? '' : 'contremarque'))} actif={actionDepotFilter === 'contremarque'} title={besoinsDepotOk ? 'Références non MYSTOCK avec des réservations non couvertes (stock, transferts, encours) : contremarque à passer' : 'Vue v_appro_article_besoin_depot indisponible'} />
         </div>
       </section>
 
       {/* Filtres densifiés */}
       <section className="rounded-xl border border-[#E5E1D8] bg-white px-3 py-2">
-        <div className="grid gap-1.5" style={{ gridTemplateColumns: 'minmax(180px, 2fr) repeat(8, minmax(0, 1fr))' }}>
+        <div className="grid gap-1.5" style={{ gridTemplateColumns: 'minmax(170px, 1.6fr) repeat(10, minmax(0, 1fr))' }}>
           <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Référence ou désignation…" className={`${ctl} font-medium`} />
           <select value={fournFilter} onChange={(e) => setFournFilter(e.target.value)} className={ctl}>
             <option value="">Fournisseur : tous</option>
             {fournOptions.map((f) => <option key={f.numero} value={f.numero}>{f.numero} — {f.label}</option>)}
+          </select>
+          <select value={familleMacroFilter} onChange={(e) => { setFamilleMacroFilter(e.target.value); setFamilleFilter('') }} className={`${ctl} ${familleMacroFilter ? 'border-[#B4761A] text-[#8A5A08]' : ''}`} title="Famille macro (ref_familles) : restreint aussi la liste des familles">
+            <option value="">Famille macro : toutes</option>
+            {familleMacroOptions.map((f) => <option key={f} value={f}>{f}</option>)}
           </select>
           <select value={familleFilter} onChange={(e) => setFamilleFilter(e.target.value)} className={ctl}>
             <option value="">Famille : toutes</option>
@@ -3726,6 +3867,10 @@ function OngletCalculBesoin({ articles, fournisseurs, paramsFourn, profils, prof
             <option value="">Stratégie : toutes</option>
             {STRATEGIES_APPRO.map((s) => <option key={s} value={s}>{s}</option>)}
             <option value="__none">Non renseignée</option>
+          </select>
+          <select value={mystockFilter} onChange={(e) => setMystockFilter(e.target.value as typeof mystockFilter)} disabled={!!groupeActif}
+            title={groupeActif ? 'Ignoré tant qu\'un groupe est sélectionné' : 'Champ libre SAGE MYSTOCK'} className={`${ctl} ${mystockFilter !== 'tous' ? 'border-[#B4761A] text-[#8A5A08]' : ''} disabled:opacity-50`}>
+            <option value="oui">MyStock : OUI</option><option value="non">MyStock : NON</option><option value="tous">MyStock : tous</option>
           </select>
           <select value={sommeilFilter} onChange={(e) => setSommeilFilter(e.target.value as typeof sommeilFilter)} className={ctl}>
             <option value="tous">Sommeil : toutes</option><option value="non">Actives</option><option value="oui">En sommeil</option>
@@ -3759,7 +3904,13 @@ function OngletCalculBesoin({ articles, fournisseurs, paramsFourn, profils, prof
             className="h-7 rounded-full border border-[#E5E1D8] bg-white px-2.5 text-[11.5px] font-bold text-[#5B4387] hover:bg-[#EFE9F7]" title={groupeActif ? 'Modifier le groupe' : 'Créer un groupe à la volée'}>{groupeActif ? '✎ Groupe' : '+ Groupe à la volée'}</button>
           {groupeActif && refsGroupeAbsentes.length > 0 && <span className="text-[11px] font-semibold text-orange-700" title={refsGroupeAbsentes.join(', ')}>{refsGroupeAbsentes.length} réf. du groupe absente{refsGroupeAbsentes.length > 1 ? 's' : ''} du calcul</span>}
           <span className="mx-1 h-5 w-px bg-[#E5E1D8]" />
-          <button type="button" className={`${puce(pertinentsSeuls && !groupeActif)} ${groupeActif ? 'opacity-50' : ''}`} onClick={() => setPertinentsSeuls((v) => !v)} title={groupeActif ? 'Ignoré tant qu\'un groupe est sélectionné' : undefined}>MYSTOCK actives</button>
+          <select value={actionDepotFilter} onChange={(e) => setActionDepotFilter(e.target.value as typeof actionDepotFilter)} title="Réservations SAGE non couvertes dépôt par dépôt : transfert, réappro ou contremarque"
+            className={`h-7 rounded-full border px-2.5 text-[11.5px] font-semibold outline-none ${actionDepotFilter ? 'border-[#B4761A] bg-[#B4761A]/[0.1] text-[#8A5A08]' : 'border-[#E5E1D8] bg-white text-[#3A362E]'}`}>
+            <option value="">Action dépôts : toutes réf.</option>
+            <option value="toutes">Avec une action dépôt</option>
+            <option value="transferts">Transferts (tous)</option>
+            {ACTIONS_DEPOT.map((x) => <option key={x.code} value={x.code}>{x.label}</option>)}
+          </select>
           <button type="button" className={puce(aCommanderSeuls)} onClick={() => setACommanderSeuls((v) => !v)}>À commander</button>
           <button type="button" className={puce(avecConsoSeuls)} onClick={() => setAvecConsoSeuls((v) => !v)}>Avec conso</button>
           <button type="button" className={puce(avecEncoursSeuls)} onClick={() => setAvecEncoursSeuls((v) => !v)}>Avec encours</button>
@@ -3894,7 +4045,7 @@ function OngletCalculBesoin({ articles, fournisseurs, paramsFourn, profils, prof
               {affichees.map((a) => (
                 <LigneArticle key={a.reference_article} a={a} p={propositions.get(a.reference_article)!} t={tarifs.get(a.reference_article)}
                   f={a.fournisseur_principal ? fournMap.get(a.fournisseur_principal) : undefined} incs={incoherencesParRef.get(a.reference_article) || []}
-                  colonnes={setVisibles} profilsOk={profilsOk}
+                  colonnes={setVisibles} profilsOk={profilsOk} besoin={besoinsDepot.get(a.reference_article.toUpperCase())} familleMacro={familleMacro.get(safeText(a.famille))}
                   onOuvrirArticle={onOuvrirArticle} onOuvrirFournisseur={onOuvrirFournisseur} onEditer={onEditer} onSurcharge={onSurcharge} onPropositionSaved={onArticleChange} />
               ))}
               {!loading && affichees.length === 0 && <tr><td colSpan={colonnesVisibles.length} className="px-3 py-8 text-center text-[#8A8474]">Aucune référence pour ces filtres.</td></tr>}
@@ -3967,6 +4118,37 @@ function normaliserProfil(r: ProfilConso): ProfilConso {
   }
 }
 
+/** Besoin ferme par dépôt (v_appro_article_besoin_depot, migration appro_article_besoin_depot_transferts) ; null si la vue manque. */
+async function chargerBesoinsDepot(): Promise<BesoinDepot[] | null> {
+  const acc: BesoinDepot[] = []
+  const pageSize = 1000
+  let from = 0
+  const n = (v: unknown) => Number(v ?? 0)
+  while (true) {
+    const { data, error } = await supabase.from('v_appro_article_besoin_depot').select('*').order('reference_article').range(from, from + pageSize - 1)
+    if (error) return null
+    const batch = (data || []) as BesoinDepot[]
+    acc.push(...batch.map((b) => ({
+      ...b,
+      manque_stock_fms: n(b.manque_stock_fms), manque_fms: n(b.manque_fms), surplus_fms: n(b.surplus_fms),
+      manque_stock_agences: n(b.manque_stock_agences), manque_agences: n(b.manque_agences), surplus_agences: n(b.surplus_agences),
+      encours_total: n(b.encours_total), transfert_agences_vers_fms: n(b.transfert_agences_vers_fms),
+      transfert_fms_vers_agences: n(b.transfert_fms_vers_agences), transfert_inter_agences: n(b.transfert_inter_agences), manque_net: n(b.manque_net),
+      detail_depots: (b.detail_depots || []).map((d) => ({ ...d, res: n(d.res), dispo: n(d.dispo), transit: n(d.transit), encours: n(d.encours), manque: n(d.manque), surplus: n(d.surplus) })),
+    })))
+    if (batch.length < pageSize) break
+    from += pageSize
+  }
+  return acc
+}
+
+/** Correspondance famille SAGE → famille macro (ref_familles). */
+async function chargerFamillesMacro(): Promise<Map<string, string>> {
+  const { data } = await supabase.from('ref_familles').select('famille, famille_macro').limit(5000)
+  return new Map(((data || []) as { famille: string | null; famille_macro: string | null }[])
+    .filter((r) => r.famille && r.famille_macro).map((r) => [safeText(r.famille), safeText(r.famille_macro)]))
+}
+
 /** Profils de conso (v_appro_article_conso_profil) ; null si la vue n'existe pas encore (migration non appliquée). */
 async function chargerProfils(): Promise<ProfilConso[] | null> {
   const acc: ProfilConso[] = []
@@ -3991,6 +4173,9 @@ export default function CalculBesoinApproPage() {
   const [articles, setArticles] = useState<ArtRow[]>([])
   const [profils, setProfils] = useState<Map<string, ProfilConso>>(new Map())
   const [profilsOk, setProfilsOk] = useState(true)
+  const [besoinsDepot, setBesoinsDepot] = useState<Map<string, BesoinDepot>>(new Map())
+  const [besoinsDepotOk, setBesoinsDepotOk] = useState(true)
+  const [familleMacro, setFamilleMacro] = useState<Map<string, string>>(new Map())
   const [strategies, setStrategies] = useState<StrategieRef[]>([])
   const [parametres, setParametres] = useState<Parametre[]>([])
   const [paramsFourn, setParamsFourn] = useState<Map<string, ParamsFourn>>(new Map())
@@ -4018,7 +4203,10 @@ export default function CalculBesoinApproPage() {
         chargerParamsFourn(),
       ])
       setFournisseurs(f); setStrategies(s); setParametres(p)
-      const [a, pr] = await Promise.all([chargerArticles(setLoadProgress), chargerProfils()])
+      const [a, pr, bd, fm] = await Promise.all([chargerArticles(setLoadProgress), chargerProfils(), chargerBesoinsDepot(), chargerFamillesMacro()])
+      setBesoinsDepotOk(bd !== null)
+      setBesoinsDepot(new Map((bd || []).map((x) => [x.reference_article.toUpperCase(), x])))
+      setFamilleMacro(fm)
       setProfilsOk(pr !== null)
       setProfils(new Map((pr || []).map((x) => [x.reference_article, x])))
       setArticles(a)
@@ -4060,6 +4248,7 @@ export default function CalculBesoinApproPage() {
         )}
         {onglet === 'calcul' && (
           <OngletCalculBesoin articles={articles} fournisseurs={fournisseurs} paramsFourn={paramsFourn} profils={profils} profilsOk={profilsOk}
+            besoinsDepot={besoinsDepot} besoinsDepotOk={besoinsDepotOk} familleMacro={familleMacro}
             strategies={strategies} loading={loading} loadProgress={loadProgress} error={error}
             parametres={parametres} onParametresChange={setParametres}
             onArticleChange={onArticleChange} onArticlePatch={onArticlePatch} onProfilPatch={onProfilPatch} onProfilSet={onProfilSet}
