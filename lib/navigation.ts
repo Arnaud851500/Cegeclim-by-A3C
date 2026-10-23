@@ -23,6 +23,8 @@
 // dédié can_suivi_agences (coché dans /autorisation) ; le périmètre agence /
 // collaborateur de l'utilisateur est appliqué par les RPC de l'écran
 // (migration 20261013_suivi_agences_droit_perimetre.sql).
+// ÉVOLUTION (2026-10-23) : « Portefeuille commandes fournisseurs » (/stock/portefeuille-cdf)
+// ajouté sous Calcul de besoin - Appro (droit can_stocks).
 // ÉVOLUTION (2026-10-21) : « Pénuries – vue mensuelle » (/stock/penurie/mensuel)
 // ajoutée sous Références en pénurie (même droit can_activites).
 // ÉVOLUTION (2026-10-21) : « Équivalences R/O AirH2O » (/stock/equivalences-ro),
@@ -176,6 +178,7 @@ export const NAV_BLOCS: NavBloc[] = [
       { label: 'Équivalences R/O AirH2O', path: '/stock/equivalences-ro', activeLabel: 'Équivalences R/O AirH2O 600 / 800', accessKey: 'can_dashboard', description: 'Groupes AirH2O 600 / 800 par taille et par usage (S, S + ECS, Combi, monobloc H) : solution actuelle et solutions d’anciennes générations en stock, composant limitant, quantité réalisable et écart de prix, en glisser-déposer.' },
       { label: 'Pénuries – vue mensuelle', path: '/stock/penurie/mensuel', activeLabel: 'Pénuries – vue mensuelle', accessKey: 'can_activites', description: 'Octobre → mars : arrivages, commandes fermes, commandes non tenables et solde projeté, en ferme ou avec prévisions (N-1 × coef.), par référence ou en quantité pertinente, avec courbes.' },
       { label: 'Calcul de besoin - Appro', path: '/stock/calcul-besoin', activeLabel: 'Calcul de besoin - Appro', accessKey: 'can_stocks', description: 'Propositions de commande fournisseur par article, paramètres d’appro, conso retenue et écrêtage des ventes exceptionnelles.' },
+      { label: 'Portefeuille commandes fournisseurs', path: '/stock/portefeuille-cdf', activeLabel: 'Portefeuille commandes fournisseurs', accessKey: 'can_stocks', description: 'CDF ouvertes : alertes containers (n°, suivi bateau, marge), sans AR, CDF attendues par des CDC à faire confirmer, dates dépassées.' },
       { label: 'Projection stock', path: '/stocks-disponibilites2', accessKey: 'can_stocks', description: 'Stock projeté par référence, hypothèses mensuelles et substitutions.' },
       { label: 'Reconstitution Stock', path: '/stock/reconstruction', accessKey: 'can_activites', description: 'Reconstruction stock projeté et verification des promesses"' },
       { label: 'Vision dispo par groupe d article', path: '/stock/groupes', accessKey: 'can_activites', description: 'Visibilite dispo à venir et livraisons possibles"' },
