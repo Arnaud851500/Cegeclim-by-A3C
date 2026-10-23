@@ -602,8 +602,9 @@ function CdfModal({ ligne, armateurs, parametres, onClose, onSaved, position, on
 
           {/* CDC qui attendent la CDF */}
           <section className="rounded-xl border border-[#E5E1D8] bg-white p-3 lg:col-span-2">
-            <h3 className="mb-1.5 text-[11px] font-bold uppercase tracking-wide text-[#8A8474]">Commandes clients qui attendent cette CDF</h3>
-            {loading ? <p className="text-[12px] text-[#8A8474]">Chargement…</p> : !detail?.cdc?.length ? <p className="text-[12px] text-[#8A8474]">Aucune commande client ne dépend de cette réception.</p> : (
+            <h3 className="mb-1.5 text-[11px] font-bold uppercase tracking-wide text-[#8A8474]">Commandes clients qui ont besoin de cette CDF</h3>
+            <p className="mb-1.5 text-[11px] text-[#8A8474]">Seules les commandes que le stock et les réceptions précédentes ne couvrent pas (réceptions servies dans l’ordre des dates).</p>
+            {loading ? <p className="text-[12px] text-[#8A8474]">Chargement…</p> : !detail?.cdc?.length ? <p className="text-[12px] text-[#8A8474]">Aucune commande client n’a besoin de cette réception : le stock et les réceptions précédentes suffisent.</p> : (
               <div className="max-h-60 overflow-y-auto">
                 <table className="w-full text-[11.5px]">
                   <thead className="sticky top-0 bg-white"><tr className="text-left text-[#8A8474]"><th className="px-1.5 py-1">CDC</th><th className="px-1.5">Client</th><th className="px-1.5">Représentant</th><th className="px-1.5">Référence</th><th className="px-1.5 text-right">Qté</th><th className="px-1.5">Livraison</th><th className="px-1.5">Couverture</th></tr></thead>
