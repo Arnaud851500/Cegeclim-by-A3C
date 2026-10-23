@@ -1,7 +1,46 @@
 'use client'
 
 import { useEffect, useMemo, useState } from 'react'
+import { useRouter } from 'next/navigation'
 import { supabase } from '@/lib/supabaseClient'
+import { ouvrirActualitesMobile } from './MobileFilActu'
+
+// ÉVOLUTION (2026-10-23, demandé par Arnaud) : pastille « ⚠ Alerte dispo » sur les références
+// signalées par une publication du fil d'actu (colonne actualites.refs_alerte, RPC
+// get_alertes_dispo_refs, plateforme mobile) — ex. groupes AirH2O 600 / 800 des tailles 3,5 à 6.
+// Un appui ouvre la publication (lecture de l'écran Équivalences R/O, dispos, solutions de repli).
+type AlerteDispo = { actualite_id: string; titre: string }
+
+async function chargerAlertesDispo(references: string[]): Promise<Record<string, AlerteDispo | null>> {
+  const out: Record<string, AlerteDispo | null> = {}
+  references.forEach((r) => { out[r] = null })
+  if (references.length === 0) return out
+  const { data, error } = await supabase.rpc('get_alertes_dispo_refs', { p_refs: references, p_plateforme: 'mobile' })
+  if (error) return out
+  for (const d of (data || []) as Array<{ reference_article: string; actualite_id: string; titre: string }>) {
+    out[String(d.reference_article)] = { actualite_id: d.actualite_id, titre: d.titre }
+  }
+  return out
+}
+
+function PastilleAlerteDispo({ alerte, onOpen, grande }: { alerte: AlerteDispo; onOpen: () => void; grande?: boolean }) {
+  return (
+    <span
+      role="button"
+      tabIndex={0}
+      title={alerte.titre}
+      onClick={(e) => { e.stopPropagation(); onOpen() }}
+      onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); onOpen() } }}
+      style={{
+        display: 'inline-flex', alignItems: 'center', gap: 4, padding: grande ? '4px 10px' : '2px 8px', borderRadius: 999,
+        background: '#E8A33D', color: '#1A1205', fontSize: grande ? 12 : 10.5, fontWeight: 800, whiteSpace: 'nowrap', cursor: 'pointer',
+        boxShadow: '0 0 0 2px rgba(232,163,61,0.25)',
+      }}
+    >
+      ⚠ Alerte dispo
+    </span>
+  )
+}
 
 // ─────────────────────────────────────────────────────────────────────────
 // Écran "Stock articles" (mobile) :
@@ -288,6 +327,9 @@ export default function MobileStockArticles({
   const [dispoParRef, setDispoParRef] = useState<Record<string, DispoNouvelleCommande>>({})
   // ── Prix catalogue HT (sans remise), par référence ───────────────────
   const [prixParRef, setPrixParRef] = useState<Record<string, number | null>>({})
+  const [alertesParRef, setAlertesParRef] = useState<Record<string, AlerteDispo | null>>({})
+  const router = useRouter()
+  const ouvrirAlerte = (a: AlerteDispo) => ouvrirActualitesMobile({ id: a.actualite_id }, (href) => router.push(href))
 
   // ── Filtres ──────────────────────────────────────────────────────────
   const [famillesRef, setFamillesRef] = useState<FamilleRow[] | null>(null)
@@ -437,6 +479,19 @@ export default function MobileStockArticles({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [refsResultatsKey])
 
+  // Pastilles « Alerte dispo » des références affichées : un seul appel par lot.
+  useEffect(() => {
+    const refs = refsResultatsKey ? refsResultatsKey.split('|') : []
+    const manquantes = refs.filter((r) => !(r in alertesParRef))
+    if (manquantes.length === 0) return
+    let cancelled = false
+    void chargerAlertesDispo(manquantes).then((out) => {
+      if (!cancelled) setAlertesParRef((prev) => ({ ...prev, ...out }))
+    })
+    return () => { cancelled = true }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [refsResultatsKey])
+
   const refsSaisies = useMemo(() => parseReferences(query), [query])
   const isListe = refsSaisies.length > 1
 
@@ -538,6 +593,9 @@ export default function MobileStockArticles({
                   <span style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
                     <span style={{ fontFamily: 'var(--font-mono)', fontSize: 14.5, fontWeight: 700, color: '#fff' }}>{r.reference_article}</span>
                     {d?.blocage_appro && <BadgeBlocage source={d.blocage_source} />}
+                    {alertesParRef[r.reference_article] && (
+                      <PastilleAlerteDispo alerte={alertesParRef[r.reference_article] as AlerteDispo} onOpen={() => ouvrirAlerte(alertesParRef[r.reference_article] as AlerteDispo)} />
+                    )}
                   </span>
                   <span style={{ display: 'flex', alignItems: 'baseline', gap: 6, flexShrink: 0 }}>
                     <PrixCatalogue prix={prixParRef[r.reference_article]} charge={r.reference_article in prixParRef} />
@@ -785,6 +843,15 @@ function StockArticleDetailSheet({
   const [dispoNCLoading, setDispoNCLoading] = useState(true)
   const [dispoNCError, setDispoNCError] = useState<string | null>(null)
 
+  // Pastille « Alerte dispo » de la référence consultée.
+  const [alerteDispo, setAlerteDispo] = useState<AlerteDispo | null>(null)
+  const routerFiche = useRouter()
+  useEffect(() => {
+    let cancelled = false
+    void chargerAlertesDispo([reference]).then((out) => { if (!cancelled) setAlerteDispo(out[reference] ?? null) })
+    return () => { cancelled = true }
+  }, [reference])
+
   // Prix catalogue HT (sans remise) de la référence consultée.
   const [prixCatalogue, setPrixCatalogue] = useState<number | null>(null)
   const [prixCharge, setPrixCharge] = useState(false)
@@ -935,7 +1002,16 @@ function StockArticleDetailSheet({
               <span style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                 <span style={{ fontFamily: 'var(--font-mono)', fontSize: 15, fontWeight: 700, color: '#fff' }}>{reference}</span>
                 {dispoNC?.blocage_appro && <BadgeBlocage source={dispoNC.blocage_source} />}
+                {alerteDispo && (
+                  <PastilleAlerteDispo grande alerte={alerteDispo}
+                    onOpen={() => { onClose(); ouvrirActualitesMobile({ id: alerteDispo.actualite_id }, (href) => routerFiche.push(href)) }} />
+                )}
               </span>
+              {alerteDispo && (
+                <div style={{ fontSize: 11.5, color: '#E8A33D', marginTop: 4, lineHeight: 1.35 }}>
+                  {alerteDispo.titre} — appuyer sur la pastille pour lire.
+                </div>
+              )}
               <div style={{ fontSize: 12.5, color: 'rgba(255,255,255,0.55)', marginTop: 2 }}>{designationResolue || '—'}</div>
               <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginTop: 6 }}>
                 <span style={{ fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.05em', color: 'rgba(255,255,255,0.4)' }}>Prix catalogue</span>

@@ -549,6 +549,9 @@ function Editeur() {
   const [bandeauJusquau, setBandeauJusquau] = useState(todayPlus(7))
   const [epingle, setEpingle] = useState(false)
   const [plateformes, setPlateformes] = useState<Plateforme[]>([...PLATEFORMES_DEFAUT])
+  // 23/10/2026 : références signalées par une pastille « ⚠ Alerte dispo » dans l'écran Stock
+  // (PC et Compagnon), qui ouvre cette publication tant qu'elle est publiée (colonne refs_alerte).
+  const [refsAlerte, setRefsAlerte] = useState('')
   const [cibleAgences, setCibleAgences] = useState<string[]>([])
   const [cibleEquipes, setCibleEquipes] = useState<string[]>([])
   const [modeCible, setModeCible] = useState<'tous' | 'equipes' | 'agences'>('tous')
@@ -581,6 +584,7 @@ function Editeur() {
           setBandeauJusquau(row.bandeau_jusquau || '')
           setEpingle(row.epingle)
           setPlateformes(row.plateformes)
+          setRefsAlerte(((row as { refs_alerte?: string[] }).refs_alerte || []).join(' '))
           setCibleAgences(row.cible_agences)
           setCibleEquipes(row.cible_equipes)
           setModeCible(row.cible_equipes.length > 0 ? 'equipes' : row.cible_agences.length > 0 ? 'agences' : 'tous')
@@ -735,6 +739,7 @@ function Editeur() {
       cible_agences: modeCible === 'agences' ? cibleAgences : [],
       cible_equipes: modeCible === 'equipes' ? cibleEquipes : [],
       plateformes,
+      refs_alerte: Array.from(new Set(refsAlerte.split(/[\s,;]+/).map((r) => r.trim().toUpperCase()).filter(Boolean))),
     }
 
     setSaving(true)
@@ -937,6 +942,21 @@ function Editeur() {
               </label>
             ))}
             <span style={styles.hint}>Au moins une case. Une nouveauté qui ne concerne que le PC (ou le téléphone) n’encombre pas l’autre.</span>
+          </div>
+
+          <div style={styles.panel}>
+            <h2 style={styles.panelTitle}>Pastille « ⚠ Alerte dispo »</h2>
+            <label style={styles.field}>
+              Références signalées dans l’écran Stock
+              <textarea
+                value={refsAlerte}
+                onChange={(e) => setRefsAlerte(e.target.value)}
+                rows={3}
+                placeholder="RAS-4WHVRP2E RASM-4VTW2E …"
+                style={{ ...styles.input, fontFamily: 'var(--font-mono, monospace)', resize: 'vertical' }}
+              />
+            </label>
+            <span style={styles.hint}>Séparées par des espaces, virgules ou retours à la ligne. Une fois publiée, ces références portent une pastille qui ouvre cette publication (Stock PC et Compagnon).</span>
           </div>
 
           <div style={styles.panel}>
