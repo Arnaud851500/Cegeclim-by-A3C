@@ -32,6 +32,13 @@
  *  - favori « Envoyer au compagnon » (PC) : un clic sur la page de l'armateur ouvre cette page avec
  *    #suivi=<texte de la page> ; la CDF est retrouvée par son n° de container et sa fiche s'ouvre pré-remplie.
  *
+ * 23/10/2026 (suite 2) — traitement container par container sans attendre :
+ *  - après un relevé ou une action, la ligne est mise à jour tout de suite dans la liste et le
+ *    portefeuille se recalcule en arrière-plan (plus d'écran « Chargement… ») ;
+ *  - « Enregistrer et suivant → » ; ← / → suivent la liste telle qu'elle était à l'ouverture de la fiche ;
+ *  - favori : si le compagnon est déjà ouvert, l'onglet ouvert par le favori transmet la page au
+ *    compagnon (BroadcastChannel) puis se ferme — la fiche s'ouvre dans l'onglet existant, sans rechargement.
+ *
  * Sources : RPC get_appro_portefeuille_cdf / get_appro_cdf_detail ; tables appro_container_releves,
  * appro_cdf_actions, appro_armateurs, appro_cdf_statuts ; sage.cdf_statut et sage.bdcf_commentaires
  * (export TSE à compléter, voir supabase/sql/20261023_export_sage_cdf_complements.sql).
@@ -254,7 +261,7 @@ function LienFavori() {
 
 function CdfModal({ ligne, armateurs, parametres, onClose, onSaved, position, onPrev, onNext, prefill }: {
   ligne: Ligne; armateurs: Armateur[]; parametres: Parametres | null
-  onClose: () => void; onSaved: () => void; position: string | null; onPrev?: () => void; onNext?: () => void
+  onClose: () => void; onSaved: (patch: Partial<Ligne>) => void; position: string | null; onPrev?: () => void; onNext?: () => void
   prefill?: SuiviLu | null
 }) {
   const [detail, setDetail] = useState<Detail | null>(null)
@@ -332,11 +339,12 @@ function CdfModal({ ligne, armateurs, parametres, onClose, onSaved, position, on
   const verdictPrevu: Verdict | null = marge === null || !parametres ? null
     : marge < 0 ? 'RETARD' : marge <= parametres.marge_intenable ? 'INTENABLE' : marge <= parametres.marge_tres_juste ? 'TRES_JUSTE' : marge <= parametres.marge_juste ? 'JUSTE' : 'OK'
 
-  async function enregistrerReleve() {
+  async function enregistrerReleve(suivant = false) {
     setSaving(true); setErreur(null); setOk(null)
+    const cont = f.container.trim() ? f.container.toUpperCase().replace(/[\s\-./]/g, '') : null
     const { error } = await supabase.from('appro_container_releves').insert({
       cdf_numero: ligne.numero,
-      container_numero: f.container.trim() ? f.container.toUpperCase().replace(/[\s\-./]/g, '') : null,
+      container_numero: cont,
       armateur: f.armateur || null,
       navire: f.navire.trim() || null,
       port_arrivee: f.port_arrivee.trim() || null,
@@ -346,8 +354,25 @@ function CdfModal({ ligne, armateurs, parametres, onClose, onSaved, position, on
     })
     setSaving(false)
     if (error) { setErreur(messageErreur(error)); return }
+    // Mise à jour immédiate de la ligne dans la liste (le portefeuille se recalcule en arrière-plan)
+    const containerRetenu = ligne.container_source === 'sage' ? ligne.container : cont
+    const alertes = ligne.alertes.filter((a) => !['CONT_SANS_SUIVI', 'CONT_SUIVI_ANCIEN', 'CONT_MARGE'].includes(a)
+      && !(a === 'CONT_SANS_CONTAINER' && containerRetenu && containerValide(containerRetenu))
+      && !(a === 'CONT_CONTAINER_INVALIDE' && containerRetenu && containerValide(containerRetenu)))
+    if (verdictPrevu && ['RETARD', 'INTENABLE', 'TRES_JUSTE'].includes(verdictPrevu)) alertes.push('CONT_MARGE')
+    onSaved({
+      container: containerRetenu,
+      container_source: ligne.container_source || (cont ? 'saisie' : null),
+      container_valide: containerRetenu ? containerValide(containerRetenu) : null,
+      container_saisi: cont,
+      armateur: f.armateur || null, navire: f.navire.trim() || null, port_arrivee: f.port_arrivee.trim() || null,
+      eta_port: f.eta_port || null, statut_suivi: f.statut || null, commentaire_suivi: f.commentaire.trim() || null,
+      releve_le: new Date().toISOString(), releve_par: 'vous', nb_releves: ligne.nb_releves + 1,
+      marge_jours: marge, verdict: verdictPrevu, alertes,
+    })
+    if (suivant && onNext) { onNext(); return }
     setOk('Suivi enregistré.'); setF((x) => ({ ...x, commentaire: '' }))
-    void charger(); onSaved()
+    void charger()
   }
 
   async function enregistrerAction(action: 'relance' | 'confirme' | 'commentaire') {
@@ -363,8 +388,16 @@ function CdfModal({ ligne, armateurs, parametres, onClose, onSaved, position, on
     setSaving(false)
     if (error) { setErreur(messageErreur(error)); return }
     setOk(action === 'confirme' ? 'Alerte confirmée : masquée tant que la date de livraison ne change pas.' : action === 'relance' ? 'Relance tracée.' : 'Commentaire ajouté.')
+    const confirmee = action === 'confirme' && actionAlerte ? actionAlerte : null
+    onSaved({
+      derniere_action: { action, alerte_code: actionAlerte || null, commentaire: actionCommentaire.trim() || null, le: new Date().toISOString(), par: 'vous' },
+      ...(confirmee ? {
+        alertes: ligne.alertes.filter((a) => a !== confirmee),
+        alertes_confirmees: Array.from(new Set([...ligne.alertes_confirmees, confirmee])),
+      } : {}),
+    })
     setActionCommentaire('')
-    void charger(); onSaved()
+    void charger()
   }
 
   const ctl = 'h-8 w-full min-w-0 rounded-md border border-[#E5E1D8] bg-white px-2 text-[12px] font-semibold text-[#3A362E] outline-none focus:border-[#B4761A]'
@@ -500,11 +533,18 @@ function CdfModal({ ligne, armateurs, parametres, onClose, onSaved, position, on
                 <label className="col-span-2 space-y-0.5"><span className="font-bold text-[#5E5A44]">Commentaire</span>
                   <input className={ctl} value={f.commentaire} onChange={(e) => setF({ ...f, commentaire: e.target.value })} placeholder="ex. transbordement à Port Klang" /></label>
               </div>
-              <div className="mt-2 flex justify-end">
+              <div className="mt-2 flex justify-end gap-1.5">
                 <button type="button" onClick={() => void enregistrerReleve()} disabled={saving || !containerSaisiOk}
                   className="h-9 rounded-lg bg-[#111820] px-4 text-[12.5px] font-bold text-white disabled:opacity-40">
                   {saving ? '…' : 'Mettre à jour le suivi'}
                 </button>
+                {onNext && (
+                  <button type="button" onClick={() => void enregistrerReleve(true)} disabled={saving || !containerSaisiOk}
+                    title="Enregistre le relevé et ouvre la CDF suivante de la liste"
+                    className="h-9 rounded-lg bg-[#1D5C86] px-4 text-[12.5px] font-bold text-white disabled:opacity-40">
+                    {saving ? '…' : 'Enregistrer et suivant →'}
+                  </button>
+                )}
               </div>
               {(detail?.releves?.length || 0) > 0 && (
                 <div className="mt-2 max-h-40 overflow-y-auto border-t border-[#E5E1D8] pt-2">
@@ -627,24 +667,61 @@ function PortefeuilleCdf() {
   const [prefill, setPrefill] = useState<{ cdf: string; lu: SuiviLu } | null>(null)
   const [suiviRecu, setSuiviRecu] = useState<SuiviLu | null>(null)
   const [infoSuivi, setInfoSuivi] = useState<string | null>(null)
+  const [majFond, setMajFond] = useState(false)
+  const [relaye, setRelaye] = useState(false)
+  const [ordreNav, setOrdreNav] = useState<string[] | null>(null)
+  const idEnvoiRef = React.useRef<string | null>(null)
 
-  const charger = useCallback(async () => {
-    setLoading(true); setErreur(null)
+  /** silencieux = recalcul en arrière-plan : la liste reste affichée et utilisable. */
+  const charger = useCallback(async (silencieux = false) => {
+    if (silencieux) setMajFond(true); else { setLoading(true); setErreur(null) }
     const { data, error } = await supabase.rpc('get_appro_portefeuille_cdf')
-    if (error) { setErreur(messageErreur(error)); setRep(null) } else setRep(data as Reponse)
-    setLoading(false)
+    if (error) { setErreur(messageErreur(error)); if (!silencieux) setRep(null) } else setRep(data as Reponse)
+    if (silencieux) setMajFond(false); else setLoading(false)
   }, [])
-  useEffect(() => { void charger() }, [charger])
 
-  // Favori « Envoyer au compagnon » : texte de la page de suivi reçu dans #suivi=…
+  /** Mise à jour immédiate d'une ligne (après un relevé ou une action), avant le recalcul en arrière-plan. */
+  const majLigne = useCallback((numero: string, patch: Partial<Ligne>) => {
+    setRep((prev) => (prev ? { ...prev, rows: prev.rows.map((r) => (r.numero === numero ? { ...r, ...patch } : r)) } : prev))
+    void charger(true)
+  }, [charger])
+
+  // Premier chargement. Favori « Envoyer au compagnon » (#suivi=…) : si le compagnon est déjà
+  // ouvert dans un autre onglet, on lui transmet la page et cet onglet se ferme (pas de rechargement).
   useEffect(() => {
     const h = window.location.hash
-    if (!h.startsWith('#suivi=')) return
+    if (!h.startsWith('#suivi=')) { void charger(); return }
     let texte = ''
     try { texte = decodeURIComponent(h.slice(7)) } catch { texte = '' }
     window.history.replaceState(null, '', window.location.pathname + window.location.search)
-    const r = lireSuiviContainer(texte)
-    setSuiviRecu(r)
+    let canal: BroadcastChannel | null = null
+    try { canal = new BroadcastChannel('cegeclim-portefeuille-cdf') } catch { canal = null }
+    if (!canal) { setSuiviRecu(lireSuiviContainer(texte)); void charger(); return }
+    const id = Math.random().toString(36).slice(2)
+    idEnvoiRef.current = id
+    let recu = false
+    canal.onmessage = (e: MessageEvent) => { if (e.data?.type === 'ack' && e.data.id === id) recu = true }
+    canal.postMessage({ type: 'suivi', id, texte })
+    const timer = window.setTimeout(() => {
+      canal?.close()
+      if (recu) { setRelaye(true); window.close(); return }
+      setSuiviRecu(lireSuiviContainer(texte)); void charger()
+    }, 700)
+    return () => { window.clearTimeout(timer) }
+  }, [charger])
+
+  // Onglet compagnon déjà ouvert : reçoit la page envoyée par le favori depuis un autre onglet
+  useEffect(() => {
+    let canal: BroadcastChannel | null = null
+    try { canal = new BroadcastChannel('cegeclim-portefeuille-cdf') } catch { return }
+    canal.onmessage = (e: MessageEvent) => {
+      const d = e.data
+      if (d?.type !== 'suivi' || typeof d.texte !== 'string' || d.id === idEnvoiRef.current) return
+      canal?.postMessage({ type: 'ack', id: d.id })
+      setSuiviRecu(lireSuiviContainer(d.texte))
+      try { window.focus() } catch { /* focus refusé par le navigateur */ }
+    }
+    return () => { canal?.close() }
   }, [])
 
   // Quand le portefeuille est chargé : on retrouve la CDF du container reçu et on ouvre sa fiche pré-remplie
@@ -726,7 +803,11 @@ function PortefeuilleCdf() {
     montant: base.reduce((s, r) => s + Number(r.montant_ht || 0), 0),
   }), [base])
 
-  const indexOuvert = cdfOuverte ? filtres.findIndex((r) => r.numero === cdfOuverte) : -1
+  // ← / → suivent la liste telle qu'elle était à l'ouverture de la fiche (une CDF traitée qui perd
+  // son alerte ne décale pas la navigation)
+  const listeNav = ordreNav || filtres.map((r) => r.numero)
+  const indexOuvert = cdfOuverte ? listeNav.indexOf(cdfOuverte) : -1
+  function ouvrirCdf(numero: string) { setOrdreNav(filtres.map((r) => r.numero)); setUrl({ cdf: numero }) }
   const ligneOuverte = cdfOuverte ? rows.find((r) => r.numero === cdfOuverte) || null : null
 
   function trier(k: CleTri) { setTri((t) => (t.k === k ? { k, dir: (t.dir === 1 ? -1 : 1) as 1 | -1 } : { k, dir: 1 })) }
@@ -772,6 +853,17 @@ function PortefeuilleCdf() {
   const p = rep?.parametres
   const toggleAlerte = (a: CodeAlerte) => setAlerteF((v) => (v === a ? '' : a))
 
+  if (relaye) {
+    return (
+      <main className="flex min-h-screen items-center justify-center bg-[#F4F3F0] p-6 text-center text-[#111820]">
+        <div className="rounded-xl border border-[#E5E1D8] bg-white px-6 py-5">
+          <div className="text-[18px] font-bold text-emerald-700">✓ Envoyé au compagnon</div>
+          <p className="mt-1 text-[13px] text-[#5E5A44]">La fiche de la CDF s’est ouverte dans l’onglet du compagnon. Vous pouvez fermer cet onglet.</p>
+        </div>
+      </main>
+    )
+  }
+
   return (
     <main className="min-h-screen bg-[#F4F3F0] px-4 py-3 text-[#111820]" style={{ fontFeatureSettings: '"tnum"' }}>
       <div className="mx-auto max-w-[1900px] space-y-2.5">
@@ -782,6 +874,7 @@ function PortefeuilleCdf() {
             <p className="text-[11.5px] text-[#8A8474]">
               CDF SAGE ouvertes · relances, AR, suivi des containers et nettoyage
               {rep?.import_sage_le && <> · données SAGE du {fmtDateHeure(rep.import_sage_le)}</>}
+              {majFond && <span className="ml-1 text-[#1D5C86]"> · mise à jour en arrière-plan…</span>}
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
@@ -794,7 +887,7 @@ function PortefeuilleCdf() {
             <button type="button" onClick={() => void exporterExcel()} disabled={exportEnCours || loading || filtres.length === 0} className="h-10 rounded-lg bg-[#111820] px-3 text-[13px] font-bold text-white disabled:opacity-50">
               {exportEnCours ? 'Export…' : `⬇ Excel (${fmtNum(filtres.length)})`}
             </button>
-            <button type="button" onClick={() => void charger()} disabled={loading} title="Recharger" className="h-10 rounded-lg border border-[#E5E1D8] bg-white px-3 text-[14px] font-bold disabled:opacity-50">{loading ? '…' : '↻'}</button>
+            <button type="button" onClick={() => void charger()} disabled={loading} title="Recharger" className="h-10 rounded-lg border border-[#E5E1D8] bg-white px-3 text-[14px] font-bold disabled:opacity-50">{loading || majFond ? '…' : '↻'}</button>
           </div>
         </section>
 
@@ -817,14 +910,14 @@ function PortefeuilleCdf() {
         )}
 
         <section className="grid gap-2" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))' }}>
-          <Kpi label="CDF ouvertes" value={loading ? '…' : fmtNum(kpis.total)} sub={`${fmtNum(kpis.cont)} containers · ${fmtNum(kpis.montant / 1000)} k€ HT`} onClick={() => { setAlerteF(''); setSeulementAlertes(false) }} actif={!alerteF && !seulementAlertes} title="Toutes les CDF du périmètre" />
-          <Kpi label="Avec alerte" value={loading ? '…' : fmtNum(kpis.avecAlerte)} sub="à traiter" tone="alerte" onClick={() => { setAlerteF(''); setSeulementAlertes(true) }} actif={!alerteF && seulementAlertes} />
-          <Kpi label="Container sans n°" value={loading ? '…' : fmtNum(compte.CONT_SANS_CONTAINER)} sub={p ? `livraison ≤ ${p.cont_alerte_jours_avant} j` : ''} tone="alerte" onClick={() => toggleAlerte('CONT_SANS_CONTAINER')} actif={alerteF === 'CONT_SANS_CONTAINER'} title={ALERTE.CONT_SANS_CONTAINER.title} />
-          <Kpi label="Suivi bateau" value={loading ? '…' : fmtNum(compte.CONT_SANS_SUIVI + compte.CONT_SUIVI_ANCIEN)} sub={`${fmtNum(compte.CONT_SANS_SUIVI)} à faire · ${fmtNum(compte.CONT_SUIVI_ANCIEN)} à rafraîchir`} tone="warn" onClick={() => toggleAlerte(compte.CONT_SANS_SUIVI ? 'CONT_SANS_SUIVI' : 'CONT_SUIVI_ANCIEN')} actif={alerteF === 'CONT_SANS_SUIVI' || alerteF === 'CONT_SUIVI_ANCIEN'} />
-          <Kpi label="Marge critique" value={loading ? '…' : fmtNum(compte.CONT_MARGE)} sub="ETA port vs date CDF" tone="alerte" onClick={() => toggleAlerte('CONT_MARGE')} actif={alerteF === 'CONT_MARGE'} title={ALERTE.CONT_MARGE.title} />
-          <Kpi label="Sans AR" value={loading ? '…' : rep?.sources.statut_ar ? fmtNum(compte.SANS_AR) : 'n/d'} sub={p ? `FMS, créées depuis ≥ ${p.sans_ar_jours} j` : ''} tone="alerte" onClick={() => toggleAlerte('SANS_AR')} actif={alerteF === 'SANS_AR'} title={ALERTE.SANS_AR.title} />
-          <Kpi label="CDC attendent" value={loading ? '…' : fmtNum(compte.CDC_A_CONFIRMER)} sub={p ? `dues sous ${p.relance_cdc_horizon_jours} j : confirmer` : ''} tone="info" onClick={() => toggleAlerte('CDC_A_CONFIRMER')} actif={alerteF === 'CDC_A_CONFIRMER'} title={ALERTE.CDC_A_CONFIRMER.title} />
-          <Kpi label="Date dépassée" value={loading ? '…' : fmtNum(compte.DATE_DEPASSEE)} sub={`${fmtNum(compte.SANS_DATE)} sans date`} tone="violet" onClick={() => toggleAlerte('DATE_DEPASSEE')} actif={alerteF === 'DATE_DEPASSEE'} title={ALERTE.DATE_DEPASSEE.title} />
+          <Kpi label="CDF ouvertes" value={loading && !rep ? '…' : fmtNum(kpis.total)} sub={`${fmtNum(kpis.cont)} containers · ${fmtNum(kpis.montant / 1000)} k€ HT`} onClick={() => { setAlerteF(''); setSeulementAlertes(false) }} actif={!alerteF && !seulementAlertes} title="Toutes les CDF du périmètre" />
+          <Kpi label="Avec alerte" value={loading && !rep ? '…' : fmtNum(kpis.avecAlerte)} sub="à traiter" tone="alerte" onClick={() => { setAlerteF(''); setSeulementAlertes(true) }} actif={!alerteF && seulementAlertes} />
+          <Kpi label="Container sans n°" value={loading && !rep ? '…' : fmtNum(compte.CONT_SANS_CONTAINER)} sub={p ? `livraison ≤ ${p.cont_alerte_jours_avant} j` : ''} tone="alerte" onClick={() => toggleAlerte('CONT_SANS_CONTAINER')} actif={alerteF === 'CONT_SANS_CONTAINER'} title={ALERTE.CONT_SANS_CONTAINER.title} />
+          <Kpi label="Suivi bateau" value={loading && !rep ? '…' : fmtNum(compte.CONT_SANS_SUIVI + compte.CONT_SUIVI_ANCIEN)} sub={`${fmtNum(compte.CONT_SANS_SUIVI)} à faire · ${fmtNum(compte.CONT_SUIVI_ANCIEN)} à rafraîchir`} tone="warn" onClick={() => toggleAlerte(compte.CONT_SANS_SUIVI ? 'CONT_SANS_SUIVI' : 'CONT_SUIVI_ANCIEN')} actif={alerteF === 'CONT_SANS_SUIVI' || alerteF === 'CONT_SUIVI_ANCIEN'} />
+          <Kpi label="Marge critique" value={loading && !rep ? '…' : fmtNum(compte.CONT_MARGE)} sub="ETA port vs date CDF" tone="alerte" onClick={() => toggleAlerte('CONT_MARGE')} actif={alerteF === 'CONT_MARGE'} title={ALERTE.CONT_MARGE.title} />
+          <Kpi label="Sans AR" value={loading && !rep ? '…' : rep?.sources.statut_ar ? fmtNum(compte.SANS_AR) : 'n/d'} sub={p ? `FMS, créées depuis ≥ ${p.sans_ar_jours} j` : ''} tone="alerte" onClick={() => toggleAlerte('SANS_AR')} actif={alerteF === 'SANS_AR'} title={ALERTE.SANS_AR.title} />
+          <Kpi label="CDC attendent" value={loading && !rep ? '…' : fmtNum(compte.CDC_A_CONFIRMER)} sub={p ? `dues sous ${p.relance_cdc_horizon_jours} j : confirmer` : ''} tone="info" onClick={() => toggleAlerte('CDC_A_CONFIRMER')} actif={alerteF === 'CDC_A_CONFIRMER'} title={ALERTE.CDC_A_CONFIRMER.title} />
+          <Kpi label="Date dépassée" value={loading && !rep ? '…' : fmtNum(compte.DATE_DEPASSEE)} sub={`${fmtNum(compte.SANS_DATE)} sans date`} tone="violet" onClick={() => toggleAlerte('DATE_DEPASSEE')} actif={alerteF === 'DATE_DEPASSEE'} title={ALERTE.DATE_DEPASSEE.title} />
         </section>
 
         <section className="flex flex-wrap items-center gap-2 rounded-xl border border-[#E5E1D8] bg-white px-3 py-2">
@@ -854,10 +947,10 @@ function PortefeuilleCdf() {
               </tr>
             </thead>
             <tbody>
-              {loading && <tr><td colSpan={13} className="px-3 py-6 text-center text-[#8A8474]">Chargement du portefeuille…</td></tr>}
-              {!loading && filtres.length === 0 && <tr><td colSpan={13} className="px-3 py-6 text-center font-semibold text-emerald-700">Aucune CDF à traiter avec ces filtres.</td></tr>}
-              {!loading && filtres.map((r) => (
-                <tr key={r.numero} onClick={() => setUrl({ cdf: r.numero })} className="cursor-pointer border-b border-[#F0EDE6] hover:bg-[#FAF8F3]">
+              {loading && !rep && <tr><td colSpan={13} className="px-3 py-6 text-center text-[#8A8474]">Chargement du portefeuille…</td></tr>}
+              {!(loading && !rep) && filtres.length === 0 && <tr><td colSpan={13} className="px-3 py-6 text-center font-semibold text-emerald-700">Aucune CDF à traiter avec ces filtres.</td></tr>}
+              {!(loading && !rep) && filtres.map((r) => (
+                <tr key={r.numero} onClick={() => ouvrirCdf(r.numero)} className="cursor-pointer border-b border-[#F0EDE6] hover:bg-[#FAF8F3]">
                   <td className="whitespace-nowrap px-2 py-1 font-semibold">{r.numero}{r.est_cont && <span className="ml-1 text-[10px]" title="Commande container">🚢</span>}</td>
                   <td className="max-w-[180px] truncate px-2 py-1" title={`${r.fournisseur_code} ${r.fournisseur_nom || ''}`}>{r.fournisseur_nom || r.fournisseur_code}</td>
                   <td className="max-w-[170px] truncate px-2 py-1" title={r.reference || ''}>{r.reference || '—'}<span className="ml-1 text-[10.5px] text-[#8A8474]">{r.depot || ''}</span></td>
@@ -889,11 +982,12 @@ function PortefeuilleCdf() {
 
       {ligneOuverte && (
         <CdfModal key={`${ligneOuverte.numero}${prefill && prefill.cdf === ligneOuverte.numero ? '-suivi' : ''}`} ligne={ligneOuverte} armateurs={armateurs} parametres={rep?.parametres || null}
-          position={indexOuvert >= 0 ? `${indexOuvert + 1} / ${filtres.length}` : null}
-          onPrev={indexOuvert > 0 ? () => setUrl({ cdf: filtres[indexOuvert - 1].numero }) : undefined}
-          onNext={indexOuvert >= 0 && indexOuvert < filtres.length - 1 ? () => setUrl({ cdf: filtres[indexOuvert + 1].numero }) : undefined}
+          position={indexOuvert >= 0 ? `${indexOuvert + 1} / ${listeNav.length}` : null}
+          onPrev={indexOuvert > 0 ? () => setUrl({ cdf: listeNav[indexOuvert - 1] }) : undefined}
+          onNext={indexOuvert >= 0 && indexOuvert < listeNav.length - 1 ? () => setUrl({ cdf: listeNav[indexOuvert + 1] }) : undefined}
           prefill={prefill && prefill.cdf === ligneOuverte.numero ? prefill.lu : null}
-          onClose={() => { setPrefill(null); setUrl({ cdf: null }) }} onSaved={() => void charger()} />
+          onClose={() => { setPrefill(null); setOrdreNav(null); setUrl({ cdf: null }) }}
+          onSaved={(patch) => majLigne(ligneOuverte.numero, patch)} />
       )}
     </main>
   )
