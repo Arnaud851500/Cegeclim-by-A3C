@@ -20,6 +20,11 @@
  * Code couleur : A attribuer < 0 rouge, = 0 orange, > 0 vert ; Attribué > A attribuer rouge
  * (sur-allocation), = vert, < orange ; cases d'allocation jaunes.
  *
+ * 24/10/2026 (suite) : filtre Split / Monobloc, ordre des lignes taille → mono puis tri → split puis monobloc,
+ * et onglets de détail (comme le fichier Excel) : CDC à livrer (année + année suivante), BL du mois précédent et
+ * du mois, CDC créées depuis 7 jours (livrées, en préparation ou à livrer, avec les CDC plus anciennes passées
+ * derrière), Julien Ithurbide, Arrivages par mois — chacun filtrable par agence / recherche et exportable.
+ *
  * Sources : RPC get_allocation_ro / set_allocation_ro (supabase/sql/20261024_allocation_airh2o.sql).
  */
 
@@ -205,6 +210,79 @@ function DetailModal({ detail, lignes, onClose }: { detail: Detail; lignes: Lign
 }
 
 // ─────────────────────────────────────────────────────────────────────────
+// Listes de détail (onglets)
+// ─────────────────────────────────────────────────────────────────────────
+
+type Onglet = 'tableau' | 'cdc' | 'bl' | 'recentes' | 'julien' | 'arrivages'
+type Col<T> = { h: string; v: (x: T) => string | number | null; cls?: (x: T) => string; right?: boolean; date?: boolean; w?: number }
+
+const STATUT_NATURE: Record<Nature, string> = {
+  CDC: 'À livrer', CDC_ANNEE_SUIVANTE: 'À livrer (année suivante)', PL: 'En préparation (PL)', BL_M: 'Livrée (BL)', BL_M1: 'Livrée (BL)',
+}
+
+async function exporterListe<T>(nom: string, cols: Col<T>[], rows: T[]) {
+  const wb = new ExcelJS.Workbook()
+  const ws = wb.addWorksheet(nom.slice(0, 30))
+  ws.addRow(cols.map((c) => c.h)).font = { bold: true }
+  rows.forEach((r) => ws.addRow(cols.map((c) => {
+    const v = c.v(r)
+    if (c.date && typeof v === 'string' && v) return new Date(`${v.slice(0, 10)}T12:00:00`)
+    return v === null || v === undefined ? '' : v
+  })))
+  cols.forEach((c, i) => {
+    ws.getColumn(i + 1).width = c.w || 13
+    if (c.date) ws.getColumn(i + 1).numFmt = 'dd/mm/yyyy'
+  })
+  ws.views = [{ state: 'frozen', ySplit: 1 }]
+  ws.autoFilter = { from: { row: 1, column: 1 }, to: { row: 1, column: cols.length } }
+  const buffer = await wb.xlsx.writeBuffer()
+  const url = URL.createObjectURL(new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }))
+  const a = document.createElement('a'); a.href = url; a.download = `${nom.replace(/[^\w-]+/g, '_')}_${new Date().toISOString().slice(0, 10)}.xlsx`; a.click(); URL.revokeObjectURL(url)
+}
+
+function ListeDetail<T>({ titre, sousTitre, cols, rows, cle, rowCls, totalQte }: {
+  titre: string; sousTitre?: string; cols: Col<T>[]; rows: T[]; cle: (x: T, i: number) => string
+  rowCls?: (x: T) => string; totalQte?: number
+}) {
+  return (
+    <section className="rounded-xl border border-[#E5E1D8] bg-white">
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#E5E1D8] px-4 py-2">
+        <div>
+          <h2 className="text-[15px] font-bold">{titre}</h2>
+          <p className="text-[11.5px] text-[#8A8474]">{fmtNum(rows.length)} ligne(s){totalQte !== undefined ? ` · ${fmtNum(totalQte)} groupe(s)` : ''}{sousTitre ? ` · ${sousTitre}` : ''}</p>
+        </div>
+        <button type="button" onClick={() => void exporterListe(titre, cols, rows)} disabled={rows.length === 0}
+          className="h-9 rounded-lg bg-[#111820] px-3 text-[12.5px] font-bold text-white disabled:opacity-40">⬇ Excel ({fmtNum(rows.length)})</button>
+      </div>
+      <div className="overflow-auto" style={{ maxHeight: 'calc(100vh - 300px)' }}>
+        <table className="w-full text-[12px]">
+          <thead className="sticky top-0 z-10 bg-white">
+            <tr className="border-b border-[#E5E1D8] text-left text-[10.5px] font-bold uppercase tracking-wide text-[#8A8474]">
+              {cols.map((c) => <th key={c.h} className={`whitespace-nowrap px-2 py-1.5 ${c.right ? 'text-right' : ''}`}>{c.h}</th>)}
+            </tr>
+          </thead>
+          <tbody>
+            {rows.length === 0 && <tr><td colSpan={cols.length} className="px-3 py-6 text-center text-[#8A8474]">Aucune ligne avec ces filtres.</td></tr>}
+            {rows.map((r, i) => (
+              <tr key={cle(r, i)} className={`border-b border-[#F0EDE6] ${rowCls ? rowCls(r) : ''}`}>
+                {cols.map((c) => {
+                  const v = c.v(r)
+                  return (
+                    <td key={c.h} className={`whitespace-nowrap px-2 py-1 ${c.right ? 'text-right' : ''} ${c.cls ? c.cls(r) : ''}`}>
+                      {c.date ? fmtDate(v as string | null) : typeof v === 'number' ? fmtNum(v) : (v ?? '—')}
+                    </td>
+                  )
+                })}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────────
 // Page
 // ─────────────────────────────────────────────────────────────────────────
 
@@ -217,6 +295,10 @@ function AllocationAirH2O() {
   const [compact, setCompact] = useState(false)
   const [masquerVides, setMasquerVides] = useState(false)
   const [detail, setDetail] = useState<Detail | null>(null)
+  const [typeF, setTypeF] = useState<'' | '600' | '800'>('')
+  const [onglet, setOnglet] = useState<Onglet>('tableau')
+  const [agenceF, setAgenceF] = useState('')
+  const [search, setSearch] = useState('')
   const [exportEnCours, setExportEnCours] = useState(false)
 
   const charger = useCallback(async () => {
@@ -244,18 +326,24 @@ function AllocationAirH2O() {
   }, [d, valeurs])
   const alloc = useCallback((ref: string, bloc: string) => n0(allocs.get(`${ref}|${bloc}`)?.quantite), [allocs])
 
+  // Ordre : taille, puis monophasé avant triphasé, puis Split (600) avant Monobloc (800) ; filtre de type
+  const refsVis = useMemo(() => [...(d?.refs || [])]
+    .filter((r) => !typeF || r.gamme === typeF)
+    .sort((a, b) => a.taille - b.taille || (/230|mono/i.test(a.alim) ? 0 : 1) - (/230|mono/i.test(b.alim) ? 0 : 1) || a.gamme.localeCompare(b.gamme)), [d, typeF])
+  const refsSet = useMemo(() => new Set(refsVis.map((r) => r.ref)), [refsVis])
+
   const blocs = useMemo(() => {
     if (!d) return [] as string[]
     if (!masquerVides) return d.blocs
-    return d.blocs.filter((b) => b === 'ANGLET' || b === 'JITHURBIDE' || d.refs.some((r) => (['bl_m1', 'bl_m', 'pl', 'cdc'] as Metrique[]).some((k) => val(r.ref, b, k) !== 0) || alloc(r.ref, b) !== 0))
-  }, [d, masquerVides, val, alloc])
+    return d.blocs.filter((b) => b === 'ANGLET' || b === 'JITHURBIDE' || refsVis.some((r) => (['bl_m1', 'bl_m', 'pl', 'cdc'] as Metrique[]).some((k) => val(r.ref, b, k) !== 0) || alloc(r.ref, b) !== 0))
+  }, [d, masquerVides, val, alloc, refsVis])
 
-  const lignes = useMemo(() => (d?.refs || []).map((r) => {
+  const lignes = useMemo(() => refsVis.map((r) => {
     const cdc = val(r.ref, TOTAL, 'cdc')
     const aAtt = n0(r.dispo) - cdc + n0(r.arrivage_annee)
     const attr = (d?.blocs || []).reduce((s, b) => s + alloc(r.ref, b), 0)
     return { r, cdc, aAtt, attr }
-  }), [d, val, alloc])
+  }), [refsVis, d, val, alloc])
 
   const tot = useMemo(() => ({
     dispo: lignes.reduce((s, l) => s + n0(l.r.dispo), 0),
@@ -263,8 +351,8 @@ function AllocationAirH2O() {
     aAtt: lignes.reduce((s, l) => s + l.aAtt, 0),
     attr: lignes.reduce((s, l) => s + l.attr, 0),
   }), [lignes])
-  const totBloc = useCallback((bloc: string, k: Metrique) => (d?.refs || []).reduce((s, r) => s + val(r.ref, bloc, k), 0), [d, val])
-  const totAlloc = useCallback((bloc: string) => (d?.refs || []).reduce((s, r) => s + alloc(r.ref, bloc), 0), [d, alloc])
+  const totBloc = useCallback((bloc: string, k: Metrique) => refsVis.reduce((s, r) => s + val(r.ref, bloc, k), 0), [refsVis, val])
+  const totAlloc = useCallback((bloc: string) => refsVis.reduce((s, r) => s + alloc(r.ref, bloc), 0), [refsVis, alloc])
 
   async function sauverAlloc(ref: string, bloc: string, q: number) {
     const { error } = await supabase.rpc('set_allocation_ro', { p_reference: ref, p_bloc: bloc, p_quantite: q })
@@ -278,6 +366,89 @@ function AllocationAirH2O() {
   }
 
   const annee = d ? d.fin_annee.slice(0, 4) : ''
+
+  // ── Listes de détail ──
+  const refInfo = useMemo(() => new Map((d?.refs || []).map((r) => [r.ref, r])), [d])
+  const docsFiltres = useMemo(() => {
+    const s = search.trim().toUpperCase()
+    return (d?.lignes || []).filter((l) => refsSet.has(l.ref)
+      && (!agenceF || l.bloc === agenceF)
+      && (!s || `${l.ref} ${l.piece} ${l.cdc} ${l.client} ${l.tiers} ${l.representant}`.toUpperCase().includes(s)))
+  }, [d, refsSet, agenceF, search])
+  const listeCdc = useMemo(() => docsFiltres.filter((l) => l.nature === 'CDC' || l.nature === 'CDC_ANNEE_SUIVANTE' || l.nature === 'PL')
+    .sort((a, b) => (refsVis.findIndex((r) => r.ref === a.ref) - refsVis.findIndex((r) => r.ref === b.ref)) || (a.date_livraison || '9999').localeCompare(b.date_livraison || '9999')), [docsFiltres, refsVis])
+  const listeBl = useMemo(() => docsFiltres.filter((l) => l.nature === 'BL_M' || l.nature === 'BL_M1')
+    .sort((a, b) => (a.date_bl || '').localeCompare(b.date_bl || '') || a.ref.localeCompare(b.ref)), [docsFiltres])
+  const listeJulien = useMemo(() => docsFiltres.filter((l) => l.bloc === 'JITHURBIDE')
+    .sort((a, b) => a.nature.localeCompare(b.nature) || (a.date_bl || a.date_livraison || '').localeCompare(b.date_bl || b.date_livraison || '')), [docsFiltres])
+  const depuis = useMemo(() => { const x = new Date(); x.setDate(x.getDate() - 7); return x.toISOString().slice(0, 10) }, [])
+  const listeRecentes = useMemo(() => {
+    const ouvertes = (d?.lignes || []).filter((l) => l.nature === 'CDC' || l.nature === 'CDC_ANNEE_SUIVANTE')
+    const ordre: Record<Nature, number> = { BL_M: 0, BL_M1: 0, PL: 1, CDC: 2, CDC_ANNEE_SUIVANTE: 2 }
+    return docsFiltres.filter((l) => (l.date_cdc || '') >= depuis)
+      .map((l) => {
+        const lim = l.date_bl || l.date_livraison || '9999-12-31'
+        const plusAnciennes = ouvertes.filter((o) => o.ref === l.ref && o.cdc !== l.cdc && (o.date_cdc || '') < (l.date_cdc || ''))
+        return { ...l, anciennes: plusAnciennes.length, anciennesDues: plusAnciennes.filter((o) => (o.date_livraison || '0000') <= lim).length }
+      })
+      .sort((a, b) => ordre[a.nature] - ordre[b.nature] || (a.date_cdc || '').localeCompare(b.date_cdc || ''))
+  }, [d, docsFiltres, depuis])
+  const listeArrivages = useMemo(() => refsVis.flatMap((r) => r.arrivages.map((a) => ({ ref: r.ref, type: r.gamme === '600' ? 'Split' : 'Monobloc', taille: r.taille, alim: r.alim, ...a })))
+    .filter((a) => !search.trim() || `${a.ref} ${a.cdf}`.toUpperCase().includes(search.trim().toUpperCase())), [refsVis, search])
+
+  type LR = LigneDoc & { anciennes?: number; anciennesDues?: number }
+  const colRef: Col<LR>[] = [
+    { h: 'Référence', v: (l) => l.ref, cls: () => 'font-semibold', w: 16 },
+    { h: 'Type', v: (l) => (refInfo.get(l.ref)?.gamme === '600' ? 'Split' : 'Monobloc'), w: 10 },
+    { h: 'Taille', v: (l) => String(refInfo.get(l.ref)?.taille ?? '').replace('.', ','), w: 7 },
+    { h: 'Alim.', v: (l) => refInfo.get(l.ref)?.alim ?? '', w: 11 },
+  ]
+  const colClient: Col<LR>[] = [
+    { h: 'Qté', v: (l) => n0(l.q), right: true, cls: () => 'font-bold', w: 6 },
+    { h: 'Montant HT', v: (l) => n0(l.montant_ht), right: true, w: 11 },
+    { h: 'N° client', v: (l) => l.tiers, w: 10 },
+    { h: 'Client', v: (l) => l.client, w: 30 },
+    { h: 'Représentant', v: (l) => l.representant, w: 15 },
+    { h: 'Agence', v: (l) => libBloc(l.bloc), w: 18 },
+  ]
+  const colsCdc: Col<LR>[] = [...colRef,
+    { h: 'Statut', v: (l) => (l.nature === 'PL' ? 'En préparation (PL)' : l.nature === 'CDC' ? `À livrer ${annee}` : `À livrer ${Number(annee) + 1}`),
+      cls: (l) => (l.nature === 'PL' ? 'text-sky-800' : l.nature === 'CDC' ? 'font-semibold' : 'text-[#7A5EA8]'), w: 18 },
+    { h: 'N° CDC', v: (l) => l.cdc || l.piece, w: 11 }, { h: 'Pièce', v: (l) => l.piece, w: 11 },
+    { h: 'Date CDC', v: (l) => l.date_cdc, date: true, w: 11 },
+    { h: 'Livraison demandée', v: (l) => l.date_livraison, date: true, w: 12,
+      cls: (l) => ((l.date_livraison || '9999') < new Date().toISOString().slice(0, 10) && l.nature === 'CDC' ? 'font-bold text-red-700' : '') },
+    ...colClient]
+  const colsBl: Col<LR>[] = [...colRef,
+    { h: 'Mois', v: (l) => (l.nature === 'BL_M' ? libMois(d?.mois_m || '') : libMois(d?.mois_m1 || '')), w: 8 },
+    { h: 'N° BL / facture', v: (l) => l.piece, w: 13 }, { h: 'Date BL', v: (l) => l.date_bl, date: true, w: 11 },
+    { h: 'N° CDC', v: (l) => l.cdc, w: 11 }, { h: 'Date CDC', v: (l) => l.date_cdc, date: true, w: 11 },
+    ...colClient]
+  const colsRecentes: Col<LR>[] = [
+    { h: 'Statut', v: (l) => STATUT_NATURE[l.nature], cls: (l) => (l.nature.startsWith('BL') ? 'font-bold text-[#1E6B3A]' : l.nature === 'PL' ? 'text-sky-800' : ''), w: 18 },
+    ...colRef,
+    { h: 'N° CDC', v: (l) => l.cdc || l.piece, w: 11 }, { h: 'Date CDC', v: (l) => l.date_cdc, date: true, w: 11 },
+    { h: 'BL / PL', v: (l) => (l.nature === 'CDC' || l.nature === 'CDC_ANNEE_SUIVANTE' ? null : l.piece), w: 11 },
+    { h: 'Date BL', v: (l) => l.date_bl, date: true, w: 11 },
+    { h: 'Livraison demandée', v: (l) => l.date_livraison, date: true, w: 12 },
+    ...colClient,
+    { h: 'CDC plus anciennes en attente', v: (l) => l.anciennes ?? 0, right: true, w: 12 },
+    { h: 'dont dues au plus tard le jour du BL', v: (l) => l.anciennesDues ?? 0, right: true, cls: (l) => ((l.anciennesDues ?? 0) > 0 ? 'font-bold text-red-700' : ''), w: 14 },
+  ]
+  const colsJulien: Col<LR>[] = [
+    { h: 'Nature', v: (l) => LIB_NATURE[l.nature], w: 18 }, ...colRef,
+    { h: 'Pièce', v: (l) => l.piece, w: 11 }, { h: 'N° CDC', v: (l) => l.cdc, w: 11 }, { h: 'Date CDC', v: (l) => l.date_cdc, date: true, w: 11 },
+    { h: 'Livraison demandée', v: (l) => l.date_livraison, date: true, w: 12 }, { h: 'Date BL', v: (l) => l.date_bl, date: true, w: 11 },
+    ...colClient]
+  type LA = (typeof listeArrivages)[number]
+  const colsArr: Col<LA>[] = [
+    { h: 'Référence', v: (a) => a.ref, cls: () => 'font-semibold', w: 16 }, { h: 'Type', v: (a) => a.type, w: 10 },
+    { h: 'Taille', v: (a) => String(a.taille).replace('.', ','), w: 7 }, { h: 'Alim.', v: (a) => a.alim, w: 11 },
+    { h: 'Mois', v: (a) => libMoisAnnee(a.mois), w: 10 },
+    { h: 'Qté attendue', v: (a) => n0(a.q), right: true, cls: (a) => (a.mois <= (d?.fin_annee || '').slice(0, 7) ? 'font-bold' : 'text-[#8A8474]'), w: 10 },
+    { h: 'CDF SAGE', v: (a) => a.cdf, w: 46 },
+  ]
+  const sommeQ = (rows: { q: number }[]) => rows.reduce((s, x) => s + n0(x.q), 0)
   const lm1 = d ? libMois(d.mois_m1) : 'M-1'
   const lm = d ? libMois(d.mois_m) : 'M'
   const subVentes: { k: Metrique; l: string }[] = [
@@ -373,6 +544,59 @@ function AllocationAirH2O() {
         {loading && !d && <div className="rounded-xl border border-[#E5E1D8] bg-white px-4 py-10 text-center text-[12px] text-[#8A8474]">Chargement…</div>}
 
         {d && (
+          <section className="flex flex-wrap items-center gap-2 rounded-xl border border-[#E5E1D8] bg-white px-3 py-2">
+            <div className="flex rounded-lg border border-[#E5E1D8] bg-[#F4F3F0] p-0.5 text-[12.5px] font-bold">
+              {([['', 'Split + Monobloc'], ['600', 'Split (AirH2O 600)'], ['800', 'Monobloc (AirH2O 800)']] as ['' | '600' | '800', string][]).map(([k, l]) => (
+                <button key={k} type="button" onClick={() => setTypeF(k)} className={`rounded-md px-3 py-1 ${typeF === k ? 'bg-white text-[#111820] shadow-sm' : 'text-[#8A8474]'}`}>{l}</button>
+              ))}
+            </div>
+            <span className="mx-1 h-6 w-px bg-[#E5E1D8]" />
+            {([['tableau', 'Tableau d’allocation'], ['cdc', `CDC à livrer (${annee} + ${Number(annee) + 1})`], ['bl', `BL ${lm1} / ${lm}`],
+              ['recentes', 'CDC des 7 derniers jours'], ['julien', 'Julien Ithurbide'], ['arrivages', 'Arrivages']] as [Onglet, string][]).map(([k, l]) => (
+              <button key={k} type="button" onClick={() => setOnglet(k)}
+                className={`h-8 rounded-lg px-3 text-[12.5px] font-bold ${onglet === k ? 'bg-[#1D5C86] text-white' : 'border border-[#E5E1D8] bg-white text-[#3A362E] hover:border-[#1D5C86]'}`}>{l}</button>
+            ))}
+            {onglet !== 'tableau' && (
+              <>
+                <span className="mx-1 h-6 w-px bg-[#E5E1D8]" />
+                {onglet !== 'arrivages' && onglet !== 'julien' && (
+                  <select value={agenceF} onChange={(e) => setAgenceF(e.target.value)} className="h-8 rounded-md border border-[#E5E1D8] bg-white px-2 text-[12px] font-semibold">
+                    <option value="">Toutes les agences</option>
+                    {d.blocs.map((b) => <option key={b} value={b}>{libBloc(b)}</option>)}
+                  </select>
+                )}
+                <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Référence, CDC, client…"
+                  className="h-8 w-[220px] rounded-md border border-[#E5E1D8] bg-white px-2 text-[12px] font-semibold outline-none focus:border-[#1D5C86]" />
+              </>
+            )}
+          </section>
+        )}
+
+        {d && onglet === 'cdc' && (
+          <ListeDetail titre={`CDC à livrer ${annee} et ${Number(annee) + 1}`} sousTitre={`dont en préparation (PL) ; livraison demandée en rouge = déjà passée`}
+            cols={colsCdc} rows={listeCdc} cle={(l, i) => `${l.piece}-${l.ref}-${i}`} totalQte={sommeQ(listeCdc)}
+            rowCls={(l) => (l.bloc === 'JITHURBIDE' ? 'bg-[#F4F0FA]' : '')} />
+        )}
+        {d && onglet === 'bl' && (
+          <ListeDetail titre={`BL ${lm1} et ${lm}`} sousTitre="BL facturés ou non, datés du mois, hors retours"
+            cols={colsBl} rows={listeBl} cle={(l, i) => `${l.piece}-${l.ref}-${i}`} totalQte={sommeQ(listeBl)}
+            rowCls={(l) => (l.bloc === 'JITHURBIDE' ? 'bg-[#F4F0FA]' : '')} />
+        )}
+        {d && onglet === 'recentes' && (
+          <ListeDetail titre="CDC créées depuis 7 jours" sousTitre={`depuis le ${fmtDate(depuis)} · en rouge : livrée alors qu’une CDC plus ancienne, due au plus tard le jour du BL, attend toujours`}
+            cols={colsRecentes} rows={listeRecentes} cle={(l, i) => `${l.piece}-${l.ref}-${i}`} totalQte={sommeQ(listeRecentes)}
+            rowCls={(l) => (l.nature.startsWith('BL') && (l.anciennesDues ?? 0) > 0 ? 'bg-[#FDE2DF]' : '')} />
+        )}
+        {d && onglet === 'julien' && (
+          <ListeDetail titre="Julien Ithurbide — clients dont il est le représentant sur la fiche" sousTitre="CDC à livrer, en préparation et livrées"
+            cols={colsJulien} rows={listeJulien} cle={(l, i) => `${l.piece}-${l.ref}-${i}`} totalQte={sommeQ(listeJulien)} />
+        )}
+        {d && onglet === 'arrivages' && (
+          <ListeDetail titre="Arrivages fournisseurs attendus" sousTitre={`CDF SAGE ouvertes ; en gras : arrivages d’ici le 31/12 (comptés dans « Arrivage ${annee} »)`}
+            cols={colsArr} rows={listeArrivages} cle={(a, i) => `${a.ref}-${a.mois}-${i}`} totalQte={sommeQ(listeArrivages)} />
+        )}
+
+        {d && onglet === 'tableau' && (
           <section className="overflow-auto rounded-xl border border-[#E5E1D8] bg-white" style={{ maxHeight: 'calc(100vh - 220px)' }}>
             <table className="border-collapse text-[12px]">
               <thead className="sticky top-0 z-20">
@@ -479,7 +703,7 @@ function AllocationAirH2O() {
           </section>
         )}
 
-        {d && (
+        {d && onglet === 'tableau' && (
           <section className="flex flex-wrap items-center gap-x-4 gap-y-1.5 rounded-xl border border-[#E5E1D8] bg-white px-4 py-2.5 text-[11.5px] text-[#5E5A50]">
             <span className="font-bold text-[#111820]">Légende</span>
             <span className="flex items-center gap-1.5"><span className="inline-block h-3.5 w-6 rounded bg-[#F4B6B0]" />A attribuer &lt; 0 : CDC {annee} non couvertes · Attribué &gt; A attribuer : sur-allocation</span>
