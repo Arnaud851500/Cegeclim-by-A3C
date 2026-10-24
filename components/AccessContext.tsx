@@ -2,6 +2,7 @@
 
 import React, { createContext, useCallback, useContext, useEffect, useState } from 'react'
 import { supabase } from '@/lib/supabaseClient'
+import { peutVoirAllocationRo } from '@/lib/allocationRo'
 
 export type AccessRights = {
   can_dashboard: boolean
@@ -44,6 +45,9 @@ export type AccessRights = {
   show_alert_data_coherence: boolean
   /** (2026-10-20) Alerte « Date de livraison interdite », indépendante de l'alerte CDC. */
   show_alert_dates_interdites: boolean
+  /** (2026-10-24) Écran « Allocation AirH2O 600 / 800 » : liste nominative (lib/allocationRo.ts),
+   * contrôlée aussi côté base (stock_alloc_ro_acces). */
+  can_allocation_ro: boolean
 }
 
 type AccessContextType = {
@@ -170,6 +174,7 @@ export const defaultRights: AccessRights = {
   show_alert_todo: false,
   show_alert_data_coherence: false,
   show_alert_dates_interdites: false,
+  can_allocation_ro: false,
 }
 
 const AccessContext = createContext<AccessContextType>({
@@ -396,7 +401,7 @@ export function AccessProvider({ children }: { children: React.ReactNode }) {
     setLoading(true)
     const result = await fetchAccess()
     setEmail(result.email)
-    setRights(result.rights)
+    setRights({ ...result.rights, can_allocation_ro: peutVoirAllocationRo(result.email) })
     setLoading(false)
   }, [])
 
