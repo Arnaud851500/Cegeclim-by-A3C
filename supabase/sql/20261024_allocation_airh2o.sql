@@ -209,3 +209,11 @@ begin
 end $$;
 revoke all on function public.get_allocation_ro() from public, anon;
 grant execute on function public.get_allocation_ro() to authenticated;
+
+-- ─── 24/10/2026 (appliqué en production) ────────────────────────────────────
+-- Les agences qui ont une allocation sans aucune vente (ex. DAX, sans
+-- collaborateur rattaché) apparaissent aussi comme bloc : dans get_allocation_ro,
+-- le CTE « blocs » reçoit en plus
+--     union select distinct a.bloc from stock_alloc_ro a
+-- Allocations initiales saisies d'après le tableau d'Arnaud du 24/10/2026
+-- (updated_by = 'tableau Arnaud 24/10').
