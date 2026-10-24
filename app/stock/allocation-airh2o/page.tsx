@@ -8,11 +8,11 @@
  * (menu : lib/allocationRo.ts ; données : table stock_alloc_ro_acces, vérifiée par la base).
  *
  * Une ligne par groupe extérieur AirH2O 600 / 800 du catalogue 2026, tailles ≥ 3,5 :
- *  - STOCK : Dispo (Phy-PL), Arrivage de l'année, A attribuer = Dispo − CDC Liv + Arrivage,
+ *  - STOCK : Dispo (Phy-PL), Arrivage de l'année, A attribuer = Dispo + Arrivage (24/10 soir, demandé par Arnaud),
  *    Attribué = somme des allocations saisies ;
  *  - TOTAL VENTES puis un bloc par agence (ANGLET hors Julien Ithurbide, Julien Ithurbide,
  *    puis chaque agence) : BL du mois précédent, BL du mois, PL en cours, CDC à livrer d'ici
- *    le 31/12 (retards compris) et « Alloc en plus des CDC » (saisie partagée, enregistrée
+ *    le 31/12 (retards compris) et « Allocation 2026 » (saisie partagée, enregistrée
  *    à la sortie du champ) ;
  *  - un clic sur un chiffre ouvre le détail des lignes (CDC, PL, BL) ;
  *  - vue compacte : par agence, seulement CDC Liv et Alloc.
@@ -142,7 +142,7 @@ function CelluleAlloc({ valeur, info, onSave }: { valeur: number; info?: Alloc; 
       onChange={(e) => setTexte(e.target.value.replace(/[^\d.,]/g, ''))}
       onBlur={() => void valider()}
       onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); if (e.key === 'Escape') { setTexte(valeur ? String(valeur) : ''); (e.target as HTMLInputElement).blur() } }}
-      title={info ? `Saisi le ${fmtDateHeure(info.updated_at)}${info.updated_by ? ` par ${info.updated_by}` : ''}` : 'Allocation en plus des CDC déjà enregistrées'}
+      title={info ? `Saisi le ${fmtDateHeure(info.updated_at)}${info.updated_by ? ` par ${info.updated_by}` : ''}` : 'Allocation de l’année pour cette agence'}
       className={`h-7 w-full min-w-[46px] rounded border text-center text-[12.5px] font-bold text-[#0000CC] outline-none focus:border-[#1D5C86] focus:bg-white
         ${etat === 'err' ? 'border-red-500 bg-red-50' : etat === 'ok' ? 'border-emerald-500 bg-emerald-50' : etat === 'saving' ? 'border-[#B4761A] bg-[#FFF2B3]' : 'border-[#E8D27A] bg-[#FFF2B3]'}`}
     />
@@ -295,7 +295,7 @@ function AllocationAirH2O() {
   const [compact, setCompact] = useState(false)
   const [masquerVides, setMasquerVides] = useState(false)
   const [detail, setDetail] = useState<Detail | null>(null)
-  const [typeF, setTypeF] = useState<'' | '600' | '800'>('')
+  const [typeF, setTypeF] = useState<'' | '600' | '800'>('600')   // par défaut : AirH2O 600 (Split)
   const [onglet, setOnglet] = useState<Onglet>('tableau')
   const [agenceF, setAgenceF] = useState('')
   const [search, setSearch] = useState('')
@@ -340,7 +340,8 @@ function AllocationAirH2O() {
 
   const lignes = useMemo(() => refsVis.map((r) => {
     const cdc = val(r.ref, TOTAL, 'cdc')
-    const aAtt = n0(r.dispo) - cdc + n0(r.arrivage_annee)
+    // 24/10/2026 soir (Arnaud) : A attribuer = Dispo (Phy-PL) + Arrivage de l'année (les CDC ne sont plus déduites)
+    const aAtt = n0(r.dispo) + n0(r.arrivage_annee)
     const attr = (d?.blocs || []).reduce((s, b) => s + alloc(r.ref, b), 0)
     return { r, cdc, aAtt, attr }
   }), [refsVis, d, val, alloc])
@@ -470,7 +471,7 @@ function AllocationAirH2O() {
       const ws = wb.addWorksheet('Allocation')
       const h1: string[] = ['Référence', 'Désignation', 'Type', 'Taille', 'Alim.', 'STOCK', '', '', '', 'TOTAL VENTES', '', '', '']
       const h2: string[] = ['', '', '', '', '', 'Dispo (Phy-PL)', `Arrivage ${annee}`, 'A attribuer', 'Attribué', ...subVentes.map((s) => s.l)]
-      d.blocs.forEach((b) => { h1.push(libBloc(b), '', '', '', ''); h2.push(...subVentes.map((s) => s.l), `Alloc${annee} en plus des CDC`) })
+      d.blocs.forEach((b) => { h1.push(libBloc(b), '', '', '', ''); h2.push(...subVentes.map((s) => s.l), `Allocation ${annee}`) })
       ws.addRow(h1).font = { bold: true }; ws.addRow(h2).font = { bold: true }
       lignes.forEach(({ r, aAtt, attr }) => {
         const row: (string | number)[] = [r.ref, r.designation || '', r.gamme === '600' ? 'Split' : 'Monobloc', r.taille, r.alim, r.dispo, r.arrivage_annee, aAtt, attr,
@@ -517,7 +518,7 @@ function AllocationAirH2O() {
             <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-[#B4761A]">CEGECLIM — Stocks & logistique · accès réservé</p>
             <h1 className="text-[20px] font-bold leading-tight tracking-tight">Allocation AirH2O 600 / 800 — groupes extérieurs T3,5 à 6</h1>
             <p className="text-[11.5px] text-[#8A8474]">
-              A attribuer = Dispo (Phy-PL) − CDC Liv {annee} + Arrivage {annee} · Attribué = somme des allocations saisies par agence
+              A attribuer = Dispo (Phy-PL) + Arrivage {annee} · Attribué = somme des colonnes jaunes « Allocation {annee} »
               {d?.import_sage_le && <> · données SAGE du {fmtDateHeure(d.import_sage_le)}</>}
             </p>
           </div>
@@ -625,7 +626,7 @@ function AllocationAirH2O() {
                     return (
                       <React.Fragment key={b}>
                         {subBloc.map((s, i) => <th key={s.k} className={`${th} min-w-[52px] ${i === 0 ? 'border-l-2 border-l-[#3A362E]' : ''}`} style={{ background: p[1] }}>{s.l}</th>)}
-                        <th className={`${th} min-w-[70px]`} style={{ background: '#F2D96B' }}>Alloc{annee} en plus des CDC</th>
+                        <th className={`${th} min-w-[70px]`} style={{ background: '#F2D96B' }}>Allocation {annee}</th>
                       </React.Fragment>
                     )
                   })}
@@ -706,7 +707,7 @@ function AllocationAirH2O() {
         {d && onglet === 'tableau' && (
           <section className="flex flex-wrap items-center gap-x-4 gap-y-1.5 rounded-xl border border-[#E5E1D8] bg-white px-4 py-2.5 text-[11.5px] text-[#5E5A50]">
             <span className="font-bold text-[#111820]">Légende</span>
-            <span className="flex items-center gap-1.5"><span className="inline-block h-3.5 w-6 rounded bg-[#F4B6B0]" />A attribuer &lt; 0 : CDC {annee} non couvertes · Attribué &gt; A attribuer : sur-allocation</span>
+            <span className="flex items-center gap-1.5"><span className="inline-block h-3.5 w-6 rounded bg-[#F4B6B0]" />A attribuer &lt; 0 · Attribué &gt; A attribuer : sur-allocation</span>
             <span className="flex items-center gap-1.5"><span className="inline-block h-3.5 w-6 rounded bg-[#FBE3B5]" />A attribuer = 0 · reste à allouer</span>
             <span className="flex items-center gap-1.5"><span className="inline-block h-3.5 w-6 rounded bg-[#C9EBD4]" />A attribuer &gt; 0 · tout est alloué</span>
             <span className="flex items-center gap-1.5"><span className="inline-block h-3.5 w-6 rounded border border-[#E8D27A] bg-[#FFF2B3]" />allocation à saisir (enregistrée à la sortie du champ, partagée)</span>
