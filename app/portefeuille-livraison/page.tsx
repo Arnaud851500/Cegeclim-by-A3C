@@ -447,12 +447,6 @@ function toIsoDate(date: Date) {
   return `${year}-${month}-${day}`
 }
 
-function getYesterdayIsoDate() {
-  const date = new Date()
-  date.setDate(date.getDate() - 1)
-  return toIsoDate(date)
-}
-
 function getHorizonIsoDate(months: number) {
   const date = new Date()
   date.setMonth(date.getMonth() + months)
@@ -734,7 +728,7 @@ async function runControlQueryWithRetry<T>(label: string, operation: () => Promi
  * l'API), PAGE_PARALLEL pages à la fois. `fetchRange` doit appliquer un tri
  * stable (clé unique) pour que les pages ne se chevauchent pas. */
 async function fetchAllPages<T>(
-  fetchRange: (from: number, to: number) => PromiseLike<{ data: any; error: any }>,
+  fetchRange: (from: number, to: number) => PromiseLike<{ data: unknown; error: unknown }>,
   isCurrentLoad: () => boolean,
   onProgress?: (count: number) => void,
 ): Promise<T[]> {
@@ -799,7 +793,7 @@ export default function PortefeuilleLivraisonPage() {
   const [dateCreationDebut, setDateCreationDebut] = useState('')
   const [dateCreationFin, setDateCreationFin] = useState('')
   const [dateLivraisonDebut, setDateLivraisonDebut] = useState('')
-  const [dateLivraisonFin, setDateLivraisonFin] = useState(() => getYesterdayIsoDate())
+  const [dateLivraisonFin, setDateLivraisonFin] = useState('')  // (2026-10-26) plus de valeur par défaut (auparavant : hier)
   const [dateLivraisonFinModifiee, setDateLivraisonFinModifiee] = useState(false)
 
   const [selectedRepresentant, setSelectedRepresentant] = useState('')
@@ -838,7 +832,7 @@ export default function PortefeuilleLivraisonPage() {
 
   const isBlSelected = selectedTypes.includes('BL')
   const isCdcSelected = selectedTypes.includes('CDC')
-  const dateLivraisonFinControle = dateLivraisonFinModifiee ? dateLivraisonFin : ''
+  const dateLivraisonFinControle = dateLivraisonFin
 
   const [selection, setSelection] = useState<DetailSelection | null>(null)
   const [selectedDocumentKeyForLines, setSelectedDocumentKeyForLines] = useState<string | null>(null)
@@ -853,15 +847,14 @@ export default function PortefeuilleLivraisonPage() {
   const promessesRepresentantFiltre = access.allowedCollaborateurs.length > 0 ? '' : selectedRepresentant
 
   // Bornes de dates appliquées aux dates interdites : création début / fin sur
-  // la date de création, livraison début sur la date promise ; la borne
-  // « Livraison fin » n'est appliquée que si l'utilisateur l'a choisie (la
-  // valeur par défaut « hier » masquerait toutes ces commandes récentes).
+  // la date de création, livraison début / fin sur la date promise (pas de
+  // borne de fin par défaut depuis le 2026-10-26).
   const promessesFiltreDates = useMemo<PromessesFiltreDates>(() => ({
     creationDebut: dateCreationDebut,
     creationFin: dateCreationFin,
     livraisonDebut: dateLivraisonDebut,
-    livraisonFin: dateLivraisonFinModifiee ? dateLivraisonFin : '',
-  }), [dateCreationDebut, dateCreationFin, dateLivraisonDebut, dateLivraisonFin, dateLivraisonFinModifiee])
+    livraisonFin: dateLivraisonFin,
+  }), [dateCreationDebut, dateCreationFin, dateLivraisonDebut, dateLivraisonFin])
 
   function applyDetailSelection(nextSelection: DetailSelection | null) {
     setSelection(nextSelection)
@@ -880,9 +873,8 @@ export default function PortefeuilleLivraisonPage() {
     setSelectedDocumentKeyForLines(null)
   }
 
-  /** Active le filtre "CDC liv < M-2" : ne garde que les CDC, remet la borne
-   * de livraison par défaut (hier) qui couvre de toute façon tout le retard,
-   * et réinitialise le détail. */
+  /** Active le filtre "CDC liv < M-2" : ne garde que les CDC et réinitialise
+   * le détail (les bornes de dates choisies sont conservées). */
   function openCdcRetard() {
     setSelectedTypes(['CDC'])
     setCdcRetardOnly(true)
@@ -1813,17 +1805,15 @@ export default function PortefeuilleLivraisonPage() {
   function toggleType(type: string) {
     setSelectedTypes((current) => {
       if (current.includes(type)) { const next = current.filter((item) => item !== type); return next.length ? next : current }
-      if (type === 'BL' && !dateLivraisonFinModifiee) { setDateLivraisonFin(''); setDateLivraisonFinModifiee(false) }
       return [...current, type]
     })
   }
 
   useEffect(() => {
     if (isBlSelected) return
-    if (!dateLivraisonFinModifiee && !dateLivraisonFin) setDateLivraisonFin(getYesterdayIsoDate())
     setSelectedControle('TOUS'); setSelectedGroupKey(null); setSelectedExpedition(''); setSelectedDepotEntete('')
     setReferenceEnteteSearch(''); setLieuLivraisonSearch(''); setSelection(null); setSelectedDocumentKeyForLines(null)
-  }, [isBlSelected, dateLivraisonFin, dateLivraisonFinModifiee])
+  }, [isBlSelected])
 
   function toggleDocumentSort(key: keyof DocumentPortefeuille) {
     setDocumentSort((current) => !current || current.key !== key ? { key, direction: 'asc' } : { key, direction: current.direction === 'asc' ? 'desc' : 'asc' })
@@ -1919,7 +1909,7 @@ export default function PortefeuilleLivraisonPage() {
                 {' '}Les dates et les listes de sélection s'appliquent aux cartes et à tous les tableaux ci-dessous.
               </p>
               <div className="mt-2 inline-flex rounded-full border border-blue-200 bg-blue-50 px-2.5 py-1 text-xs font-semibold text-blue-800">
-                Version 2026-10-25 v4.0 — chargement complet paginé · filtres appliqués aux cartes, au contrôle BL et aux dates interdites · contrôle frais de port groupé · {CDC_RETARD_LABEL} · commandes non complètes à la date de livraison client · pastille arrêt appro · période figée d'appro
+                Version 2026-10-26 v4.1 — sans borne de livraison fin par défaut · chargement complet paginé · filtres appliqués aux cartes, au contrôle BL et aux dates interdites · contrôle frais de port groupé · {CDC_RETARD_LABEL} · commandes non complètes à la date de livraison client · pastille arrêt appro · période figée d'appro
               </div>
             </div>
             <div className="flex flex-wrap gap-2">
