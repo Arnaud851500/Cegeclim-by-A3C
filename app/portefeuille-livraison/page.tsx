@@ -22,19 +22,8 @@ import {
 // règle que l'écran Reconstruction du stock projeté) -- carte KPI + panneau
 // dédié avec action / commentaire par CDC. URL ?promesse=interdite ou
 // événement cegeclim:open-promesses-interdites. Voir lib/cdcPromesses.ts.
-// ÉVOLUTION (2026-10-25) : le panneau et la carte suivent les filtres de
-// dates du portefeuille (filtrerPromessesParDates).
-import CdcPromessesInterdites, { filtrerPromessesParDates, type PromessesFiltreDates } from '@/components/CdcPromessesInterdites'
-import { PROMESSES_ALERT_LABEL, PROMESSES_FENETRE_JOURS, PROMESSES_OPEN_EVENT, commandesDansPerimetre, fetchPromessesAlerte, fetchPromessesInterdites, promessesExportCommandes, promessesExportLignes, type PromesseLigne } from '@/lib/cdcPromesses'
-
-// ÉVOLUTION (2026-10-25) : chargement complet paginé. L'API Supabase renvoie
-// au plus 1 000 lignes par requête quel que soit le .limit() demandé : le
-// portefeuille (≈ 27 000 lignes CDC/PL, ≈ 23 000 lignes de couverture, ≈ 2 500
-// actions et ≈ 2 100 groupes frais de port) était tronqué, si bien que les
-// dates et les listes de sélection semblaient sans effet sur les tableaux.
-// Toutes les lectures passent désormais par fetchAllPages (tri stable + range).
-// Les filtres secondaires (expédition, dépôt, référence entête, lieu, famille
-// macro) s'appliquent aussi aux cartes KPI et aux groupes BL.
+import CdcPromessesInterdites from '@/components/CdcPromessesInterdites'
+import { PROMESSES_ALERT_LABEL, PROMESSES_FENETRE_JOURS, PROMESSES_OPEN_EVENT, commandesDansPerimetre, fetchPromessesAlerte, fetchPromessesInterdites, promessesExportCommandes, promessesExportLignes } from '@/lib/cdcPromesses'
 
 type LignePortefeuille = {
   id: number | string | null
@@ -337,12 +326,6 @@ const CONTROL_QUERY_MAX_ATTEMPTS = 3
 const CONTROL_QUERY_RETRY_DELAYS_MS = [0, 1200, 3000]
 const STALE_LOAD_ERROR = '__STALE_PORTFOLIO_LOAD__'
 
-// Pagination : taille de page = plafond de l'API Supabase (1 000 lignes),
-// 4 pages lues en parallèle, garde-fou à 80 000 lignes par source.
-const PAGE_SIZE = 1000
-const PAGE_PARALLEL = 4
-const PAGE_MAX_ROWS = 80000
-
 // Actions SQL considérées comme anomalies frais de port.
 // Utilisées pour le filtrage SQL direct sur les vues de contrôle — évite le
 // scan complet de l'historique sans avoir besoin d'une borne de date.
@@ -445,6 +428,12 @@ function toIsoDate(date: Date) {
   const month = String(date.getMonth() + 1).padStart(2, '0')
   const day = String(date.getDate()).padStart(2, '0')
   return `${year}-${month}-${day}`
+}
+
+function getYesterdayIsoDate() {
+  const date = new Date()
+  date.setDate(date.getDate() - 1)
+  return toIsoDate(date)
 }
 
 function getHorizonIsoDate(months: number) {
@@ -724,37 +713,6 @@ async function runControlQueryWithRetry<T>(label: string, operation: () => Promi
   throw lastError
 }
 
-/** Lit toutes les lignes d'une requête par pages de PAGE_SIZE (plafond de
- * l'API), PAGE_PARALLEL pages à la fois. `fetchRange` doit appliquer un tri
- * stable (clé unique) pour que les pages ne se chevauchent pas. */
-async function fetchAllPages<T>(
-  fetchRange: (from: number, to: number) => PromiseLike<{ data: unknown; error: unknown }>,
-  isCurrentLoad: () => boolean,
-  onProgress?: (count: number) => void,
-): Promise<T[]> {
-  const out: T[] = []
-  for (let start = 0; start < PAGE_MAX_ROWS; start += PAGE_SIZE * PAGE_PARALLEL) {
-    if (!isCurrentLoad()) throw new Error(STALE_LOAD_ERROR)
-    const batch = await Promise.all(
-      Array.from({ length: PAGE_PARALLEL }, (_, index) => {
-        const from = start + index * PAGE_SIZE
-        return Promise.resolve(fetchRange(from, from + PAGE_SIZE - 1)).then(({ data, error }) => {
-          if (error) throw error
-          return (data ?? []) as T[]
-        })
-      }),
-    )
-    let done = false
-    for (const rows of batch) {
-      out.push(...rows)
-      if (rows.length < PAGE_SIZE) { done = true; break }
-    }
-    onProgress?.(out.length)
-    if (done) break
-  }
-  return out
-}
-
 // Nombre de colonnes de la grille KPI selon les cartes visibles (Tailwind a
 // besoin des noms de classes complets, d'où la table de correspondance).
 const KPI_GRID_COLS: Record<number, string> = {
@@ -767,15 +725,12 @@ const KPI_GRID_COLS: Record<number, string> = {
   8: 'xl:grid-cols-8',
 }
 
-const CONTROL_MODES_SPECIAUX = ['TOUS', 'ANOMALIES', 'FRAIS_PORT_MANQUANT', 'FRAIS_PORT_A_SUPPRIMER', 'AUTRES_ANOMALIES']
-
 export default function PortefeuilleLivraisonPage() {
   const currentMonthKey = useMemo(() => getCurrentMonthKey(), [])
   const access = usePageFilterAccess()
   const loadRequestIdRef = useRef(0)
 
   const [loading, setLoading] = useState(false)
-  const [loadingInfo, setLoadingInfo] = useState('')
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
   const [controlErrorMessage, setControlErrorMessage] = useState<string | null>(null)
   const [couvertureErrorMessage, setCouvertureErrorMessage] = useState<string | null>(null)
@@ -793,7 +748,7 @@ export default function PortefeuilleLivraisonPage() {
   const [dateCreationDebut, setDateCreationDebut] = useState('')
   const [dateCreationFin, setDateCreationFin] = useState('')
   const [dateLivraisonDebut, setDateLivraisonDebut] = useState('')
-  const [dateLivraisonFin, setDateLivraisonFin] = useState('')  // (2026-10-26) plus de valeur par défaut (auparavant : hier)
+  const [dateLivraisonFin, setDateLivraisonFin] = useState(() => getYesterdayIsoDate())
   const [dateLivraisonFinModifiee, setDateLivraisonFinModifiee] = useState(false)
 
   const [selectedRepresentant, setSelectedRepresentant] = useState('')
@@ -821,18 +776,12 @@ export default function PortefeuilleLivraisonPage() {
   const [selectedCouverture, setSelectedCouverture] = useState<CouvertureFilterMode>('TOUS')
   // Panneau « Date de livraison interdite » (2026-10-20).
   const [promessesOpen, setPromessesOpen] = useState(false)
-  // (2026-10-25) Lignes de la liste chargées par la page pour que la carte
-  // suive les filtres ; compteur du panneau quand il est ouvert (tient compte
-  // des actions saisies entre-temps) ; compteur RPC en repli si la liste est
-  // indisponible.
-  const [promessesLignes, setPromessesLignes] = useState<PromesseLigne[] | null>(null)
-  const [promessesPanelCount, setPromessesPanelCount] = useState<number | null>(null)
-  const [promessesRpcCount, setPromessesRpcCount] = useState<number | null>(null)
+  const [promessesCount, setPromessesCount] = useState<number | null>(null)
   const promessesPanelRef = useRef<HTMLDivElement | null>(null)
 
   const isBlSelected = selectedTypes.includes('BL')
   const isCdcSelected = selectedTypes.includes('CDC')
-  const dateLivraisonFinControle = dateLivraisonFin
+  const dateLivraisonFinControle = dateLivraisonFinModifiee ? dateLivraisonFin : ''
 
   const [selection, setSelection] = useState<DetailSelection | null>(null)
   const [selectedDocumentKeyForLines, setSelectedDocumentKeyForLines] = useState<string | null>(null)
@@ -840,21 +789,6 @@ export default function PortefeuilleLivraisonPage() {
   const [documentSort, setDocumentSort] = useState<SortConfig<DocumentPortefeuille>>({ key: 'agence', direction: 'asc' })
   const [groupSort, setGroupSort] = useState<SortConfig<GroupeFraisPort>>({ key: 'date_controle', direction: 'desc' })
   const [ligneSort, setLigneSort] = useState<SortConfig<LigneDetail>>({ key: 'agence', direction: 'asc' })
-
-  // Périmètre agence / représentant transmis au panneau des dates interdites
-  // (vide quand le périmètre est imposé par les droits : la RLS s'en charge).
-  const promessesAgenceFiltre = access.allowedAgences.length > 0 ? '' : selectedAgence
-  const promessesRepresentantFiltre = access.allowedCollaborateurs.length > 0 ? '' : selectedRepresentant
-
-  // Bornes de dates appliquées aux dates interdites : création début / fin sur
-  // la date de création, livraison début / fin sur la date promise (pas de
-  // borne de fin par défaut depuis le 2026-10-26).
-  const promessesFiltreDates = useMemo<PromessesFiltreDates>(() => ({
-    creationDebut: dateCreationDebut,
-    creationFin: dateCreationFin,
-    livraisonDebut: dateLivraisonDebut,
-    livraisonFin: dateLivraisonFin,
-  }), [dateCreationDebut, dateCreationFin, dateLivraisonDebut, dateLivraisonFin])
 
   function applyDetailSelection(nextSelection: DetailSelection | null) {
     setSelection(nextSelection)
@@ -873,8 +807,9 @@ export default function PortefeuilleLivraisonPage() {
     setSelectedDocumentKeyForLines(null)
   }
 
-  /** Active le filtre "CDC liv < M-2" : ne garde que les CDC et réinitialise
-   * le détail (les bornes de dates choisies sont conservées). */
+  /** Active le filtre "CDC liv < M-2" : ne garde que les CDC, remet la borne
+   * de livraison par défaut (hier) qui couvre de toute façon tout le retard,
+   * et réinitialise le détail. */
   function openCdcRetard() {
     setSelectedTypes(['CDC'])
     setCdcRetardOnly(true)
@@ -993,36 +928,14 @@ export default function PortefeuilleLivraisonPage() {
     }
   }, [])
 
-  /** Liste des dates interdites (périmètre RLS) chargée par la page : la carte
-   * KPI applique ensuite les mêmes filtres que le panneau. En cas d'échec, le
-   * compteur de l'alerte (RPC, sans filtres) sert de repli. */
-  async function loadPromesses() {
-    try {
-      const rows = await fetchPromessesInterdites()
-      setPromessesLignes(rows)
-    } catch (error) {
-      console.warn('Portefeuille livraison - liste des dates interdites indisponible', error)
-      setPromessesLignes(null)
-      const alerte = await fetchPromessesAlerte()
-      setPromessesRpcCount(alerte.indisponible ? null : alerte.aTraiter)
-    }
-  }
-
+  // Compteur de la carte « Date de livraison interdite » (périmètre RLS de
+  // l'utilisateur) ; remplacé par celui du panneau une fois ouvert (qui tient
+  // compte des filtres agence / représentant de la page).
   useEffect(() => {
-    void loadPromesses()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    let alive = true
+    fetchPromessesAlerte().then((a) => { if (alive && !a.indisponible) setPromessesCount((n) => (n === null ? a.aTraiter : n)) })
+    return () => { alive = false }
   }, [])
-
-  const promessesCountFiltre = useMemo<number | null>(() => {
-    if (!promessesLignes) return promessesRpcCount
-    const commandes = filtrerPromessesParDates(
-      commandesDansPerimetre(promessesLignes, promessesAgenceFiltre, promessesRepresentantFiltre),
-      promessesFiltreDates,
-    )
-    return commandes.filter((c) => c.statut_traitement === 'a_traiter' || c.statut_traitement === 'non_confirmee').length
-  }, [promessesLignes, promessesRpcCount, promessesAgenceFiltre, promessesRepresentantFiltre, promessesFiltreDates])
-
-  const promessesCount = promessesOpen && promessesPanelCount !== null ? promessesPanelCount : promessesCountFiltre
 
   // Références en « Blocage appro » SAGE : chargées une seule fois, paginées
   // par sécurité (limite PostgREST). En cas d'erreur, la page reste utilisable
@@ -1073,50 +986,39 @@ export default function PortefeuilleLivraisonPage() {
     const isCurrentLoad = () => loadRequestIdRef.current === requestId
 
     setLoading(true)
-    setLoadingInfo('')
     setErrorMessage(null)
     setControlErrorMessage(null)
     setCouvertureErrorMessage(null)
 
     try {
-      // ── Lignes du portefeuille (toutes les pages) ─────────────────────────
-      const buildLignesQuery = () => {
-        let query = supabase
-          .from('v_portefeuille_livraison_lignes')
-          .select('*')
-          .in('type_document', selectedTypes.length ? selectedTypes : DEFAULT_TYPES)
+      let query = supabase
+        .from('v_portefeuille_livraison_lignes')
+        .select('*')
+        .in('type_document', selectedTypes.length ? selectedTypes : DEFAULT_TYPES)
+        .order('agence', { ascending: true, nullsFirst: true })
+        .order('representant', { ascending: true, nullsFirst: true })
+        .order('date_livraison', { ascending: true, nullsFirst: true })
 
-        if (dateCreationDebut) query = query.gte('date_creation_document', dateCreationDebut)
-        if (dateCreationFin) query = query.lte('date_creation_document', dateCreationFin)
-        if (dateLivraisonDebut) query = query.gte('date_livraison', dateLivraisonDebut)
-        if (dateLivraisonFin) query = query.lte('date_livraison', dateLivraisonFin)
+      if (dateCreationDebut) query = query.gte('date_creation_document', dateCreationDebut)
+      if (dateCreationFin) query = query.lte('date_creation_document', dateCreationFin)
+      if (dateLivraisonDebut) query = query.gte('date_livraison', dateLivraisonDebut)
+      if (dateLivraisonFin) query = query.lte('date_livraison', dateLivraisonFin)
 
-        if (access.allowedCollaborateurs.length > 0) query = query.in('representant', access.allowedCollaborateurs)
-        else if (selectedRepresentant) query = query.eq('representant', selectedRepresentant)
+      if (access.allowedCollaborateurs.length > 0) query = query.in('representant', access.allowedCollaborateurs)
+      else if (selectedRepresentant) query = query.eq('representant', selectedRepresentant)
 
-        if (access.allowedAgences.length > 0) query = query.in('agence', access.allowedAgences)
-        else if (selectedAgence) query = query.eq('agence', selectedAgence)
+      if (access.allowedAgences.length > 0) query = query.in('agence', access.allowedAgences)
+      else if (selectedAgence) query = query.eq('agence', selectedAgence)
 
-        if (selectedFamilleMacro) query = query.eq('famille_macro', selectedFamilleMacro)
-        if (selectedSommeil === 'OUI') query = query.eq('client_en_sommeil', true)
-        if (selectedSommeil === 'NON') query = query.or('client_en_sommeil.is.false,client_en_sommeil.is.null')
+      if (selectedFamilleMacro) query = query.eq('famille_macro', selectedFamilleMacro)
+      if (selectedSommeil === 'OUI') query = query.eq('client_en_sommeil', true)
+      if (selectedSommeil === 'NON') query = query.or('client_en_sommeil.is.false,client_en_sommeil.is.null')
 
-        // Tri stable sur l'identifiant de ligne (unique) pour la pagination.
-        return query.order('id', { ascending: true })
-      }
-
-      const data = await runControlQueryWithRetry<LignePortefeuille[]>(
-        'lignes portefeuille',
-        () => fetchAllPages<LignePortefeuille>(
-          (from, to) => buildLignesQuery().range(from, to),
-          isCurrentLoad,
-          (count) => { if (isCurrentLoad()) setLoadingInfo(`${count.toLocaleString('fr-FR')} lignes`) },
-        ),
-        isCurrentLoad,
-      )
+      const { data, error } = await query.limit(50000)
+      if (error) throw error
       if (!isCurrentLoad()) return
 
-      const rows = data.filter((row) =>
+      const rows = ((data || []) as LignePortefeuille[]).filter((row) =>
         isAllowedByList(row.representant, access.allowedCollaborateurs) &&
         isAllowedByList(row.agence, access.allowedAgences)
       )
@@ -1130,33 +1032,32 @@ export default function PortefeuilleLivraisonPage() {
       // lignes correspondant aux mêmes filtres que le portefeuille.
       if (isCdcSelected) {
         try {
-          if (isCurrentLoad()) setLoadingInfo('couverture stock')
-          const buildCouvertureQuery = () => {
-            let couvertureQuery = supabase
-              .from('v_portefeuille_couverture_stock')
-              .select(COUVERTURE_SELECT)
-
-            if (dateCreationDebut) couvertureQuery = couvertureQuery.gte('date_creation_document', dateCreationDebut)
-            if (dateCreationFin) couvertureQuery = couvertureQuery.lte('date_creation_document', dateCreationFin)
-            if (dateLivraisonDebut) couvertureQuery = couvertureQuery.gte('date_livraison', dateLivraisonDebut)
-            if (dateLivraisonFin) couvertureQuery = couvertureQuery.lte('date_livraison', dateLivraisonFin)
-
-            if (access.allowedCollaborateurs.length > 0) couvertureQuery = couvertureQuery.in('representant', access.allowedCollaborateurs)
-            else if (selectedRepresentant) couvertureQuery = couvertureQuery.eq('representant', selectedRepresentant)
-
-            if (access.allowedAgences.length > 0) couvertureQuery = couvertureQuery.in('agence', access.allowedAgences)
-            else if (selectedAgence) couvertureQuery = couvertureQuery.eq('agence', selectedAgence)
-
-            if (selectedFamilleMacro) couvertureQuery = couvertureQuery.eq('famille_macro', selectedFamilleMacro)
-            if (selectedSommeil === 'OUI') couvertureQuery = couvertureQuery.eq('client_en_sommeil', true)
-            if (selectedSommeil === 'NON') couvertureQuery = couvertureQuery.or('client_en_sommeil.is.false,client_en_sommeil.is.null')
-
-            return couvertureQuery.order('id', { ascending: true })
-          }
-
           const couvertureData = await runControlQueryWithRetry<CouvertureStock[]>(
             'couverture stock',
-            () => fetchAllPages<CouvertureStock>((from, to) => buildCouvertureQuery().range(from, to), isCurrentLoad),
+            async () => {
+              let couvertureQuery = supabase
+                .from('v_portefeuille_couverture_stock')
+                .select(COUVERTURE_SELECT)
+
+              if (dateCreationDebut) couvertureQuery = couvertureQuery.gte('date_creation_document', dateCreationDebut)
+              if (dateCreationFin) couvertureQuery = couvertureQuery.lte('date_creation_document', dateCreationFin)
+              if (dateLivraisonDebut) couvertureQuery = couvertureQuery.gte('date_livraison', dateLivraisonDebut)
+              if (dateLivraisonFin) couvertureQuery = couvertureQuery.lte('date_livraison', dateLivraisonFin)
+
+              if (access.allowedCollaborateurs.length > 0) couvertureQuery = couvertureQuery.in('representant', access.allowedCollaborateurs)
+              else if (selectedRepresentant) couvertureQuery = couvertureQuery.eq('representant', selectedRepresentant)
+
+              if (access.allowedAgences.length > 0) couvertureQuery = couvertureQuery.in('agence', access.allowedAgences)
+              else if (selectedAgence) couvertureQuery = couvertureQuery.eq('agence', selectedAgence)
+
+              if (selectedFamilleMacro) couvertureQuery = couvertureQuery.eq('famille_macro', selectedFamilleMacro)
+              if (selectedSommeil === 'OUI') couvertureQuery = couvertureQuery.eq('client_en_sommeil', true)
+              if (selectedSommeil === 'NON') couvertureQuery = couvertureQuery.or('client_en_sommeil.is.false,client_en_sommeil.is.null')
+
+              const response = await couvertureQuery.limit(50000)
+              if (response.error) throw response.error
+              return (response.data ?? []) as unknown as CouvertureStock[]
+            },
             isCurrentLoad,
           )
           if (!isCurrentLoad()) return
@@ -1199,49 +1100,46 @@ export default function PortefeuilleLivraisonPage() {
       let groupRowsLoaded = false
 
       try {
-        if (isCurrentLoad()) setLoadingInfo('contrôle frais de port')
-        const buildControlQuery = () => {
-          let controlQuery = supabase
-            .from('mv_controle_frais_port_actions')
-            .select(CONTROL_ACTION_SELECT)
-            .eq('type_document', 'BL')
-
-          // Filtre SQL sur le statut d'anomalie — permet de charger tout l'historique
-          // sans timeout, car la vue ne retourne que les lignes actionnables.
-          if (selectedControle === 'FRAIS_PORT_MANQUANT') {
-            controlQuery = controlQuery.eq('action_recommandee', 'AJOUTER')
-          } else if (selectedControle === 'FRAIS_PORT_A_SUPPRIMER') {
-            controlQuery = controlQuery.eq('action_recommandee', 'SUPPRIMER')
-          } else if (selectedControle === 'AUTRES_ANOMALIES') {
-            controlQuery = controlQuery.eq('action_recommandee', 'VERIFIER')
-          } else if (selectedControle === 'ANOMALIES') {
-            controlQuery = controlQuery.in('action_recommandee', [...ANOMALY_ACTIONS])
-          }
-
-          // Filtres de dates : toujours appliqués par-dessus le filtre anomalie.
-          // date_controle = date du BL dans la vue actions.
-          if (dateCreationDebut) controlQuery = controlQuery.gte('date_controle', dateCreationDebut)
-          if (dateCreationFin) controlQuery = controlQuery.lte('date_controle', dateCreationFin)
-          if (dateLivraisonDebut) controlQuery = controlQuery.gte('date_livraison', dateLivraisonDebut)
-          if (dateLivraisonFinControle) controlQuery = controlQuery.lte('date_livraison', dateLivraisonFinControle)
-
-          if (access.allowedCollaborateurs.length > 0) controlQuery = controlQuery.in('representant', access.allowedCollaborateurs)
-          else if (selectedRepresentant) controlQuery = controlQuery.eq('representant', selectedRepresentant)
-
-          if (access.allowedAgences.length > 0) controlQuery = controlQuery.in('agence', access.allowedAgences)
-          else if (selectedAgence) controlQuery = controlQuery.eq('agence', selectedAgence)
-
-          if (selectedSommeil === 'OUI') controlQuery = controlQuery.eq('client_en_sommeil', true)
-          if (selectedSommeil === 'NON') controlQuery = controlQuery.or('client_en_sommeil.is.false,client_en_sommeil.is.null')
-
-          return controlQuery
-            .order('numero_document', { ascending: true })
-            .order('numero_tiers', { ascending: true })
-        }
-
         const controlData = await runControlQueryWithRetry<ControleFraisPort[]>(
           'actions frais de port',
-          () => fetchAllPages<ControleFraisPort>((from, to) => buildControlQuery().range(from, to), isCurrentLoad),
+          async () => {
+            let controlQuery = supabase
+              .from('mv_controle_frais_port_actions')
+              .select(CONTROL_ACTION_SELECT)
+              .eq('type_document', 'BL')
+
+            // Filtre SQL sur le statut d'anomalie — permet de charger tout l'historique
+            // sans timeout, car la vue ne retourne que les lignes actionnables.
+            if (selectedControle === 'FRAIS_PORT_MANQUANT') {
+              controlQuery = controlQuery.eq('action_recommandee', 'AJOUTER')
+            } else if (selectedControle === 'FRAIS_PORT_A_SUPPRIMER') {
+              controlQuery = controlQuery.eq('action_recommandee', 'SUPPRIMER')
+            } else if (selectedControle === 'AUTRES_ANOMALIES') {
+              controlQuery = controlQuery.eq('action_recommandee', 'VERIFIER')
+            } else if (selectedControle === 'ANOMALIES') {
+              controlQuery = controlQuery.in('action_recommandee', [...ANOMALY_ACTIONS])
+            }
+
+            // Filtres de dates : toujours appliqués par-dessus le filtre anomalie.
+            // date_controle = date du BL dans la vue actions.
+            if (dateCreationDebut) controlQuery = controlQuery.gte('date_controle', dateCreationDebut)
+            if (dateCreationFin) controlQuery = controlQuery.lte('date_controle', dateCreationFin)
+            if (dateLivraisonDebut) controlQuery = controlQuery.gte('date_livraison', dateLivraisonDebut)
+            if (dateLivraisonFinControle) controlQuery = controlQuery.lte('date_livraison', dateLivraisonFinControle)
+
+            if (access.allowedCollaborateurs.length > 0) controlQuery = controlQuery.in('representant', access.allowedCollaborateurs)
+            else if (selectedRepresentant) controlQuery = controlQuery.eq('representant', selectedRepresentant)
+
+            if (access.allowedAgences.length > 0) controlQuery = controlQuery.in('agence', access.allowedAgences)
+            else if (selectedAgence) controlQuery = controlQuery.eq('agence', selectedAgence)
+
+            if (selectedSommeil === 'OUI') controlQuery = controlQuery.eq('client_en_sommeil', true)
+            if (selectedSommeil === 'NON') controlQuery = controlQuery.or('client_en_sommeil.is.false,client_en_sommeil.is.null')
+
+            const response = await controlQuery.limit(50000)
+            if (response.error) throw response.error
+            return (response.data ?? []) as unknown as ControleFraisPort[]
+          },
           isCurrentLoad,
         )
 
@@ -1256,37 +1154,37 @@ export default function PortefeuilleLivraisonPage() {
         setControlesFraisPort(controlRows)
         controlRowsLoaded = true
 
-        const buildGroupQuery = () => {
-          let groupQuery = supabase
-            .from('mv_controle_frais_port_groupes')
-            .select('*')
-
-          // Même logique côté groupes : filtre SQL sur l'anomalie en priorité.
-          if (selectedControle === 'FRAIS_PORT_MANQUANT') {
-            groupQuery = groupQuery.eq('statut_groupe', 'FRAIS_PORT_MANQUANT')
-          } else if (selectedControle === 'FRAIS_PORT_A_SUPPRIMER') {
-            groupQuery = groupQuery.gt('nb_bl_a_supprimer', 0)
-          } else if (selectedControle === 'ANOMALIES' || selectedControle === 'AUTRES_ANOMALIES') {
-            groupQuery = groupQuery.eq('anomalie_controle', true)
-          }
-
-          if (dateCreationDebut) groupQuery = groupQuery.gte('date_controle', dateCreationDebut)
-          if (dateCreationFin) groupQuery = groupQuery.lte('date_controle', dateCreationFin)
-          if (dateLivraisonDebut) groupQuery = groupQuery.gte('date_livraison_max', dateLivraisonDebut)
-          if (dateLivraisonFinControle) groupQuery = groupQuery.lte('date_livraison_min', dateLivraisonFinControle)
-
-          if (selectedSommeil === 'OUI') groupQuery = groupQuery.eq('client_en_sommeil', true)
-          if (selectedSommeil === 'NON') groupQuery = groupQuery.eq('client_en_sommeil', false)
-
-          if (!access.allowedAgences.length && selectedAgence) groupQuery = groupQuery.ilike('agences', `%${selectedAgence}%`)
-          if (!access.allowedCollaborateurs.length && selectedRepresentant) groupQuery = groupQuery.ilike('representants', `%${selectedRepresentant}%`)
-
-          return groupQuery.order('cle_groupe_frais_port', { ascending: true })
-        }
-
         const groupData = await runControlQueryWithRetry<GroupeFraisPort[]>(
           'groupes frais de port',
-          () => fetchAllPages<GroupeFraisPort>((from, to) => buildGroupQuery().range(from, to), isCurrentLoad),
+          async () => {
+            let groupQuery = supabase
+              .from('mv_controle_frais_port_groupes')
+              .select('*')
+
+            // Même logique côté groupes : filtre SQL sur l'anomalie en priorité.
+            if (selectedControle === 'FRAIS_PORT_MANQUANT') {
+              groupQuery = groupQuery.eq('statut_groupe', 'FRAIS_PORT_MANQUANT')
+            } else if (selectedControle === 'FRAIS_PORT_A_SUPPRIMER') {
+              groupQuery = groupQuery.gt('nb_bl_a_supprimer', 0)
+            } else if (selectedControle === 'ANOMALIES' || selectedControle === 'AUTRES_ANOMALIES') {
+              groupQuery = groupQuery.eq('anomalie_controle', true)
+            }
+
+            if (dateCreationDebut) groupQuery = groupQuery.gte('date_controle', dateCreationDebut)
+            if (dateCreationFin) groupQuery = groupQuery.lte('date_controle', dateCreationFin)
+            if (dateLivraisonDebut) groupQuery = groupQuery.gte('date_livraison_max', dateLivraisonDebut)
+            if (dateLivraisonFinControle) groupQuery = groupQuery.lte('date_livraison_min', dateLivraisonFinControle)
+
+            if (selectedSommeil === 'OUI') groupQuery = groupQuery.eq('client_en_sommeil', true)
+            if (selectedSommeil === 'NON') groupQuery = groupQuery.eq('client_en_sommeil', false)
+
+            if (!access.allowedAgences.length && selectedAgence) groupQuery = groupQuery.ilike('agences', `%${selectedAgence}%`)
+            if (!access.allowedCollaborateurs.length && selectedRepresentant) groupQuery = groupQuery.ilike('representants', `%${selectedRepresentant}%`)
+
+            const response = await groupQuery.limit(20000)
+            if (response.error) throw response.error
+            return (response.data ?? []) as unknown as GroupeFraisPort[]
+          },
           isCurrentLoad,
         )
 
@@ -1331,7 +1229,7 @@ export default function PortefeuilleLivraisonPage() {
       setSelectedDocumentKeyForLines(null)
       setErrorMessage(formatLoadError(error))
     } finally {
-      if (isCurrentLoad()) { setLoading(false); setLoadingInfo('') }
+      if (isCurrentLoad()) setLoading(false)
     }
   }
 
@@ -1342,7 +1240,7 @@ export default function PortefeuilleLivraisonPage() {
 
   useEffect(() => {
     if (access.loading) return
-    const timer = window.setTimeout(() => { void loadData() }, 300)
+    const timer = window.setTimeout(() => { void loadData() }, 150)
     return () => window.clearTimeout(timer)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
@@ -1359,7 +1257,6 @@ export default function PortefeuilleLivraisonPage() {
     selectedAgence,
     selectedFamilleMacro,
     selectedSommeil,
-    selectedControle,
   ])
 
   // Couverture stock indexée par id de ligne (uuid de v_portefeuille_livraison_lignes).
@@ -1475,52 +1372,31 @@ export default function PortefeuilleLivraisonPage() {
     Array.from(new Set<string>([...documents.map((doc) => doc.depot_entete), ...groupesFraisPort.flatMap((group) => String(group.depots || '').split(',').map((v) => v.trim()))].filter((v): v is string => Boolean(v)))).sort((a, b) => a.localeCompare(b, 'fr')),
   [documents, groupesFraisPort])
 
-  // (2026-10-25) Groupes BL dans le périmètre des filtres secondaires.
-  // Famille macro et référence entête ne sont pas portées par les groupes :
-  // on garde les groupes qui contiennent au moins un BL retenu par ces filtres.
-  const clesGroupesDocuments = useMemo<Set<string> | null>(() => {
-    const referenceSearch = referenceEnteteSearch.trim().toLowerCase()
-    if (!selectedFamilleMacro && !referenceSearch) return null
-    return new Set(
-      documents
-        .filter((doc) => doc.type_document === 'BL' && doc.cle_groupe_frais_port && (!referenceSearch || doc.reference_entete.toLowerCase().includes(referenceSearch)))
-        .map((doc) => doc.cle_groupe_frais_port),
-    )
-  }, [documents, selectedFamilleMacro, referenceEnteteSearch])
-
-  const groupesPerimetre = useMemo(() => {
+  const groupesFiltresControle = useMemo(() => {
     const lieuSearch = lieuLivraisonSearch.trim().toLowerCase()
     return groupesFraisPort.filter((group) => {
+      if (selectedControle === 'FRAIS_PORT_MANQUANT' && group.statut_groupe !== 'FRAIS_PORT_MANQUANT') return false
+      if (selectedControle === 'FRAIS_PORT_A_SUPPRIMER' && group.nb_bl_a_supprimer <= 0) return false
+      if (selectedControle === 'AUTRES_ANOMALIES' && (!isControlAnomaly(group.statut_groupe) || group.statut_groupe === 'FRAIS_PORT_MANQUANT' || group.nb_bl_a_supprimer > 0)) return false
+      if (selectedControle === 'ANOMALIES' && !isControlAnomaly(group.statut_groupe)) return false
+      if (!['TOUS', 'ANOMALIES', 'FRAIS_PORT_MANQUANT', 'FRAIS_PORT_A_SUPPRIMER', 'AUTRES_ANOMALIES'].includes(selectedControle) && group.statut_groupe !== selectedControle) return false
       if (selectedExpedition && group.expedition !== selectedExpedition) return false
       if (selectedDepotEntete && !scopeTextMatchesAllowed(group.depots, [selectedDepotEntete])) return false
-      if (lieuSearch && !String(group.lieu_livraison || '').toLowerCase().includes(lieuSearch)) return false
-      if (clesGroupesDocuments && !clesGroupesDocuments.has(group.cle_groupe_frais_port)) return false
+      if (lieuSearch && !group.lieu_livraison.toLowerCase().includes(lieuSearch)) return false
       return true
     })
-  }, [groupesFraisPort, selectedExpedition, selectedDepotEntete, lieuLivraisonSearch, clesGroupesDocuments])
-
-  const groupesFiltresControle = useMemo(() => groupesPerimetre.filter((group) => {
-    if (selectedControle === 'FRAIS_PORT_MANQUANT' && group.statut_groupe !== 'FRAIS_PORT_MANQUANT') return false
-    if (selectedControle === 'FRAIS_PORT_A_SUPPRIMER' && group.nb_bl_a_supprimer <= 0) return false
-    if (selectedControle === 'AUTRES_ANOMALIES' && (!isControlAnomaly(group.statut_groupe) || group.statut_groupe === 'FRAIS_PORT_MANQUANT' || group.nb_bl_a_supprimer > 0)) return false
-    if (selectedControle === 'ANOMALIES' && !isControlAnomaly(group.statut_groupe)) return false
-    if (!CONTROL_MODES_SPECIAUX.includes(selectedControle) && group.statut_groupe !== selectedControle) return false
-    return true
-  }), [groupesPerimetre, selectedControle])
+  }, [groupesFraisPort, selectedControle, selectedExpedition, selectedDepotEntete, lieuLivraisonSearch])
 
   const sortedGroupesFraisPort = useMemo(() => sortArray(groupesFiltresControle, groupSort), [groupesFiltresControle, groupSort])
 
-  /** Tous les filtres de la page appliqués à un document. Les cartes KPI
-   * ignorent leur propre filtre (ignoreRetard / ignoreCouverture) pour que
-   * leur compteur reste stable quand on l'active ou le désactive. */
-  const docPasseFiltres = useMemo(() => {
+  const documentsFiltresControle = useMemo(() => {
     const referenceSearch = referenceEnteteSearch.trim().toLowerCase()
     const lieuSearch = lieuLivraisonSearch.trim().toLowerCase()
-    return (doc: DocumentPortefeuille, opts: { ignoreRetard?: boolean; ignoreCouverture?: boolean } = {}) => {
-      if (!opts.ignoreRetard && cdcRetardOnly && !isCdcEnRetard(doc)) return false
+    return documents.filter((doc) => {
+      if (cdcRetardOnly && !isCdcEnRetard(doc)) return false
       // Filtre couverture stock : ne concerne que les CDC ; les autres types
       // restent affichés uniquement quand le filtre est sur "Tous".
-      if (!opts.ignoreCouverture && selectedCouverture !== 'TOUS') {
+      if (selectedCouverture !== 'TOUS') {
         if (doc.type_document !== 'CDC') return false
         if (!couvertureFilterMatches(selectedCouverture, doc.couv_statut_doc, doc.couv_nb_arret_appro > 0)) return false
       }
@@ -1529,16 +1405,14 @@ export default function PortefeuilleLivraisonPage() {
       if (selectedControle === 'FRAIS_PORT_A_SUPPRIMER' && doc.action_recommandee !== 'SUPPRIMER') return false
       if (selectedControle === 'AUTRES_ANOMALIES' && doc.action_recommandee !== 'VERIFIER') return false
       if (selectedControle === 'ANOMALIES' && !isDirectControlAction(doc.action_recommandee)) return false
-      if (!CONTROL_MODES_SPECIAUX.includes(selectedControle) && doc.statut_controle !== selectedControle) return false
+      if (!['TOUS', 'ANOMALIES', 'FRAIS_PORT_MANQUANT', 'FRAIS_PORT_A_SUPPRIMER', 'AUTRES_ANOMALIES'].includes(selectedControle) && doc.statut_controle !== selectedControle) return false
       if (selectedExpedition && doc.expedition !== selectedExpedition) return false
       if (selectedDepotEntete && doc.depot_entete !== selectedDepotEntete) return false
       if (referenceSearch && !doc.reference_entete.toLowerCase().includes(referenceSearch)) return false
       if (lieuSearch && !doc.lieu_livraison.toLowerCase().includes(lieuSearch)) return false
       return true
-    }
-  }, [cdcRetardOnly, selectedCouverture, selectedGroupKey, selectedControle, selectedExpedition, selectedDepotEntete, referenceEnteteSearch, lieuLivraisonSearch])
-
-  const documentsFiltresControle = useMemo(() => documents.filter((doc) => docPasseFiltres(doc)), [documents, docPasseFiltres])
+    })
+  }, [documents, cdcRetardOnly, selectedCouverture, selectedGroupKey, selectedControle, selectedExpedition, selectedDepotEntete, referenceEnteteSearch, lieuLivraisonSearch])
 
   const moisLivraison = useMemo(() => {
     const set = new Set<string>()
@@ -1634,14 +1508,7 @@ export default function PortefeuilleLivraisonPage() {
     return () => { window.dispatchEvent(new CustomEvent('cegeclim:status-scope-change', { detail: { active: false, agences: [], collaborateurs: [] } })) }
   }, [access.allowedAgences.join('|'), access.allowedCollaborateurs.join('|'), selectedAgence, selectedRepresentant])
 
-  // Liste des familles macro : on garde celles déjà rencontrées pour que la
-  // liste ne se réduise pas à la seule famille choisie une fois le filtre posé.
-  const famillesConnuesRef = useRef<Set<string>>(new Set())
-  const famillesMacro = useMemo(() => {
-    for (const l of lignes) famillesConnuesRef.current.add(safeText(l.famille_macro, 'Sans famille macro'))
-    if (selectedFamilleMacro) famillesConnuesRef.current.add(selectedFamilleMacro)
-    return Array.from(famillesConnuesRef.current).sort()
-  }, [lignes, selectedFamilleMacro])
+  const famillesMacro = useMemo(() => Array.from(new Set(lignes.map((l) => safeText(l.famille_macro, 'Sans famille macro')))).sort(), [lignes])
 
   const selectedDocuments = useMemo(() => {
     if (!selection) return documentsFiltresControle
@@ -1758,22 +1625,20 @@ export default function PortefeuilleLivraisonPage() {
 
   const totalGeneral = useMemo(() => documentsFiltresControle.reduce((acc, doc) => { acc.nb_documents += 1; acc.montant_ht += doc.montant_ht; return acc }, { nb_documents: 0, montant_ht: 0 }), [documentsFiltresControle])
 
-  // KPI "CDC liv < M-2" : calculé sur les documents retenus par tous les
-  // filtres de la page sauf le sien, pour que le compteur reste stable quand
-  // on active ou désactive le filtre depuis la carte.
+  // KPI "CDC liv < M-2" : calculé sur tous les documents chargés (avant le
+  // filtre cdcRetardOnly) pour que le compteur reste stable quand on active
+  // ou désactive le filtre depuis la carte.
   const cdcRetardKpi = useMemo(() => documents.reduce((acc, doc) => {
-    if (!docPasseFiltres(doc, { ignoreRetard: true })) return acc
     if (!isCdcEnRetard(doc)) return acc
     acc.nb_documents += 1
     acc.montant_ht += doc.montant_ht
     return acc
-  }, { nb_documents: 0, montant_ht: 0 }), [documents, docPasseFiltres])
+  }, { nb_documents: 0, montant_ht: 0 }), [documents])
 
-  // KPI "CDC non servables" : même principe (tous les filtres sauf le filtre
-  // couverture lui-même).
+  // KPI "CDC non servables" : même principe, sur les documents chargés
+  // (avant filtre couverture), pour rester stable quand on bascule le filtre.
   const couvertureKpi = useMemo(() => documents.reduce((acc, doc) => {
     if (doc.type_document !== 'CDC') return acc
-    if (!docPasseFiltres(doc, { ignoreCouverture: true })) return acc
     if (doc.couv_nb_lignes_controlees > 0) acc.nb_controles += 1
     if (doc.couv_nb_a_couvrir_appro > 0) acc.nb_a_couvrir_appro += 1
     if (!isCouvertureNonServable(doc.couv_statut_doc)) return acc
@@ -1784,17 +1649,15 @@ export default function PortefeuilleLivraisonPage() {
     if (doc.couv_statut_doc === 'RECEPTION_TARDIVE') acc.nb_tardive += 1
     if (doc.couv_nb_arret_appro > 0) acc.nb_arret_appro += 1
     return acc
-  }, { nb_documents: 0, nb_controles: 0, montant_ht: 0, montant_non_servable_ht: 0, nb_rupture: 0, nb_tardive: 0, nb_arret_appro: 0, nb_a_couvrir_appro: 0 }), [documents, docPasseFiltres])
+  }, { nb_documents: 0, nb_controles: 0, montant_ht: 0, montant_non_servable_ht: 0, nb_rupture: 0, nb_tardive: 0, nb_arret_appro: 0, nb_a_couvrir_appro: 0 }), [documents])
 
-  // KPI contrôle BL : sur les groupes du périmètre (expédition, dépôt, lieu,
-  // famille, référence), avant le filtre de mode de contrôle des cartes.
-  const controleKpis = useMemo(() => groupesPerimetre.reduce((acc, group) => {
+  const controleKpis = useMemo(() => groupesFraisPort.reduce((acc, group) => {
     if (group.statut_groupe === 'FRAIS_PORT_MANQUANT') acc.portManquant += 1
     acc.blASupprimer += Number(group.nb_bl_a_supprimer || 0)
     if (isControlAnomaly(group.statut_groupe) && group.statut_groupe !== 'FRAIS_PORT_MANQUANT' && group.nb_bl_a_supprimer <= 0) acc.autresAnomalies += 1
     acc.totalActions += Number(group.nb_actions || 0)
     return acc
-  }, { portManquant: 0, blASupprimer: 0, autresAnomalies: 0, totalActions: 0 }), [groupesPerimetre])
+  }, { portManquant: 0, blASupprimer: 0, autresAnomalies: 0, totalActions: 0 }), [groupesFraisPort])
 
   const showCdcRetardCard = isCdcSelected
   const showCouvertureCard = isCdcSelected
@@ -1805,15 +1668,17 @@ export default function PortefeuilleLivraisonPage() {
   function toggleType(type: string) {
     setSelectedTypes((current) => {
       if (current.includes(type)) { const next = current.filter((item) => item !== type); return next.length ? next : current }
+      if (type === 'BL' && !dateLivraisonFinModifiee) { setDateLivraisonFin(''); setDateLivraisonFinModifiee(false) }
       return [...current, type]
     })
   }
 
   useEffect(() => {
     if (isBlSelected) return
+    if (!dateLivraisonFinModifiee && !dateLivraisonFin) setDateLivraisonFin(getYesterdayIsoDate())
     setSelectedControle('TOUS'); setSelectedGroupKey(null); setSelectedExpedition(''); setSelectedDepotEntete('')
     setReferenceEnteteSearch(''); setLieuLivraisonSearch(''); setSelection(null); setSelectedDocumentKeyForLines(null)
-  }, [isBlSelected])
+  }, [isBlSelected, dateLivraisonFin, dateLivraisonFinModifiee])
 
   function toggleDocumentSort(key: keyof DocumentPortefeuille) {
     setDocumentSort((current) => !current || current.key !== key ? { key, direction: 'asc' } : { key, direction: current.direction === 'asc' ? 'desc' : 'asc' })
@@ -1823,19 +1688,6 @@ export default function PortefeuilleLivraisonPage() {
   }
   function toggleLigneSort(key: keyof LigneDetail) {
     setLigneSort((current) => !current || current.key !== key ? { key, direction: 'asc' } : { key, direction: current.direction === 'asc' ? 'desc' : 'asc' })
-  }
-
-  function togglePromessesPanel() {
-    if (promessesOpen) {
-      // Fermeture : on recharge la liste pour que la carte tienne compte des
-      // actions saisies dans le panneau.
-      setPromessesOpen(false)
-      setPromessesPanelCount(null)
-      void loadPromesses()
-      return
-    }
-    setPromessesOpen(true)
-    window.setTimeout(() => promessesPanelRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 200)
   }
 
   async function exportExcel() {
@@ -1880,11 +1732,11 @@ export default function PortefeuilleLivraisonPage() {
     if (isCdcSelected) XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(couvertureExport), 'Non completes a date liv')
     if (isCdcSelected) {
       // (2026-10-21) Onglets « Date de livraison interdite » : même liste et même périmètre que le panneau dédié.
-      // (2026-10-25) + mêmes filtres de dates que le panneau.
       try {
-        const commandesInterdites = filtrerPromessesParDates(
-          commandesDansPerimetre(await fetchPromessesInterdites(), promessesAgenceFiltre, promessesRepresentantFiltre),
-          promessesFiltreDates,
+        const commandesInterdites = commandesDansPerimetre(
+          await fetchPromessesInterdites(),
+          access.allowedAgences.length > 0 ? '' : selectedAgence,
+          access.allowedCollaborateurs.length > 0 ? '' : selectedRepresentant,
         )
         XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(promessesExportCommandes(commandesInterdites)), 'Dates interdites')
         XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(promessesExportLignes(commandesInterdites)), 'Dates interdites detail')
@@ -1906,15 +1758,14 @@ export default function PortefeuilleLivraisonPage() {
                 Contrôle groupé des BL : un seul forfait par Date BL / N° tiers / Mode d'expédition / Lieu de livraison. Les BL à corriger sont identifiés avec une action Ajouter, Supprimer ou Vérifier.
                 {' '}Les CDC en retard de livraison ({getCdcRetardDescription()}) sont surlignés en rouge.
                 {' '}Couverture stock des CDC : stock global tous dépôts + réceptions fournisseurs attendues (commandes SAGE non réceptionnées), besoins servis par date de livraison puis date de création ; les commandes fournisseurs en retard ou sans date sont supposées reçues demain. Une ligne livrable après la période figée (aujourd'hui + délai d'appro de la référence) n'est pas en alerte : elle est « à couvrir par appro ». Dates de prochaine dispo par référence : écran Références en pénurie.
-                {' '}Les dates et les listes de sélection s'appliquent aux cartes et à tous les tableaux ci-dessous.
               </p>
               <div className="mt-2 inline-flex rounded-full border border-blue-200 bg-blue-50 px-2.5 py-1 text-xs font-semibold text-blue-800">
-                Version 2026-10-26 v4.1 — sans borne de livraison fin par défaut · chargement complet paginé · filtres appliqués aux cartes, au contrôle BL et aux dates interdites · contrôle frais de port groupé · {CDC_RETARD_LABEL} · commandes non complètes à la date de livraison client · pastille arrêt appro · période figée d'appro
+                Version 2026-10-20 v3.9 — contrôle frais de port groupé · {CDC_RETARD_LABEL} · commandes non complètes à la date de livraison client · dates de livraison interdites · pastille arrêt appro · période figée d'appro
               </div>
             </div>
             <div className="flex flex-wrap gap-2">
-              <button type="button" onClick={() => { void loadData(); void loadPromesses() }} disabled={loading} className="rounded-xl bg-slate-900 px-4 py-2 text-sm font-medium text-white shadow-sm disabled:opacity-50">
-                {loading ? `Chargement${loadingInfo ? ` · ${loadingInfo}` : ''}…` : 'Actualiser'}
+              <button type="button" onClick={loadData} disabled={loading} className="rounded-xl bg-slate-900 px-4 py-2 text-sm font-medium text-white shadow-sm disabled:opacity-50">
+                {loading ? 'Chargement...' : 'Actualiser'}
               </button>
               <button type="button" onClick={() => void exportExcel()} disabled={loading || lignes.length === 0} className="rounded-xl bg-emerald-600 px-4 py-2 text-sm font-medium text-white shadow-sm disabled:opacity-50">
                 Export Excel
@@ -2045,25 +1896,25 @@ export default function PortefeuilleLivraisonPage() {
                 </label>
                 <label className="space-y-1">
                   <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">Expédition</span>
-                  <select value={selectedExpedition} onChange={(e) => { setSelectedExpedition(e.target.value); applyDetailSelection(null) }} className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm">
+                  <select value={selectedExpedition} onChange={(e) => setSelectedExpedition(e.target.value)} className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm">
                     <option value="">Toutes</option>
                     {expeditions.map((v) => <option key={v} value={v}>{v}</option>)}
                   </select>
                 </label>
                 <label className="space-y-1">
                   <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">Dépôt entête</span>
-                  <select value={selectedDepotEntete} onChange={(e) => { setSelectedDepotEntete(e.target.value); applyDetailSelection(null) }} className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm">
+                  <select value={selectedDepotEntete} onChange={(e) => setSelectedDepotEntete(e.target.value)} className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm">
                     <option value="">Tous</option>
                     {depotsEntete.map((v) => <option key={v} value={v}>{v}</option>)}
                   </select>
                 </label>
                 <label className="space-y-1">
                   <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">Référence entête</span>
-                  <input value={referenceEnteteSearch} onChange={(e) => { setReferenceEnteteSearch(e.target.value); applyDetailSelection(null) }} placeholder="Contient…" className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm" />
+                  <input value={referenceEnteteSearch} onChange={(e) => setReferenceEnteteSearch(e.target.value)} placeholder="Contient…" className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm" />
                 </label>
                 <label className="space-y-1">
                   <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">Lieu de livraison</span>
-                  <input value={lieuLivraisonSearch} onChange={(e) => { setLieuLivraisonSearch(e.target.value); applyDetailSelection(null) }} placeholder="Contient…" className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm" />
+                  <input value={lieuLivraisonSearch} onChange={(e) => setLieuLivraisonSearch(e.target.value)} placeholder="Contient…" className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm" />
                 </label>
               </div>
             </div>
@@ -2093,7 +1944,6 @@ export default function PortefeuilleLivraisonPage() {
           <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
             <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Documents affichés</div>
             <div className="mt-1 text-2xl font-semibold">{totalGeneral.nb_documents.toLocaleString('fr-FR')}</div>
-            <div className="mt-1 text-[11px] text-slate-500">{lignes.length.toLocaleString('fr-FR')} ligne(s) chargée(s)</div>
           </div>
           <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
             <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Montant HT</div>
@@ -2141,7 +1991,10 @@ export default function PortefeuilleLivraisonPage() {
           {showPromessesCard && (
             <button
               type="button"
-              onClick={togglePromessesPanel}
+              onClick={() => {
+                setPromessesOpen((v) => !v)
+                if (!promessesOpen) window.setTimeout(() => promessesPanelRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 200)
+              }}
               title={promessesOpen ? 'Masquer la liste des commandes à date de livraison interdite' : `Afficher les CDC créées depuis ${PROMESSES_FENETRE_JOURS} jours dont la date de livraison promise ne tient pas compte du stock disponible`}
               className={[
                 'rounded-2xl border p-4 text-left shadow-sm',
@@ -2158,7 +2011,7 @@ export default function PortefeuilleLivraisonPage() {
             <>
               <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
                 <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Groupes BL contrôlés</div>
-                <div className="mt-1 text-2xl font-semibold">{groupesPerimetre.length.toLocaleString('fr-FR')}</div>
+                <div className="mt-1 text-2xl font-semibold">{groupesFraisPort.length.toLocaleString('fr-FR')}</div>
               </div>
               <button type="button" onClick={() => openBlControl('FRAIS_PORT_MANQUANT')} className={['rounded-2xl border p-4 text-left shadow-sm', controleKpis.portManquant > 0 ? 'border-red-300 bg-red-50' : 'border-emerald-200 bg-white'].join(' ')}>
                 <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Groupes sans port</div>
@@ -2179,10 +2032,9 @@ export default function PortefeuilleLivraisonPage() {
         {showPromessesCard && promessesOpen && (
           <div ref={promessesPanelRef} className="scroll-mt-24">
             <CdcPromessesInterdites
-              agenceFiltre={promessesAgenceFiltre}
-              representantFiltre={promessesRepresentantFiltre}
-              filtreDates={promessesFiltreDates}
-              onCountChange={setPromessesPanelCount}
+              agenceFiltre={access.allowedAgences.length > 0 ? '' : selectedAgence}
+              representantFiltre={access.allowedCollaborateurs.length > 0 ? '' : selectedRepresentant}
+              onCountChange={setPromessesCount}
             />
           </div>
         )}
