@@ -7,6 +7,9 @@
 // ?promesse=interdite). Une ligne par CDC × référence, mêmes colonnes que le
 // détail de l'écran « Reconstruction du stock projeté » ; une action +
 // commentaire par CDC (cellule fusionnée). Voir lib/cdcPromesses.ts.
+// (2026-10-25) Le panneau suit aussi les filtres de dates du portefeuille
+// (création début / fin sur la date de création, livraison début / fin sur la
+// date de livraison promise) via la prop filtreDates.
 // ============================================================================
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
@@ -39,6 +42,41 @@ import {
 
 type FiltreVerdict = 'TOUS' | 'INTENABLE' | 'CREE_RETARD'
 
+/** Bornes de dates venant des filtres du Portefeuille livraison (ISO AAAA-MM-JJ, vide = pas de borne). */
+export type PromessesFiltreDates = {
+  creationDebut?: string
+  creationFin?: string
+  livraisonDebut?: string
+  livraisonFin?: string
+}
+
+export function promessesFiltreDatesActif(f?: PromessesFiltreDates | null) {
+  return Boolean(f && (f.creationDebut || f.creationFin || f.livraisonDebut || f.livraisonFin))
+}
+
+/** Applique les bornes de dates du portefeuille : date de création de la CDC
+ * et date de livraison promise (échéance). */
+export function filtrerPromessesParDates(commandes: PromesseCommande[], f?: PromessesFiltreDates | null): PromesseCommande[] {
+  if (!promessesFiltreDatesActif(f)) return commandes
+  return commandes.filter((c) => {
+    const creation = String(c.date_creation || '').slice(0, 10)
+    const echeance = String(c.echeance || '').slice(0, 10)
+    if (f!.creationDebut && (!creation || creation < f!.creationDebut)) return false
+    if (f!.creationFin && (!creation || creation > f!.creationFin)) return false
+    if (f!.livraisonDebut && (!echeance || echeance < f!.livraisonDebut)) return false
+    if (f!.livraisonFin && (!echeance || echeance > f!.livraisonFin)) return false
+    return true
+  })
+}
+
+function libelleFiltreDates(f?: PromessesFiltreDates | null) {
+  if (!promessesFiltreDatesActif(f)) return ''
+  const parts: string[] = []
+  if (f!.creationDebut || f!.creationFin) parts.push(`créées ${f!.creationDebut ? `du ${formatDateCourte(f!.creationDebut)}` : ''}${f!.creationFin ? ` au ${formatDateCourte(f!.creationFin)}` : ''}`.trim())
+  if (f!.livraisonDebut || f!.livraisonFin) parts.push(`livraison promise ${f!.livraisonDebut ? `du ${formatDateCourte(f!.livraisonDebut)}` : ''}${f!.livraisonFin ? ` au ${formatDateCourte(f!.livraisonFin)}` : ''}`.trim())
+  return parts.join(' · ')
+}
+
 const VERDICT_CLASS: Record<PromesseVerdict, string> = {
   OK: 'border-emerald-300 bg-emerald-50 text-emerald-800',
   INTENABLE: 'border-rose-300 bg-rose-50 text-rose-800',
@@ -58,12 +96,15 @@ function norm(v: string | null | undefined) {
 export default function CdcPromessesInterdites({
   agenceFiltre,
   representantFiltre,
+  filtreDates,
   onCountChange,
 }: {
   /** Agence choisie dans les filtres du portefeuille (vide = toutes). */
   agenceFiltre?: string
   /** Représentant choisi dans les filtres du portefeuille (vide = tous). */
   representantFiltre?: string
+  /** Bornes de dates choisies dans les filtres du portefeuille. */
+  filtreDates?: PromessesFiltreDates | null
   /** Nombre de CDC à traiter (à traiter + non confirmées) dans le périmètre affiché. */
   onCountChange?: (n: number) => void
 }) {
@@ -95,11 +136,11 @@ export default function CdcPromessesInterdites({
 
   const commandes = useMemo(() => grouperParCommande(lignes).filter((c) => c.lignes.length > 0 || c.statut_traitement !== 'resolue'), [lignes])
 
-  const commandesPerimetre = useMemo(() => commandes.filter((c) => {
+  const commandesPerimetre = useMemo(() => filtrerPromessesParDates(commandes.filter((c) => {
     if (agenceFiltre && norm(c.agence) !== norm(agenceFiltre)) return false
     if (representantFiltre && norm(c.representant) !== norm(representantFiltre) && !c.lignes.some((l) => norm(l.collaborateur) === norm(representantFiltre))) return false
     return true
-  }), [commandes, agenceFiltre, representantFiltre])
+  }), filtreDates), [commandes, agenceFiltre, representantFiltre, filtreDates])
 
   const compteurs = useMemo(() => {
     const out = { aTraiter: 0, nonConfirmee: 0, enAttente: 0, intenable: 0, retard: 0, pieces: 0 }
@@ -130,6 +171,7 @@ export default function CdcPromessesInterdites({
   }, [commandesPerimetre, masquerTraitees, filtreVerdict, recherche])
 
   const calculeLe = useMemo(() => lignes.reduce<string | null>((m, l) => (l.calcule_le && (!m || l.calcule_le > m) ? l.calcule_le : m), null), [lignes])
+  const filtreDatesLibelle = libelleFiltreDates(filtreDates)
 
   function exporter() {
     const wb = XLSX.utils.book_new()
@@ -148,6 +190,11 @@ export default function CdcPromessesInterdites({
             {' '}Ne sont pas retenues, comme dans le reste du portefeuille : les références non gérées en stock, et les commandes dont la rupture créée tombe après le délai d'appro (un appro passé à la saisie la couvre).
             {' '}Pour chaque commande : <b>décaler la date</b> (au plus tôt la date proposée, qui suppose au besoin un appro lancé le jour même) ou <b>déprioriser une autre commande</b> de votre portefeuille, avec un commentaire. L’action est vérifiée à la synchro suivante.
           </p>
+          {filtreDatesLibelle && (
+            <div className="mt-2 inline-flex rounded-full border border-blue-200 bg-blue-50 px-2.5 py-1 text-xs font-semibold text-blue-800">
+              Filtres de dates du portefeuille appliqués : {filtreDatesLibelle}
+            </div>
+          )}
           <div className="mt-2 flex flex-wrap gap-2 text-xs font-semibold">
             <span className="rounded-full border border-rose-300 bg-rose-50 px-2.5 py-1 text-rose-800">{compteurs.aTraiter} à traiter</span>
             <span className="rounded-full border border-red-400 bg-red-100 px-2.5 py-1 text-red-900" title={STATUT_INFO.non_confirmee.aide}>{compteurs.nonConfirmee} non confirmée(s)</span>
@@ -269,7 +316,7 @@ export default function CdcPromessesInterdites({
                 })
               })}
               {commandesAffichees.length === 0 && (
-                <tr><td colSpan={12} className="px-3 py-6 text-center text-sm text-slate-500">{commandesPerimetre.length === 0 ? 'Aucune commande à date de livraison interdite dans votre périmètre.' : 'Aucune commande pour ces filtres.'}</td></tr>
+                <tr><td colSpan={12} className="px-3 py-6 text-center text-sm text-slate-500">{commandesPerimetre.length === 0 ? (filtreDatesLibelle ? 'Aucune commande à date de livraison interdite avec ces filtres de dates.' : 'Aucune commande à date de livraison interdite dans votre périmètre.') : 'Aucune commande pour ces filtres.'}</td></tr>
               )}
             </tbody>
           </table>
