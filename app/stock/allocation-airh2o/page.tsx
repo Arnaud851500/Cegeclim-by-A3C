@@ -93,8 +93,8 @@ function messageErreur(e: unknown): string {
 const n0 = (v: unknown) => Number(v ?? 0) || 0
 
 function libBloc(b: string): string {
-  if (b === 'ANGLET') return 'ANGLET - Hors J.It.'
-  if (b === 'JITHURBIDE') return 'Julien. Ith + SAV / JMLADEUIX'   // 25/10/2026 : blocs cumulés (demande d'Arnaud)
+  if (b === 'ANGLET') return 'ANGLET'
+  if (b === 'JITHURBIDE') return 'SAV / JMLADEUIX'   // 25/10/2026 : bloc cumulé, libellé demandé par Arnaud
   if (b === TOTAL) return 'TOTAL VENTES'
   return b
 }
@@ -555,7 +555,7 @@ function AllocationAirH2O() {
             </div>
             <span className="mx-1 h-6 w-px bg-[#E5E1D8]" />
             {([['tableau', 'Tableau d’allocation'], ['cdc', `CDC à livrer (${annee} + ${Number(annee) + 1})`], ['bl', `BL ${lm1} / ${lm}`],
-              ['recentes', 'CDC des 7 derniers jours'], ['julien', 'Julien Ithurbide'], ['arrivages', 'Arrivages']] as [Onglet, string][]).map(([k, l]) => (
+              ['recentes', 'CDC des 7 derniers jours'], ['julien', 'SAV / JMLADEUIX'], ['arrivages', 'Arrivages']] as [Onglet, string][]).map(([k, l]) => (
               <button key={k} type="button" onClick={() => setOnglet(k)}
                 className={`h-8 rounded-lg px-3 text-[12.5px] font-bold ${onglet === k ? 'bg-[#1D5C86] text-white' : 'border border-[#E5E1D8] bg-white text-[#3A362E] hover:border-[#1D5C86]'}`}>{l}</button>
             ))}
@@ -591,7 +591,7 @@ function AllocationAirH2O() {
             rowCls={(l) => (l.nature.startsWith('BL') && (l.anciennesDues ?? 0) > 0 ? 'bg-[#FDE2DF]' : '')} />
         )}
         {d && onglet === 'julien' && (
-          <ListeDetail titre="Julien Ithurbide — clients dont il est le représentant sur la fiche" sousTitre="CDC à livrer, en préparation et livrées"
+          <ListeDetail titre="SAV / JMLADEUIX" sousTitre="CDC à livrer, en préparation et livrées"
             cols={colsJulien} rows={listeJulien} cle={(l, i) => `${l.piece}-${l.ref}-${i}`} totalQte={sommeQ(listeJulien)} />
         )}
         {d && onglet === 'arrivages' && (
@@ -716,7 +716,7 @@ function AllocationAirH2O() {
             <span className="w-full text-[10.5px] text-[#8A8474]">
               Dispo (Phy-PL) = stock réel tous dépôts − PL. Arrivage = CDF SAGE attendues jusqu’au 31/12 (survol : détail par mois, au-delà compris). CDC Liv = CDC à livrer d’ici le 31/12, retards compris.
               BL = livraisons datées du mois (facturées ou non, hors retours). Agence = agence du représentant de la fiche client (client NON AFFECTE : collaborateur de la pièce) ;
-              « ANGLET - Hors J.It. » exclut les clients de Julien Ithurbide, regroupés dans « Julien. Ith ». Un clic sur un chiffre ouvre le détail des lignes.
+              Un clic sur un chiffre ouvre le détail des lignes.
             </span>
           </section>
         )}
