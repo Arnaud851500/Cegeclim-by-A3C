@@ -25,6 +25,8 @@
  * du mois, CDC créées depuis 7 jours (livrées, en préparation ou à livrer, avec les CDC plus anciennes passées
  * derrière), Julien Ithurbide, Arrivages par mois — chacun filtrable par agence / recherche et exportable.
  *
+ * 25/10/2026 : le bloc « Julien. Ith » cumule SAV / JMLADEUIX (CDC, BL, PL et allocations), côté base.
+ *
  * Sources : RPC get_allocation_ro / set_allocation_ro (supabase/sql/20261024_allocation_airh2o.sql).
  */
 
@@ -92,7 +94,7 @@ const n0 = (v: unknown) => Number(v ?? 0) || 0
 
 function libBloc(b: string): string {
   if (b === 'ANGLET') return 'ANGLET - Hors J.It.'
-  if (b === 'JITHURBIDE') return 'Julien. Ith'
+  if (b === 'JITHURBIDE') return 'Julien. Ith + SAV / JMLADEUIX'   // 25/10/2026 : blocs cumulés (demande d'Arnaud)
   if (b === TOTAL) return 'TOTAL VENTES'
   return b
 }

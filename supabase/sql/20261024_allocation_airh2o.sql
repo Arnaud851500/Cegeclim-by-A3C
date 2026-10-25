@@ -217,3 +217,8 @@ grant execute on function public.get_allocation_ro() to authenticated;
 --     union select distinct a.bloc from stock_alloc_ro a
 -- Allocations initiales saisies d'après le tableau d'Arnaud du 24/10/2026
 -- (updated_by = 'tableau Arnaud 24/10').
+
+-- ─── 25/10/2026 (appliqué en production) ────────────────────────────────────
+-- Bloc « Julien. Ith » cumulé avec SAV/JMLADEUIX : dans get_allocation_ro,
+--   case when la.representant = 'AAITHURBIDE' or la.agence = 'SAV/JMLADEUIX' then 'JITHURBIDE' else la.agence end as bloc
+-- et allocations SAV/JMLADEUIX ajoutées à celles du bloc JITHURBIDE puis supprimées.
