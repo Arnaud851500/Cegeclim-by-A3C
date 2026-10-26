@@ -632,7 +632,7 @@ function AllocationAirH2O() {
 
         {erreur && (
           <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-[12.5px] font-semibold text-red-800">
-            {/Accès réservé/.test(erreur) ? 'Aucune agence n’est rattachée à votre accès (périmètre agences dans Autorisations) : l’écran ne peut pas être filtré.' : erreur}
+            {/Accès réservé/.test(erreur) ? 'Aucune agence n’est rattachée à votre accès (périmètre agences, agence objectif ou collaborateurs dans Autorisations) : l’écran ne peut pas être filtré.' : erreur}
             {/get_allocation_ro|does not exist/.test(erreur) ? ' — la migration 20261026_allocation_airh2o_agences.sql est-elle appliquée ?' : ''}
           </div>
         )}

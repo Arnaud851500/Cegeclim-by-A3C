@@ -120,7 +120,7 @@ const PERMISSION_GROUPS: Array<{
     items: [
       { key: 'can_dashboard', label: 'Tableaux de bord', description: 'Indicateurs, portefeuille, SMC, Focus mois, appros.' },
       { key: 'can_stocks', label: 'Stocks', description: 'Projection et disponibilité des stocks.' },
-      { key: 'can_allocation_airh2o', label: 'Allocation AirH2O 600 / 800', description: 'Allocations par agence, limitées aux agences du périmètre de la personne (onglet Utilisateurs), en lecture, sans les colonnes de stock.' },
+      { key: 'can_allocation_airh2o', label: 'Allocation AirH2O 600 / 800', description: 'Allocations de l’agence rattachée à la personne (périmètre agences, sinon agence objectif, sinon agence de ses collaborateurs), en lecture, sans les colonnes de stock. Accordé aussi automatiquement par le droit Tableau de bord (can_dashboard).' },
       { key: 'can_activites', label: 'Activités', description: 'Écrans de suivi d’activité.' },
       { key: 'can_todo', label: 'Todo List', description: 'Liste des actions à traiter.' },
       { key: 'can_documents', label: 'Documents', description: 'Bibliothèque documentaire.' },

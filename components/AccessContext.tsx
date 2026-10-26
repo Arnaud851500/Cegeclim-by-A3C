@@ -406,8 +406,9 @@ export function AccessProvider({ children }: { children: React.ReactNode }) {
     setLoading(true)
     const result = await fetchAccess()
     setEmail(result.email)
-    // Allocation AirH2O : vue complète (liste nominative) ou vue agence (droit de profil).
-    setRights({ ...result.rights, can_allocation_ro: peutVoirAllocationRo(result.email) || result.rights.can_allocation_airh2o })
+    // Allocation AirH2O : vue complète + saisie (liste nominative) ou vue agence en lecture
+    // (droit can_dashboard ou droit de profil can_allocation_airh2o) — 26/10/2026.
+    setRights({ ...result.rights, can_allocation_ro: peutVoirAllocationRo(result.email) || result.rights.can_allocation_airh2o || result.rights.can_dashboard })
     setLoading(false)
   }, [])
 
