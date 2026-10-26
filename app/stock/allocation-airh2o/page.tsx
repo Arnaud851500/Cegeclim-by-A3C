@@ -719,11 +719,16 @@ function AllocationAirH2O() {
 
         {d && (
           <section className="flex flex-wrap items-center gap-2 rounded-xl border border-[#E5E1D8] bg-white px-3 py-2">
-            <div className="flex rounded-lg border border-[#E5E1D8] bg-[#F4F3F0] p-0.5 text-[12.5px] font-bold">
-              {([['', 'Split + Monobloc'], ['600', 'Split (AirH2O 600)'], ['800', 'Monobloc (AirH2O 800)']] as ['' | '600' | '800', string][]).map(([k, l]) => (
-                <button key={k} type="button" onClick={() => setTypeF(k)} className={`rounded-md px-3 py-1 ${typeF === k ? 'bg-white text-[#111820] shadow-sm' : 'text-[#8A8474]'}`}>{l}</button>
-              ))}
-            </div>
+            {/* 26/10/2026 : vue agence limitée à l'AirH2O 600 par la base (l'AirH2O 800 est dans les équivalences) */}
+            {lecture ? (
+              <span className="rounded-lg border border-[#E5E1D8] bg-[#F4F3F0] px-3 py-1 text-[12.5px] font-bold">Split (AirH2O 600)</span>
+            ) : (
+              <div className="flex rounded-lg border border-[#E5E1D8] bg-[#F4F3F0] p-0.5 text-[12.5px] font-bold">
+                {([['', 'Split + Monobloc'], ['600', 'Split (AirH2O 600)'], ['800', 'Monobloc (AirH2O 800)']] as ['' | '600' | '800', string][]).map(([k, l]) => (
+                  <button key={k} type="button" onClick={() => setTypeF(k)} className={`rounded-md px-3 py-1 ${typeF === k ? 'bg-white text-[#111820] shadow-sm' : 'text-[#8A8474]'}`}>{l}</button>
+                ))}
+              </div>
+            )}
             <span className="mx-1 h-6 w-px bg-[#E5E1D8]" />
             {([['tableau', 'Tableau d’allocation'], ['cdc', `CDC à livrer (${annee} + ${Number(annee) + 1})`], ['bl', `BL ${lm1} / ${lm} / depuis ${debutLib}`],
               ['recentes', 'CDC des 7 derniers jours'], ...(lecture ? [] : [['arrivages', 'Arrivages']])] as [Onglet, string][]).map(([k, l]) => (

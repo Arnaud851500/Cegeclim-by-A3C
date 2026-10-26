@@ -102,3 +102,19 @@ begin
   if v = v0 or v not like '%agg_all%' or v not like '%''sources'', sources%' then raise exception 'patch non appliqué'; end if;
   execute v;
 end $do$;
+
+-- ─── 26/10/2026, 19h30 (appliqué en production) ─────────────────────────────
+-- Vue agence limitée à l'AirH2O 600 : l'AirH2O 800 n'est visible que des 4 personnes
+-- de stock_alloc_ro_acces (les autres la retrouvent dans les équivalences R/O).
+do $do$
+declare v text; v0 text;
+begin
+  v := pg_get_functiondef('public.get_allocation_ro'::regproc); v0 := v;
+  if v like '%c->>''gamme'' = ''600''%' then return; end if;
+  v := replace(v, $a$    where (c->>'taille')::numeric >= 3.5
+  ),$a$, $a$    where (c->>'taille')::numeric >= 3.5
+      and (v_complet or c->>'gamme' = '600')   -- 26/10/2026 : vue agence limitée à l'AirH2O 600 (800 dans les équivalences)
+  ),$a$);
+  if v = v0 then raise exception 'patch non appliqué'; end if;
+  execute v;
+end $do$;
