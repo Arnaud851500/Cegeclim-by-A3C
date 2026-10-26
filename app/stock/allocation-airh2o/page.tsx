@@ -295,7 +295,7 @@ function libCouverture(l: LigneDoc): string | null {
     return x.q_stock > 0 ? `${fmtNum(x.q_stock)} en stock + ${fmtNum(x.q_cdf)} ${via}` : `Via ${x.cdf || 'CDF'} (dispo le ${fmtDate(x.date_dispo)})`
   }
   if (estPl(l.nature)) return 'Préparée (stock réservé)'
-  if (l.nature !== 'CDC' && l.nature !== 'CDC_ANNEE_SUIVANTE') return null
+  if (l.nature !== 'CDC') return null
   const dc = l.couv_date ? fmtDate(l.couv_date) : null
   switch (l.couv_statut) {
     case 'COUVERT': return 'Stock actuel'
