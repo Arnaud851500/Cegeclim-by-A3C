@@ -7,7 +7,8 @@
 // Cette liste ne sert qu'à afficher (ou non) l'écran dans le menu : la vraie
 // barrière est côté base (table public.stock_alloc_ro_acces, vérifiée par
 // get_allocation_ro / set_allocation_ro — supabase/sql/20261024_allocation_airh2o.sql).
-// Pour ouvrir l'écran à quelqu'un : ajouter son e-mail ici ET dans la table.
+// Pour ouvrir la vue complète à quelqu'un : ajouter son e-mail ici ET dans la table.
+// (26/10/2026) Vue agence en lecture : cocher « Allocation AirH2O 600 / 800 » sur son profil (Autorisations).
 // ============================================================================
 
 export const ALLOCATION_RO_EMAILS: readonly string[] = [

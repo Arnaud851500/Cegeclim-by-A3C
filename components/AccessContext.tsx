@@ -48,6 +48,8 @@ export type AccessRights = {
   /** (2026-10-24) Écran « Allocation AirH2O 600 / 800 » : liste nominative (lib/allocationRo.ts),
    * contrôlée aussi côté base (stock_alloc_ro_acces). */
   can_allocation_ro: boolean
+  /** (2026-10-26) Droit de profil : écran Allocation limité aux agences du périmètre, en lecture. */
+  can_allocation_airh2o: boolean
 }
 
 type AccessContextType = {
@@ -100,6 +102,7 @@ type AccessProfileRow = {
   show_alert_todo?: boolean | null
   show_alert_data_coherence?: boolean | null
   show_alert_dates_interdites?: boolean | null
+  can_allocation_airh2o?: boolean | null
 }
 
 function normalizeList(value: unknown, fallback: string[] = []): string[] {
@@ -175,6 +178,7 @@ export const defaultRights: AccessRights = {
   show_alert_data_coherence: false,
   show_alert_dates_interdites: false,
   can_allocation_ro: false,
+  can_allocation_airh2o: false,
 }
 
 const AccessContext = createContext<AccessContextType>({
@@ -272,6 +276,7 @@ const PROFILE_FLAG_KEYS = [
   'show_alert_todo',
   'show_alert_data_coherence',
   'show_alert_dates_interdites',
+  'can_allocation_airh2o',
 ] as const satisfies ReadonlyArray<keyof AccessRights & keyof AccessProfileRow>
 
 function personalScope(userRow: UserAccessRow) {
@@ -401,7 +406,8 @@ export function AccessProvider({ children }: { children: React.ReactNode }) {
     setLoading(true)
     const result = await fetchAccess()
     setEmail(result.email)
-    setRights({ ...result.rights, can_allocation_ro: peutVoirAllocationRo(result.email) })
+    // Allocation AirH2O : vue complète (liste nominative) ou vue agence (droit de profil).
+    setRights({ ...result.rights, can_allocation_ro: peutVoirAllocationRo(result.email) || result.rights.can_allocation_airh2o })
     setLoading(false)
   }, [])
 
