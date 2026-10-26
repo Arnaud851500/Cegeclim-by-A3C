@@ -36,6 +36,13 @@
  *  - période d'allocation : BL sept., BL oct. arrêtés au 25/10, nouvelle colonne « BL + PL depuis le 26/10 »
  *    (PL encours = PL créées avant le 26/10) ; contrôle : depuis 26/10 + CDC Liv ≤ Allocation (sinon rouge).
  *
+ * 26/10/2026 (fin d'après-midi) :
+ *  - vue agence : colonnes TOTAL VENTES masquées ;
+ *  - par agence, « BL et PL depuis 26/10 » et « CDC Liv » encadrées : ce sont elles qui ne doivent pas dépasser l'allocation ;
+ *  - onglet CDC : une ligne « Reste à affecter » par référence × agence quand l'allocation dépasse CDC Liv + BL/PL depuis
+ *    le 26/10, avec la date de disponibilité (stock actuel ou CDF), calculée par la base (restes servis après toutes les
+ *    CDC 2026 ouvertes, à la suite entre agences : ANGLET, SAV / JMLADEUIX, puis ordre alphabétique).
+ *
  * Sources : RPC get_allocation_ro / set_allocation_ro (supabase/sql/20261024_allocation_airh2o.sql).
  */
 
@@ -58,7 +65,12 @@ type RefRow = {
 type Valeur = { ref: string; bloc: string; bl_m1: number; bl_m: number; pl: number; post: number; cdc: number; cdc_suiv: number }
 type Alloc = { ref: string; bloc: string; quantite: number; updated_at: string; updated_by: string | null }
 /** POST_BL / POST_PL : BL datés et PL créées depuis le début de la période d'allocation (26/10). */
-type Nature = 'CDC' | 'CDC_ANNEE_SUIVANTE' | 'PL' | 'BL_M' | 'BL_M1' | 'POST_BL' | 'POST_PL'
+type Nature = 'CDC' | 'CDC_ANNEE_SUIVANTE' | 'PL' | 'BL_M' | 'BL_M1' | 'POST_BL' | 'POST_PL' | 'RESTE'
+/** Allocation pas encore commandée (Allocation − CDC Liv − BL/PL depuis le 26/10), et sa disponibilité. */
+type Reste = {
+  ref: string; bloc: string; alloc: number; cdc: number; post: number; reste: number
+  q_stock: number; q_cdf: number; date_dispo: string | null; cdf: string | null; insuffisant: boolean
+}
 type LigneDoc = {
   ref: string; bloc: string; nature: Nature; piece: string; cdc: string | null; date_cdc: string | null; date_piece?: string | null
   date_livraison: string | null; date_bl: string | null; q: number; montant_ht: number | null
@@ -66,12 +78,15 @@ type LigneDoc = {
   /** CDC : couverture à la date demandée (v_portefeuille_couverture_stock). */
   couv_statut?: 'COUVERT' | 'COUVERT_PAR_RECEPTION' | 'RECEPTION_TARDIVE' | 'RUPTURE' | 'A_COUVRIR_PAR_APPRO' | null
   couv_cdf?: string | null; couv_date?: string | null; couv_retard?: number | null
+  /** Ligne « Reste à affecter » (nature RESTE). */
+  reste?: Reste
 }
 type Donnees = {
   genere_le: string; import_sage_le: string | null; fin_annee: string; mois_m1: string; mois_m: string
   debut_alloc?: string
   /** complet : vue et saisie (liste nominative) ; agence : agences du périmètre, lecture seule, sans stock. */
   mode?: 'complet' | 'agence'; blocs_user?: string[]
+  restes?: Reste[]
   refs: RefRow[]; blocs: string[]; valeurs: Valeur[]; allocations: Alloc[]; lignes: LigneDoc[]
 }
 type Metrique = 'bl_m1' | 'bl_m' | 'pl' | 'post' | 'cdc'
@@ -176,7 +191,7 @@ function CelluleAlloc({ valeur, info, onSave }: { valeur: number; info?: Alloc; 
 
 const LIB_NATURE: Record<Nature, string> = {
   CDC: 'CDC à livrer', CDC_ANNEE_SUIVANTE: 'CDC année suivante', PL: 'En préparation (PL)', BL_M: 'BL oct. (jusqu’au 25/10)', BL_M1: 'BL sept.',
-  POST_BL: 'BL depuis le 26/10', POST_PL: 'PL créée depuis le 26/10',
+  POST_BL: 'BL depuis le 26/10', POST_PL: 'PL créée depuis le 26/10', RESTE: 'Reste à affecter',
 }
 
 function DetailModal({ detail, lignes, onClose }: { detail: Detail; lignes: LigneDoc[]; onClose: () => void }) {
@@ -249,6 +264,13 @@ type Col<T> = {
 
 /** Livrable à la date demandée ? (CDC à livrer) */
 function libCouverture(l: LigneDoc): string | null {
+  if (l.nature === 'RESTE' && l.reste) {
+    const x = l.reste
+    if (x.insuffisant) return `Pas encore couvert (stock + CDF en cours insuffisants)`
+    if (x.q_cdf <= 0) return 'Stock actuel (disponible maintenant)'
+    const via = `via ${x.cdf || 'CDF'} (dispo le ${fmtDate(x.date_dispo)})`
+    return x.q_stock > 0 ? `${fmtNum(x.q_stock)} en stock + ${fmtNum(x.q_cdf)} ${via}` : `Via ${x.cdf || 'CDF'} (dispo le ${fmtDate(x.date_dispo)})`
+  }
   if (estPl(l.nature)) return 'Préparée (stock réservé)'
   if (l.nature !== 'CDC' && l.nature !== 'CDC_ANNEE_SUIVANTE') return null
   const dc = l.couv_date ? fmtDate(l.couv_date) : null
@@ -262,6 +284,11 @@ function libCouverture(l: LigneDoc): string | null {
   }
 }
 function clsCouverture(l: LigneDoc): string {
+  if (l.nature === 'RESTE' && l.reste) {
+    if (l.reste.insuffisant) return 'font-bold text-red-700'
+    if (l.reste.q_cdf <= 0) return 'font-semibold text-[#1E6B3A]'
+    return (l.reste.date_dispo || '') > `${new Date().getFullYear()}-12-31` ? 'font-bold text-orange-700' : 'font-semibold text-[#1D5C86]'
+  }
   if (estPl(l.nature)) return 'text-sky-800'
   switch (l.couv_statut) {
     case 'COUVERT': return 'font-semibold text-[#1E6B3A]'
@@ -274,13 +301,14 @@ function clsCouverture(l: LigneDoc): string {
 }
 /** Ordre de tri : du plus critique au plus sûr. */
 function rangCouverture(l: LigneDoc): number {
+  if (l.nature === 'RESTE') return 7
   if (estPl(l.nature)) return 6
   return ({ RUPTURE: 0, RECEPTION_TARDIVE: 1, A_COUVRIR_PAR_APPRO: 2, COUVERT_PAR_RECEPTION: 3, COUVERT: 4 } as Record<string, number>)[l.couv_statut || ''] ?? 5
 }
 
 const STATUT_NATURE: Record<Nature, string> = {
   CDC: 'À livrer', CDC_ANNEE_SUIVANTE: 'À livrer (année suivante)', PL: 'En préparation (PL)', BL_M: 'Livrée (BL)', BL_M1: 'Livrée (BL)',
-  POST_BL: 'Livrée (BL)', POST_PL: 'En préparation (PL)',
+  POST_BL: 'Livrée (BL)', POST_PL: 'En préparation (PL)', RESTE: 'Reste à affecter',
 }
 
 async function exporterListe<T>(nom: string, cols: Col<T>[], rows: T[]) {
@@ -461,14 +489,23 @@ function AllocationAirH2O() {
       && (!agenceF || l.bloc === agenceF)
       && (!s || `${l.ref} ${l.piece} ${l.cdc} ${l.client} ${l.tiers} ${l.representant}`.toUpperCase().includes(s)))
   }, [d, refsSet, agenceF, search])
-  const listeCdc = useMemo(() => docsFiltres.filter((l) => l.nature === 'CDC' || l.nature === 'CDC_ANNEE_SUIVANTE' || estPl(l.nature))
-    .sort((a, b) => (refsVis.findIndex((r) => r.ref === a.ref) - refsVis.findIndex((r) => r.ref === b.ref)) || (a.date_livraison || '9999').localeCompare(b.date_livraison || '9999')), [docsFiltres, refsVis])
+  const lignesReste = useMemo<LigneDoc[]>(() => {
+    const s = search.trim().toUpperCase()
+    return (d?.restes || []).filter((x) => refsSet.has(x.ref) && (!agenceF || x.bloc === agenceF) && (!s || x.ref.toUpperCase().includes(s)))
+      .map((x) => ({
+        ref: x.ref, bloc: x.bloc, nature: 'RESTE' as Nature, piece: '', cdc: null, date_cdc: null, date_livraison: null, date_bl: null,
+        q: x.reste, montant_ht: null, tiers: null, client: `Allocation non encore commandée (alloc ${fmtNum(x.alloc)} − CDC ${fmtNum(x.cdc)} − BL/PL ${fmtNum(x.post)})`,
+        representant: null, agence: x.bloc, reste: x,
+      }))
+  }, [d, refsSet, agenceF, search])
+  const listeCdc = useMemo(() => [...docsFiltres.filter((l) => l.nature === 'CDC' || l.nature === 'CDC_ANNEE_SUIVANTE' || estPl(l.nature)), ...lignesReste]
+    .sort((a, b) => (refsVis.findIndex((r) => r.ref === a.ref) - refsVis.findIndex((r) => r.ref === b.ref)) || (a.nature === 'RESTE' ? 1 : 0) - (b.nature === 'RESTE' ? 1 : 0) || (a.date_livraison || '9999').localeCompare(b.date_livraison || '9999')), [docsFiltres, lignesReste, refsVis])
   const listeBl = useMemo(() => docsFiltres.filter((l) => estBl(l.nature))
     .sort((a, b) => (a.date_bl || '').localeCompare(b.date_bl || '') || a.ref.localeCompare(b.ref)), [docsFiltres])
   const depuis = useMemo(() => { const x = new Date(); x.setDate(x.getDate() - 7); return x.toISOString().slice(0, 10) }, [])
   const listeRecentes = useMemo(() => {
     const ouvertes = (d?.lignes || []).filter((l) => l.nature === 'CDC' || l.nature === 'CDC_ANNEE_SUIVANTE')
-    const ordre: Record<Nature, number> = { BL_M: 0, BL_M1: 0, POST_BL: 0, PL: 1, POST_PL: 1, CDC: 2, CDC_ANNEE_SUIVANTE: 2 }
+    const ordre: Record<Nature, number> = { BL_M: 0, BL_M1: 0, POST_BL: 0, PL: 1, POST_PL: 1, CDC: 2, CDC_ANNEE_SUIVANTE: 2, RESTE: 3 }
     return docsFiltres.filter((l) => (l.date_cdc || '') >= depuis)
       .map((l) => {
         const lim = l.date_bl || l.date_livraison || '9999-12-31'
@@ -496,9 +533,9 @@ function AllocationAirH2O() {
     { h: 'Agence', v: (l) => libBloc(l.bloc), w: 18 },
   ]
   const colsCdc: Col<LR>[] = [...colRef,
-    { h: 'Statut', v: (l) => (estPl(l.nature) ? 'En préparation (PL)' : l.nature === 'CDC' ? `À livrer ${annee}` : `À livrer ${Number(annee) + 1}`),
-      cls: (l) => (estPl(l.nature) ? 'text-sky-800' : l.nature === 'CDC' ? 'font-semibold' : 'text-[#7A5EA8]'), w: 18 },
-    { h: 'N° CDC', v: (l) => l.cdc || l.piece, w: 11 }, { h: 'Pièce', v: (l) => l.piece, w: 11 },
+    { h: 'Statut', v: (l) => (l.nature === 'RESTE' ? 'Reste à affecter' : estPl(l.nature) ? 'En préparation (PL)' : l.nature === 'CDC' ? `À livrer ${annee}` : `À livrer ${Number(annee) + 1}`),
+      cls: (l) => (l.nature === 'RESTE' ? 'font-bold text-[#8A5A08]' : estPl(l.nature) ? 'text-sky-800' : l.nature === 'CDC' ? 'font-semibold' : 'text-[#7A5EA8]'), w: 18 },
+    { h: 'N° CDC', v: (l) => l.cdc || l.piece || null, w: 11 }, { h: 'Pièce', v: (l) => l.piece || null, w: 11 },
     { h: 'Date CDC', v: (l) => l.date_cdc, date: true, w: 11 },
     { h: 'Livraison demandée', v: (l) => l.date_livraison, date: true, w: 12,
       cls: (l) => ((l.date_livraison || '9999') < new Date().toISOString().slice(0, 10) && l.nature === 'CDC' ? 'font-bold text-red-700' : '') },
@@ -546,7 +583,13 @@ function AllocationAirH2O() {
     const conso = ref ? val(ref, bloc, 'post') + val(ref, bloc, 'cdc') : totBloc(bloc, 'post') + totBloc(bloc, 'cdc')
     return conso > a ? conso - a : 0
   }
-  const subBloc = compact ? subVentes.filter((s) => s.k === 'cdc') : subVentes
+  const subBloc = compact ? subVentes.filter((s) => s.k === 'post' || s.k === 'cdc') : subVentes
+  // Colonnes encadrées : celles qui, ensemble, ne doivent pas dépasser l'allocation
+  const CADRE = '2.5px solid #C2410C'
+  const cadre = (k: Metrique, pos: 'h' | 'b' | 'f'): React.CSSProperties => {
+    if (k !== 'post' && k !== 'cdc') return {}
+    return { ...(k === 'post' ? { borderLeft: CADRE } : { borderRight: CADRE }), ...(pos === 'h' ? { borderTop: CADRE } : pos === 'f' ? { borderBottom: CADRE } : {}) }
+  }
 
   function ouvrir(ref: string | null, bloc: string, k: Metrique) {
     const natures: Nature[] = k === 'cdc' ? ['CDC'] : k === 'pl' ? ['PL'] : k === 'post' ? ['POST_BL', 'POST_PL'] : k === 'bl_m' ? ['BL_M'] : ['BL_M1']
@@ -561,17 +604,17 @@ function AllocationAirH2O() {
       const wb = new ExcelJS.Workbook()
       const ws = wb.addWorksheet('Allocation')
       const vide = subVentes.slice(1).map(() => '')
-      const h1: string[] = ['Référence', 'Désignation', 'Type', 'Taille', 'Alim.', ...(lecture ? [] : ['STOCK', '', '', '']), 'TOTAL VENTES', ...vide]
-      const h2: string[] = ['', '', '', '', '', ...(lecture ? [] : ['Dispo (Phy-PL)', `Arrivage ${annee}`, 'A attribuer', 'Attribué']), ...subVentes.map((s) => s.l)]
+      const h1: string[] = ['Référence', 'Désignation', 'Type', 'Taille', 'Alim.', ...(lecture ? [] : ['STOCK', '', '', '', 'TOTAL VENTES', ...vide])]
+      const h2: string[] = ['', '', '', '', '', ...(lecture ? [] : ['Dispo (Phy-PL)', `Arrivage ${annee}`, 'A attribuer', 'Attribué', ...subVentes.map((s) => s.l)])]
       d.blocs.forEach((b) => { h1.push(libBloc(b), ...vide, ''); h2.push(...subVentes.map((s) => s.l), `Allocation ${annee}`) })
       ws.addRow(h1).font = { bold: true }; ws.addRow(h2).font = { bold: true }
       lignes.forEach(({ r, aAtt, attr }) => {
-        const row: (string | number)[] = [r.ref, r.designation || '', r.gamme === '600' ? 'Split' : 'Monobloc', r.taille, r.alim, ...(lecture ? [] : [n0(r.dispo), n0(r.arrivage_annee), aAtt, attr]),
-          ...subVentes.map((s) => val(r.ref, TOTAL, s.k))]
+        const row: (string | number)[] = [r.ref, r.designation || '', r.gamme === '600' ? 'Split' : 'Monobloc', r.taille, r.alim, ...(lecture ? [] : [n0(r.dispo), n0(r.arrivage_annee), aAtt, attr,
+          ...subVentes.map((s) => val(r.ref, TOTAL, s.k))])]
         d.blocs.forEach((b) => row.push(...subVentes.map((s) => val(r.ref, b, s.k)), alloc(r.ref, b)))
         ws.addRow(row)
       })
-      const t: (string | number)[] = ['TOTAL', '', '', '', '', ...(lecture ? [] : [tot.dispo, tot.arr, tot.aAtt, tot.attr]), ...subVentes.map((s) => totBloc(TOTAL, s.k))]
+      const t: (string | number)[] = ['TOTAL', '', '', '', '', ...(lecture ? [] : [tot.dispo, tot.arr, tot.aAtt, tot.attr, ...subVentes.map((s) => totBloc(TOTAL, s.k))])]
       d.blocs.forEach((b) => t.push(...subVentes.map((s) => totBloc(b, s.k)), totAlloc(b)))
       ws.addRow(t).font = { bold: true }
       ws.views = [{ state: 'frozen', xSplit: 1, ySplit: 2 }]
@@ -620,7 +663,7 @@ function AllocationAirH2O() {
           </div>
           <div className="flex flex-wrap items-center gap-2">
             <label className="flex items-center gap-1.5 text-[12px] font-semibold text-[#3A362E]">
-              <input type="checkbox" checked={compact} onChange={(e) => setCompact(e.target.checked)} /> Vue compacte (CDC + Alloc)
+              <input type="checkbox" checked={compact} onChange={(e) => setCompact(e.target.checked)} /> Vue compacte (BL/PL depuis {debutLib}, CDC, Alloc)
             </label>
             <label className="flex items-center gap-1.5 text-[12px] font-semibold text-[#3A362E]">
               <input type="checkbox" checked={masquerVides} onChange={(e) => setMasquerVides(e.target.checked)} /> Masquer les agences sans activité
@@ -672,9 +715,9 @@ function AllocationAirH2O() {
 
         {d && onglet === 'cdc' && (
           <ListeDetail titre={`CDC à livrer ${annee} et ${Number(annee) + 1}`}
-            sousTitre={`dont en préparation (PL) ; livraison demandée en rouge = déjà passée ; « Livrable » : stock actuel, ou CDF qui la complète (à l’heure / en retard), CDC servies par date de livraison puis date de création ; clic sur un en-tête pour trier`}
-            cols={colsCdc} rows={listeCdc} cle={(l, i) => `${l.piece}-${l.ref}-${i}`} totalQte={sommeQ(listeCdc)}
-            rowCls={(l) => (l.bloc === 'JITHURBIDE' ? 'bg-[#F4F0FA]' : '')} />
+            sousTitre={`${fmtNum(sommeQ(lignesReste))} groupe(s) d’allocation restant à affecter (lignes jaunes, hors total : dispo après toutes les CDC ${annee} ouvertes, agences servies à la suite) ; dont en préparation (PL) ; livraison demandée en rouge = déjà passée ; « Livrable » : stock actuel, ou CDF qui la complète (à l’heure / en retard), CDC servies par date de livraison puis date de création ; clic sur un en-tête pour trier`}
+            cols={colsCdc} rows={listeCdc} cle={(l, i) => `${l.piece}-${l.ref}-${i}`} totalQte={sommeQ(listeCdc.filter((l) => l.nature !== 'RESTE'))}
+            rowCls={(l) => (l.nature === 'RESTE' ? 'bg-[#FFF8D6] italic' : l.bloc === 'JITHURBIDE' ? 'bg-[#F4F0FA]' : '')} />
         )}
         {d && onglet === 'bl' && (
           <ListeDetail titre={`BL ${lm1}, ${lm} et depuis le ${debutLib}`} sousTitre={`BL facturés ou non, hors retours ; ${lm} = jusqu’au ${veilleLib}, puis « depuis le ${debutLib} »`}
@@ -702,7 +745,7 @@ function AllocationAirH2O() {
                   <th rowSpan={2} className={`${th} bg-[#1D3557] text-white`}>Taille</th>
                   <th rowSpan={2} className={`${th} bg-[#1D3557] text-white`}>Alim.</th>
                   {!lecture && <th colSpan={4} className={`${th} border-l-2 border-l-[#3A362E] text-[12.5px] text-white`} style={{ background: C_STOCK[0] }}>STOCK</th>}
-                  <th colSpan={subVentes.length} className={`${th} border-l-2 border-l-[#3A362E] text-[12.5px] text-white`} style={{ background: C_TOTAL[0] }}>TOTAL VENTES</th>
+                  {!lecture && <th colSpan={subVentes.length} className={`${th} border-l-2 border-l-[#3A362E] text-[12.5px] text-white`} style={{ background: C_TOTAL[0] }}>TOTAL VENTES</th>}
                   {blocs.map((b, i) => {
                     const p = PAL[d.blocs.indexOf(b) % PAL.length]
                     return <th key={b} colSpan={subBloc.length + 1} className={`${th} border-l-2 border-l-[#3A362E] text-[12.5px] text-white`} style={{ background: p[0] }} data-i={i}>{libBloc(b)}</th>
@@ -712,14 +755,15 @@ function AllocationAirH2O() {
                   {(lecture ? [] : ['Dispo (Phy-PL)', `Arrivage ${annee}`, 'A attribuer', 'Attribué']).map((l, i) => (
                     <th key={l} className={`${th} min-w-[62px] ${i === 0 ? 'border-l-2 border-l-[#3A362E]' : ''}`} style={{ background: C_STOCK[1] }}>{l}</th>
                   ))}
-                  {subVentes.map((s, i) => (
+                  {!lecture && subVentes.map((s, i) => (
                     <th key={s.k} className={`${th} min-w-[56px] ${i === 0 ? 'border-l-2 border-l-[#3A362E]' : ''}`} style={{ background: C_TOTAL[1] }}>{s.l}</th>
                   ))}
                   {blocs.map((b) => {
                     const p = PAL[d.blocs.indexOf(b) % PAL.length]
                     return (
                       <React.Fragment key={b}>
-                        {subBloc.map((s, i) => <th key={s.k} className={`${th} min-w-[52px] ${i === 0 ? 'border-l-2 border-l-[#3A362E]' : ''}`} style={{ background: p[1] }}>{s.l}</th>)}
+                        {subBloc.map((s, i) => <th key={s.k} className={`${th} min-w-[52px] ${i === 0 ? 'border-l-2 border-l-[#3A362E]' : ''}`} style={{ background: p[1], ...cadre(s.k, 'h') }}
+                          title={s.k === 'post' || s.k === 'cdc' ? `Colonnes encadrées : BL et PL depuis ${debutLib} + CDC Liv ${annee} ne doivent pas dépasser l’allocation` : undefined}>{s.l}</th>)}
                         <th className={`${th} min-w-[70px]`} style={{ background: '#F2D96B' }}>Allocation {annee}</th>
                       </React.Fragment>
                     )
@@ -747,7 +791,7 @@ function AllocationAirH2O() {
                         <td className={`${td} text-[13px] font-extrabold ${clsAttribue(attr, aAtt)}`} style={attr <= 0 ? { background: C_STOCK[2] } : undefined}>{fmtNum(attr)}</td>
                       </>
                     )}
-                    {subVentes.map((s, i) => (
+                    {!lecture && subVentes.map((s, i) => (
                       <td key={s.k} className={`${td} ${i === 0 ? 'border-l-2 border-l-[#3A362E]' : ''}`} style={{ background: C_TOTAL[2] }}>
                         <Num v={val(r.ref, TOTAL, s.k)} bold={s.k === 'cdc'} onClick={() => ouvrir(r.ref, TOTAL, s.k)} />
                       </td>
@@ -757,7 +801,7 @@ function AllocationAirH2O() {
                       return (
                         <React.Fragment key={b}>
                           {subBloc.map((s, i) => (
-                            <td key={s.k} className={`${td} ${i === 0 ? 'border-l-2 border-l-[#3A362E]' : ''}`} style={{ background: p[2] }}>
+                            <td key={s.k} className={`${td} ${i === 0 ? 'border-l-2 border-l-[#3A362E]' : ''}`} style={{ background: p[2], ...cadre(s.k, 'b') }}>
                               <Num v={val(r.ref, b, s.k)} bold={s.k === 'cdc'} onClick={() => ouvrir(r.ref, b, s.k)} />
                             </td>
                           ))}
@@ -785,7 +829,7 @@ function AllocationAirH2O() {
                       <td className={`${td} border-t-2 border-t-[#3A362E] text-[13px] font-extrabold ${clsAttribue(tot.attr, tot.aAtt)}`} style={tot.attr <= 0 ? { background: C_STOCK[1] } : undefined}>{fmtNum(tot.attr)}</td>
                     </>
                   )}
-                  {subVentes.map((s, i) => (
+                  {!lecture && subVentes.map((s, i) => (
                     <td key={s.k} className={`${td} border-t-2 border-t-[#3A362E] ${i === 0 ? 'border-l-2 border-l-[#3A362E]' : ''}`} style={{ background: C_TOTAL[1] }}>
                       <Num v={totBloc(TOTAL, s.k)} bold onClick={() => ouvrir(null, TOTAL, s.k)} />
                     </td>
@@ -795,7 +839,7 @@ function AllocationAirH2O() {
                     return (
                       <React.Fragment key={b}>
                         {subBloc.map((s, i) => (
-                          <td key={s.k} className={`${td} border-t-2 border-t-[#3A362E] ${i === 0 ? 'border-l-2 border-l-[#3A362E]' : ''}`} style={{ background: p[1] }}>
+                          <td key={s.k} className={`${td} border-t-2 border-t-[#3A362E] ${i === 0 ? 'border-l-2 border-l-[#3A362E]' : ''}`} style={{ background: p[1], ...cadre(s.k, 'f') }}>
                             <Num v={totBloc(b, s.k)} bold onClick={() => ouvrir(null, b, s.k)} />
                           </td>
                         ))}
@@ -821,6 +865,7 @@ function AllocationAirH2O() {
                 <span className="flex items-center gap-1.5"><span className="inline-block h-3.5 w-6 rounded border border-[#E8D27A] bg-[#FFF2B3]" />allocation à saisir (enregistrée à la sortie du champ, partagée)</span>
               </>
             )}
+            <span className="flex items-center gap-1.5"><span className="inline-block h-3.5 w-6" style={{ border: CADRE }} />colonnes encadrées : BL et PL depuis le {debutLib} + CDC Liv {annee}, à ne pas dépasser</span>
             <span className="flex items-center gap-1.5"><span className="inline-block h-3.5 w-6 rounded bg-[#F4B6B0] ring-2 ring-inset ring-red-600" />allocation dépassée : BL et PL depuis le {debutLib} + CDC Liv {annee} &gt; Allocation {annee}</span>
             <span className="w-full text-[10.5px] text-[#8A8474]">
                {!lecture && <>Dispo (Phy-PL) = stock réel tous dépôts − PL. A attribuer ajoute les BL et PL faits depuis le {debutLib}, déjà sortis du Dispo. Arrivage = CDF SAGE attendues jusqu’au 31/12 (survol : détail par mois, au-delà compris). </>}CDC Liv = CDC à livrer d’ici le 31/12, retards compris.
