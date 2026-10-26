@@ -424,7 +424,9 @@ function AllocationAirH2O() {
   const lignes = useMemo(() => refsVis.map((r) => {
     const cdc = val(r.ref, TOTAL, 'cdc')
     // 24/10/2026 soir (Arnaud) : A attribuer = Dispo (Phy-PL) + Arrivage de l'année (les CDC ne sont plus déduites)
-    const aAtt = n0(r.dispo) + n0(r.arrivage_annee)
+    // 26/10/2026 (Arnaud) : + BL et PL créés depuis le début de période (26/10), qui ont réduit le Dispo :
+    // la quantité à attribuer reste ainsi figée au 26/10.
+    const aAtt = n0(r.dispo) + n0(r.arrivage_annee) + val(r.ref, TOTAL, 'post')
     const attr = (d?.blocs || []).reduce((s, b) => s + alloc(r.ref, b), 0)
     return { r, cdc, aAtt, attr }
   }), [refsVis, d, val, alloc])
@@ -612,7 +614,7 @@ function AllocationAirH2O() {
             <p className="text-[11.5px] text-[#8A8474]">
               {lecture
                 ? <>Allocation {annee} de votre agence · contrôle : « BL et PL depuis {debutLib} » + « CDC Liv {annee} » ≤ allocation (sinon en rouge)</>
-                : <>A attribuer = Dispo (Phy-PL) + Arrivage {annee} · Attribué = somme des colonnes jaunes « Allocation {annee} »</>}
+                : <>A attribuer = Dispo (Phy-PL) + Arrivage {annee} + BL et PL depuis le {debutLib} (vision figée au {debutLib}) · Attribué = somme des colonnes jaunes « Allocation {annee} »</>}
               {d?.import_sage_le && <> · données SAGE du {fmtDateHeure(d.import_sage_le)}</>}
             </p>
           </div>
@@ -821,7 +823,7 @@ function AllocationAirH2O() {
             )}
             <span className="flex items-center gap-1.5"><span className="inline-block h-3.5 w-6 rounded bg-[#F4B6B0] ring-2 ring-inset ring-red-600" />allocation dépassée : BL et PL depuis le {debutLib} + CDC Liv {annee} &gt; Allocation {annee}</span>
             <span className="w-full text-[10.5px] text-[#8A8474]">
-              {!lecture && <>Dispo (Phy-PL) = stock réel tous dépôts − PL. Arrivage = CDF SAGE attendues jusqu’au 31/12 (survol : détail par mois, au-delà compris). </>}CDC Liv = CDC à livrer d’ici le 31/12, retards compris.
+               {!lecture && <>Dispo (Phy-PL) = stock réel tous dépôts − PL. A attribuer ajoute les BL et PL faits depuis le {debutLib}, déjà sortis du Dispo. Arrivage = CDF SAGE attendues jusqu’au 31/12 (survol : détail par mois, au-delà compris). </>}CDC Liv = CDC à livrer d’ici le 31/12, retards compris.
               BL = livraisons (facturées ou non, hors retours) : {lm1}, {lm} jusqu’au {veilleLib}, puis « BL et PL depuis le {debutLib} » avec les PL créées depuis cette date (PL encours = PL créées avant). Agence = agence du représentant de la fiche client (client NON AFFECTE : collaborateur de la pièce) ;
               Un clic sur un chiffre ouvre le détail des lignes.
             </span>
