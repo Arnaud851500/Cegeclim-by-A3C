@@ -66,3 +66,39 @@ begin
   if v = v0 or v not like '%''restes''%' then raise exception 'patch non appliqué'; end if;
   execute v;
 end $do$;
+
+-- ─── 26/10/2026, 17h (appliqué en production) ───────────────────────────────
+-- Correctif : en vue agence, lignes_bloc / agg ne contiennent que l'agence de la personne ;
+-- le calcul des restes (qui sert les agences à la suite) doit lire les CDC et BL/PL de TOUTES
+-- les agences → nouvel agrégat agg_all (sur lignes_ag) utilisé par rst.
+-- Ajout : restes[].sources = détail de ce qui couvre chaque reste (stock actuel, puis chaque CDF
+-- avec sa date de réception retenue et la quantité prise dessus).
+do $do$
+declare v text; v0 text;
+begin
+  v := pg_get_functiondef('public.get_allocation_ro'::regproc); v0 := v;
+  if v like '%agg_all%' then return; end if;   -- déjà appliqué
+  v := replace(v, $a$  sup as (
+    select c.ref, 0 as ord,$a$, $a$  agg_all as (
+    select ref, case when representant = 'AAITHURBIDE' or agence = 'SAV/JMLADEUIX' then 'JITHURBIDE' else agence end as bloc,
+           sum(q) filter (where nature = 'CDC') as cdc,
+           sum(q) filter (where nature in ('POST_BL', 'POST_PL')) as post
+    from lignes_ag where nature is not null group by 1, 2
+  ),
+  sup as (
+    select c.ref, 0 as ord,$a$);
+  v := replace(v, $a$    left join agg ag on ag.ref = a.reference_article and ag.bloc = a.bloc
+    left join dem dm$a$, $a$    left join agg_all ag on ag.ref = a.reference_article and ag.bloc = a.bloc
+    left join dem dm$a$);
+  v := replace(v, $a$    select r.*, greatest(0, least(r.reste, r.dispo - (r.fin_pos - r.reste))) as q_stock, f.d as date_dispo, f.cdf, f.ord
+    from rst_cum r$a$, $a$    select r.*, greatest(0, least(r.reste, r.dispo - (r.fin_pos - r.reste))) as q_stock, f.d as date_dispo, f.cdf, f.ord,
+           (select coalesce(jsonb_agg(jsonb_build_object('cdf', sc.cdf, 'date', sc.d,
+                      'q', least(sc.cumul, r.fin_pos) - greatest(sc.cumul - sc.q, r.fin_pos - r.reste)) order by sc.ord, sc.d, sc.cdf), '[]'::jsonb)
+              from sup_c sc
+              where sc.ref = r.ref and sc.q > 0 and sc.cumul > r.fin_pos - r.reste and sc.cumul - sc.q < r.fin_pos) as sources
+    from rst_cum r$a$);
+  v := replace(v, $a$'cdf', case when ord = 1 then cdf end, 'insuffisant', date_dispo is null)$a$,
+                  $a$'cdf', case when ord = 1 then cdf end, 'insuffisant', date_dispo is null, 'sources', sources)$a$);
+  if v = v0 or v not like '%agg_all%' or v not like '%''sources'', sources%' then raise exception 'patch non appliqué'; end if;
+  execute v;
+end $do$;

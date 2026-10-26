@@ -70,6 +70,8 @@ type Nature = 'CDC' | 'CDC_ANNEE_SUIVANTE' | 'PL' | 'BL_M' | 'BL_M1' | 'POST_BL'
 type Reste = {
   ref: string; bloc: string; alloc: number; cdc: number; post: number; reste: number
   q_stock: number; q_cdf: number; date_dispo: string | null; cdf: string | null; insuffisant: boolean
+  /** Détail de ce qui couvre le reste : stock actuel (cdf null) puis CDF par date de réception. */
+  sources?: { cdf: string | null; date: string; q: number }[]
 }
 type LigneDoc = {
   ref: string; bloc: string; nature: Nature; piece: string; cdc: string | null; date_cdc: string | null; date_piece?: string | null
@@ -289,10 +291,13 @@ function libCouverture(l: LigneDoc): string | null {
   }
   if (l.nature === 'RESTE' && l.reste) {
     const x = l.reste
-    if (x.insuffisant) return `Pas encore couvert (stock + CDF en cours insuffisants)`
-    if (x.q_cdf <= 0) return 'Stock actuel (disponible maintenant)'
-    const via = `via ${x.cdf || 'CDF'} (dispo le ${fmtDate(x.date_dispo)})`
-    return x.q_stock > 0 ? `${fmtNum(x.q_stock)} en stock + ${fmtNum(x.q_cdf)} ${via}` : `Via ${x.cdf || 'CDF'} (dispo le ${fmtDate(x.date_dispo)})`
+    // 26/10/2026 : détail par source — stock actuel et chaque CDF qui couvre le reste, avec sa date
+    const src = x.sources || []
+    const couvert = src.reduce((t, y) => t + n0(y.q), 0)
+    const parts = src.map((y) => (y.cdf ? `${fmtNum(y.q)} via ${y.cdf} (le ${fmtDate(y.date)})` : `${fmtNum(y.q)} en stock actuel`))
+    if (x.reste > couvert) parts.push(`${fmtNum(x.reste - couvert)} non couvert(s) : stock + CDF en cours insuffisants`)
+    if (parts.length === 0) return x.insuffisant ? 'Pas encore couvert (stock + CDF en cours insuffisants)' : 'Stock actuel (disponible maintenant)'
+    return parts.join(' + ')
   }
   if (estPl(l.nature)) return 'Préparée (stock réservé)'
   if (l.nature !== 'CDC') return null
@@ -313,7 +318,8 @@ function clsCouverture(l: LigneDoc): string {
   if (l.nature === 'RESTE' && l.reste) {
     if (l.reste.insuffisant) return 'font-bold text-red-700'
     if (l.reste.q_cdf <= 0) return 'font-semibold text-[#1E6B3A]'
-    return (l.reste.date_dispo || '') > `${new Date().getFullYear()}-12-31` ? 'font-bold text-orange-700' : 'font-semibold text-[#1D5C86]'
+    const tard = (l.reste.sources || []).some((y) => y.cdf && y.date > `${new Date().getFullYear()}-12-31`)
+    return tard ? 'font-bold text-orange-700' : 'font-semibold text-[#1D5C86]'
   }
   if (estPl(l.nature)) return 'text-sky-800'
   switch (l.couv_statut) {
