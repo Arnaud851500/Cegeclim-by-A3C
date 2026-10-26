@@ -262,8 +262,31 @@ type Col<T> = {
   s?: (x: T) => string | number | null
 }
 
+/**
+ * 26/10/2026 (Arnaud) : les CDC à livrer l'année suivante ne sont livrables qu'à partir du 31/03 de cette année-là :
+ * le stock et les CDF qui les couvriraient sont répartis en allocations sur l'année en cours.
+ */
+const DISPO_ANNEE_SUIVANTE = `${new Date().getFullYear() + 1}-03-31`
+function joursEntre(a: string, b: string): number {
+  return Math.round((new Date(`${a.slice(0, 10)}T12:00:00`).getTime() - new Date(`${b.slice(0, 10)}T12:00:00`).getTime()) / 86400000)
+}
+/** CDC année suivante : date de dispo retenue (31/03 au plus tôt) et retard sur la date demandée. */
+function dispoAnneeSuivante(l: LigneDoc): { date: string; retard: number; cdf: string | null } {
+  const couvTardive = l.couv_date && l.couv_statut !== 'COUVERT' && l.couv_date.slice(0, 10) > DISPO_ANNEE_SUIVANTE
+  const date = couvTardive ? l.couv_date!.slice(0, 10) : DISPO_ANNEE_SUIVANTE
+  const retard = l.date_livraison ? Math.max(0, joursEntre(date, l.date_livraison)) : 0
+  return { date, retard, cdf: couvTardive ? l.couv_cdf || null : null }
+}
+
 /** Livrable à la date demandée ? (CDC à livrer) */
 function libCouverture(l: LigneDoc): string | null {
+  if (l.nature === 'CDC_ANNEE_SUIVANTE') {
+    if (l.couv_statut === 'RUPTURE') return 'Rupture : aucune CDF suffisante'
+    if (l.couv_statut === 'A_COUVRIR_PAR_APPRO') return 'À couvrir par un nouvel appro'
+    const x = dispoAnneeSuivante(l)
+    const base = `À partir du ${fmtDate(x.date)}${x.cdf ? ` via ${x.cdf}` : ' (stock 2026 alloué)'}`
+    return x.retard > 0 ? `${base} · retard ${fmtNum(x.retard)} j` : `${base} · à l’heure`
+  }
   if (l.nature === 'RESTE' && l.reste) {
     const x = l.reste
     if (x.insuffisant) return `Pas encore couvert (stock + CDF en cours insuffisants)`
@@ -284,6 +307,9 @@ function libCouverture(l: LigneDoc): string | null {
   }
 }
 function clsCouverture(l: LigneDoc): string {
+  if (l.nature === 'CDC_ANNEE_SUIVANTE' && l.couv_statut !== 'RUPTURE' && l.couv_statut !== 'A_COUVRIR_PAR_APPRO') {
+    return dispoAnneeSuivante(l).retard > 0 ? 'font-bold text-orange-700' : 'font-semibold text-[#7A5EA8]'
+  }
   if (l.nature === 'RESTE' && l.reste) {
     if (l.reste.insuffisant) return 'font-bold text-red-700'
     if (l.reste.q_cdf <= 0) return 'font-semibold text-[#1E6B3A]'
@@ -302,6 +328,7 @@ function clsCouverture(l: LigneDoc): string {
 /** Ordre de tri : du plus critique au plus sûr. */
 function rangCouverture(l: LigneDoc): number {
   if (l.nature === 'RESTE') return 7
+  if (l.nature === 'CDC_ANNEE_SUIVANTE' && l.couv_statut !== 'RUPTURE' && l.couv_statut !== 'A_COUVRIR_PAR_APPRO') return dispoAnneeSuivante(l).retard > 0 ? 1 : 3
   if (estPl(l.nature)) return 6
   return ({ RUPTURE: 0, RECEPTION_TARDIVE: 1, A_COUVRIR_PAR_APPRO: 2, COUVERT_PAR_RECEPTION: 3, COUVERT: 4 } as Record<string, number>)[l.couv_statut || ''] ?? 5
 }
@@ -539,7 +566,7 @@ function AllocationAirH2O() {
     { h: 'Date CDC', v: (l) => l.date_cdc, date: true, w: 11 },
     { h: 'Livraison demandée', v: (l) => l.date_livraison, date: true, w: 12,
       cls: (l) => ((l.date_livraison || '9999') < new Date().toISOString().slice(0, 10) && l.nature === 'CDC' ? 'font-bold text-red-700' : '') },
-    { h: 'Livrable à la date demandée', v: (l) => libCouverture(l), cls: (l) => clsCouverture(l), s: (l) => rangCouverture(l) * 1000 + n0(l.couv_retard), w: 36 },
+    { h: 'Livrable à la date demandée', v: (l) => libCouverture(l), cls: (l) => clsCouverture(l), s: (l) => rangCouverture(l) * 1000 + (l.nature === 'CDC_ANNEE_SUIVANTE' ? dispoAnneeSuivante(l).retard : n0(l.couv_retard)), w: 36 },
     ...colClient]
   const colsBl: Col<LR>[] = [...colRef,
     { h: 'Période', v: (l) => (l.nature === 'POST_BL' ? `depuis le ${debutLib}` : l.nature === 'BL_M' ? `${libMois(d?.mois_m || '')} (→ ${veilleLib})` : libMois(d?.mois_m1 || '')), w: 14 },
@@ -715,7 +742,7 @@ function AllocationAirH2O() {
 
         {d && onglet === 'cdc' && (
           <ListeDetail titre={`CDC à livrer ${annee} et ${Number(annee) + 1}`}
-            sousTitre={`${fmtNum(sommeQ(lignesReste))} groupe(s) d’allocation restant à affecter (lignes jaunes, hors total : dispo après toutes les CDC ${annee} ouvertes, agences servies à la suite) ; dont en préparation (PL) ; livraison demandée en rouge = déjà passée ; « Livrable » : stock actuel, ou CDF qui la complète (à l’heure / en retard), CDC servies par date de livraison puis date de création ; clic sur un en-tête pour trier`}
+            sousTitre={`${fmtNum(sommeQ(lignesReste))} groupe(s) d’allocation restant à affecter (lignes jaunes, hors total : dispo après toutes les CDC ${annee} ouvertes, agences servies à la suite) ; dont en préparation (PL) ; livraison demandée en rouge = déjà passée ; « Livrable » : stock actuel, ou CDF qui la complète (à l’heure / en retard) ; CDC ${Number(annee) + 1} livrables à partir du 31/03/${Number(annee) + 1} (stock et CDF alloués sur ${annee}), CDC servies par date de livraison puis date de création ; clic sur un en-tête pour trier`}
             cols={colsCdc} rows={listeCdc} cle={(l, i) => `${l.piece}-${l.ref}-${i}`} totalQte={sommeQ(listeCdc.filter((l) => l.nature !== 'RESTE'))}
             rowCls={(l) => (l.nature === 'RESTE' ? 'bg-[#FFF8D6] italic' : l.bloc === 'JITHURBIDE' ? 'bg-[#F4F0FA]' : '')} />
         )}
