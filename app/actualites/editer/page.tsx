@@ -374,6 +374,11 @@ function ImageEditor({
           style={{ ...styles.input, flex: '1 1 240px' }}
           aria-label="Légende de l’image"
         />
+        <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, whiteSpace: 'nowrap' }}
+          title="Affiche l’image sur toute la largeur, sans limite de hauteur (infographie à lire en entier)">
+          <input type="checkbox" checked={!!block.pleineLargeur} onChange={(e) => onChange({ pleineLargeur: e.target.checked })} />
+          Pleine largeur
+        </label>
       </div>
     </div>
   )

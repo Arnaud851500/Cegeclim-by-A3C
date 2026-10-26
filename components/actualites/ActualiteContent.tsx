@@ -122,14 +122,14 @@ function Lightbox({ src, alt, onClose }: { src: string; alt: string; onClose: ()
   )
 }
 
-function ImageBlock({ src, caption }: { src?: string; caption?: string }) {
+function ImageBlock({ src, caption, pleineLargeur }: { src?: string; caption?: string; pleineLargeur?: boolean }) {
   const [open, setOpen] = useState(false)
   return (
     <figure style={styles.figure}>
       {src ? (
         <button type="button" onClick={() => setOpen(true)} style={styles.figureButton} title="Agrandir l’image">
           {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img src={src} alt={caption || 'Impression d’écran'} style={styles.figureImg} loading="lazy" />
+          <img src={src} alt={caption || 'Impression d’écran'} style={pleineLargeur ? { ...styles.figureImg, maxHeight: 'none' } : styles.figureImg} loading="lazy" />
         </button>
       ) : (
         <div style={styles.figurePlaceholder}>Chargement de l’image…</div>
@@ -447,7 +447,7 @@ export default function ActualiteContent({
           case 'image':
             // Bloc image laissé vide dans l'éditeur : rien à afficher.
             if (!block.path) return null
-            return <ImageBlock key={index} src={urls[block.path]} caption={block.caption} />
+            return <ImageBlock key={index} src={urls[block.path]} caption={block.caption} pleineLargeur={block.pleineLargeur} />
           case 'callout':
             return block.text.trim() || block.title?.trim() ? (
               <aside key={index} style={{ ...styles.callout, ...(block.tone === 'alerte' ? styles.calloutAlerte : {}) }}>

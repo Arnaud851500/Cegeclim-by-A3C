@@ -42,7 +42,8 @@ export type Block =
   | { type: 'heading'; text: string }
   | { type: 'list'; ordered?: boolean; items: string[] }
   | { type: 'table'; rows: string[][]; header?: boolean }
-  | { type: 'image'; path: string; caption?: string }
+  /** pleineLargeur (26/10/2026) : pas de hauteur maximale — pour une infographie haute à lire en entier. */
+  | { type: 'image'; path: string; caption?: string; pleineLargeur?: boolean }
   | { type: 'callout'; title?: string; text: string; tone?: 'info' | 'alerte' }
   | { type: 'link'; label: string; url: string }
   | StockBlock
