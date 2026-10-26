@@ -52,6 +52,9 @@ type LigneDoc = {
   ref: string; bloc: string; nature: Nature; piece: string; cdc: string | null; date_cdc: string | null
   date_livraison: string | null; date_bl: string | null; q: number; montant_ht: number | null
   tiers: string | null; client: string | null; representant: string | null; agence: string | null
+  /** CDC : couverture à la date demandée (v_portefeuille_couverture_stock). */
+  couv_statut?: 'COUVERT' | 'COUVERT_PAR_RECEPTION' | 'RECEPTION_TARDIVE' | 'RUPTURE' | 'A_COUVRIR_PAR_APPRO' | null
+  couv_cdf?: string | null; couv_date?: string | null; couv_retard?: number | null
 }
 type Donnees = {
   genere_le: string; import_sage_le: string | null; fin_annee: string; mois_m1: string; mois_m: string
@@ -216,7 +219,42 @@ function DetailModal({ detail, lignes, onClose }: { detail: Detail; lignes: Lign
 // ─────────────────────────────────────────────────────────────────────────
 
 type Onglet = 'tableau' | 'cdc' | 'bl' | 'recentes' | 'julien' | 'arrivages'
-type Col<T> = { h: string; v: (x: T) => string | number | null; cls?: (x: T) => string; right?: boolean; date?: boolean; w?: number }
+type Col<T> = {
+  h: string; v: (x: T) => string | number | null; cls?: (x: T) => string; right?: boolean; date?: boolean; w?: number
+  /** Valeur de tri (à défaut : v). */
+  s?: (x: T) => string | number | null
+}
+
+/** Livrable à la date demandée ? (CDC à livrer) */
+function libCouverture(l: LigneDoc): string | null {
+  if (l.nature === 'PL') return 'Préparée (stock réservé)'
+  if (l.nature !== 'CDC' && l.nature !== 'CDC_ANNEE_SUIVANTE') return null
+  const dc = l.couv_date ? fmtDate(l.couv_date) : null
+  switch (l.couv_statut) {
+    case 'COUVERT': return 'Stock actuel'
+    case 'COUVERT_PAR_RECEPTION': return `Via ${l.couv_cdf || 'CDF'} · à l’heure${dc ? ` (dispo le ${dc})` : ''}`
+    case 'RECEPTION_TARDIVE': return `Via ${l.couv_cdf || 'CDF'} · retard ${fmtNum(l.couv_retard)} j${dc ? ` (dispo le ${dc})` : ''}`
+    case 'RUPTURE': return 'Rupture : aucune CDF suffisante'
+    case 'A_COUVRIR_PAR_APPRO': return 'À couvrir par un nouvel appro'
+    default: return '—'
+  }
+}
+function clsCouverture(l: LigneDoc): string {
+  if (l.nature === 'PL') return 'text-sky-800'
+  switch (l.couv_statut) {
+    case 'COUVERT': return 'font-semibold text-[#1E6B3A]'
+    case 'COUVERT_PAR_RECEPTION': return 'font-semibold text-[#1D5C86]'
+    case 'RECEPTION_TARDIVE': return 'font-bold text-orange-700'
+    case 'RUPTURE': return 'font-bold text-red-700'
+    case 'A_COUVRIR_PAR_APPRO': return 'font-semibold text-violet-800'
+    default: return ''
+  }
+}
+/** Ordre de tri : du plus critique au plus sûr. */
+function rangCouverture(l: LigneDoc): number {
+  if (l.nature === 'PL') return 6
+  return ({ RUPTURE: 0, RECEPTION_TARDIVE: 1, A_COUVRIR_PAR_APPRO: 2, COUVERT_PAR_RECEPTION: 3, COUVERT: 4 } as Record<string, number>)[l.couv_statut || ''] ?? 5
+}
 
 const STATUT_NATURE: Record<Nature, string> = {
   CDC: 'À livrer', CDC_ANNEE_SUIVANTE: 'À livrer (année suivante)', PL: 'En préparation (PL)', BL_M: 'Livrée (BL)', BL_M1: 'Livrée (BL)',
@@ -246,6 +284,20 @@ function ListeDetail<T>({ titre, sousTitre, cols, rows, cle, rowCls, totalQte }:
   titre: string; sousTitre?: string; cols: Col<T>[]; rows: T[]; cle: (x: T, i: number) => string
   rowCls?: (x: T) => string; totalQte?: number
 }) {
+  // 26/10/2026 : tri sur la colonne choisie (clic sur l'en-tête, second clic = ordre inverse)
+  const [tri, setTri] = useState<{ i: number; dir: 1 | -1 } | null>(null)
+  const triees = useMemo(() => {
+    if (!tri) return rows
+    const c = cols[tri.i]
+    const val = c.s || c.v
+    return [...rows].sort((a, b) => {
+      const va = val(a), vb = val(b)
+      if (va === null || va === undefined || va === '') return 1
+      if (vb === null || vb === undefined || vb === '') return -1
+      if (typeof va === 'number' && typeof vb === 'number') return (va - vb) * tri.dir
+      return String(va).localeCompare(String(vb), 'fr', { numeric: true }) * tri.dir
+    })
+  }, [rows, cols, tri])
   return (
     <section className="rounded-xl border border-[#E5E1D8] bg-white">
       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#E5E1D8] px-4 py-2">
@@ -253,19 +305,25 @@ function ListeDetail<T>({ titre, sousTitre, cols, rows, cle, rowCls, totalQte }:
           <h2 className="text-[15px] font-bold">{titre}</h2>
           <p className="text-[11.5px] text-[#8A8474]">{fmtNum(rows.length)} ligne(s){totalQte !== undefined ? ` · ${fmtNum(totalQte)} groupe(s)` : ''}{sousTitre ? ` · ${sousTitre}` : ''}</p>
         </div>
-        <button type="button" onClick={() => void exporterListe(titre, cols, rows)} disabled={rows.length === 0}
+        <button type="button" onClick={() => void exporterListe(titre, cols, triees)} disabled={rows.length === 0}
           className="h-9 rounded-lg bg-[#111820] px-3 text-[12.5px] font-bold text-white disabled:opacity-40">⬇ Excel ({fmtNum(rows.length)})</button>
       </div>
       <div className="overflow-auto" style={{ maxHeight: 'calc(100vh - 300px)' }}>
         <table className="w-full text-[12px]">
           <thead className="sticky top-0 z-10 bg-white">
             <tr className="border-b border-[#E5E1D8] text-left text-[10.5px] font-bold uppercase tracking-wide text-[#8A8474]">
-              {cols.map((c) => <th key={c.h} className={`whitespace-nowrap px-2 py-1.5 ${c.right ? 'text-right' : ''}`}>{c.h}</th>)}
+              {cols.map((c, i) => (
+                <th key={c.h} onClick={() => setTri((x) => (x && x.i === i ? { i, dir: (x.dir === 1 ? -1 : 1) as 1 | -1 } : { i, dir: 1 }))}
+                  title="Trier sur cette colonne"
+                  className={`cursor-pointer select-none whitespace-nowrap px-2 py-1.5 hover:text-[#3A362E] ${c.right ? 'text-right' : ''} ${tri?.i === i ? 'text-[#1D5C86]' : ''}`}>
+                  {c.h}{tri?.i === i ? (tri.dir === 1 ? ' ▲' : ' ▼') : ''}
+                </th>
+              ))}
             </tr>
           </thead>
           <tbody>
-            {rows.length === 0 && <tr><td colSpan={cols.length} className="px-3 py-6 text-center text-[#8A8474]">Aucune ligne avec ces filtres.</td></tr>}
-            {rows.map((r, i) => (
+            {triees.length === 0 && <tr><td colSpan={cols.length} className="px-3 py-6 text-center text-[#8A8474]">Aucune ligne avec ces filtres.</td></tr>}
+            {triees.map((r, i) => (
               <tr key={cle(r, i)} className={`border-b border-[#F0EDE6] ${rowCls ? rowCls(r) : ''}`}>
                 {cols.map((c) => {
                   const v = c.v(r)
@@ -421,6 +479,7 @@ function AllocationAirH2O() {
     { h: 'Date CDC', v: (l) => l.date_cdc, date: true, w: 11 },
     { h: 'Livraison demandée', v: (l) => l.date_livraison, date: true, w: 12,
       cls: (l) => ((l.date_livraison || '9999') < new Date().toISOString().slice(0, 10) && l.nature === 'CDC' ? 'font-bold text-red-700' : '') },
+    { h: 'Livrable à la date demandée', v: (l) => libCouverture(l), cls: (l) => clsCouverture(l), s: (l) => rangCouverture(l) * 1000 + n0(l.couv_retard), w: 36 },
     ...colClient]
   const colsBl: Col<LR>[] = [...colRef,
     { h: 'Mois', v: (l) => (l.nature === 'BL_M' ? libMois(d?.mois_m || '') : libMois(d?.mois_m1 || '')), w: 8 },
@@ -576,7 +635,8 @@ function AllocationAirH2O() {
         )}
 
         {d && onglet === 'cdc' && (
-          <ListeDetail titre={`CDC à livrer ${annee} et ${Number(annee) + 1}`} sousTitre={`dont en préparation (PL) ; livraison demandée en rouge = déjà passée`}
+          <ListeDetail titre={`CDC à livrer ${annee} et ${Number(annee) + 1}`}
+            sousTitre={`dont en préparation (PL) ; livraison demandée en rouge = déjà passée ; « Livrable » : stock actuel, ou CDF qui la complète (à l’heure / en retard), CDC servies par date de livraison puis date de création ; clic sur un en-tête pour trier`}
             cols={colsCdc} rows={listeCdc} cle={(l, i) => `${l.piece}-${l.ref}-${i}`} totalQte={sommeQ(listeCdc)}
             rowCls={(l) => (l.bloc === 'JITHURBIDE' ? 'bg-[#F4F0FA]' : '')} />
         )}

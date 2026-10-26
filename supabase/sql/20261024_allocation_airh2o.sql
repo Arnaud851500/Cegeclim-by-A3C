@@ -222,3 +222,9 @@ grant execute on function public.get_allocation_ro() to authenticated;
 -- Bloc « Julien. Ith » cumulé avec SAV/JMLADEUIX : dans get_allocation_ro,
 --   case when la.representant = 'AAITHURBIDE' or la.agence = 'SAV/JMLADEUIX' then 'JITHURBIDE' else la.agence end as bloc
 -- et allocations SAV/JMLADEUIX ajoutées à celles du bloc JITHURBIDE puis supprimées.
+
+-- ─── 26/10/2026 (appliqué en production) ────────────────────────────────────
+-- Couverture de chaque ligne de CDC dans get_allocation_ro (lignes[].couv_statut,
+-- couv_cdf, couv_date, couv_retard), lue dans v_portefeuille_couverture_stock :
+-- CTE « couv » (statut le plus critique par CDC × référence, date de couverture,
+-- retard estimé, CDF qui la complète), jointe aux lignes de nature CDC.
