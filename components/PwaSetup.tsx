@@ -45,7 +45,11 @@ export default function PwaSetup() {
     window.addEventListener('appinstalled', onInstalled)
 
     if ('serviceWorker' in navigator && window.location.protocol === 'https:') {
-      navigator.serviceWorker.register('/sw.js', { scope: '/' }).catch((error) => {
+      // 26/10/2026 : updateViaCache 'none' = le navigateur revérifie sw.js à
+      // chaque chargement (jamais servi depuis son cache HTTP).
+      navigator.serviceWorker.register('/sw.js', { scope: '/', updateViaCache: 'none' })
+        .then((registration) => registration.update().catch(() => undefined))
+        .catch((error) => {
         console.warn('[pwa] enregistrement du service worker impossible', error)
       })
     }

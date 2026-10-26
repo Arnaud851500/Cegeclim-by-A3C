@@ -12,7 +12,9 @@
  * servir une ancienne version de l'app après un déploiement Vercel).
  */
 
-const VERSION = 'compagnon-sw-v1'
+// v2 (26/10/2026) : nouvelle version pour forcer la mise à jour du service
+// worker sur les postes (boucle de rechargement après déploiement).
+const VERSION = 'compagnon-sw-v2'
 
 const OFFLINE_HTML = `<!doctype html>
 <html lang="fr">

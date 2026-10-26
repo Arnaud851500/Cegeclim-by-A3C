@@ -10,6 +10,8 @@ import './theme.css'
 import ClientRootShell from './ClientRootShell'
 import PwaSetup from '@/components/PwaSetup'
 import { THEME_BOOT_SCRIPT } from '@/lib/theme'
+// 26/10/2026 : garde-fou contre la boucle de rechargement après déploiement
+import { DEPLOY_GUARD_SCRIPT } from '@/lib/deployGuard'
 
 export const metadata: Metadata = {
   title: 'Le compagnon CEGECLIM',
@@ -42,6 +44,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
     // ci-dessous avant l'hydratation (13/10/2026, mode clair / sombre).
     <html lang="fr" suppressHydrationWarning>
       <head>
+        <script dangerouslySetInnerHTML={{ __html: DEPLOY_GUARD_SCRIPT }} />
         <script dangerouslySetInnerHTML={{ __html: THEME_BOOT_SCRIPT }} />
       </head>
       <body className={`${fontDisplay.variable} ${fontBody.variable} ${fontMono.variable} ${fontReading.variable}`}>
