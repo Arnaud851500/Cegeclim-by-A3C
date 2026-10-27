@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import type React from 'react'
 import { supabase } from '@/lib/supabaseClient'
+import { NAV_BLOCS } from '@/lib/navigation'
 
 type PermissionKey =
   | 'can_dashboard'
@@ -23,6 +24,10 @@ type PermissionKey =
   | 'can_suivi_agences'
   | 'can_financement'
   | 'can_allocation_airh2o'
+  | 'can_appro'
+  | 'can_superuser'
+  | 'can_projetblg'
+  | 'can_paiement'
 
 type AlertKey =
   | 'show_alert_cerfa_ko'
@@ -85,22 +90,29 @@ const ALL_DEPARTEMENTS = [
 
 // Les écrans sont regroupés par famille métier : c'est ainsi qu'on raisonne
 // quand on ouvre un accès ("il lui faut le commercial, pas l'administration").
+// (2026-10-27) Refonte des droits : familles calées sur les blocs de l'accueil,
+// nouveaux droits can_appro / can_superuser / can_projetblg / can_paiement.
+// La liste des écrans ouverts par chaque droit est lue dans lib/navigation.ts
+// (screensOf) : elle ne peut plus dériver de l'arborescence réelle.
+// Un droit coché ici s'applique partout (écrans ET contrôles en base) : les
+// colonnes can_* de user_page_access sont recalculées depuis les profils par
+// trigger (migration 20261027_refonte_droits_ecrans.sql), plus besoin de les
+// modifier à la main.
 const PERMISSION_GROUPS: Array<{
   family: string
   hint: string
   items: Array<{ key: PermissionKey; label: string; description: string }>
 }> = [
   {
-    family: 'Commercial',
-    hint: 'Prospection, clients et territoire',
+    family: 'Activité & clients',
+    hint: 'Blocs « Mon activité » et « Mes clients »',
     items: [
+      { key: 'can_dashboard', label: 'Activité commerciale', description: 'One Page, activité quotidienne, analyse devis, courbes de flux, suivi multi clients, vision client 360, agenda.' },
+      { key: 'can_activites', label: 'Activités – CA', description: 'Suivi des activités et indicateurs de chiffre d’affaires.' },
       { key: 'can_carte', label: 'Prospects / Clients', description: 'Carte commerciale et fiches prospects.' },
-      { key: 'can_clients', label: 'Clients', description: 'Liste et gestion de la base clients.' },
-      { key: 'can_clients_cegeclim', label: 'Clients Cegeclim', description: 'Vue dédiée aux clients Cegeclim.' },
-      { key: 'can_suivi_prospects', label: 'Suivi prospects', description: 'Avancement et relances commerciales.' },
-      { key: 'can_territoire', label: 'Territoire', description: 'Écran Région / Département.' },
-      { key: 'can_cartographie', label: 'Cartographie', description: 'Écran de cartographie.' },
-      { key: 'can_agences', label: 'Agences', description: 'Fiches et paramétrage des agences.' },
+      { key: 'can_clients', label: 'Clients (ancien écran)', description: 'Liste clients — écran hors arborescence, ouvrable par URL.' },
+      { key: 'can_clients_cegeclim', label: 'Clients Cegeclim (ancien écran)', description: 'Écran hors arborescence, ouvrable par URL.' },
+      { key: 'can_suivi_prospects', label: 'Suivi prospects (ancien écran)', description: 'Écran hors arborescence, ouvrable par URL.' },
     ],
   },
   {
@@ -112,18 +124,33 @@ const PERMISSION_GROUPS: Array<{
         label: 'Suivi agences – commerciaux',
         description: 'CA facturé, évolution vs N-1, croix de positionnement, fiches. Chaque personne ne voit que les agences et collaborateurs de son périmètre (onglet Utilisateurs).',
       },
+      { key: 'can_objectifs', label: 'Objectifs', description: 'Fixer et suivre les objectifs commerciaux (Direction).' },
     ],
   },
   {
-    family: 'Pilotage',
-    hint: 'Chiffres, stocks et activité',
+    family: 'Territoire',
+    hint: 'Régions, départements, agences',
     items: [
-      { key: 'can_dashboard', label: 'Tableaux de bord', description: 'Indicateurs, portefeuille, SMC, Focus mois, appros.' },
-      { key: 'can_stocks', label: 'Stocks', description: 'Projection et disponibilité des stocks.' },
-      { key: 'can_allocation_airh2o', label: 'Allocation AirH2O 600 / 800', description: 'Allocations de l’agence rattachée à la personne (périmètre agences, sinon agence objectif, sinon agence de ses collaborateurs), en lecture, sans les colonnes de stock. Accordé aussi automatiquement par le droit Tableau de bord (can_dashboard).' },
-      { key: 'can_activites', label: 'Activités', description: 'Écrans de suivi d’activité.' },
-      { key: 'can_todo', label: 'Todo List', description: 'Liste des actions à traiter.' },
+      { key: 'can_territoire', label: 'Région – Département', description: 'Territoires, potentiels PAC et attractivité.' },
+      { key: 'can_agences', label: 'Agences', description: 'Fiches et paramétrage des agences.' },
+      { key: 'can_cartographie', label: 'Cartographie', description: 'Données sur fond de carte.' },
+    ],
+  },
+  {
+    family: 'Tâches & documents',
+    hint: 'Bloc « Mes tâches / Mes RDV »',
+    items: [
+      { key: 'can_todo', label: 'Todo List', description: 'Liste des actions ; ouvre aussi la présence dans la liste « Confiée à ».' },
       { key: 'can_documents', label: 'Documents', description: 'Bibliothèque documentaire.' },
+    ],
+  },
+  {
+    family: 'Stocks & appro',
+    hint: 'Bloc « Stocks & logistique » : consultation d’un côté, pilotage appro de l’autre',
+    items: [
+      { key: 'can_stocks', label: 'Stocks (consultation)', description: 'Portefeuille de commandes, stocks, équivalences et allocation AirH2O, analyse stock dépôt.' },
+      { key: 'can_appro', label: 'Appro & pénuries', description: 'Calcul de besoin, portefeuille CDF, projection, pénuries, reconstitution, dispo par groupe, substitutions de stock.' },
+      { key: 'can_allocation_airh2o', label: 'Allocation AirH2O – vue agence', description: 'Allocations de l’agence rattachée à la personne (périmètre agences, sinon agence objectif, sinon agence de ses collaborateurs), en lecture, sans les colonnes de stock. Accordé aussi automatiquement par le droit Activité commerciale (can_dashboard).' },
     ],
   },
   {
@@ -138,15 +165,28 @@ const PERMISSION_GROUPS: Array<{
     ],
   },
   {
+    family: 'Projet BLG',
+    hint: 'Cohérence SAGE ↔ BLG',
+    items: [
+      { key: 'can_projetblg', label: 'Projet BLG', description: 'Contrôles articles, clients, fournisseurs et rapprochement SAGE ↔ BLG.' },
+    ],
+  },
+  {
     family: 'Administration',
     hint: 'À réserver aux administrateurs',
     items: [
-      { key: 'can_autorisation', label: 'Administration', description: 'Accès, imports, jobs, analyse devis et atelier.' },
-      { key: 'can_change_scope', label: 'Changer de société', description: 'Autorise le changement de scope dans le bandeau.' },
-      { key: 'can_objectifs', label: 'Objectifs', description: 'Fixer et suivre les objectifs commerciaux (Direction).' },
+      { key: 'can_autorisation', label: 'Administration', description: 'Gestion des accès, MAJ base clients, imports, jobs, tableaux de bord de l’atelier. Donne aussi la vision de toutes les données (sans périmètre).' },
+      { key: 'can_superuser', label: 'Super-utilisateur', description: 'Indicateurs, analyse IA, performance des extractions, cycle de synchronisation, statistiques d’usage.' },
+      { key: 'can_paiement', label: 'MAJ retards paiement', description: 'Import du fichier compta des retards de paiement.' },
+      { key: 'can_change_scope', label: 'Changer de société', description: 'Changement de scope dans le bandeau ; donne aussi la vision de toutes les données.' },
     ],
   },
 ]
+
+/** Écrans de l'arborescence ouverts par un droit (lib/navigation.ts). */
+function screensOf(key: PermissionKey): string[] {
+  return NAV_BLOCS.flatMap((bloc) => bloc.pages.filter((page) => page.accessKey === key).map((page) => page.label))
+}
 
 const PERMISSIONS = PERMISSION_GROUPS.flatMap((group) => group.items)
 
@@ -169,10 +209,12 @@ const LANDING_PAGES = [
   { value: '/approvisionnements', label: 'Flux Devis-CDC-BC-Fact' },
   { value: '/portefeuille-livraison', label: 'Portefeuille commande' },
   { value: '/synthese_multi_clients', label: 'Suivi Multi Clients' },
-  { value: '/tableau-de-bord/vision-tci', label: 'One Page' },
+  { value: '/tableaux-de-bord/vision-tci', label: 'One Page' },
   { value: '/atelier-analyse', label: 'Tableaux de bord' },
-  { value: '/focus_mensuel', label: 'Activité Quotidienne' },
-  { value: '/stocks-disponibilites', label: 'Projection stock' },
+  { value: '/focus_mensuel2', label: 'Activité Quotidienne' },
+  { value: '/stocks-disponibilites2', label: 'Projection stock' },
+  { value: '/stock', label: 'Stocks' },
+  { value: '/stock/calcul-besoin', label: 'Calcul de besoin - Appro' },
   { value: '/Indicateurs', label: 'Indicateurs' },
   { value: '/todo', label: 'Todo List' },
   { value: '/documents', label: 'Documents' },
@@ -212,6 +254,10 @@ const EMPTY_PROFILE: AccessProfile = {
   can_suivi_agences: false,
   can_financement: false,
   can_allocation_airh2o: false,
+  can_appro: false,
+  can_superuser: false,
+  can_projetblg: false,
+  can_paiement: false,
   show_alert_cerfa_ko: false,
   show_alert_cdc_liv_avant_2026: false,
   show_alert_controle_frais_port: false,
@@ -931,6 +977,7 @@ export default function AutorisationPage() {
                                 key={permission.key}
                                 label={permission.label}
                                 description={permission.description}
+                                screens={screensOf(permission.key)}
                                 checked={profileDraft[permission.key]}
                                 onChange={(checked) => patchProfileDraft({ [permission.key]: checked } as Partial<AccessProfile>)}
                               />
@@ -1692,11 +1739,14 @@ function ChipsField({
 function ToggleCard({
   label,
   description,
+  screens,
   checked,
   onChange,
 }: {
   label: string
   description: string
+  /** Écrans de l'arborescence ouverts par ce droit (vide pour les alertes). */
+  screens?: string[]
   checked: boolean
   onChange: (checked: boolean) => void
 }) {
@@ -1715,6 +1765,18 @@ function ToggleCard({
       <span className="min-w-0">
         <span className="block text-sm font-semibold text-slate-900">{label}</span>
         <span className="mt-0.5 block text-xs leading-5 text-slate-600">{description}</span>
+        {screens && screens.length > 0 && (
+          <span className="mt-1.5 flex flex-wrap gap-1">
+            {screens.map((screen) => (
+              <span
+                key={screen}
+                className="rounded-full border border-[#E2DFD8] bg-white px-2 py-0.5 text-[10px] font-medium leading-4 text-slate-600"
+              >
+                {screen}
+              </span>
+            ))}
+          </span>
+        )}
       </span>
     </label>
   )

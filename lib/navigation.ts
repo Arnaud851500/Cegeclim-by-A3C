@@ -33,6 +33,12 @@
 // ajoutée sous Références en pénurie (même droit can_activites).
 // ÉVOLUTION (2026-10-21) : « Équivalences R/O AirH2O » (/stock/equivalences-ro),
 // backups d'anciennes générations par glisser-déposer (table stock_equivalences).
+// ÉVOLUTION (2026-10-27) : refonte des droits (classeur refonte_droits_ecrans) —
+// nouveaux droits can_appro (écrans appro / pénurie / projection), can_superuser
+// (indicateurs, analyse IA, performance, cycle de synchro, statistiques),
+// can_projetblg (bloc Projet BLG), can_paiement (MAJ retards paiement) ;
+// can_stocks = écrans stock consultation (portefeuille cde, équivalences,
+// allocation, stocks, analyse dépôt). Migration 20261027_refonte_droits_ecrans.sql.
 // Le bloc « Mes alertes » de l'accueil n'est pas ici : il n'a pas de page, il
 // ouvre le Centre d'alertes (components/AlertsContext.tsx + ClientRootShell).
 
@@ -111,9 +117,9 @@ export const NAV_BLOCS: NavBloc[] = [
       { label: 'Analyse devis', path: '/cycle-documents', accessKey: 'can_dashboard', description: 'Cycle des documents et transformation des devis.' },
       { label: 'Courbes de flux', path: '/approvisionnements', accessKey: 'can_dashboard', description: 'Courbes Devis – CDC – BL – Factures dans le temps.' },
       { label: 'Activités – CA', path: '/activites', accessKey: 'can_activites', description: 'Suivre les activités et les indicateurs de chiffre d’affaires.' },
-      { label: 'Indicateurs', path: '/indicateurs', accessKey: 'can_autorisation', description: 'Principaux indicateurs de performance (commerce, services, coûts, stocks).' },
-      { label: 'Analyse IA', path: '/atelier-analyse/assistant', accessKey: 'can_activites', description: 'Assistant d’analyse conversationnel sur les données de l’activité.' },
-      { label: 'Indicateurs (pilotage)', path: '/Indicateurs', accessKey: 'can_activites', description: 'Vue pilotage des indicateurs, réservée aux administrateurs.' },
+      { label: 'Indicateurs', path: '/indicateurs', accessKey: 'can_superuser', description: 'Principaux indicateurs de performance (commerce, services, coûts, stocks).' },
+      { label: 'Analyse IA', path: '/atelier-analyse/assistant', accessKey: 'can_superuser', description: 'Assistant d’analyse conversationnel sur les données de l’activité.' },
+      { label: 'Indicateurs (pilotage)', path: '/Indicateurs', accessKey: 'can_superuser', description: 'Vue pilotage des indicateurs, réservée aux super-utilisateurs.' },
     ],
   },
   {
@@ -177,18 +183,18 @@ export const NAV_BLOCS: NavBloc[] = [
     gradient: ['#8B8767', '#5E5A44'],
     iconBg: 'rgba(255,255,255,0.18)',
     pages: [
-      { label: 'Portefeuille de commandes', path: '/portefeuille-livraison', activeLabel: 'Portefeuille cde', accessKey: 'can_dashboard', description: 'CDC à livrer, contrôle des frais de port, couverture stock.' },
-      { label: 'Références en pénurie', path: '/stock/penurie', activeLabel: 'Références en pénurie', accessKey: 'can_dashboard', description: 'Prochaine date de dispo pour une nouvelle commande client (stock, CDC, CDF, délai d’appro) — vue commandes clients et vue appro.' },
-      { label: 'Équivalences R/O AirH2O', path: '/stock/equivalences-ro', activeLabel: 'Équivalences R/O AirH2O 600 / 800', accessKey: 'can_dashboard', description: 'Groupes AirH2O 600 / 800 par taille et par usage (S, S + ECS, Combi, monobloc H) : solution actuelle et solutions d’anciennes générations en stock, composant limitant, quantité réalisable et écart de prix, en glisser-déposer.' },
-      { label: 'Pénuries – vue mensuelle', path: '/stock/penurie/mensuel', activeLabel: 'Pénuries – vue mensuelle', accessKey: 'can_activites', description: 'Octobre → mars : arrivages, commandes fermes, commandes non tenables et solde projeté, en ferme ou avec prévisions (N-1 × coef.), par référence ou en quantité pertinente, avec courbes.' },
-      { label: 'Calcul de besoin - Appro', path: '/stock/calcul-besoin', activeLabel: 'Calcul de besoin - Appro', accessKey: 'can_stocks', description: 'Propositions de commande fournisseur par article, paramètres d’appro, conso retenue et écrêtage des ventes exceptionnelles.' },
-      { label: 'Allocation AirH2O 600 / 800', path: '/stock/allocation-airh2o', activeLabel: 'Allocation AirH2O 600 / 800', accessKey: 'can_dashboard', description: 'Groupes AirH2O 600 / 800 T3,5 à 6 : dispo, arrivages, CDC et BL par agence, reste à attribuer et allocations par agence (vue complète réservée ; droit de profil « Allocation AirH2O » = vue de son agence, en lecture).' },
-      { label: 'Portefeuille commandes fournisseurs', path: '/stock/portefeuille-cdf', activeLabel: 'Portefeuille commandes fournisseurs', accessKey: 'can_stocks', description: 'CDF ouvertes : alertes containers (n°, suivi bateau, marge), sans AR, CDF attendues par des CDC à faire confirmer, dates dépassées.' },
-      { label: 'Projection stock', path: '/stocks-disponibilites2', accessKey: 'can_stocks', description: 'Stock projeté par référence, hypothèses mensuelles et substitutions.' },
-      { label: 'Reconstitution Stock', path: '/stock/reconstruction', accessKey: 'can_activites', description: 'Reconstruction stock projeté et verification des promesses"' },
-      { label: 'Vision dispo par groupe d article', path: '/stock/groupes', accessKey: 'can_activites', description: 'Visibilite dispo à venir et livraisons possibles"' },
-      { label: 'Stocks', path: '/stock', accessKey: 'can_dashboard', description: 'Consultation des stocks (FMS et Agences), stocks prévisionnels et visu des dates de disponibilité .' },
-    { label: 'Analyse Stock Depot', path: '/stock/analyse-agence', accessKey: 'can_stocks', description: 'Analyse stock Dépot, proposition MIN / MAX ' },
+      { label: 'Portefeuille de commandes', path: '/portefeuille-livraison', activeLabel: 'Portefeuille cde', accessKey: 'can_stocks', description: 'CDC à livrer, contrôle des frais de port, couverture stock.' },
+      { label: 'Références en pénurie', path: '/stock/penurie', activeLabel: 'Références en pénurie', accessKey: 'can_appro', description: 'Prochaine date de dispo pour une nouvelle commande client (stock, CDC, CDF, délai d’appro) — vue commandes clients et vue appro.' },
+      { label: 'Équivalences R/O AirH2O', path: '/stock/equivalences-ro', activeLabel: 'Équivalences R/O AirH2O 600 / 800', accessKey: 'can_stocks', description: 'Groupes AirH2O 600 / 800 par taille et par usage (S, S + ECS, Combi, monobloc H) : solution actuelle et solutions d’anciennes générations en stock, composant limitant, quantité réalisable et écart de prix, en glisser-déposer.' },
+      { label: 'Pénuries – vue mensuelle', path: '/stock/penurie/mensuel', activeLabel: 'Pénuries – vue mensuelle', accessKey: 'can_appro', description: 'Octobre → mars : arrivages, commandes fermes, commandes non tenables et solde projeté, en ferme ou avec prévisions (N-1 × coef.), par référence ou en quantité pertinente, avec courbes.' },
+      { label: 'Calcul de besoin - Appro', path: '/stock/calcul-besoin', activeLabel: 'Calcul de besoin - Appro', accessKey: 'can_appro', description: 'Propositions de commande fournisseur par article, paramètres d’appro, conso retenue et écrêtage des ventes exceptionnelles.' },
+      { label: 'Allocation AirH2O 600 / 800', path: '/stock/allocation-airh2o', activeLabel: 'Allocation AirH2O 600 / 800', accessKey: 'can_stocks', description: 'Groupes AirH2O 600 / 800 T3,5 à 6 : dispo, arrivages, CDC et BL par agence, reste à attribuer et allocations par agence (vue complète réservée ; droit de profil « Allocation AirH2O » = vue de son agence, en lecture).' },
+      { label: 'Portefeuille commandes fournisseurs', path: '/stock/portefeuille-cdf', activeLabel: 'Portefeuille commandes fournisseurs', accessKey: 'can_appro', description: 'CDF ouvertes : alertes containers (n°, suivi bateau, marge), sans AR, CDF attendues par des CDC à faire confirmer, dates dépassées.' },
+      { label: 'Projection stock', path: '/stocks-disponibilites2', accessKey: 'can_appro', description: 'Stock projeté par référence, hypothèses mensuelles et substitutions.' },
+      { label: 'Reconstitution Stock', path: '/stock/reconstruction', accessKey: 'can_appro', description: 'Reconstruction du stock projeté et vérification des promesses.' },
+      { label: 'Vision dispo par groupe d article', path: '/stock/groupes', accessKey: 'can_appro', description: 'Visibilité de la dispo à venir et des livraisons possibles.' },
+      { label: 'Stocks', path: '/stock', accessKey: 'can_stocks', description: 'Consultation des stocks (FMS et Agences), stocks prévisionnels et visu des dates de disponibilité .' },
+      { label: 'Analyse Stock Depot', path: '/stock/analyse-agence', accessKey: 'can_stocks', description: 'Analyse stock Dépot, proposition MIN / MAX ' },
     ],
   },
   {
@@ -213,10 +219,10 @@ export const NAV_BLOCS: NavBloc[] = [
     gradient: ['#54459F', '#352B6B'],
     iconBg: 'rgba(255,255,255,0.18)',
     pages: [
-      { label: 'Articles SAGE – BLG', path: '/controle-sage-blg/articles', activeLabel: 'Contrôle cohérence Articles SAGE-BLG', accessKey: 'can_autorisation', description: 'Contrôle de cohérence des articles entre SAGE et BLG.' },
-      { label: 'Clients SAGE – BLG', path: '/controle-sage-blg/clients', activeLabel: 'Contrôle cohérence Client SAGE-BLG', accessKey: 'can_autorisation', description: 'Contrôle de cohérence des tiers, contacts et adresses de livraison.' },
-      { label: 'Fournisseurs SAGE – BLG', path: '/controle-sage-blg/fournisseur-sage-blg', activeLabel: 'Contrôle cohérence Fournisseur SAGE-BLG', accessKey: 'can_autorisation', description: 'Contrôle de cohérence fournisseurs et articles entre SAGE et BLG.' },
-      { label: 'Rapprochement SAGE-BLG', path: '/controle-sage-blg/rapprochement-sage-blg', activeLabel: 'Rapprochement Sage-BLG, CDC, CDF, Stocks', accessKey: 'can_autorisation', description: 'Contrôle de cohérence SAGE-BLG CDC, CDF, Stock' },
+      { label: 'Articles SAGE – BLG', path: '/controle-sage-blg/articles', activeLabel: 'Contrôle cohérence Articles SAGE-BLG', accessKey: 'can_projetblg', description: 'Contrôle de cohérence des articles entre SAGE et BLG.' },
+      { label: 'Clients SAGE – BLG', path: '/controle-sage-blg/clients', activeLabel: 'Contrôle cohérence Client SAGE-BLG', accessKey: 'can_projetblg', description: 'Contrôle de cohérence des tiers, contacts et adresses de livraison.' },
+      { label: 'Fournisseurs SAGE – BLG', path: '/controle-sage-blg/fournisseur-sage-blg', activeLabel: 'Contrôle cohérence Fournisseur SAGE-BLG', accessKey: 'can_projetblg', description: 'Contrôle de cohérence fournisseurs et articles entre SAGE et BLG.' },
+      { label: 'Rapprochement SAGE-BLG', path: '/controle-sage-blg/rapprochement-sage-blg', activeLabel: 'Rapprochement Sage-BLG, CDC, CDF, Stocks', accessKey: 'can_projetblg', description: 'Contrôle de cohérence SAGE-BLG CDC, CDF, Stock' },
       
     ],
   },
@@ -232,10 +238,10 @@ export const NAV_BLOCS: NavBloc[] = [
       { label: 'MAJ base clients', path: '/clients', activeLabel: 'MAJ Base clients', accessKey: 'can_autorisation', description: 'Mise à jour de la base clients.' },
       { label: 'MAJ données activité', path: '/Import', activeLabel: 'MAJ Données Activité', accessKey: 'can_autorisation', description: 'Imports, contrôles des agrégats et cohérence des données.' },
       { label: 'Planification des jobs', path: '/admin/planification', activeLabel: 'Job scheduling', accessKey: 'can_autorisation', description: 'Planification des synchronisations et recalculs.' },
-      { label: 'Performance des extractions', path: '/admin/performance-extraction', activeLabel: 'Performance des extractions', accessKey: 'can_autorisation', description: 'Durée des exports SAGE (TSE) par lancement, historique et journal d’exécution.' },
-      { label: 'Cycle de synchronisation', path: '/cycle-synchronisation', activeLabel: 'Cycle Synchronisation data', accessKey: 'can_autorisation', description: 'État et historique des cycles de synchronisation SAGE → Supabase.' },
-      { label: 'MAJ retards paiement', path: '/retards-paiement', activeLabel: 'Retards de paiements', accessKey: 'can_autorisation', description: 'Intégration du fichier des retards de paiemnets.' },
-      { label: 'Statistiques usage', path: '/admin/statistiques-usage', activeLabel: 'Statistiques usage', accessKey: 'can_autorisation', description: 'Suivi de l utilisation de l outil pour accompagnement' },
+      { label: 'Performance des extractions', path: '/admin/performance-extraction', activeLabel: 'Performance des extractions', accessKey: 'can_superuser', description: 'Durée des exports SAGE (TSE) par lancement, historique et journal d’exécution.' },
+      { label: 'Cycle de synchronisation', path: '/cycle-synchronisation', activeLabel: 'Cycle Synchronisation data', accessKey: 'can_superuser', description: 'État et historique des cycles de synchronisation SAGE → Supabase.' },
+      { label: 'MAJ retards paiement', path: '/retards-paiement', activeLabel: 'Retards de paiements', accessKey: 'can_paiement', description: 'Intégration du fichier des retards de paiemnets.' },
+      { label: 'Statistiques usage', path: '/admin/statistiques-usage', activeLabel: 'Statistiques usage', accessKey: 'can_superuser', description: 'Suivi de l utilisation de l outil pour accompagnement' },
     ],
   },
 ]

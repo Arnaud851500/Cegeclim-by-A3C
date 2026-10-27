@@ -21,6 +21,11 @@ export type AccessRights = {
   can_financement: boolean
   can_objectifs: boolean
   can_suivi_agences: boolean
+  /** (2026-10-27) Refonte des droits : appro, super-utilisateur, Projet BLG, retards de paiement. */
+  can_appro: boolean
+  can_superuser: boolean
+  can_projetblg: boolean
+  can_paiement: boolean
   can_change_scope: boolean
   allowed_scopes: string[]
   allowed_agences: string[]
@@ -93,6 +98,10 @@ type AccessProfileRow = {
   can_financement?: boolean | null
   can_objectifs?: boolean | null
   can_suivi_agences?: boolean | null
+  can_appro?: boolean | null
+  can_superuser?: boolean | null
+  can_projetblg?: boolean | null
+  can_paiement?: boolean | null
   can_change_scope?: boolean | null
   default_landing_page?: string | null
   show_alert_cerfa_ko?: boolean | null
@@ -157,6 +166,10 @@ export const defaultRights: AccessRights = {
   can_financement: false,
   can_objectifs: false,
   can_suivi_agences: false,
+  can_appro: false,
+  can_superuser: false,
+  can_projetblg: false,
+  can_paiement: false,
   can_change_scope: false,
   allowed_scopes: ['Global'],
   allowed_agences: [],
@@ -188,13 +201,22 @@ const AccessContext = createContext<AccessContextType>({
   refreshAccess: async () => {},
 })
 
+// (2026-10-27) Aligné sur lib/navigation.ts (refonte des droits). Sert au
+// choix de la page d'atterrissage ; le contrôle des écrans est fait par
+// isPathAllowed de lib/navigation.ts (ClientRootShell).
 const PAGE_ACCESS_CHECKS: Array<[string, keyof AccessRights]> = [
-  ['/indicateurs', 'can_dashboard'],
-  ['/Indicateurs', 'can_dashboard'],
+  ['/indicateurs', 'can_superuser'],
+  ['/Indicateurs', 'can_superuser'],
+  ['/atelier-analyse/assistant', 'can_superuser'],
+  ['/atelier-analyse', 'can_autorisation'],
   ['/approvisionnements', 'can_dashboard'],
-  ['/portefeuille-livraison', 'can_dashboard'],
+  ['/portefeuille-livraison', 'can_stocks'],
   ['/synthese_multi_clients', 'can_dashboard'],
   ['/focus_mensuel', 'can_dashboard'],
+  ['/tableaux-de-bord/vision-tci', 'can_dashboard'],
+  ['/vision-client', 'can_dashboard'],
+  ['/cycle-documents', 'can_dashboard'],
+  ['/agenda', 'can_dashboard'],
   ['/territoire', 'can_territoire'],
   ['/cartographie', 'can_cartographie'],
   ['/clients', 'can_autorisation'],
@@ -205,12 +227,20 @@ const PAGE_ACCESS_CHECKS: Array<[string, keyof AccessRights]> = [
   ['/agences', 'can_agences'],
   ['/autorisation', 'can_autorisation'],
   ['/admin/planification', 'can_autorisation'],
+  ['/admin/performance-extraction', 'can_superuser'],
+  ['/admin/statistiques-usage', 'can_superuser'],
+  ['/cycle-synchronisation', 'can_superuser'],
+  ['/retards-paiement', 'can_paiement'],
+  ['/controle-sage-blg', 'can_projetblg'],
   ['/Import', 'can_autorisation'],
-  ['/cycle-documents', 'can_autorisation'],
-  ['/atelier-analyse', 'can_autorisation'],
   ['/documents', 'can_documents'],
-  ['/stocks', 'can_stocks'],
-  ['/stocks-disponibilites', 'can_stocks'],
+  ['/stock/penurie', 'can_appro'],
+  ['/stock/calcul-besoin', 'can_appro'],
+  ['/stock/portefeuille-cdf', 'can_appro'],
+  ['/stock/reconstruction', 'can_appro'],
+  ['/stock/groupes', 'can_appro'],
+  ['/stocks-disponibilites2', 'can_appro'],
+  ['/stock', 'can_stocks'],
   ['/activites', 'can_activites'],
   ['/financement', 'can_financement'],
   ['/suivi-agences', 'can_suivi_agences'],
@@ -230,7 +260,7 @@ export function getFirstAllowedPath(rights: AccessRights) {
     return requestedLandingPage
   }
 
-  if (rights.can_dashboard) return '/indicateurs'
+  if (rights.can_dashboard) return '/tableaux-de-bord/vision-tci'
   if (rights.can_territoire) return '/territoire'
   if (rights.can_cartographie) return '/cartographie'
   if (rights.can_clients) return '/accueil'
@@ -242,7 +272,10 @@ export function getFirstAllowedPath(rights: AccessRights) {
   if (rights.can_autorisation) return '/autorisation'
   if (rights.can_activites) return '/activites'
   if (rights.can_documents) return '/documents'
-  if (rights.can_stocks) return '/stocks-disponibilites'
+  if (rights.can_stocks) return '/stock'
+  if (rights.can_appro) return '/stock/calcul-besoin'
+  if (rights.can_projetblg) return '/controle-sage-blg/rapprochement-sage-blg'
+  if (rights.can_paiement) return '/retards-paiement'
   if (rights.can_financement) return '/financement'
   if (rights.can_suivi_agences) return '/suivi-agences'
 
@@ -268,6 +301,10 @@ const PROFILE_FLAG_KEYS = [
   'can_financement',
   'can_objectifs',
   'can_suivi_agences',
+  'can_appro',
+  'can_superuser',
+  'can_projetblg',
+  'can_paiement',
   'can_change_scope',
   'show_alert_cerfa_ko',
   'show_alert_cdc_liv_avant_2026',
