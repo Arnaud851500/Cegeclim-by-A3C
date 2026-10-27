@@ -118,3 +118,25 @@ begin
   if v = v0 then raise exception 'patch non appliqué'; end if;
   execute v;
 end $do$;
+
+-- ─── 27/10/2026 (appliqué en production) ────────────────────────────────────
+-- Référence chantier (champ SAGE « Référence » de la pièce) ajoutée aux lignes : lignes[].chantier.
+do $do$
+declare v text; p text;
+begin
+  v := pg_get_functiondef('public.get_allocation_ro'::regproc);
+  if v like '%''chantier'', lb.chantier%' then return; end if;
+  p := v; v := replace(v, $a$a.numero_tiers_entete as tiers, a.intitule_tiers_entete as client, a.collaborateur
+    from activite_lignes a$a$, $a$a.numero_tiers_entete as tiers, a.intitule_tiers_entete as client, a.collaborateur,
+           nullif(trim(a.reference), '') as chantier
+    from activite_lignes a$a$);
+  if v = p then raise exception 'étape 1'; end if;
+  p := v; v := replace(v, $a$f.numero_tiers_entete, f.intitule_tiers_entete, f.collaborateur
+    from facture_lignes f$a$, $a$f.numero_tiers_entete, f.intitule_tiers_entete, f.collaborateur,
+           nullif(trim(f.reference), '')
+    from facture_lignes f$a$);
+  if v = p then raise exception 'étape 2'; end if;
+  p := v; v := replace(v, $a$'tiers', lb.tiers, 'client', lb.client,$a$, $a$'tiers', lb.tiers, 'client', lb.client, 'chantier', lb.chantier,$a$);
+  if v = p then raise exception 'étape 3'; end if;
+  execute v;
+end $do$;

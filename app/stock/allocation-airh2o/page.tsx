@@ -77,6 +77,8 @@ type LigneDoc = {
   ref: string; bloc: string; nature: Nature; piece: string; cdc: string | null; date_cdc: string | null; date_piece?: string | null
   date_livraison: string | null; date_bl: string | null; q: number; montant_ht: number | null
   tiers: string | null; client: string | null; representant: string | null; agence: string | null
+  /** Référence chantier SAGE (champ « Référence » de la pièce), 27/10/2026. */
+  chantier?: string | null
   /** CDC : couverture à la date demandée (v_portefeuille_couverture_stock). */
   couv_statut?: 'COUVERT' | 'COUVERT_PAR_RECEPTION' | 'RECEPTION_TARDIVE' | 'RUPTURE' | 'A_COUVRIR_PAR_APPRO' | null
   couv_cdf?: string | null; couv_date?: string | null; couv_retard?: number | null
@@ -224,10 +226,10 @@ function DetailModal({ detail, lignes, onClose }: { detail: Detail; lignes: Lign
               <th className="px-1.5 py-1">Nature</th><th className="px-1.5">Référence</th><th className="px-1.5">Pièce</th><th className="px-1.5">N° CDC</th>
               <th className="px-1.5">Date CDC</th><th className="px-1.5">Livraison demandée</th>
               {avecCouv ? <th className="px-1.5">Livrable à la date demandée</th> : <th className="px-1.5">Date BL</th>}
-              <th className="px-1.5 text-right">Qté</th><th className="px-1.5">Client</th><th className="px-1.5">Représentant</th><th className="px-1.5">Agence</th>
+              <th className="px-1.5 text-right">Qté</th><th className="px-1.5">Client</th><th className="px-1.5">Réf. chantier</th><th className="px-1.5">Représentant</th><th className="px-1.5">Agence</th>
             </tr></thead>
             <tbody>
- {liste.length === 0 && <tr><td colSpan={11} className="px-2 py-6 text-center text-[#8A8474]">Aucune ligne.</td></tr>}
+ {liste.length === 0 && <tr><td colSpan={12} className="px-2 py-6 text-center text-[#8A8474]">Aucune ligne.</td></tr>}
               {liste.map((l, i) => (
                 <tr key={`${l.piece}-${l.ref}-${i}`} className={`border-t border-[#F0EDE6] ${l.bloc === 'JITHURBIDE' ? 'bg-[#F4F0FA]' : ''}`}>
                   <td className="whitespace-nowrap px-1.5 py-0.5">{LIB_NATURE[l.nature]}</td>
@@ -241,6 +243,7 @@ function DetailModal({ detail, lignes, onClose }: { detail: Detail; lignes: Lign
                     : <td className="whitespace-nowrap px-1.5">{fmtDate(l.date_bl)}</td>}
                   <td className="px-1.5 text-right font-bold">{fmtNum(l.q)}</td>
                   <td className="max-w-[260px] truncate px-1.5" title={`${l.tiers || ''} ${l.client || ''}`}>{l.client || l.tiers}</td>
+                  <td className="max-w-[200px] truncate px-1.5" title={l.chantier || ''}>{l.chantier || '—'}</td>
                   <td className="whitespace-nowrap px-1.5">{l.representant || '—'}</td>
                   <td className="whitespace-nowrap px-1.5">{libBloc(l.bloc)}</td>
                 </tr>
@@ -520,7 +523,7 @@ function AllocationAirH2O() {
     const s = search.trim().toUpperCase()
     return (d?.lignes || []).filter((l) => refsSet.has(l.ref)
       && (!agenceF || l.bloc === agenceF)
-      && (!s || `${l.ref} ${l.piece} ${l.cdc} ${l.client} ${l.tiers} ${l.representant}`.toUpperCase().includes(s)))
+      && (!s || `${l.ref} ${l.piece} ${l.cdc} ${l.client} ${l.tiers} ${l.representant} ${l.chantier || ''}`.toUpperCase().includes(s)))
   }, [d, refsSet, agenceF, search])
   const lignesReste = useMemo<LigneDoc[]>(() => {
     const s = search.trim().toUpperCase()
@@ -562,6 +565,7 @@ function AllocationAirH2O() {
     { h: 'Montant HT', v: (l) => n0(l.montant_ht), right: true, w: 11 },
     { h: 'N° client', v: (l) => l.tiers, w: 10 },
     { h: 'Client', v: (l) => l.client, w: 30 },
+    { h: 'Réf. chantier', v: (l) => l.chantier || null, w: 24 },
     { h: 'Représentant', v: (l) => l.representant, w: 15 },
     { h: 'Agence', v: (l) => libBloc(l.bloc), w: 18 },
   ]
@@ -744,7 +748,7 @@ function AllocationAirH2O() {
                     {d.blocs.map((b) => <option key={b} value={b}>{libBloc(b)}</option>)}
                   </select>
                 )}
-                <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Référence, CDC, client…"
+                <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Référence, CDC, client, chantier…"
                   className="h-8 w-[220px] rounded-md border border-[#E5E1D8] bg-white px-2 text-[12px] font-semibold outline-none focus:border-[#1D5C86]" />
               </>
             )}
@@ -812,7 +816,7 @@ function AllocationAirH2O() {
                 {lignes.map(({ r, aAtt, attr }) => (
                   <tr key={r.ref} className="hover:brightness-[0.98]">
                     <td className={`${td} sticky left-0 z-10 bg-white text-left font-bold`}>
-                      <a href={`/stock/penurie?ref=${encodeURIComponent(r.ref)}&mystock=tous`} className="hover:text-[#B4761A] hover:underline" title="Fiche pénurie">{r.ref}</a>
+                      <a href={`/stock?ref=${encodeURIComponent(r.ref)}`} className="hover:text-[#B4761A] hover:underline" title="Ouvrir la référence dans l’écran Stock">{r.ref}</a>
                     </td>
                     <td className={`${td} max-w-[240px] truncate text-left text-[11px] text-[#5E5A50]`} title={r.designation || ''}>{r.designation}</td>
                     <td className={`${td} whitespace-nowrap`}>{r.gamme === '600' ? 'Split' : 'Monobloc'}</td>
