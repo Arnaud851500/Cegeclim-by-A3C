@@ -20,6 +20,10 @@
  * Sources : RPC get_stock_agence_analyse, get_stock_agence_article ;
  * tables stock_agence_depots, stock_agence_parametres, stock_agence_article_choix.
  * Migration requise : supabase/sql/20261006_stock_agence_analyse.sql.
+ *
+ * 27/10/2026 : dépôt figé sur l'agence du collaborateur (périmètre agences de l'onglet Utilisateurs
+ * d'Autorisations), contrôlé aussi par la base (stock_agence_depots_user —
+ * supabase/sql/20261027_stock_agence_depot_fige.sql). Périmètre vide = tous les dépôts.
  */
 
 import React, { Suspense, useCallback, useEffect, useMemo, useState } from 'react'
@@ -551,6 +555,8 @@ function AnalyseStockAgence() {
   const params = useSearchParams()
   const [depots, setDepots] = useState<Depot[]>([])
   const [depotNum, setDepotNum] = useState(params.get('depot') || '1')
+  /** null = pas de restriction ; sinon dépôts autorisés (agence du collaborateur). undefined = pas encore lu. */
+  const [depotsUser, setDepotsUser] = useState<string[] | null | undefined>(undefined)
   const [depuis] = useState('2025-01-01')
   const [analyse, setAnalyse] = useState<Analyse | null>(null)
   const [loading, setLoading] = useState(true)
@@ -573,6 +579,12 @@ function AnalyseStockAgence() {
 
   useEffect(() => {
     void supabase.from('stock_agence_depots').select('*').order('ordre').then(({ data }) => setDepots((data || []) as Depot[]))
+    void supabase.rpc('stock_agence_depots_user').then(({ data, error }) => {
+      const liste = error ? null : (data as string[] | null)
+      setDepotsUser(liste)
+      // Dépôt figé : si celui de l'URL n'est pas autorisé, on prend celui de l'agence
+      if (liste && liste.length) setDepotNum((cur) => (liste.includes(cur) ? cur : liste[0]))
+    })
     void supabase.from('stock_agence_parametres').select('*').order('cle').then(({ data }) => {
       const p = (data || []) as Parametre[]
       setParametres(p); setParamsDraft(Object.fromEntries(p.map((x) => [x.cle, String(x.valeur)])))
@@ -580,13 +592,20 @@ function AnalyseStockAgence() {
   }, [])
 
   const charger = useCallback(async () => {
+    if (depotsUser === undefined) return
+    if (depotsUser && !depotsUser.includes(depotNum)) {
+      setAnalyse(null); setLoading(false)
+      setErreur(depotsUser.length ? null : 'Aucun dépôt suivi pour l’agence de votre périmètre : l’analyse n’est pas disponible.')
+      return
+    }
     setLoading(true); setErreur(null)
     const { data, error } = await supabase.rpc('get_stock_agence_analyse', { p_depot_num: depotNum, p_depuis: depuis })
     if (error) setErreur(messageErreur(error))
     else setAnalyse(data as Analyse)
     setLoading(false)
-  }, [depotNum, depuis])
+  }, [depotNum, depuis, depotsUser])
   useEffect(() => { void charger() }, [charger])
+  const depotsVisibles = depotsUser ? depots.filter((x) => depotsUser.includes(x.depot_num)) : depots
 
   function changerDepot(n: string) {
     setDepotNum(n); setRefOuverte(null); setAbcXyz(null)
@@ -733,10 +752,16 @@ function AnalyseStockAgence() {
             )}
           </div>
           <div className="flex flex-wrap items-center gap-2">
-            <select value={depotNum} onChange={(e) => changerDepot(e.target.value)} className="h-10 rounded-lg border border-[#E5E1D8] bg-white px-3 text-[14px] font-bold">
-              {depots.length === 0 && <option value={depotNum}>Dépôt {depotNum}</option>}
-              {depots.map((d) => <option key={d.depot_num} value={d.depot_num}>{d.central ? 'FMS (central)' : d.nom_court}</option>)}
-            </select>
+            {depotsUser && depotsVisibles.length <= 1 ? (
+              <span className="flex h-10 items-center rounded-lg border border-[#E5E1D8] bg-[#F4F3F0] px-3 text-[14px] font-bold" title="Dépôt de votre agence (périmètre défini dans Autorisations)">
+                {depotsVisibles[0]?.nom_court || '—'}
+              </span>
+            ) : (
+              <select value={depotNum} onChange={(e) => changerDepot(e.target.value)} className="h-10 rounded-lg border border-[#E5E1D8] bg-white px-3 text-[14px] font-bold">
+                {depotsVisibles.length === 0 && <option value={depotNum}>Dépôt {depotNum}</option>}
+                {depotsVisibles.map((d) => <option key={d.depot_num} value={d.depot_num}>{d.central ? 'FMS (central)' : d.nom_court}</option>)}
+              </select>
+            )}
             <button type="button" onClick={() => setVoirParams((v) => !v)} className={`h-10 rounded-lg border px-3 text-[13px] font-bold ${voirParams ? 'border-[#B4761A] text-[#96600F]' : 'border-[#E5E1D8] text-[#3A362E] hover:bg-[#F4F3F0]'}`}>⚙ Paramètres</button>
             <button type="button" onClick={() => void exporterExcel()} disabled={exportEnCours || loading || filtres.length === 0} className="h-10 rounded-lg bg-[#111820] px-3 text-[13px] font-bold text-white disabled:opacity-50">
               {exportEnCours ? 'Export…' : `⬇ Excel (${fmtNum(filtres.length)})`}
