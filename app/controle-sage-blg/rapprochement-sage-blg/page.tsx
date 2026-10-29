@@ -129,7 +129,12 @@ type Ecart = {
   suivi_commentaire: string | null;
   suivi_par: string | null;
   suivi_le: string | null;
+  /** Commande BLG archivée (CDC / CDF) ; null = sans pièce BLG ou stock. */
+  blg_archive: boolean | null;
+  blg_archive_motif: string | null;
 };
+
+type ArchiveFiltre = '' | 'oui' | 'non';
 
 type SortKey = 'valeur_ht' | 'age_jours' | 'document' | 'reference_article' | 'depot' | 'tiers_nom' | 'ecart_qte' | 'date_document';
 
@@ -300,6 +305,9 @@ export default function RapprochementSageBlgPage() {
   const [depot, setDepot] = useState('');
   const [age, setAge] = useState('');
   const [suiviFiltre, setSuiviFiltre] = useState<'' | Suivi | 'ouverts'>('ouverts');
+  // 29/10/2026 : commandes archivées dans BLG (CDC / CDF) — oui / non / tous
+  const [archiveFiltre, setArchiveFiltre] = useState<ArchiveFiltre>('');
+  const archiveActif: ArchiveFiltre = domaine === 'STOCK' ? '' : archiveFiltre;
   const [sortKey, setSortKey] = useState<SortKey>('valeur_ht');
   const [sortAsc, setSortAsc] = useState(false);
   const [page, setPage] = useState(0);
@@ -343,14 +351,14 @@ export default function RapprochementSageBlgPage() {
   // -------------------------------------------------------------
   const chargerSynthese = useCallback(async () => {
     setLoadingSynthese(true);
-    const { data, error: err } = await supabase.rpc('get_rappro_synthese');
+    const { data, error: err } = await supabase.rpc('get_rappro_synthese', { p_archive: archiveActif || null });
     setLoadingSynthese(false);
     if (err) {
       setError(`Synthèse indisponible : ${err.message}`);
       return;
     }
     setSynthese(data as Synthese);
-  }, []);
+  }, [archiveActif]);
 
   useEffect(() => {
     void chargerSynthese();
@@ -440,6 +448,8 @@ export default function RapprochementSageBlgPage() {
       if (a?.max != null) q = q.lte('age_jours', a.max);
       if (suiviFiltre === 'ouverts') q = q.in('suivi_statut', ['a_traiter', 'en_cours']);
       else if (suiviFiltre) q = q.eq('suivi_statut', suiviFiltre);
+      if (archiveActif === 'oui') q = q.eq('blg_archive', true);
+      else if (archiveActif === 'non') q = q.not('blg_archive', 'is', true);
       const s = pgrstEsc(rechercheDebounced);
       if (s) {
         q = q.or(
@@ -448,7 +458,7 @@ export default function RapprochementSageBlgPage() {
       }
       return q.order(sortKey, { ascending: sortAsc, nullsFirst: false }).order('id', { ascending: true });
     },
-    [domaine, niveau, typeCode, afficherDecalage, afficherInfos, depot, age, suiviFiltre, rechercheDebounced, sortKey, sortAsc]
+    [domaine, niveau, typeCode, afficherDecalage, afficherInfos, depot, age, suiviFiltre, archiveActif, rechercheDebounced, sortKey, sortAsc]
   );
 
   const chargerLignes = useCallback(async () => {
@@ -470,7 +480,7 @@ export default function RapprochementSageBlgPage() {
   useEffect(() => {
     setPage(0);
     setSelection(new Set());
-  }, [domaine, niveau, typeCode, afficherDecalage, afficherInfos, depot, age, suiviFiltre, rechercheDebounced, sortKey, sortAsc]);
+  }, [domaine, niveau, typeCode, afficherDecalage, afficherInfos, depot, age, suiviFiltre, archiveActif, rechercheDebounced, sortKey, sortAsc]);
 
   function changerDomaine(d: Domaine) {
     setDomaine(d);
@@ -622,6 +632,8 @@ export default function RapprochementSageBlgPage() {
         { header: 'Valeur HT', key: 'valeur_ht', width: 12 },
         { header: 'Situation SAGE', key: 'statut_sage', width: 34 },
         { header: 'Situation BLG', key: 'statut_blg', width: 34 },
+        { header: 'Archivée BLG', key: 'archive', width: 12 },
+        { header: 'Motif archivage BLG', key: 'blg_archive_motif', width: 24 },
         { header: 'Décalage probable', key: 'decal', width: 10 },
         { header: 'Suivi', key: 'suivi', width: 16 },
         { header: 'Commentaire', key: 'suivi_commentaire', width: 30 },
@@ -639,6 +651,7 @@ export default function RapprochementSageBlgPage() {
           ecart_qte: r.ecart_qte == null ? null : Number(r.ecart_qte),
           valeur_ht: r.valeur_ht == null ? null : Number(r.valeur_ht),
           decal: r.probable_decalage ? 'Oui' : '',
+          archive: r.blg_archive == null ? '' : r.blg_archive ? 'Oui' : 'Non',
           suivi: SUIVI_PAR_CLE[r.suivi_statut]?.label,
         };
         detailKeys.forEach((k) => {
@@ -906,7 +919,7 @@ export default function RapprochementSageBlgPage() {
 
             {/* Filtres */}
             <div style={{ background: C.blanc, border: `1px solid ${C.ligne}`, borderRadius: 12, padding: 12, marginBottom: 12 }}>
-              <div style={{ display: 'grid', gridTemplateColumns: 'minmax(220px, 2fr) repeat(3, minmax(150px, 1fr))', gap: 10 }}>
+              <div style={{ display: 'grid', gridTemplateColumns: `minmax(220px, 2fr) repeat(${domaine === 'STOCK' ? 3 : 4}, minmax(150px, 1fr))`, gap: 10 }}>
                 <input
                   value={recherche}
                   onChange={(e) => setRecherche(e.target.value)}
@@ -937,6 +950,18 @@ export default function RapprochementSageBlgPage() {
                     </option>
                   ))}
                 </select>
+                {domaine !== 'STOCK' && (
+                  <select
+                    value={archiveFiltre}
+                    onChange={(e) => setArchiveFiltre(e.target.value as ArchiveFiltre)}
+                    style={inputStyle}
+                    title="Commande archivée dans BLG (motif d’archivage renseigné)"
+                  >
+                    <option value="">Archivée BLG : tous</option>
+                    <option value="oui">Archivée BLG : oui</option>
+                    <option value="non">Archivée BLG : non</option>
+                  </select>
+                )}
               </div>
               <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 10, flexWrap: 'wrap' }}>
                 <span style={{ fontSize: 13, color: C.texte2 }}>
@@ -1093,7 +1118,17 @@ export default function RapprochementSageBlgPage() {
                             </td>
                           )}
                           <td style={{ ...td, fontSize: 12, color: C.sageBleu, maxWidth: 240, whiteSpace: 'normal' }}>{r.statut_sage ?? '—'}</td>
-                          <td style={{ ...td, fontSize: 12, color: C.violet, maxWidth: 240, whiteSpace: 'normal' }}>{r.statut_blg ?? '—'}</td>
+                          <td style={{ ...td, fontSize: 12, color: C.violet, maxWidth: 240, whiteSpace: 'normal' }}>
+                            {r.statut_blg ?? '—'}
+                            {r.blg_archive && (
+                              <span
+                                title={r.blg_archive_motif ? `Motif : ${r.blg_archive_motif}` : undefined}
+                                style={{ display: 'inline-block', marginLeft: 6, padding: '1px 6px', borderRadius: 4, fontSize: 11, fontWeight: 600, color: C.gris, background: '#F1EFE8', border: `1px solid ${C.ligne}` }}
+                              >
+                                Archivée
+                              </span>
+                            )}
+                          </td>
                           <td style={{ ...td, textAlign: 'right', fontWeight: 600, color: Number(r.ecart_qte) > 0 ? C.sageBleu : Number(r.ecart_qte) < 0 ? C.violet : C.gris }}>
                             {r.ecart_qte == null ? '—' : `${Number(r.ecart_qte) > 0 ? '+' : ''}${fmtNum(r.ecart_qte, 2)}`}
                           </td>
