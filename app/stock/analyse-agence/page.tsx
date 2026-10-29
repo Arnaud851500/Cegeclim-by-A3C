@@ -24,9 +24,14 @@
  * 27/10/2026 : dépôt figé sur l'agence du collaborateur (périmètre agences de l'onglet Utilisateurs
  * d'Autorisations), contrôlé aussi par la base (stock_agence_depots_user —
  * supabase/sql/20261027_stock_agence_depot_fige.sql). Périmètre vide = tous les dépôts.
+ *
+ * 29/10/2026 : la fenêtre article interroge le dépôt de l'analyse affichée (meta.depot_num) et non
+ * le dépôt sélectionné ; une réponse d'analyse arrivée en retard (changement de dépôt, dépôt figé
+ * appliqué au chargement) est ignorée. Avant, la liste pouvait rester celle d'Anglet pendant que la
+ * fenêtre lisait les sorties d'un autre dépôt : graphique vide, « Aucune vente sur la période ».
  */
 
-import React, { Suspense, useCallback, useEffect, useMemo, useState } from 'react'
+import React, { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
 import { Bar, CartesianGrid, ComposedChart, Line, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
 import ExcelJS from 'exceljs'
@@ -591,16 +596,21 @@ function AnalyseStockAgence() {
     })
   }, [])
 
+  const requete = useRef(0)
   const charger = useCallback(async () => {
     if (depotsUser === undefined) return
+    const id = ++requete.current
     if (depotsUser && !depotsUser.includes(depotNum)) {
       setAnalyse(null); setLoading(false)
       setErreur(depotsUser.length ? null : 'Aucun dépôt suivi pour l’agence de votre périmètre : l’analyse n’est pas disponible.')
       return
     }
     setLoading(true); setErreur(null)
+    // Analyse d'un autre dépôt encore affichée : on la retire pour ne pas mélanger liste et détail
+    setAnalyse((cur) => (cur && String(cur.meta?.depot_num) !== String(depotNum) ? null : cur))
     const { data, error } = await supabase.rpc('get_stock_agence_analyse', { p_depot_num: depotNum, p_depuis: depuis })
-    if (error) setErreur(messageErreur(error))
+    if (id !== requete.current) return // réponse périmée : un autre chargement a été lancé depuis
+    if (error) { setErreur(messageErreur(error)); setAnalyse(null) }
     else setAnalyse(data as Analyse)
     setLoading(false)
   }, [depotNum, depuis, depotsUser])
@@ -928,7 +938,7 @@ function AnalyseStockAgence() {
       </div>
 
       {ligneOuverte && (
-        <ArticleModal depotNum={depotNum} depuis={depuis} ligne={ligneOuverte}
+        <ArticleModal depotNum={String(meta?.depot_num ?? depotNum)} depuis={depuis} ligne={ligneOuverte}
           position={indexOuvert >= 0 ? `${indexOuvert + 1} / ${filtres.length}` : null}
           onPrev={indexOuvert > 0 ? () => setRefOuverte(filtres[indexOuvert - 1].ref) : undefined}
           onNext={indexOuvert >= 0 && indexOuvert < filtres.length - 1 ? () => setRefOuverte(filtres[indexOuvert + 1].ref) : undefined}
