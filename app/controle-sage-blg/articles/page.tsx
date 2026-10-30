@@ -51,13 +51,13 @@
  * ÉVOLUTION (2026-09-25) : vue « Nomenclatures » (sélecteur Articles / Nomenclatures,
  *   dans les trois onglets) — un bloc par article chapeau avec ses paramètres, puis ses
  *   composants : quantités, PA net / PV (unitaires et × quantité), sommeil / archive,
- *   blocage appro / nature « Achat interdit ». Sources : v_sage_nomenclature_lignes,
+ *   blocage appro / tag BLG « Bloqué achat ». Sources : v_sage_nomenclature_lignes,
  *   mv_blg_nomenclature_lignes, mv_controle_nomenclature_sage_blg (rafraîchies avec
  *   refresh_controle_articles).
  * ÉVOLUTION (2026-09-24) : contrôles de statut / blocage
  *   - MyStock SAGE = OUI  ↔  tag BLG « FMS »
- *   - Interdire en commande SAGE = Oui  ↔  nature BLG « Classique - Achat interdit »
- *     ou « Parc - Achat interdit »
+ *   - Interdire en commande SAGE = Oui  ↔  tag BLG « Bloqué achat » (purchaseBlocked)
+ *     (30/10/2026 : remplace la comparaison avec la nature « Achat interdit »)
  *   - En sommeil SAGE  ↔  Archivé BLG = blg.article_part.internal_tag = 'archive'
  *     (valeurs normal / archive ; vérifié le 25/09/2026 contre l'export BLG des
  *     articles archivés : 3 038 / 3 038). Colonne `archive` de mv_blg_articles_complet.
@@ -1243,7 +1243,7 @@ const PAIRES: PaireArticle[] = [
   { groupe: 'Identification', labelSage: 'Marque', sageKey: 'sage_marque', labelBlg: 'Marque', blgKey: 'blg_marque', compare: true, gereVides: true, comparer: (r) => comparerMarque(r.sage_marque, r.blg_marque) },
   { groupe: 'Identification', labelSage: 'Statut', sageKey: 'sage_statut', labelBlg: 'Statut (id)', blgKey: 'blg_statut', compare: false },
   { groupe: 'Statut et blocages', labelSage: 'MyStock', sageKey: 'sage_mystock', labelBlg: 'Tag FMS', blgKey: 'blg_tag_fms', compare: true, gereVides: true, comparer: (r) => (Boolean(r.sage_mystock_oui) === Boolean(r.blg_tag_fms_bool) ? 'ok' : 'ecart') },
-  { groupe: 'Statut et blocages', labelSage: 'Interdire en commande', sageKey: 'sage_interdire_commande', labelBlg: 'Nature « Achat interdit »', blgKey: 'blg_achat_interdit', compare: true, gereVides: true, comparer: (r) => (Boolean(r.sage_interdire_commande_bool) === Boolean(r.blg_achat_interdit_bool) ? 'ok' : 'ecart') },
+  { groupe: 'Statut et blocages', labelSage: 'Interdire en commande', sageKey: 'sage_interdire_commande', labelBlg: 'Tag « Bloqué achat »', blgKey: 'blg_achat_interdit', compare: true, gereVides: true, comparer: (r) => (Boolean(r.sage_interdire_commande_bool) === Boolean(r.blg_achat_interdit_bool) ? 'ok' : 'ecart') },
   { groupe: 'Statut et blocages', labelSage: 'En sommeil', sageKey: 'sage_sommeil', labelBlg: 'Archivé', blgKey: 'blg_archive', compare: true, gereVides: true, comparer: (r) => (Boolean(r.sage_en_sommeil) === Boolean(r.blg_archive_bool) ? 'ok' : 'ecart') },
   { groupe: 'Statut et blocages', labelSage: 'Paramétrage n° de série', sageKey: 'sage_numero_serie', labelBlg: 'Nature · stock · n° de série', blgKey: 'blg_parametrage_serie', compare: true, gereVides: true, controleVides: true, comparer: comparerNumeroSerie },
   { groupe: 'Statut et blocages', labelSage: 'Frais de transport (nomenclature)', sageKey: 'sage_transport', labelBlg: 'Tag Transport', blgKey: 'blg_transport', compare: true, gereVides: true, controleVides: true, comparer: comparerTransport },
@@ -1775,7 +1775,7 @@ function OngletComparaison({ version }: { version: number }) {
             <li>Suivi de stock : « Aucun » SAGE ↔ gestion de stock vide BLG ; tout autre suivi ↔ gestion renseignée.</li>
             <li>Nomenclature : composants SAGE (sage.nomenclature) ↔ marques de la nomenclature BLG de même référence, ordre libre ; quantités différentes = orange.</li>
             <li>MyStock = OUI (SAGE) doit correspondre au tag « FMS » (BLG).</li>
-            <li>Interdire en commande = Oui (SAGE) doit correspondre à une nature BLG « Classique - Achat interdit » ou « Parc - Achat interdit ».</li>
+            <li>Interdire en commande = Oui (SAGE) doit correspondre au tag BLG « Bloqué achat » (la nature de l'article n'est plus comparée).</li>
             <li>Frais de transport : chaque article TRANSPORTxxx de la nomenclature SAGE (TRANSPORTPV, TRANSPORTPV1, PV2, PV3, TRANSPORTSPE…) doit se retrouver en tag BLG du même nom (TransportPV1…), et inversement — tag manquant ou en trop = écart. Articles sans l'un ni l'autre : « non concernés ».</li>
             <li>Paramétrage n° de série : un article dont la nomenclature SAGE contient un article NUMEROSERIE (ou NUMEROSERIEAIRZONE) doit être dans BLG soit en nature « Parc … » avec gestion de stock « Matériel », soit en nature « Classique … » avec gestion de stock « Classique » et gestion des numéros de série « Obligatoire » ou « Facultatif ». Les autres articles sont « non concernés ».</li>
             <li>En sommeil (SAGE) doit correspondre à un article archivé dans BLG (champ BLG article_part.internal_tag = « archive »).</li>
@@ -1968,7 +1968,7 @@ function OngletComparaison({ version }: { version: number }) {
 //  - Comparaison : mv_controle_nomenclature_sage_blg (rapprochement chapeau × composant)
 // Une carte par article chapeau : paramètres en tête, composants en dessous avec
 // quantités, prix d'achat / de vente (unitaires et × quantité), sommeil / archive et
-// blocage appro / nature « Achat interdit ».
+// blocage appro / tag BLG « Bloqué achat ».
 
 type ModeNomenclature = 'sage' | 'blg' | 'comparaison'
 
@@ -2131,18 +2131,18 @@ function VueNomenclatures({ mode, version }: { mode: ModeNomenclature; version: 
         if (mode === 'blg') return {
           'Chapeau': g.reference, 'Désignation chapeau': safeText(g.tete.parent_designation), 'Statut nomenclature': safeText(g.tete.nomenclature_statut), 'Tarification': TARIFICATION_BLG[safeText(g.tete.nomenclature_tarification)] ?? safeText(g.tete.nomenclature_tarification),
           'Prix fixe nomenclature': toNum(g.tete.nomenclature_prix_fixe) ?? '', 'Chapeau prix public': toNum(g.tete.parent_prix_vente) ?? '', 'Chapeau PA net': toNum(g.tete.parent_prix_achat) ?? '',
-          'Chapeau archivé': b(g.tete.parent_archive), 'Chapeau achat interdit': b(g.tete.parent_achat_interdit), 'Nature chapeau': safeText(g.tete.parent_nature),
+          'Chapeau archivé': b(g.tete.parent_archive), 'Chapeau bloqué achat': b(g.tete.parent_achat_interdit), 'Nature chapeau': safeText(g.tete.parent_nature),
           'Ordre': toNum(l.ordre) ?? '', 'Composant': safeText(l.composant_reference), 'Désignation composant': safeText(l.composant_designation), 'Qté': toNum(l.quantite) ?? '',
           'PA net unit.': toNum(l.composant_prix_achat) ?? '', 'PA × qté': produit(l.quantite, l.composant_prix_achat) ?? '', 'Prix public unit.': toNum(l.composant_prix_vente) ?? '', 'PV × qté': produit(l.quantite, l.composant_prix_vente) ?? '',
-          'Composant archivé': b(l.composant_archive), 'Composant achat interdit': b(l.composant_achat_interdit), 'Nature composant': safeText(l.composant_nature), 'Tag FMS': b(l.composant_fms), 'Stock': toNum(l.composant_stock) ?? '',
+          'Composant archivé': b(l.composant_archive), 'Composant bloqué achat': b(l.composant_achat_interdit), 'Nature composant': safeText(l.composant_nature), 'Tag FMS': b(l.composant_fms), 'Stock': toNum(l.composant_stock) ?? '',
         }
         return {
           'Chapeau': g.reference, 'Désignation chapeau': safeText(g.tete.parent_designation), 'Nomenclature SAGE': b(g.tete.parent_nomenclature_sage), 'Nomenclature BLG': b(g.tete.parent_nomenclature_blg),
-          'Chapeau sommeil SAGE': b(g.tete.parent_sage_en_sommeil), 'Chapeau archivé BLG': b(g.tete.parent_blg_archive), 'Chapeau blocage appro SAGE': b(g.tete.parent_sage_blocage_appro), 'Chapeau achat interdit BLG': b(g.tete.parent_blg_achat_interdit),
+          'Chapeau sommeil SAGE': b(g.tete.parent_sage_en_sommeil), 'Chapeau archivé BLG': b(g.tete.parent_blg_archive), 'Chapeau blocage appro SAGE': b(g.tete.parent_sage_blocage_appro), 'Chapeau tag Bloqué achat BLG': b(g.tete.parent_blg_achat_interdit),
           'Chapeau PV SAGE': toNum(g.tete.parent_sage_prix_vente) ?? '', 'Chapeau PV BLG': toNum(g.tete.parent_blg_prix_vente) ?? '',
           'Composant': safeText(l.composant_reference), 'Désignation composant': safeText(l.composant_designation), 'Statut ligne': STATUT_LIGNE[safeText(l.statut_ligne)]?.libelle ?? safeText(l.statut_ligne),
           'Qté SAGE': toNum(l.sage_quantite) ?? '', 'Qté BLG': toNum(l.blg_quantite) ?? '',
-          'Sommeil SAGE': b(l.composant_sage_en_sommeil), 'Archivé BLG': b(l.composant_blg_archive), 'Blocage appro SAGE': b(l.composant_sage_blocage_appro), 'Achat interdit BLG': b(l.composant_blg_achat_interdit),
+          'Sommeil SAGE': b(l.composant_sage_en_sommeil), 'Archivé BLG': b(l.composant_blg_archive), 'Blocage appro SAGE': b(l.composant_sage_blocage_appro), 'Tag Bloqué achat BLG': b(l.composant_blg_achat_interdit),
           'PA SAGE': toNum(l.composant_sage_prix_achat) ?? '', 'PA BLG': toNum(l.composant_blg_prix_achat) ?? '', 'PV SAGE': toNum(l.composant_sage_prix_vente) ?? '', 'PV BLG': toNum(l.composant_blg_prix_vente) ?? '',
         }
       }))
@@ -2161,7 +2161,7 @@ function VueNomenclatures({ mode, version }: { mode: ModeNomenclature; version: 
   }
 
   const libelleInactif = mode === 'sage' ? 'Masquer les chapeaux en sommeil' : mode === 'blg' ? 'Masquer les chapeaux archivés' : 'Masquer les chapeaux en sommeil (SAGE) et archivés (BLG)'
-  const libelleAlerte = mode === 'comparaison' ? 'Avec écart uniquement' : mode === 'sage' ? 'Composant en sommeil / bloqué uniquement' : 'Composant archivé / achat interdit uniquement'
+  const libelleAlerte = mode === 'comparaison' ? 'Avec écart uniquement' : mode === 'sage' ? 'Composant en sommeil / bloqué uniquement' : 'Composant archivé / bloqué achat uniquement'
   const th = 'px-2 py-1.5 font-bold whitespace-nowrap'
   const td = 'px-2 py-1.5 align-top'
   const tdNum = 'px-2 py-1.5 text-right align-top whitespace-nowrap'
@@ -2202,7 +2202,7 @@ function VueNomenclatures({ mode, version }: { mode: ModeNomenclature; version: 
           </div>
         </div>
         {mode === 'comparaison' && (
-          <p className="mt-2 text-[12px] text-[#8A8474]">Rapprochement par référence du chapeau et du composant (casse et espaces ignorés). Une ligne est en écart si le composant manque d'un côté, si la quantité diffère, ou si sommeil SAGE ≠ archivé BLG, ou blocage appro SAGE ≠ nature « Achat interdit » BLG. Les prix sont surlignés quand ils diffèrent.</p>
+          <p className="mt-2 text-[12px] text-[#8A8474]">Rapprochement par référence du chapeau et du composant (casse et espaces ignorés). Une ligne est en écart si le composant manque d'un côté, si la quantité diffère, ou si sommeil SAGE ≠ archivé BLG, ou blocage appro SAGE ≠ tag « Bloqué achat » BLG. Les prix sont surlignés quand ils diffèrent.</p>
         )}
       </section>
 
@@ -2236,7 +2236,7 @@ function VueNomenclatures({ mode, version }: { mode: ModeNomenclature; version: 
                         <span className={`rounded-full px-2 py-0.5 font-bold ${t.nomenclature_statut === 'active' ? 'bg-emerald-50 text-emerald-700' : 'bg-[#F4F3F0] text-[#8A8474]'}`}>Nomenclature {t.nomenclature_statut === 'active' ? 'active' : 'inactive'}</span>
                         {t.parent_nature && <span className="rounded-full bg-[#F4F3F0] px-2 py-0.5 font-bold text-[#3A362E]">{t.parent_nature}</span>}
                         <Pastille actif={!!t.parent_archive} oui="Archivé" non="Non archivé" />
-                        <Pastille actif={!!t.parent_achat_interdit} oui="Achat interdit" />
+                        <Pastille actif={!!t.parent_achat_interdit} oui="Bloqué achat" />
                         <Pastille actif={!!t.parent_fms} oui="FMS" ton="vert" />
                         <Pastille actif={!t.parent_part_id} oui="Article chapeau introuvable" ton="orange" />
                       </>
@@ -2251,7 +2251,7 @@ function VueNomenclatures({ mode, version }: { mode: ModeNomenclature; version: 
                           Sommeil SAGE {t.parent_sage_en_sommeil ? 'Oui' : 'Non'} · Archivé BLG {t.parent_blg_archive === null || t.parent_blg_archive === undefined ? '—' : t.parent_blg_archive ? 'Oui' : 'Non'}
                         </span>
                         <span className={`rounded-full px-2 py-0.5 font-bold ${differentBool(t.parent_sage_blocage_appro, t.parent_blg_achat_interdit) ? 'bg-red-100 text-red-700' : 'bg-[#F4F3F0] text-[#3A362E]'}`}>
-                          Blocage appro SAGE {t.parent_sage_blocage_appro ? 'Oui' : 'Non'} · Achat interdit BLG {t.parent_blg_achat_interdit === null || t.parent_blg_achat_interdit === undefined ? '—' : t.parent_blg_achat_interdit ? 'Oui' : 'Non'}
+                          Blocage appro SAGE {t.parent_sage_blocage_appro ? 'Oui' : 'Non'} · Bloqué achat BLG {t.parent_blg_achat_interdit === null || t.parent_blg_achat_interdit === undefined ? '—' : t.parent_blg_achat_interdit ? 'Oui' : 'Non'}
                         </span>
                       </>
                     )}
@@ -2300,14 +2300,14 @@ function VueNomenclatures({ mode, version }: { mode: ModeNomenclature; version: 
                         <tr>
                           <th className={th}>#</th><th className={th}>Composant</th><th className={th}>Désignation</th><th className={`${th} text-right`}>Qté</th>
                           <th className={`${th} text-right`}>PA net unit.</th><th className={`${th} text-right`}>PA × qté</th><th className={`${th} text-right`}>Prix public</th><th className={`${th} text-right`}>PV × qté</th>
-                          <th className={th}>Archivé</th><th className={th}>Achat interdit</th><th className={th}>Nature</th><th className={th}>FMS</th><th className={`${th} text-right`}>Stock</th>
+                          <th className={th}>Archivé</th><th className={th}>Bloqué achat</th><th className={th}>Nature</th><th className={th}>FMS</th><th className={`${th} text-right`}>Stock</th>
                         </tr>
                       )}
                       {mode === 'comparaison' && (
                         <tr>
                           <th className={th}>Composant</th><th className={th}>Désignation</th><th className={th}>Statut</th>
                           <th className={`${th} text-right`}>Qté SAGE</th><th className={`${th} text-right`}>Qté BLG</th>
-                          <th className={th}>Sommeil SAGE / Archivé BLG</th><th className={th}>Blocage SAGE / Achat interdit BLG</th>
+                          <th className={th}>Sommeil SAGE / Archivé BLG</th><th className={th}>Blocage SAGE / Bloqué achat BLG</th>
                           <th className={`${th} text-right`}>PA SAGE</th><th className={`${th} text-right`}>PA BLG</th><th className={`${th} text-right`}>PV SAGE</th><th className={`${th} text-right`}>PV BLG</th>
                         </tr>
                       )}
@@ -2342,7 +2342,7 @@ function VueNomenclatures({ mode, version }: { mode: ModeNomenclature; version: 
                             <td className={tdNum}>{fmtPrix(l.composant_prix_achat)}</td><td className={tdNum}>{fmtPrix(produit(l.quantite, l.composant_prix_achat))}</td>
                             <td className={tdNum}>{fmtPrix(l.composant_prix_vente)}</td><td className={tdNum}>{fmtPrix(produit(l.quantite, l.composant_prix_vente))}</td>
                             <td className={td}><Pastille actif={l.composant_existe ? !!l.composant_archive : null} oui="Archivé" non="Non" /></td>
-                            <td className={td}><Pastille actif={l.composant_existe ? !!l.composant_achat_interdit : null} oui="Achat interdit" non="Non" /></td>
+                            <td className={td}><Pastille actif={l.composant_existe ? !!l.composant_achat_interdit : null} oui="Bloqué achat" non="Non" /></td>
                             <td className={`${td} text-[#3A362E]`}>{safeText(l.composant_nature) || '—'}</td>
                             <td className={td}><Pastille actif={l.composant_existe ? !!l.composant_fms : null} oui="Oui" non="Non" ton="vert" /></td>
                             <td className={tdNum}>{fmtQte(l.composant_stock)}</td>
