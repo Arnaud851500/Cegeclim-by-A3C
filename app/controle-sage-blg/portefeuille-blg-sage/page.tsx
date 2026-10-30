@@ -24,6 +24,8 @@
 //   get_portefeuille_blg_sage_liste(p_statut, p_situation, p_verdict, p_agence)
 // 30/10/2026 : ligne « Absente de BLG » (statut ABSENT_BLG) = CDC du portefeuille SAGE
 // sans commande BLG ; migration 20261030_portefeuille_absentes_blg.sql.
+// 30/10/2026 (b) : volet Achats (?domaine=achat) — commandes d'achat BLG × CDF / BLF / FAF SAGE
+// (sage.bdcf) ; migration 20261030b_portefeuille_achats_blg_sage.sql.
 // URL : ?statut=S43&situation=FACTUREE&verdict=A_CORRIGER&agence=PAU
 // ============================================================================
 
@@ -57,6 +59,7 @@ type MatricePayload = {
   blg_synchro: string | null
   sage_import: string | null
   agences: string[]
+  statuts_a_qualifier: string[]
   rows: MatriceRow[]
 }
 
@@ -97,12 +100,13 @@ type ListeRow = {
 }
 
 type Selection = { statut: string | null; situation: string | null; verdict: Verdict | null }
+type Domaine = 'VENTE' | 'ACHAT'
 type Metric = 'nb' | 'reste' | 'sage' | 'facture'
 type SortKey = 'reference' | 'intitule_tiers' | 'agence' | 'blg_order_date' | 'blg_reste_ht' | 'blg_montant_ht' | 'sage_montant_facture' | 'sage_derniere_facture'
 type Agg = { nb: number; nb_recent: number; reste: number; blg: number; sage: number; facture: number; verdicts: Set<Verdict> }
 
 // ── Constantes ───────────────────────────────────────────────────────────────
-const SITUATIONS: { code: string; label: string; hint: string }[] = [
+const SITUATIONS_VENTE: { code: string; label: string; hint: string }[] = [
   { code: 'A_LIVRER', label: 'CDC à livrer', hint: 'La CDC a encore des lignes à livrer dans SAGE' },
   { code: 'PL', label: 'En préparation (PL)', hint: 'Lignes en préparation de livraison dans SAGE' },
   { code: 'BL', label: 'BL non facturé', hint: 'Lignes livrées, BL pas encore facturé dans SAGE' },
@@ -110,6 +114,35 @@ const SITUATIONS: { code: string; label: string; hint: string }[] = [
   { code: 'SOLDEE', label: 'Soldée, sans facture', hint: 'En-tête SAGE connu, plus aucune ligne en cours ni facturée (lignes supprimées / soldées)' },
   { code: 'ABSENTE', label: 'Absente de SAGE', hint: 'Aucune trace de la CDC dans l’activité ni dans les factures SAGE' },
 ]
+
+const SITUATIONS_ACHAT: { code: string; label: string; hint: string }[] = [
+  { code: 'A_RECEVOIR', label: 'CDF à recevoir', hint: 'La CDF a encore des lignes à recevoir dans SAGE' },
+  { code: 'BLF', label: 'BLF non facturé', hint: 'Réception SAGE (BLF) pas encore facturée, rattachée à la CDF' },
+  { code: 'FAF', label: 'Facturée récemment', hint: 'Plus rien à recevoir ; facture fournisseur (FAF) récente rattachée à la CDF' },
+  { code: 'SORTIE', label: 'Sortie du portefeuille SAGE', hint: 'Plus rien en cours dans SAGE : réceptionnée et facturée, ou lignes / pièce supprimées' },
+]
+
+const TEXTES: Record<Domaine, {
+  titre: string; sousTitre: string; tiers: string; lieu: string; reste: string; resteCourt: string
+  piecesSage: string; facturesSage: string; note: string; noteListe: string
+}> = {
+  VENTE: {
+    titre: 'Portefeuille BLG ↔ SAGE — Ventes',
+    sousTitre: 'Commandes clients BLG ouvertes (validée, en cours, à facturer) et archivées, plus les CDC SAGE absentes de BLG, rangées selon leur situation dans SAGE. Les cases « À corriger dans BLG » sont la liste de travail quotidienne.',
+    tiers: 'Client', lieu: 'Agence', reste: 'Reste à livrer BLG', resteCourt: 'Reste BLG',
+    piecesSage: 'Pièces SAGE en cours', facturesSage: 'Factures SAGE',
+    note: 'Périmètre BLG : ventes CDC (hors service) au statut Commande validée, en cours, à facturer (et statut 21), plus les commandes archivées. Ligne « Absente de BLG » : CDC du portefeuille SAGE sans commande BLG — décalage normal si créée aujourd’hui (interface de la nuit), à corriger sinon. Situation SAGE lue dans l’activité du dernier import (CDC à livrer, PL, BL non facturés) puis dans les factures rattachées à la CDC. Reste à livrer BLG = quantité non livrée × prix net des lignes BLG. Calcul mis à jour chaque heure (h+42) ou avec « Recalculer ».',
+    noteListe: '« Facture récente » : la CDC a été facturée dans SAGE il y a 2 jours ou moins ; BLG ne l’a peut-être pas encore reçue (synchro de nuit), ce n’est pas forcément un écart. Le lien ↗ ouvre la commande dans BLG.',
+  },
+  ACHAT: {
+    titre: 'Portefeuille BLG ↔ SAGE — Achats',
+    sousTitre: 'Commandes d’achat BLG ouvertes (en cours, réception partielle, à facturer, facturée partiellement), terminées encore ouvertes dans SAGE, archivées, plus les CDF SAGE absentes de BLG, rangées selon leur situation dans SAGE (CDF à recevoir, BLF non facturé, facture récente). Les cases « À corriger dans BLG » sont la liste de travail quotidienne.',
+    tiers: 'Fournisseur', lieu: 'Lieu de livraison', reste: 'Reste à recevoir BLG', resteCourt: 'Reste BLG',
+    piecesSage: 'BLF SAGE non facturés', facturesSage: 'Factures fournisseur (FAF)',
+    note: 'Périmètre BLG : commandes d’achat CDF aux statuts ouverts, archivées, et terminées seulement si la CDF est encore ouverte dans SAGE. Situation SAGE lue dans le portefeuille achats SAGE (CDF non réceptionnées, BLF non facturés, factures fournisseur récentes) ; « Sortie du portefeuille SAGE » = réceptionnée et facturée, ou supprimée. Ligne « Absente de BLG » : CDF SAGE sans commande d’achat BLG — décalage normal si datée du jour, à corriger sinon. Reste à recevoir BLG = quantité non reçue × prix d’achat des lignes BLG. Libellés des statuts d’achat BLG déduits des données (*). Calcul mis à jour chaque heure (h+42) ou avec « Recalculer ».',
+    noteListe: '« FAF récente » : une facture fournisseur rattachée à la CDF est encore dans le portefeuille SAGE ; BLG ne l’a peut-être pas encore reçue. Le lien ↗ ouvre la commande d’achat dans BLG.',
+  },
+}
 
 const VERDICTS: Record<Verdict, { label: string; color: string; bg: string; hint: string }> = {
   A_CORRIGER: { label: 'À corriger dans BLG', color: '#E07A4E', bg: 'rgba(224,122,78,0.16)', hint: 'Commande ouverte dans BLG mais sortie du portefeuille SAGE (ou archivée à tort) : solder, archiver ou désarchiver dans BLG.' },
@@ -214,6 +247,9 @@ function PortefeuilleBlgSageContent() {
   const router = useRouter()
   const searchParams = useSearchParams()
 
+  const [domaine, setDomaine] = useState<Domaine>(searchParams.get('domaine') === 'achat' ? 'ACHAT' : 'VENTE')
+  const SITUATIONS = domaine === 'ACHAT' ? SITUATIONS_ACHAT : SITUATIONS_VENTE
+  const T = TEXTES[domaine]
   const [agence, setAgence] = useState<string>(searchParams.get('agence') ?? '')
   const [metric, setMetric] = useState<Metric>('nb')
   const [selection, setSelection] = useState<Selection>(() => {
@@ -224,8 +260,8 @@ function PortefeuilleBlgSageContent() {
 
   // Données : réponse mémorisée avec la clé de requête qui l'a produite.
   const [refreshTick, setRefreshTick] = useState(0)
-  const matriceKey = JSON.stringify([agence, refreshTick])
-  const listeKey = JSON.stringify([selection, agence, refreshTick])
+  const matriceKey = JSON.stringify([domaine, agence, refreshTick])
+  const listeKey = JSON.stringify([domaine, selection, agence, refreshTick])
   const [matriceState, setMatriceState] = useState<{ key: string; data: MatricePayload | null; error: string | null } | null>(null)
   const [listeState, setListeState] = useState<{ key: string; rows: ListeRow[]; error: string | null } | null>(null)
   const matrice = matriceState?.data ?? null
@@ -248,15 +284,16 @@ function PortefeuilleBlgSageContent() {
     if (selection.situation) p.set('situation', selection.situation)
     if (selection.verdict) p.set('verdict', selection.verdict)
     if (agence) p.set('agence', agence)
+    if (domaine === 'ACHAT') p.set('domaine', 'achat')
     const qs = p.toString()
     router.replace(qs ? `?${qs}` : '?', { scroll: false })
-  }, [selection, agence, router])
+  }, [selection, agence, domaine, router])
 
   // Matrice
   useEffect(() => {
     let active = true
     const key = matriceKey
-    supabase.rpc('get_portefeuille_blg_sage_matrice', { p_agence: agence || null }).then(({ data, error: err }) => {
+    supabase.rpc('get_portefeuille_blg_sage_matrice', { p_agence: agence || null, p_domaine: domaine }).then(({ data, error: err }) => {
       if (!active) return
       if (err) {
         setMatriceState({ key, data: null, error: `Matrice : ${err.message}` })
@@ -271,6 +308,7 @@ function PortefeuilleBlgSageContent() {
           blg_synchro: payload.blg_synchro ?? null,
           sage_import: payload.sage_import ?? null,
           agences: payload.agences ?? [],
+          statuts_a_qualifier: payload.statuts_a_qualifier ?? [],
           rows: (payload.rows ?? []).map((r) => ({
             ...r,
             nb: num(r.nb),
@@ -286,7 +324,7 @@ function PortefeuilleBlgSageContent() {
     return () => {
       active = false
     }
-  }, [matriceKey, agence])
+  }, [matriceKey, agence, domaine])
 
   // Liste
   useEffect(() => {
@@ -299,6 +337,7 @@ function PortefeuilleBlgSageContent() {
         p_situation: selection.situation,
         p_verdict: selection.verdict,
         p_agence: agence || null,
+        p_domaine: domaine,
       })
       .then(({ data, error: err }) => {
         if (!active) return
@@ -312,7 +351,7 @@ function PortefeuilleBlgSageContent() {
     return () => {
       active = false
     }
-  }, [listeKey, hasSelection, selection, agence])
+  }, [listeKey, hasSelection, selection, agence, domaine])
 
   // ── Agrégats ──────────────────────────────────────────────────────────────
   const statuts = useMemo(() => {
@@ -344,8 +383,12 @@ function PortefeuilleBlgSageContent() {
     return m
   }, [matrice])
 
-  const cellVerdict = (statut: string, situation: string): Verdict | null =>
-    (matrice?.rows ?? []).find((r) => r.statut_code === statut && r.situation_code === situation)?.verdict ?? null
+  // Une case peut mêler plusieurs verdicts (ex. Absente de BLG : du jour / plus ancienne) : on affiche le plus grave.
+  const cellVerdict = (statut: string, situation: string): Verdict | null => {
+    const vs = agg.get(`${statut}|${situation}`)?.verdicts
+    return vs ? VERDICT_ORDRE.find((v) => vs.has(v)) ?? null : null
+  }
+  const aQualifier = new Set(matrice?.statuts_a_qualifier ?? [])
 
   // ── Liste filtrée / triée ─────────────────────────────────────────────────
   const filtered = useMemo(() => {
@@ -407,7 +450,7 @@ function PortefeuilleBlgSageContent() {
     if (selection.statut) parts.push(`BLG : ${statuts.find((x) => x.code === selection.statut)?.libelle ?? selection.statut}`)
     if (selection.situation) parts.push(`SAGE : ${SITUATIONS.find((x) => x.code === selection.situation)?.label ?? selection.situation}`)
     return parts.join(' · ') || 'Toutes les commandes'
-  }, [selection, statuts])
+  }, [selection, statuts, SITUATIONS])
 
   // ── Recalcul ──────────────────────────────────────────────────────────────
   const recalculer = async () => {
@@ -431,9 +474,9 @@ function PortefeuilleBlgSageContent() {
     const wb = new ExcelJS.Workbook()
     wb.creator = 'CEGECLIM by A3C'
     const wsM = wb.addWorksheet('Matrice')
-    wsM.addRow(['Portefeuille BLG ↔ SAGE', `Calcul : ${fmtDateTime(matrice?.refreshed_at)}`, agence ? `Agence : ${agence}` : 'Toutes agences'])
+    wsM.addRow([T.titre, `Calcul : ${fmtDateTime(matrice?.refreshed_at)}`, agence ? `${T.lieu} : ${agence}` : 'Tous'])
     wsM.addRow([])
-    const h = wsM.addRow(['Statut BLG', ...SITUATIONS.flatMap((x) => [`${x.label} (nb)`, `${x.label} (reste BLG HT)`]), 'Total (nb)', 'Total (reste BLG HT)'])
+    const h = wsM.addRow(['Statut BLG', ...SITUATIONS.flatMap((x) => [`${x.label} (nb)`, `${x.label} (${T.resteCourt} HT)`]), 'Total (nb)', `Total (${T.resteCourt} HT)`])
     h.font = { bold: true }
     for (const st of statuts) {
       const cells = SITUATIONS.flatMap((x) => {
@@ -444,7 +487,7 @@ function PortefeuilleBlgSageContent() {
       wsM.addRow([st.libelle, ...cells, t?.nb ?? 0, Math.round((t?.reste ?? 0) * 100) / 100])
     }
     wsM.addRow([])
-    const hv = wsM.addRow(['Verdict', 'Commandes', 'Reste à livrer BLG HT'])
+    const hv = wsM.addRow(['Verdict', 'Commandes', `${T.reste} HT`])
     hv.font = { bold: true }
     for (const v of VERDICT_ORDRE) {
       const a = agg.get(`V|${v}`)
@@ -465,17 +508,17 @@ function PortefeuilleBlgSageContent() {
         ['Date cde BLG', (r) => fmtDate(r.blg_order_date)],
         ['Dernière modif BLG', (r) => fmtDate(r.blg_last_update)],
         ['N° tiers', (r) => r.numero_tiers ?? ''],
-        ['Client', (r) => r.intitule_tiers ?? ''],
-        ['Agence', (r) => r.agence ?? ''],
+        [T.tiers, (r) => r.intitule_tiers ?? ''],
+        [T.lieu, (r) => r.agence ?? ''],
         ['Collaborateur', (r) => r.collaborateur ?? ''],
         ['Lignes BLG', (r) => num(r.blg_nb_lignes)],
         ['Lignes BLG à livrer', (r) => num(r.blg_nb_lignes_a_livrer)],
         ['Montant BLG HT', (r) => num(r.blg_montant_ht)],
-        ['Reste à livrer BLG HT', (r) => num(r.blg_reste_ht)],
+        [`${T.reste} HT`, (r) => num(r.blg_reste_ht)],
         ['Situation SAGE', (r) => r.situation_libelle],
-        ['Pièces SAGE en cours', (r) => r.sage_pieces_en_cours ?? ''],
+        [T.piecesSage, (r) => r.sage_pieces_en_cours ?? ''],
         ['Montant SAGE en cours HT', (r) => num(r.sage_montant_en_cours)],
-        ['Factures SAGE', (r) => r.sage_factures ?? ''],
+        [T.facturesSage, (r) => r.sage_factures ?? ''],
         ['Montant facturé HT', (r) => num(r.sage_montant_facture)],
         ['Dernière facture', (r) => fmtDate(r.sage_derniere_facture)],
         ['Facture récente (≤ 2 j)', (r) => (r.facture_recente ? 'Oui' : '')],
@@ -493,7 +536,7 @@ function PortefeuilleBlgSageContent() {
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
     a.href = url
-    a.download = `portefeuille_blg_sage_${new Date().toISOString().slice(0, 10)}.xlsx`
+    a.download = `portefeuille_blg_sage_${domaine.toLowerCase()}_${new Date().toISOString().slice(0, 10)}.xlsx`
     a.click()
     URL.revokeObjectURL(url)
   }
@@ -533,12 +576,8 @@ function PortefeuilleBlgSageContent() {
     <div style={s.page}>
       <div style={s.header}>
         <div>
-          <h1 style={s.title}>Portefeuille BLG ↔ SAGE</h1>
-          <p style={s.subtitle}>
-            Commandes BLG ouvertes (validée, en cours, à facturer) et commandes archivées, rangées selon leur situation dans SAGE. Les cases
-            « À corriger dans BLG » sont la liste de travail quotidienne : commandes encore ouvertes dans BLG alors qu’elles sont sorties du
-            portefeuille SAGE, ou archivées alors qu’elles vivent encore dans SAGE.
-          </p>
+          <h1 style={s.title}>{T.titre}</h1>
+          <p style={s.subtitle}>{T.sousTitre}</p>
         </div>
         <div style={s.fresh}>
           Calcul : {fmtDateTime(matrice?.refreshed_at)}
@@ -552,7 +591,26 @@ function PortefeuilleBlgSageContent() {
       {recalcul.message && <div style={s.info}>{recalcul.message}</div>}
 
       <div style={s.toolbar}>
-        <span style={s.label}>Agence</span>
+        <div style={s.seg}>
+          {([['VENTE', 'Ventes (CDC)'], ['ACHAT', 'Achats (CDF)']] as [Domaine, string][]).map(([k, l]) => (
+            <button
+              key={k}
+              type="button"
+              style={domaine === k ? s.segBtnOn : s.segBtn}
+              onClick={() => {
+                if (k === domaine) return
+                setDomaine(k)
+                setAgence('')
+                setSelection({ statut: null, situation: null, verdict: null })
+                setSearch('')
+                setLimit(300)
+              }}
+            >
+              {l}
+            </button>
+          ))}
+        </div>
+        <span style={{ ...s.label, marginLeft: 8 }}>{T.lieu}</span>
         <select style={s.input} value={agence} onChange={(e) => { setAgence(e.target.value); setLimit(300) }}>
           <option value="">Toutes</option>
           {(matrice?.agences ?? []).map((a) => (
@@ -561,7 +619,7 @@ function PortefeuilleBlgSageContent() {
         </select>
         <span style={{ ...s.label, marginLeft: 8 }}>Afficher</span>
         <div style={s.seg}>
-          {([['nb', 'Commandes'], ['reste', 'Reste à livrer BLG'], ['sage', 'En cours SAGE'], ['facture', 'Facturé SAGE']] as [Metric, string][]).map(([k, l]) => (
+          {([['nb', 'Commandes'], ['reste', T.reste], ['sage', 'En cours SAGE'], ['facture', 'Facturé SAGE']] as [Metric, string][]).map(([k, l]) => (
             <button key={k} type="button" style={metric === k ? s.segBtnOn : s.segBtn} onClick={() => setMetric(k)}>{l}</button>
           ))}
         </div>
@@ -587,7 +645,7 @@ function PortefeuilleBlgSageContent() {
             >
               <div style={{ ...s.kpiLabel, color: tc(meta.color) }}>{meta.label}</div>
               <div style={s.kpiValue}>{nf0.format(a?.nb ?? 0)}</div>
-              <div style={s.kpiSub}>reste à livrer BLG {nfEur.format(a?.reste ?? 0)}</div>
+              <div style={s.kpiSub}>{(T.reste.charAt(0).toLowerCase() + T.reste.slice(1))} {nfEur.format(a?.reste ?? 0)}</div>
             </div>
           )
         })}
@@ -630,6 +688,7 @@ function PortefeuilleBlgSageContent() {
                     onClick={() => select({ statut: st.code, situation: null, verdict: null })}
                   >
                     {st.libelle}
+                    {aQualifier.has(st.code) && <span title="Libellé déduit des données BLG, à confirmer" style={s.muted}> *</span>}
                   </td>
                   {SITUATIONS.map((x) => {
                     const a = agg.get(`${st.code}|${x.code}`)
@@ -671,12 +730,7 @@ function PortefeuilleBlgSageContent() {
             </tbody>
           </table>
         </div>
-        <div style={s.note}>
-          Périmètre BLG : ventes CDC (hors service) au statut Commande validée, en cours, à facturer (et statut 21), plus les commandes archivées.
-          Ligne « Absente de BLG » : CDC du portefeuille SAGE sans commande BLG — décalage normal si créée aujourd’hui (interface de la nuit), à corriger sinon.
-          Situation SAGE lue dans l’activité du dernier import (CDC à livrer, PL, BL non facturés) puis dans les factures rattachées à la CDC.
-          Reste à livrer BLG = quantité non livrée × prix net des lignes BLG. Calcul mis à jour chaque heure (h+42) ou avec « Recalculer ».
-        </div>
+        <div style={s.note}>{T.note}</div>
       </div>
 
       {/* Liste */}
@@ -688,14 +742,14 @@ function PortefeuilleBlgSageContent() {
               <div style={{ ...s.muted, marginTop: 4 }}>
                 {loadingListe
                   ? 'Chargement…'
-                  : `${nf0.format(listeTotaux.nb)} commandes · montant BLG ${nfEur.format(listeTotaux.blg)} · reste à livrer BLG ${nfEur.format(listeTotaux.reste)}${listeTotaux.recentes ? ` · ${nf0.format(listeTotaux.recentes)} facturée(s) depuis ≤ 2 j` : ''}`}
+                  : `${nf0.format(listeTotaux.nb)} commandes · montant BLG ${nfEur.format(listeTotaux.blg)} · ${(T.reste.charAt(0).toLowerCase() + T.reste.slice(1))} ${nfEur.format(listeTotaux.reste)}${listeTotaux.recentes ? ` · ${nf0.format(listeTotaux.recentes)} facturée(s) depuis ≤ 2 j` : ''}`}
               </div>
             </div>
             <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-              <input style={{ ...s.input, minWidth: 260 }} placeholder="Rechercher : CDC, client, facture…" value={search} onChange={(e) => setSearch(e.target.value)} />
+              <input style={{ ...s.input, minWidth: 260 }} placeholder={domaine === 'ACHAT' ? 'Rechercher : CDF, fournisseur, BLF, FAF…' : 'Rechercher : CDC, client, facture…'} value={search} onChange={(e) => setSearch(e.target.value)} />
               <label style={{ fontSize: 12, display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }} title="Commandes facturées dans SAGE depuis 2 jours ou moins : BLG n'a peut-être pas encore reçu la facture.">
                 <input type="checkbox" checked={masquerRecentes} onChange={(e) => setMasquerRecentes(e.target.checked)} />
-                Masquer les factures récentes (≤ 2 j)
+                {domaine === 'ACHAT' ? 'Masquer les FAF récentes' : 'Masquer les factures récentes (≤ 2 j)'}
               </label>
             </div>
           </div>
@@ -703,17 +757,17 @@ function PortefeuilleBlgSageContent() {
             <table style={s.table}>
               <thead>
                 <tr>
-                  <th style={{ ...s.th, ...s.sortable }} onClick={() => toggleSort('reference')}>CDC BLG</th>
+                  <th style={{ ...s.th, ...s.sortable }} onClick={() => toggleSort('reference')}>{domaine === 'ACHAT' ? 'CDF BLG' : 'CDC BLG'}</th>
                   <th style={s.th}>Statut BLG</th>
                   <th style={{ ...s.th, ...s.sortable }} onClick={() => toggleSort('blg_order_date')}>Cde BLG</th>
-                  <th style={{ ...s.th, ...s.sortable }} onClick={() => toggleSort('intitule_tiers')}>Client</th>
-                  <th style={{ ...s.th, ...s.sortable }} onClick={() => toggleSort('agence')}>Agence</th>
+                  <th style={{ ...s.th, ...s.sortable }} onClick={() => toggleSort('intitule_tiers')}>{T.tiers}</th>
+                  <th style={{ ...s.th, ...s.sortable }} onClick={() => toggleSort('agence')}>{T.lieu}</th>
                   <th style={s.thNum}>Lignes BLG</th>
                   <th style={{ ...s.thNum, ...s.sortable }} onClick={() => toggleSort('blg_montant_ht')}>Montant BLG</th>
-                  <th style={{ ...s.thNum, ...s.sortable }} onClick={() => toggleSort('blg_reste_ht')}>Reste BLG</th>
+                  <th style={{ ...s.thNum, ...s.sortable }} onClick={() => toggleSort('blg_reste_ht')}>{T.resteCourt}</th>
                   <th style={{ ...s.th, borderLeft: '2px solid rgba(166,161,129,0.5)' }}>Situation SAGE</th>
-                  <th style={s.th}>Pièces SAGE en cours</th>
-                  <th style={s.th}>Factures SAGE</th>
+                  <th style={s.th}>{T.piecesSage}</th>
+                  <th style={s.th}>{T.facturesSage}</th>
                   <th style={{ ...s.thNum, ...s.sortable }} onClick={() => toggleSort('sage_montant_facture')}>Facturé SAGE</th>
                   <th style={{ ...s.th, ...s.sortable }} onClick={() => toggleSort('sage_derniere_facture')}>Dernière fact.</th>
                 </tr>
@@ -751,7 +805,7 @@ function PortefeuilleBlgSageContent() {
                       <td style={{ ...s.td, whiteSpace: 'nowrap' }}>{r.agence ?? '—'}</td>
                       <td style={s.tdNum}>
                         {nf0.format(num(r.blg_nb_lignes))}
-                        <span style={s.small}>{nf0.format(num(r.blg_nb_lignes_a_livrer))} à livrer</span>
+                        <span style={s.small}>{nf0.format(num(r.blg_nb_lignes_a_livrer))} {domaine === 'ACHAT' ? 'à recevoir' : 'à livrer'}</span>
                       </td>
                       <td style={s.tdNum}>{nfEur2.format(num(r.blg_montant_ht))}</td>
                       <td style={s.tdNum}>{num(r.blg_reste_ht) ? nfEur2.format(num(r.blg_reste_ht)) : <span style={s.muted}>0</span>}</td>
@@ -760,7 +814,7 @@ function PortefeuilleBlgSageContent() {
                         {num(r.sage_montant_en_cours) !== 0 && (
                           <span style={s.small}>{nfEur2.format(num(r.sage_montant_en_cours))} · {nf0.format(num(r.sage_nb_lignes_en_cours))} l.</span>
                         )}
-                        {r.sage_date_livraison && <span style={s.small}>Livr. prévue {fmtDate(r.sage_date_livraison)}</span>}
+                        {r.sage_date_livraison && <span style={s.small}>{domaine === 'ACHAT' ? 'Récept. prévue' : 'Livr. prévue'} {fmtDate(r.sage_date_livraison)}</span>}
                       </td>
                       <td style={{ ...s.td, maxWidth: 200 }}>
                         {r.sage_pieces_en_cours ? <span style={s.mono}>{r.sage_pieces_en_cours}</span> : <span style={s.muted}>—</span>}
@@ -772,7 +826,7 @@ function PortefeuilleBlgSageContent() {
                       <td style={s.tdNum}>{num(r.sage_montant_facture) ? nfEur2.format(num(r.sage_montant_facture)) : <span style={s.muted}>—</span>}</td>
                       <td style={{ ...s.td, whiteSpace: 'nowrap' }}>
                         {fmtDate(r.sage_derniere_facture)}
-                        {r.facture_recente && <span style={{ ...s.small, color: tc('#8FC7DA') }}>récente : synchro BLG ?</span>}
+                        {r.facture_recente && <span style={{ ...s.small, color: tc('#8FC7DA') }}>{domaine === 'ACHAT' ? 'FAF récente' : 'récente : synchro BLG ?'}</span>}
                       </td>
                     </tr>
                   )
@@ -792,10 +846,7 @@ function PortefeuilleBlgSageContent() {
               </button>
             </div>
           )}
-          <div style={s.note}>
-            « Facture récente » : la CDC a été facturée dans SAGE il y a 2 jours ou moins ; BLG ne l’a peut-être pas encore reçue (synchro de nuit),
-            ce n’est pas forcément un écart. Le lien ↗ ouvre la commande dans BLG.
-          </div>
+          <div style={s.note}>{T.noteListe}</div>
         </div>
       )}
     </div>
