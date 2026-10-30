@@ -228,7 +228,7 @@ export const NAV_BLOCS: NavBloc[] = [
       { label: 'Fournisseurs SAGE – BLG', path: '/controle-sage-blg/fournisseur-sage-blg', activeLabel: 'Contrôle cohérence Fournisseur SAGE-BLG', accessKey: 'can_projetblg', description: 'Contrôle de cohérence fournisseurs et articles entre SAGE et BLG.' },
       { label: 'Rapprochement SAGE-BLG', path: '/controle-sage-blg/rapprochement-sage-blg', activeLabel: 'Rapprochement Sage-BLG, CDC, CDF, Stocks', accessKey: 'can_projetblg', description: 'Contrôle de cohérence SAGE-BLG CDC, CDF, Stock' },
       { label: 'Activité SAGE – statuts BLG', path: '/controle-sage-blg/activite-sage-blg', activeLabel: 'Activité SAGE ↔ statuts BLG', accessKey: 'can_projetblg', description: 'CDC, PL, BL et BR SAGE en cours rangés par statut BLG (devis, en cours, à facturer, terminée, archives, absentes, sans CDC) : nombre de pièces, lignes et valeur, liste détaillée et pendant BLG.' },
-      { label: 'Portefeuille BLG – SAGE', path: '/controle-sage-blg/portefeuille-blg-sage', activeLabel: 'Portefeuille BLG ↔ SAGE', accessKey: 'can_projetblg', description: 'Commandes BLG ouvertes et archivées × situation dans SAGE (à livrer, PL, BL, soldée facturée / sans facture, absente) : cases à corriger chaque jour dans BLG, listes et export.' },
+      { label: 'Portefeuille BLG – SAGE', path: '/controle-sage-blg/portefeuille-blg-sage', activeLabel: 'Portefeuille BLG ↔ SAGE', accessKey: 'can_projetblg', description: 'Ventes (CDC) et achats (CDF) : commandes BLG ouvertes et archivées × situation dans SAGE, plus les commandes SAGE absentes de BLG — cases à corriger chaque jour dans BLG, listes et export.' },
       
     ],
   },
