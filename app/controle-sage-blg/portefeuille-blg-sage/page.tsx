@@ -22,6 +22,8 @@
 //   « portefeuille-blg-sage-hourly » (h+42) et par refresh_portefeuille_blg_sage()
 //   get_portefeuille_blg_sage_matrice(p_agence)
 //   get_portefeuille_blg_sage_liste(p_statut, p_situation, p_verdict, p_agence)
+// 30/10/2026 : ligne « Absente de BLG » (statut ABSENT_BLG) = CDC du portefeuille SAGE
+// sans commande BLG ; migration 20261030_portefeuille_absentes_blg.sql.
 // URL : ?statut=S43&situation=FACTUREE&verdict=A_CORRIGER&agence=PAU
 // ============================================================================
 
@@ -59,7 +61,7 @@ type MatricePayload = {
 }
 
 type ListeRow = {
-  blg_id: number
+  blg_id: number | null
   blg_document_id: string | null
   reference: string
   statut_code: string
@@ -112,7 +114,7 @@ const SITUATIONS: { code: string; label: string; hint: string }[] = [
 const VERDICTS: Record<Verdict, { label: string; color: string; bg: string; hint: string }> = {
   A_CORRIGER: { label: 'À corriger dans BLG', color: '#E07A4E', bg: 'rgba(224,122,78,0.16)', hint: 'Commande ouverte dans BLG mais sortie du portefeuille SAGE (ou archivée à tort) : solder, archiver ou désarchiver dans BLG.' },
   A_ANALYSER: { label: 'À analyser', color: '#E0A961', bg: 'rgba(224,169,97,0.14)', hint: 'Statut BLG et situation SAGE peu compatibles, à regarder au cas par cas.' },
-  DECALAGE: { label: 'Décalage normal', color: '#8FC7DA', bg: 'rgba(143,199,218,0.12)', hint: 'BL SAGE pas encore facturé : se résorbe à la facturation.' },
+  DECALAGE: { label: 'Décalage normal', color: '#8FC7DA', bg: 'rgba(143,199,218,0.12)', hint: 'BL SAGE pas encore facturé (se résorbe à la facturation), ou CDC créée aujourd’hui dans SAGE qui attend l’interface SAGE → BLG de la nuit.' },
   OK: { label: 'Cohérent', color: '#7FC79A', bg: 'rgba(127,199,154,0.08)', hint: 'Statut BLG cohérent avec la situation SAGE.' },
 }
 const VERDICT_ORDRE: Verdict[] = ['A_CORRIGER', 'A_ANALYSER', 'DECALAGE', 'OK']
@@ -671,6 +673,7 @@ function PortefeuilleBlgSageContent() {
         </div>
         <div style={s.note}>
           Périmètre BLG : ventes CDC (hors service) au statut Commande validée, en cours, à facturer (et statut 21), plus les commandes archivées.
+          Ligne « Absente de BLG » : CDC du portefeuille SAGE sans commande BLG — décalage normal si créée aujourd’hui (interface de la nuit), à corriger sinon.
           Situation SAGE lue dans l’activité du dernier import (CDC à livrer, PL, BL non facturés) puis dans les factures rattachées à la CDC.
           Reste à livrer BLG = quantité non livrée × prix net des lignes BLG. Calcul mis à jour chaque heure (h+42) ou avec « Recalculer ».
         </div>
@@ -719,7 +722,7 @@ function PortefeuilleBlgSageContent() {
                 {filtered.slice(0, limit).map((r) => {
                   const v = VERDICTS[r.verdict]
                   return (
-                    <tr key={r.blg_id}>
+                    <tr key={r.reference}>
                       <td style={{ ...s.td, whiteSpace: 'nowrap', borderLeft: `3px solid ${tc(v?.color ?? '#9AA3B5')}` }}>
                         {r.lien_blg ? (
                           <a href={r.lien_blg} target="_blank" rel="noreferrer" style={{ ...s.mono, ...s.link }} title="Ouvrir la commande dans BLG">
