@@ -43,6 +43,9 @@
 // ajouté au bloc Projet BLG (droit can_projetblg). Migration 20261029_activite_sage_blg_statuts.sql.
 // ÉVOLUTION (2026-10-30) : « Portefeuille BLG – SAGE » (/controle-sage-blg/portefeuille-blg-sage),
 // bloc Projet BLG (can_projetblg). Migration 20261029d_portefeuille_blg_sage.sql.
+// ÉVOLUTION (2026-11-01) : « Inventaire – pilotage achats » (/stock/inventaire, can_appro) et
+// « Inventaire – saisie dépôt » (/stock/inventaire/saisie, can_stocks, dépôt de l'agence).
+// Migration 20261101_inventaire_annuel.sql.
 // Le bloc « Mes alertes » de l'accueil n'est pas ici : il n'a pas de page, il
 // ouvre le Centre d'alertes (components/AlertsContext.tsx + ClientRootShell).
 
@@ -199,6 +202,8 @@ export const NAV_BLOCS: NavBloc[] = [
       { label: 'Vision dispo par groupe d article', path: '/stock/groupes', accessKey: 'can_appro', description: 'Visibilité de la dispo à venir et des livraisons possibles.' },
       { label: 'Stocks', path: '/stock', accessKey: 'can_stocks', description: 'Consultation des stocks (FMS et Agences), stocks prévisionnels et visu des dates de disponibilité .' },
       { label: 'Analyse Stock Depot', path: '/stock/analyse-agence', accessKey: 'can_stocks', description: 'Analyse stock Dépot, proposition MIN / MAX ' },
+      { label: 'Inventaire – pilotage achats', path: '/stock/inventaire', activeLabel: 'Inventaire – pilotage', accessKey: 'can_appro', description: 'Inventaire de fin d’année : listes par dépôt (familles, fournisseurs), avancement, écarts au PUMP, 2e / 3e comptage, validation, PDF et Excel pour SAGE.' },
+      { label: 'Inventaire – saisie dépôt', path: '/stock/inventaire/saisie', activeLabel: 'Inventaire – saisie', accessKey: 'can_stocks', description: 'Saisie des comptages de votre dépôt (1er, 2e, 3e) avec les initiales de l’inventoriste, impression de la liste à compter.' },
     ],
   },
   {
