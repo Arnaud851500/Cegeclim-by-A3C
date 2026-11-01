@@ -16,7 +16,9 @@
  *  - « Imprimer la liste » (PDF) pour compter sur papier puis saisir ;
  *  - « Fin du comptage » seulement quand toutes les lignes sont saisies : la saisie est
  *    ensuite verrouillée et les achats analysent les écarts ;
- *  - 1er comptage : ajout d'un article trouvé en rayon mais absent de la liste.
+ *  - 1er comptage : ajout d'un article trouvé en rayon mais absent de la liste ;
+ *  - 01/11/2026 : section « En transit » en tête de liste = stock du dépôt SAGE TRANSIT de
+ *    l'agence (expédié par FMS, non réceptionné), à compter s'il est physiquement arrivé.
  *
  * Accès : droit can_stocks ; dépôt limité à l'agence de l'utilisateur (périmètre agences
  * de l'onglet Utilisateurs d'Autorisations, MEES = DAX) ; achats = tous les dépôts.
@@ -28,7 +30,7 @@ import React, { Suspense, useCallback, useEffect, useMemo, useRef, useState } fr
 import { useRouter, useSearchParams } from 'next/navigation'
 import { supabase } from '@/lib/supabaseClient'
 import {
-  ORDINAL, ORDINAL_LONG, couleurStatut, fmtDate, fmtDateHeure, fmtEuro, fmtNum, fmtQte, libelleStatut,
+  AIDE_TRANSIT, ORDINAL, ORDINAL_LONG, couleurStatut, sectionLigne, fmtDate, fmtDateHeure, fmtEuro, fmtNum, fmtQte, libelleStatut,
   lireQuantite, messageErreur, pdfListeComptage,
   type InvDepot, type LigneSaisie, type ListeSaisie,
 } from '@/lib/inventaire'
@@ -349,19 +351,26 @@ function SaisieInventaire() {
                     {chargement && <tr><td colSpan={7} className="px-3 py-8 text-center text-[#8A8474]">Chargement…</td></tr>}
                     {!chargement && lignesAffichees.map((l, i) => {
                       const b = brouillons[l.id] || { qte: vQte(l.qte), com: l.commentaire || '', etat: 'idle' as const }
-                      const macro = l.famille_macro || 'Sans famille macro'
-                      const macroPrec = i > 0 ? (lignesAffichees[i - 1].famille_macro || 'Sans famille macro') : null
+                      const macro = sectionLigne(l)
+                      const macroPrec = i > 0 ? sectionLigne(lignesAffichees[i - 1]) : null
                       const vq = lireQuantite(b.qte)
                       const diff = vq !== null && !Number.isNaN(vq) && vq !== l.qte_theorique
                       return (
                         <React.Fragment key={l.id}>
                           {macro !== macroPrec && (
-                            <tr><td colSpan={7} className="border-t border-[#E5E1D8] bg-[#F4F3F0] px-3 py-1 text-[11px] font-bold uppercase tracking-wide text-[#5E5A44]">{macro}</td></tr>
+                            l.transit ? (
+                              <tr><td colSpan={7} className="border-t border-[#B9CFEE] bg-[#E8F0FB] px-3 py-1.5 text-[12px] text-[#1D4F91]">
+                                <span className="font-bold uppercase tracking-wide">{macro}</span> · {AIDE_TRANSIT}
+                              </td></tr>
+                            ) : (
+                              <tr><td colSpan={7} className="border-t border-[#E5E1D8] bg-[#F4F3F0] px-3 py-1 text-[11px] font-bold uppercase tracking-wide text-[#5E5A44]">{macro}</td></tr>
+                            )
                           )}
                           <tr className={`border-t border-[#EFECE4] ${b.etat === 'err' ? 'bg-red-50' : l.qte === null ? '' : 'bg-[#F7FBF7]'}`}>
                             <td className="px-3 py-1.5 font-bold">
                               {l.reference}
                               {l.hors_liste && <span className="ml-1.5 rounded bg-[#FDF3E3] px-1.5 py-0.5 text-[10px] font-bold text-[#96600F]">hors liste</span>}
+                              {l.transit && <span className="ml-1.5 rounded bg-[#E8F0FB] px-1.5 py-0.5 text-[10px] font-bold text-[#1D4F91]">transit</span>}
                             </td>
                             <td className="px-2 py-1.5 text-[#5E5A44]">{l.ref_fournisseur || '—'}</td>
                             <td className="px-2 py-1.5">{l.designation || '—'}</td>

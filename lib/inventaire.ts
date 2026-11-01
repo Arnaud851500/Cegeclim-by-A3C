@@ -51,6 +51,8 @@ export type InvDepot = {
   familles: string[]
   fournisseurs: string[]
   inclure_stock_nul: boolean
+  inclure_transit?: boolean
+  depot_transit_num?: string | null
   statut: StatutDepot
   comptage_courant: number
   stock_sage_le: string | null
@@ -66,6 +68,8 @@ export type InvDepot = {
 export type SuiviDepot = InvDepot & {
   nb_lignes: number
   nb_hors_liste: number
+  nb_transit?: number
+  valeur_transit?: number
   nb_a_compter: number
   nb_saisies: number
   valeur_theorique: number
@@ -92,6 +96,10 @@ export type LignePilotage = {
   pump: number
   pump_source: string | null
   hors_liste: boolean
+  /** Ligne du dépôt SAGE « TRANSIT » rattaché au dépôt inventorié. */
+  transit?: boolean
+  depot_stock?: string | null
+  depot_stock_libelle?: string | null
   nb_comptages: number
   q1: number | null; q2: number | null; q3: number | null
   com1: string | null; com2: string | null; com3: string | null
@@ -122,6 +130,9 @@ export type LigneSaisie = {
   qte_theorique: number
   pump: number
   hors_liste: boolean
+  transit?: boolean
+  depot_stock?: string | null
+  depot_stock_libelle?: string | null
   qte: number | null
   commentaire: string | null
 }
@@ -222,6 +233,14 @@ export function commentairesLigne(l: LignePilotage): string {
     .join(' · ')
 }
 
+/** Section d'affichage d'une ligne : « En transit » en tête, puis famille macro. */
+export function sectionLigne(l: { transit?: boolean; famille_macro: string | null; depot_stock?: string | null; depot_stock_libelle?: string | null }): string {
+  if (l.transit) return `En transit — ${l.depot_stock_libelle || 'dépôt transit'} (dépôt SAGE n° ${l.depot_stock || '?'})`
+  return l.famille_macro || 'Sans famille macro'
+}
+
+export const AIDE_TRANSIT = 'Expédié par FMS, pas encore réceptionné dans SAGE : compter ce qui est physiquement arrivé à l’agence (0 si rien).'
+
 export function libelleDecision(d: Decision): string {
   return d === 'valide' ? 'Écart validé' : d === 'refuse' ? 'Écart refusé' : '—'
 }
@@ -297,13 +316,14 @@ export function pdfListeComptage(liste: ListeSaisie, opts: { avecSaisies?: boole
   const body: Array<Array<string | { content: string; colSpan?: number; styles?: Record<string, unknown> }>> = []
   let macro = ''
   for (const l of lignes) {
-    const m = l.famille_macro || 'Sans famille macro'
+    const m = sectionLigne(l)
     if (m !== macro) {
       macro = m
-      body.push([{ content: p(m), colSpan: 7, styles: { fillColor: [238, 235, 226], fontStyle: 'bold', textColor: [60, 56, 46] } }])
+      body.push([{ content: p(l.transit ? `${m} : ${AIDE_TRANSIT}` : m), colSpan: 7,
+        styles: l.transit ? { fillColor: [232, 240, 251], fontStyle: 'bold', textColor: [29, 79, 145] } : { fillColor: [238, 235, 226], fontStyle: 'bold', textColor: [60, 56, 46] } }])
     }
     body.push([
-      p(l.reference) + (l.hors_liste ? ' (hors liste)' : ''),
+      p(l.reference) + (l.hors_liste ? ' (hors liste)' : '') + (l.transit ? ' (transit)' : ''),
       p(l.ref_fournisseur || ''),
       p(l.designation || ''),
       pQte(l.qte_theorique),
@@ -381,7 +401,7 @@ export function pdfEcarts(lignes: LignePilotage[], opts: { campagne: string; dat
       startY: 25,
       head: [['Réf. CEGECLIM', 'Réf. fourn.', 'Désignation', 'Théo.', 'C1', 'C2', 'C3', 'Retenu', 'Écart', 'PUMP', 'Valeur écart', 'Décision', 'Commentaires']],
       body: ls.map((l) => [
-        p(l.reference) + (l.hors_liste ? ' *' : ''),
+        p(l.reference) + (l.hors_liste ? ' *' : '') + (l.transit ? ' (transit)' : ''),
         p(l.ref_fournisseur || ''),
         p(l.designation || ''),
         pQte(l.qte_theorique),
@@ -481,7 +501,7 @@ export async function excelEcarts(lignes: LignePilotage[], suivi: SuiviDepot[], 
   ]
   for (const l of valides) {
     ws1.addRow({
-      depot_num: l.depot_num, depot: l.depot_libelle, reference: l.reference, designation: l.designation,
+      depot_num: l.depot_stock || l.depot_num, depot: l.depot_stock_libelle || l.depot_libelle, reference: l.reference, designation: l.designation,
       sens: n0(l.ecart) > 0 ? 'Entrée' : 'Sortie', qte: n0(l.ecart), qte_abs: Math.abs(n0(l.ecart)),
       pump: n0(l.pump), montant: Math.round(n0(l.ecart) * n0(l.pump) * 100) / 100,
       theo: n0(l.qte_theorique), compte: n0(l.qte_finale),
@@ -499,6 +519,8 @@ export async function excelEcarts(lignes: LignePilotage[], suivi: SuiviDepot[], 
     { header: 'Désignation', key: 'designation', width: 42 }, { header: 'Famille macro', key: 'macro', width: 12 },
     { header: 'Famille', key: 'famille', width: 13 }, { header: 'Fournisseur', key: 'fourn', width: 22 },
     { header: 'Hors liste', key: 'hl', width: 9 },
+    { header: 'Transit', key: 'tr', width: 8 },
+    { header: 'Inventaire du dépôt', key: 'inv', width: 22 },
     { header: 'Stock théorique', key: 'theo', width: 11, style: { numFmt: qte } },
     { header: 'Comptage 1', key: 'q1', width: 11, style: { numFmt: qte } },
     { header: 'Comptage 2', key: 'q2', width: 11, style: { numFmt: qte } },
@@ -512,8 +534,9 @@ export async function excelEcarts(lignes: LignePilotage[], suivi: SuiviDepot[], 
   ]
   for (const l of lignes) {
     ws2.addRow({
-      depot_num: l.depot_num, depot: l.depot_libelle, reference: l.reference, ref_f: l.ref_fournisseur, designation: l.designation,
-      macro: l.famille_macro, famille: l.famille, fourn: l.fournisseur_nom || l.fournisseur, hl: l.hors_liste ? 'Oui' : '',
+      depot_num: l.depot_stock || l.depot_num, depot: l.depot_stock_libelle || l.depot_libelle, inv: l.depot_libelle,
+      reference: l.reference, ref_f: l.ref_fournisseur, designation: l.designation,
+      macro: l.famille_macro, famille: l.famille, fourn: l.fournisseur_nom || l.fournisseur, hl: l.hors_liste ? 'Oui' : '', tr: l.transit ? 'Oui' : '',
       theo: n0(l.qte_theorique), q1: l.q1, q2: l.nb_comptages >= 2 ? l.q2 : null, q3: l.nb_comptages >= 3 ? l.q3 : null,
       fin: l.qte_finale, ecart: l.ecart, pump: n0(l.pump), val: l.valeur_ecart,
       decision: l.decision ? libelleDecision(l.decision) : 'À décider', com: commentairesLigne(l),

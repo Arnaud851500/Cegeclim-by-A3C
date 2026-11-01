@@ -19,6 +19,10 @@
  *  6. Éditions : liste de comptage et écarts en PDF, export Excel des écarts validés pour
  *     créer le document dans SAGE (+ détail et synthèse par dépôt).
  *
+ * 01/11/2026 (suite) : stock en transit (dépôt SAGE « TRANSIT <agence> », expédié par FMS et non
+ * réceptionné) inclus par défaut dans la liste du dépôt destinataire, section « En transit », écart
+ * passé sur le dépôt transit (migration 20261101b_inventaire_transit.sql).
+ *
  * Accès : droit can_appro (ou can_autorisation), contrôlé aussi par chaque RPC.
  * Sources : RPC inv_* (supabase/migrations/20261101_inventaire_annuel.sql).
  */
@@ -39,9 +43,12 @@ type Ctx = {
   campagnes: Campagne[]
 }
 type Option = { code: string; libelle?: string | null; nom?: string | null; macro?: string; nb_refs: number; valeur: number }
-type Options = { familles_macro: Option[]; familles: Option[]; fournisseurs: Option[]; depots: Array<{ depot_num: string; nb_refs: number; valeur: number }> }
+type Options = {
+  familles_macro: Option[]; familles: Option[]; fournisseurs: Option[]
+  depots: Array<{ depot_num: string; nb_refs: number; valeur: number; transit_libelle?: string | null; transit_nb_refs?: number | null; transit_valeur?: number | null }>
+}
 type DetailDepot = InvDepot & { lignes: LignePilotage[] }
-type FiltreLignes = 'ecarts' | 'a_decider' | 'recomptage' | 'non_saisies' | 'hors_liste' | 'toutes'
+type FiltreLignes = 'ecarts' | 'a_decider' | 'recomptage' | 'non_saisies' | 'hors_liste' | 'transit' | 'toutes'
 
 const ANNEE = new Date().getFullYear()
 
@@ -95,6 +102,7 @@ function PilotageInventaire() {
   const [prepFamilles, setPrepFamilles] = useState<Set<string>>(new Set())
   const [prepFourn, setPrepFourn] = useState<Set<string>>(new Set())
   const [prepStockNul, setPrepStockNul] = useState(false)
+  const [prepTransit, setPrepTransit] = useState(true)
   const [rechFam, setRechFam] = useState('')
   const [rechFourn, setRechFourn] = useState('')
 
@@ -203,13 +211,14 @@ function PilotageInventaire() {
   async function preparer() {
     if (!campagneId) return
     await executer('preparer', async () => {
-      const res = await rpc<Array<{ depot_num: string; ok: boolean; nb_lignes?: number; message?: string }>>('inv_depots_preparer', {
+      const res = await rpc<Array<{ depot_num: string; ok: boolean; nb_lignes?: number; nb_transit?: number; message?: string }>>('inv_depots_preparer', {
         p_campagne_id: campagneId, p_depots: Array.from(prepDepots), p_familles_macro: Array.from(prepMacros),
         p_familles: Array.from(prepFamilles), p_fournisseurs: Array.from(prepFourn), p_inclure_stock_nul: prepStockNul,
+        p_inclure_transit: prepTransit,
       })
       await rafraichirTout()
       const nom = (n: string) => ctx?.depots.find((d) => d.depot_num === n)?.nom_court || n
-      return res.map((r) => `${nom(r.depot_num)} : ${r.ok ? `${fmtNum(r.nb_lignes)} ligne(s)` : r.message}`).join(' · ')
+      return res.map((r) => `${nom(r.depot_num)} : ${r.ok ? `${fmtNum(r.nb_lignes)} ligne(s)${r.nb_transit ? ` dont ${fmtNum(r.nb_transit)} en transit` : ''}` : r.message}`).join(' · ')
     })
   }
 
@@ -279,7 +288,7 @@ function PilotageInventaire() {
       lignes: d.lignes.filter((l) => l.nb_comptages >= n).map((l) => ({
         id: l.id, reference: l.reference, ref_fournisseur: l.ref_fournisseur, designation: l.designation,
         famille: l.famille, famille_macro: l.famille_macro, qte_theorique: l.qte_theorique, pump: l.pump,
-        hors_liste: l.hors_liste, qte: n === 1 ? l.q1 : n === 2 ? l.q2 : l.q3, commentaire: n === 1 ? l.com1 : n === 2 ? l.com2 : l.com3,
+        hors_liste: l.hors_liste, transit: l.transit, depot_stock: l.depot_stock, depot_stock_libelle: l.depot_stock_libelle, qte: n === 1 ? l.q1 : n === 2 ? l.q2 : l.q3, commentaire: n === 1 ? l.com1 : n === 2 ? l.com2 : l.com3,
       })),
     }
     pdfListeComptage(liste, { avecSaisies: false })
@@ -314,6 +323,7 @@ function PilotageInventaire() {
       if (filtre === 'non_saisies' && !(detail.statut === 'comptage' && l.nb_comptages >= detail.comptage_courant
         && (detail.comptage_courant === 1 ? l.q1 : detail.comptage_courant === 2 ? l.q2 : l.q3) === null)) return false
       if (filtre === 'hors_liste' && !l.hors_liste) return false
+      if (filtre === 'transit' && !l.transit) return false
       if (!q) return true
       return [l.reference, l.ref_fournisseur, l.designation, l.famille, l.fournisseur_nom].some((x) => (x || '').toUpperCase().includes(q))
     })
@@ -433,6 +443,9 @@ function PilotageInventaire() {
                                 <div className={on ? 'text-white/70' : 'text-[#8A8474]'}>
                                   {fmtNum(o?.nb_refs)} réf. · {fmtEuro(o?.valeur)}{st ? ` · ${libelleStatut(st)}` : ''}
                                 </div>
+                                {o?.transit_nb_refs ? (
+                                  <div className={on ? 'text-[#B9CFEE]' : 'text-[#1D4F91]'}>+ transit : {fmtNum(o.transit_nb_refs)} réf. · {fmtEuro(o.transit_valeur)}</div>
+                                ) : null}
                               </button>
                             )
                           })}
@@ -475,10 +488,16 @@ function PilotageInventaire() {
                         </div>
                       </div>
                       <div className="flex flex-wrap items-center justify-between gap-2">
-                        <label className="flex items-center gap-2 text-[12.5px]">
-                          <input type="checkbox" checked={prepStockNul} onChange={(e) => setPrepStockNul(e.target.checked)} />
-                          Inclure les références à stock nul du dépôt (pour retrouver des articles non enregistrés)
-                        </label>
+                        <div className="flex flex-col gap-1">
+                          <label className="flex items-center gap-2 text-[12.5px]">
+                            <input type="checkbox" checked={prepTransit} onChange={(e) => setPrepTransit(e.target.checked)} />
+                            Inclure le stock en transit vers le dépôt (dépôt SAGE « TRANSIT … » : expédié par FMS, non réceptionné) — compté par l’agence, écart passé sur le dépôt transit
+                          </label>
+                          <label className="flex items-center gap-2 text-[12.5px]">
+                            <input type="checkbox" checked={prepStockNul} onChange={(e) => setPrepStockNul(e.target.checked)} />
+                            Inclure les références à stock nul du dépôt (pour retrouver des articles non enregistrés)
+                          </label>
+                        </div>
                         <div className="flex items-center gap-2">
                           <span className="text-[12px] text-[#8A8474]">
                             {prepDepots.size} dépôt(s) · {prepMacros.size || 'toutes'} famille(s) macro · {prepFamilles.size || 'toutes'} famille(s) · {prepFourn.size || 'tous'} fournisseur(s)
@@ -528,7 +547,8 @@ function PilotageInventaire() {
                     {suivi.length === 0 && <tr><td colSpan={12} className="px-3 py-6 text-center text-[#8A8474]">Aucune liste : ouvrez « Préparer les listes d’inventaire ».</td></tr>}
                     {suivi.map((d) => {
                       const perim = [d.familles_macro.length ? `Macro ${d.familles_macro.join(', ')}` : '', d.familles.length ? `${d.familles.length} famille(s)` : '',
-                        d.fournisseurs.length ? `Fourn. ${d.fournisseurs.join(', ')}` : '', d.inclure_stock_nul ? 'stock nul inclus' : ''].filter(Boolean).join(' · ') || 'Tout le stock'
+                        d.fournisseurs.length ? `Fourn. ${d.fournisseurs.join(', ')}` : '', d.inclure_stock_nul ? 'stock nul inclus' : '',
+                        d.nb_transit ? `transit ${d.nb_transit} réf. (${fmtEuro(d.valeur_transit)})` : ''].filter(Boolean).join(' · ') || 'Tout le stock'
                       const pct = d.nb_a_compter ? Math.round((d.nb_saisies / d.nb_a_compter) * 100) : null
                       return (
                         <tr key={d.id} onClick={() => setDepotId(d.id)}
@@ -636,7 +656,7 @@ function PilotageInventaire() {
                 {/* Filtres et actions sur la sélection */}
                 <div className="flex flex-wrap items-center gap-2 border-y border-[#EFECE4] bg-[#FAF8F3] px-4 py-2">
                   <div className="flex overflow-hidden rounded-lg border border-[#E5E1D8]">
-                    {([['ecarts', 'Écarts'], ['a_decider', `À décider (${nbADeciderDetail})`], ['recomptage', 'Recomptées'], ['non_saisies', 'Non saisies'], ['hors_liste', 'Hors liste'], ['toutes', 'Toutes']] as Array<[FiltreLignes, string]>).map(([k, lib]) => (
+                    {([['ecarts', 'Écarts'], ['a_decider', `À décider (${nbADeciderDetail})`], ['recomptage', 'Recomptées'], ['non_saisies', 'Non saisies'], ['hors_liste', 'Hors liste'], ['transit', 'Transit'], ['toutes', 'Toutes']] as Array<[FiltreLignes, string]>).map(([k, lib]) => (
                       <button key={k} type="button" onClick={() => { setFiltre(k); setSelection(new Set()) }}
                         className={`h-9 px-2.5 text-[12px] font-bold ${filtre === k ? 'bg-[#111820] text-white' : 'bg-white text-[#3A362E] hover:bg-[#F4F3F0]'}`}>{lib}</button>
                     ))}
@@ -706,6 +726,7 @@ function PilotageInventaire() {
                             <td className="whitespace-nowrap px-2 py-1.5 font-bold">
                               {l.reference}
                               {l.hors_liste && <span className="ml-1 rounded bg-[#FDF3E3] px-1 text-[10px] font-bold text-[#96600F]">hors liste</span>}
+                              {l.transit && <span className="ml-1 rounded bg-[#E8F0FB] px-1 text-[10px] font-bold text-[#1D4F91]" title={`${l.depot_stock_libelle} (dépôt SAGE n° ${l.depot_stock})`}>transit</span>}
                             </td>
                             <td className="whitespace-nowrap px-2 py-1.5 text-[#5E5A44]">{l.ref_fournisseur || '—'}</td>
                             <td className="max-w-[320px] truncate px-2 py-1.5" title={`${l.designation || ''} · ${l.famille || ''} · ${l.fournisseur_nom || l.fournisseur || ''}`}>{l.designation}</td>
