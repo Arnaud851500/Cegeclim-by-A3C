@@ -716,7 +716,7 @@ function HotlineConsole() {
               <div className="grid grid-cols-2 gap-2">
                 <label className="text-[11px] font-semibold text-slate-500">
                   Chantier / référence
-                  <input value={form.chantier} onChange={(e) => patch({ chantier: e.target.value })} className={champ} />
+                  <input value={form.chantier} onChange={(e) => patch({ chantier: e.target.value })} placeholder="Chantier ou produit" title="Référence chantier SAGE, ou nom / référence de produit (client identifié)" className={champ} />
                 </label>
                 <label className="text-[11px] font-semibold text-slate-500">
                   N° de série
