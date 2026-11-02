@@ -371,6 +371,40 @@ export async function chargerLivraisons(params: {
   return (Array.isArray(data) ? data : []) as Livraison[]
 }
 
+/** (02/11/2026) Dossier de vente du client (même reconstitution que l'écran
+ * Clients Convention CEE) : devis → commande → BL → facture, retrouvé par
+ * référence chantier, n° de pièce ou produit. RPC hotline_dossiers. */
+export type ProduitDossier = {
+  reference_article: string | null
+  designation: string | null
+  quantite: number | null
+  correspond: boolean
+  statut?: string
+}
+
+export type PieceDossier = { piece: string; date: string | null; ht: number | null }
+
+export type Dossier = {
+  cle: string
+  reference: string | null
+  etape: 'Devis' | 'Commandé' | 'Livré' | 'Facturé'
+  date_debut: string | null
+  date_fin: string | null
+  cdc: { piece: string | null; date: string | null; en_cours: boolean } | null
+  devis: PieceDossier[]
+  factures: PieceDossier[]
+  bls: Array<{ piece: string; date: string | null; facture: boolean; factures: string[] | null; lignes: ProduitDossier[] | null }>
+  reste_a_livrer: ProduitDossier[]
+  devis_lignes: ProduitDossier[]
+}
+
+export async function chargerDossiers(numeroTiers: string, recherche?: string | null): Promise<{ total: number; dossiers: Dossier[] }> {
+  const { data, error } = await supabase.rpc('hotline_dossiers', { p_numero_tiers: numeroTiers, p_recherche: recherche || null })
+  if (error) throw error
+  const v = (data || {}) as { total?: number; dossiers?: Dossier[] }
+  return { total: Number(v.total || 0), dossiers: Array.isArray(v.dossiers) ? v.dossiers : [] }
+}
+
 /** Aide à la saisie du client : par code tiers (début) ou par nom (contient). */
 export async function rechercherTiers(q: string): Promise<TiersTrouve[]> {
   if (q.trim().length < 2) return []

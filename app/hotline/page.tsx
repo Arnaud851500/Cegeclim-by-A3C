@@ -37,6 +37,7 @@ import {
   chargerArbres,
   CONTEXTE_VIDE,
   chargerContexte,
+  chargerDossiers,
   chargerLivraisons,
   chargerEtapes,
   chargerLignes,
@@ -68,6 +69,7 @@ import {
   type Etape,
   type Filiere,
   type Ligne,
+  type Dossier,
   type Livraison,
   type Motif,
   type Noeud,
@@ -135,6 +137,9 @@ function HotlineConsole() {
   const [contexteLoading, setContexteLoading] = useState(false)
   const [livraisons, setLivraisons] = useState<Livraison[]>([])
   const [livraisonsLoading, setLivraisonsLoading] = useState(false)
+  const [dossiers, setDossiers] = useState<{ total: number; liste: Dossier[] }>({ total: 0, liste: [] })
+  const [dossiersLoading, setDossiersLoading] = useState(false)
+  const [dossierChoisi, setDossierChoisi] = useState<string | null>(null)
   const [erreur, setErreur] = useState<string | null>(null)
   const [info, setInfo] = useState<string | null>(null)
   const [envoiEnCours, setEnvoiEnCours] = useState<string | null>(null)
@@ -287,13 +292,51 @@ function HotlineConsole() {
     return () => window.clearTimeout(handle)
   }, [form.numero_tiers, form.chantier, form.numero_serie, form.contact_nom, telephone, ticket?.id])
 
-  // Commande initiale & livraison (chantier / référence produit / n° série) ---
+  // Dossiers de vente du client (02/11/2026) : référence chantier, n° de pièce
+  // ou produit saisi dans « Chantier » (sinon « Modèle »). Sans recherche : les
+  // dossiers les plus récents. Un seul dossier trouvé = ouvert directement.
+  const rechercheDossier = (form.chantier.trim() || form.reference_article.trim())
+  useEffect(() => {
+    const tiers = form.numero_tiers.trim()
+    const q = rechercheDossier
+    const handle = window.setTimeout(async () => {
+      if (!tiers) {
+        setDossiers({ total: 0, liste: [] })
+        return
+      }
+      setDossiersLoading(true)
+      try {
+        const r = await chargerDossiers(tiers, q.length >= 2 ? q : null)
+        setDossiers({ total: r.total, liste: r.dossiers })
+        setDossierChoisi((actuel) => {
+          if (actuel && r.dossiers.some((d) => d.cle === actuel)) return actuel
+          return q.length >= 2 && r.dossiers.length === 1 ? r.dossiers[0].cle : null
+        })
+      } catch (e) {
+        setErreur(messageErreur(e))
+      } finally {
+        setDossiersLoading(false)
+      }
+    }, 500)
+    return () => window.clearTimeout(handle)
+  }, [form.numero_tiers, rechercheDossier])
+
+  function choisirDossier(d: Dossier | null) {
+    setDossierChoisi(d ? d.cle : null)
+    if (d && ticket) {
+      const pieces = [d.cdc?.piece, ...d.bls.map((b) => b.piece)].filter(Boolean).join(', ')
+      void ajouterEtape(ticket.id, 'COMMENTAIRE', `Dossier consulté : ${d.reference || d.cle}${pieces ? ` (${pieces})` : ''}`).then(() => rafraichirEtapes(ticket.id))
+    }
+  }
+
+  // Sans client identifié : livraisons par chantier / n° de série (tous clients)
   useEffect(() => {
     const chantier = form.chantier.trim()
     const article = form.reference_article.trim()
     const serie = form.numero_serie.trim()
+    const avecClient = Boolean(form.numero_tiers.trim())
     const handle = window.setTimeout(async () => {
-      if (chantier.length < 3 && serie.length < 4 && !(article.length >= 3 && form.numero_tiers)) {
+      if (avecClient || (chantier.length < 3 && serie.length < 4)) {
         setLivraisons([])
         return
       }
@@ -308,6 +351,7 @@ function HotlineConsole() {
     }, 500)
     return () => window.clearTimeout(handle)
   }, [form.numero_tiers, form.chantier, form.reference_article, form.numero_serie])
+
 
   // Arbre de diagnostic ------------------------------------------------------
   const arbresPossibles = useMemo(
@@ -919,12 +963,23 @@ function HotlineConsole() {
               </div>
             </div>
 
+            {form.numero_tiers.trim() ? (
+              <PaveDossiers
+                total={dossiers.total}
+                dossiers={dossiers.liste}
+                chargement={dossiersLoading}
+                recherche={rechercheDossier}
+                choisi={dossierChoisi}
+                onChoisir={choisirDossier}
+              />
+            ) : (
             <PaveLivraisons
               livraisons={livraisons}
               chargement={livraisonsLoading}
               criteres={[form.chantier, form.reference_article, form.numero_serie].filter((v) => v.trim()).join(' · ')}
               articleSansClient={Boolean(form.reference_article.trim()) && !form.numero_tiers && !form.chantier.trim() && !form.numero_serie.trim()}
             />
+            )}
 
             <PaveHistorique
               titre="HOTLINE Historique Contact"
@@ -944,39 +999,6 @@ function HotlineConsole() {
               afficherChantier
             />
 
-            <div className={carte}>
-              <div className={titreCarte}>
-                Documents de vente
-                {form.chantier ? <span className="ml-2 text-[12px] font-normal text-slate-500">chantier « {form.chantier} »</span> : null}
-                {form.numero_serie ? <span className="ml-2 text-[12px] font-normal text-slate-500">n° série « {form.numero_serie} »</span> : null}
-              </div>
-              <div className="max-h-[420px] space-y-1.5 overflow-y-auto p-4">
-                {contexte.documents.length ? (
-                  contexte.documents.map((d) => (
-                    <div key={d.numero_piece} className="rounded-lg border border-[#E2DFD8] px-3 py-2 text-[12px]">
-                      <div className="flex items-center justify-between gap-2">
-                        <span className="font-semibold text-slate-900">
-                          {d.numero_piece}
-                          {d.numero_bl ? <span className="font-normal text-slate-500"> · {d.numero_bl}</span> : null}
-                        </span>
-                        <span className="text-slate-500">
-                          {fmtDate(d.date)} · {fmtEuro(d.montant_ht)}
-                        </span>
-                      </div>
-                      {d.reference || d.projet ? <div className="text-slate-600">{[d.reference, d.projet].filter(Boolean).join(' · ')}</div> : null}
-                      {d.articles?.length ? <div className="truncate text-slate-500">{d.articles.join(' · ')}</div> : null}
-                      {d.series?.length ? <div className="text-slate-500">N° série : {d.series.join(', ')}</div> : null}
-                    </div>
-                  ))
-                ) : (
-                  <p className="text-[12px] text-slate-500">
-                    {form.numero_tiers || form.numero_serie
-                      ? 'Aucune facture sur 36 mois pour ces critères.'
-                      : 'Identifier le client (ou saisir un n° de série) pour afficher ses factures.'}
-                  </p>
-                )}
-              </div>
-            </div>
           </section>
         </div>
       </main>
@@ -1463,6 +1485,184 @@ function PaveLivraisons({
           </p>
         )}
       </div>
+    </div>
+  )
+}
+
+// ── Dossiers de vente (devis → commande → BL → facture) ─────────────────────
+const ETAPE_STYLE: Record<Dossier['etape'], { tone: string; bg: string }> = {
+  Devis: { tone: '#4B5563', bg: '#EEEDEA' },
+  Commandé: { tone: '#8A5A11', bg: '#FDF2DD' },
+  Livré: { tone: '#1E4E8C', bg: '#E6EEF9' },
+  Facturé: { tone: '#2F6B3A', bg: '#E5F2E7' },
+}
+
+function PaveDossiers({
+  total,
+  dossiers,
+  chargement,
+  recherche,
+  choisi,
+  onChoisir,
+}: {
+  total: number
+  dossiers: Dossier[]
+  chargement: boolean
+  recherche: string
+  choisi: string | null
+  onChoisir: (d: Dossier | null) => void
+}) {
+  const dossier = choisi ? dossiers.find((d) => d.cle === choisi) || null : null
+  return (
+    <div className={carte}>
+      <div className={`${titreCarte} flex items-center justify-between gap-2`}>
+        <span className="min-w-0 truncate">
+          Dossiers de vente
+          {recherche ? <span className="ml-2 text-[12px] font-normal text-slate-500">« {recherche} »</span> : null}
+        </span>
+        <span className="shrink-0 text-[11px] font-normal text-slate-400">
+          {chargement ? 'recherche…' : total ? `${total} dossier${total > 1 ? 's' : ''}${total > dossiers.length ? ` (${dossiers.length} affichés)` : ''}` : ''}
+        </span>
+      </div>
+      <div className="max-h-[620px] overflow-y-auto p-4">
+        {dossier ? (
+          <DetailDossier d={dossier} retour={dossiers.length > 1 ? () => onChoisir(null) : null} nbDossiers={dossiers.length} />
+        ) : dossiers.length ? (
+          <div className="space-y-1.5">
+            <div className="text-[11px] font-semibold text-slate-500">
+              {recherche ? 'Choisir le dossier :' : 'Dossiers récents — saisir le chantier, un n° de pièce ou un produit pour filtrer :'}
+            </div>
+            {dossiers.map((d) => (
+              <button
+                key={d.cle}
+                type="button"
+                onClick={() => onChoisir(d)}
+                className="block w-full rounded-lg border border-[#E2DFD8] px-3 py-2 text-left text-[12px] hover:border-[#B4761A] hover:bg-[#FDF7EA]"
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <span className="min-w-0 truncate font-semibold text-slate-900">{d.reference || 'Sans référence chantier'}</span>
+                  <span className="shrink-0 rounded-full px-2 py-0.5 text-[10px] font-bold" style={{ color: ETAPE_STYLE[d.etape].tone, background: ETAPE_STYLE[d.etape].bg }}>
+                    {d.etape}
+                  </span>
+                </div>
+                <div className="truncate text-slate-600">
+                  {[d.devis[0]?.piece, d.cdc?.piece, ...d.bls.map((b) => b.piece), ...d.factures.map((f) => f.piece)].filter(Boolean).join(' · ')}
+                </div>
+                <div className="text-[11px] text-slate-400">
+                  {fmtDate(d.date_debut)}
+                  {d.date_fin && d.date_fin !== d.date_debut ? ` → ${fmtDate(d.date_fin)}` : ''}
+                </div>
+              </button>
+            ))}
+          </div>
+        ) : (
+          <p className="text-[12px] text-slate-500">
+            {chargement ? 'Recherche des dossiers…' : recherche ? `Aucun dossier de ce client ne correspond à « ${recherche} » (3 dernières années).` : 'Aucun dossier de vente sur les 3 dernières années.'}
+          </p>
+        )}
+      </div>
+    </div>
+  )
+}
+
+function ListeProduits({ lignes, statut }: { lignes: ProduitDossierUI[]; statut?: boolean }) {
+  return (
+    <ul className="divide-y divide-[#F1EFEA]">
+      {lignes.map((p, i) => (
+        <li key={`${p.reference_article}-${i}`} className={`flex items-baseline gap-2 px-3 py-1.5 ${p.correspond ? 'bg-[#FDF7EA]' : ''}`}>
+          <span className="w-9 shrink-0 text-right font-semibold tabular-nums text-slate-900">{p.quantite ?? ''}</span>
+          <span className="min-w-0 flex-1">
+            <span className="font-semibold text-slate-800">{p.reference_article || '—'}</span> <span className="text-slate-600">{p.designation}</span>
+          </span>
+          {statut && p.statut ? <span className="shrink-0 text-[10px] font-semibold text-[#8A5A11]">{p.statut}</span> : null}
+          {p.correspond ? <span className="shrink-0 text-[10px] font-bold uppercase text-[#B4761A]">recherché</span> : null}
+        </li>
+      ))}
+    </ul>
+  )
+}
+
+type ProduitDossierUI = Dossier['reste_a_livrer'][number]
+
+function DetailDossier({ d, retour, nbDossiers }: { d: Dossier; retour: (() => void) | null; nbDossiers: number }) {
+  return (
+    <div className="space-y-3 text-[12px]">
+      {retour ? (
+        <button type="button" onClick={retour} className="text-[12px] font-semibold text-slate-500 hover:text-slate-900">
+          ← Tous les dossiers ({nbDossiers})
+        </button>
+      ) : null}
+      <div className="flex items-start justify-between gap-2">
+        <div>
+          <div className="text-[15px] font-bold text-slate-900">{d.reference || 'Sans référence chantier'}</div>
+          <div className="text-slate-500">
+            {fmtDate(d.date_debut)}
+            {d.date_fin && d.date_fin !== d.date_debut ? ` → ${fmtDate(d.date_fin)}` : ''}
+          </div>
+        </div>
+        <span className="shrink-0 rounded-full px-2 py-0.5 text-[11px] font-bold" style={{ color: ETAPE_STYLE[d.etape].tone, background: ETAPE_STYLE[d.etape].bg }}>
+          {d.etape}
+        </span>
+      </div>
+
+      <div className="grid grid-cols-2 gap-2">
+        <div className="rounded-lg bg-[#FAF9F7] px-3 py-2">
+          <div className="text-[10px] font-semibold uppercase tracking-[0.05em] text-slate-400">Devis</div>
+          {d.devis.length ? (
+            d.devis.map((x) => (
+              <div key={x.piece} className="text-slate-800">
+                <span className="font-semibold">{x.piece}</span> · {fmtDate(x.date)} · {fmtEuro(x.ht)}
+              </div>
+            ))
+          ) : (
+            <div className="text-slate-400">—</div>
+          )}
+        </div>
+        <div className="rounded-lg bg-[#FAF9F7] px-3 py-2">
+          <div className="text-[10px] font-semibold uppercase tracking-[0.05em] text-slate-400">Commande initiale</div>
+          {d.cdc?.piece ? (
+            <div className="text-slate-800">
+              <span className="font-semibold">{d.cdc.piece}</span> · {fmtDate(d.cdc.date)}
+              {d.cdc.en_cours ? <span className="ml-1 text-[10px] font-bold text-[#8A5A11]">EN COURS</span> : null}
+            </div>
+          ) : (
+            <div className="text-slate-400">—</div>
+          )}
+        </div>
+      </div>
+
+      {d.bls.map((b) => (
+        <div key={b.piece} className="rounded-lg border border-[#E2DFD8]">
+          <div className="flex flex-wrap items-baseline justify-between gap-x-3 border-b border-[#EFEDE8] bg-[#FAF9F7] px-3 py-2">
+            <span className="font-semibold text-[#2F6B3A]">
+              Expédié le {fmtDate(b.date)} <span className="font-normal text-slate-500">· {b.piece}</span>
+            </span>
+            <span className="text-slate-500">{b.factures?.length ? `facture ${b.factures.join(', ')}` : b.facture ? 'facturé' : 'non facturé'}</span>
+          </div>
+          {b.lignes?.length ? <ListeProduits lignes={b.lignes} /> : <div className="px-3 py-2 text-slate-400">Aucune ligne produit.</div>}
+        </div>
+      ))}
+
+      {d.reste_a_livrer.length ? (
+        <div className="rounded-lg border border-[#EBD8AE]">
+          <div className="border-b border-[#EFEDE8] bg-[#FDF7EA] px-3 py-2 font-semibold text-[#8A5A11]">Reste à livrer sur la commande</div>
+          <ListeProduits lignes={d.reste_a_livrer} statut />
+        </div>
+      ) : null}
+
+      {d.devis_lignes.length ? (
+        <div className="rounded-lg border border-[#E2DFD8]">
+          <div className="border-b border-[#EFEDE8] bg-[#FAF9F7] px-3 py-2 font-semibold text-slate-700">Contenu du devis (pas encore commandé)</div>
+          <ListeProduits lignes={d.devis_lignes} />
+        </div>
+      ) : null}
+
+      {d.factures.length ? (
+        <div className="text-slate-600">
+          <span className="font-semibold text-slate-700">Factures : </span>
+          {d.factures.map((f) => `${f.piece} du ${fmtDate(f.date)} (${fmtEuro(f.ht)})`).join(' · ')}
+        </div>
+      ) : null}
     </div>
   )
 }
