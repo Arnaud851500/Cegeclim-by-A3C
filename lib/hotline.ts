@@ -557,3 +557,32 @@ export async function creerBrouillonEmail(params: {
   window.setTimeout(() => URL.revokeObjectURL(url), 60_000)
   return { joint: Boolean(piece), fichier: fichierEml }
 }
+
+/** (02/11/2026) Envoi par le compagnon : e-mail avec le document en pièce
+ * jointe, via /api/hotline/envoyer-document (Resend), réponse au technicien,
+ * trace dans le ticket. Le brouillon .eml ci-dessus reste disponible en repli. */
+export async function envoyerDocumentParEmail(params: {
+  ticketId?: string | null
+  to: string
+  copieAMoi: boolean
+  subject: string
+  text: string
+  document: DocumentLien
+}): Promise<{ joint: boolean; fichier: string | null }> {
+  const { data } = await supabase.auth.getSession()
+  const token = data.session?.access_token
+  if (!token) throw new Error('Session expirée : reconnectez-vous.')
+  const res = await fetch('/api/hotline/envoyer-document', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify(params),
+  })
+  const json = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string; joint?: boolean; fichier?: string | null }
+  if (!res.ok || !json.ok) throw new Error(json.error || `Envoi impossible (${res.status})`)
+  return { joint: Boolean(json.joint), fichier: json.fichier || null }
+}
+
+export function messageEnvoiDocument(doc: DocumentLien, contactNom?: string | null) {
+  const bonjour = contactNom ? `Bonjour ${contactNom},` : 'Bonjour,'
+  return `${bonjour}\n\nComme convenu au téléphone, vous trouverez ci-joint le document « ${doc.titre} ».\n\nBien cordialement,\nLe support technique CEGECLIM`
+}
