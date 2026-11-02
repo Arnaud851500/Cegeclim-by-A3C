@@ -50,6 +50,10 @@
  *    sur les blocs dus sous N jours ;
  *  - vue « Par échéance » (lecture) : une ligne par CDF × date, triée par date, pour préparer les réceptions FMS.
  *
+ * 02/11/2026 — code couleur des containers : bateau arrivé au port = bleu, container déchargé = sarcelle,
+ *  livré FMS = vert (n° de container, colonne « Bateau · ETA », badge de marge qui affiche l'étape et
+ *  garde la marge et le verdict en info-bulle).
+ *
  * Sources : RPC get_appro_portefeuille_cdf / get_appro_cdf_detail ; tables appro_container_releves,
  * appro_cdf_actions, appro_armateurs, appro_cdf_statuts ; sage.cdf_statut et sage.bdcf_commentaires
  * (export TSE à compléter, voir supabase/sql/20261023_export_sage_cdf_complements.sql).
@@ -146,6 +150,14 @@ const VERDICT: Record<Verdict, { label: string; cls: string }> = {
 }
 const STATUT_SUIVI: Record<StatutSuivi, string> = {
   booke: 'Booké', embarque: 'Embarqué', en_mer: 'En mer', arrive: 'Arrivé au port', decharge: 'Déchargé', livre: 'Livré FMS',
+}
+// 02/11/2026 — code couleur des containers selon l'avancement du bateau : dès que le bateau est
+// arrivé au port, puis quand le container est déchargé, la ligne change de couleur (n° de container,
+// colonne « Bateau · ETA » et badge de marge). Avant l'arrivée, la couleur reste celle du verdict de marge.
+const ETAPE_BATEAU: Partial<Record<StatutSuivi, { label: string; badge: string; texte: string; puce: string }>> = {
+  arrive: { label: 'Au port', badge: 'bg-sky-600 text-white', texte: 'font-bold text-sky-700', puce: 'bg-sky-100 text-sky-800 ring-1 ring-sky-300' },
+  decharge: { label: 'Déchargé', badge: 'bg-teal-600 text-white', texte: 'font-bold text-teal-700', puce: 'bg-teal-100 text-teal-800 ring-1 ring-teal-300' },
+  livre: { label: 'Livré FMS', badge: 'bg-emerald-700 text-white', texte: 'font-bold text-emerald-700', puce: 'bg-emerald-100 text-emerald-800 ring-1 ring-emerald-300' },
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -1094,7 +1106,7 @@ function PortefeuilleCdf() {
             <tbody>
               {loading && !rep && <tr><td colSpan={13} className="px-3 py-6 text-center text-[#8A8474]">Chargement du portefeuille…</td></tr>}
               {!(loading && !rep) && filtres.length === 0 && <tr><td colSpan={13} className="px-3 py-6 text-center font-semibold text-emerald-700">Aucune CDF à traiter avec ces filtres.</td></tr>}
-              {!(loading && !rep) && filtres.map((r) => (
+              {!(loading && !rep) && filtres.map((r) => { const etape = r.statut_suivi ? ETAPE_BATEAU[r.statut_suivi] : undefined; return (
                 <React.Fragment key={r.numero}>
                 <tr onClick={() => ouvrirCdf(r.numero)} className="cursor-pointer border-b border-[#F0EDE6] hover:bg-[#FAF8F3]">
                   <td className="whitespace-nowrap px-2 py-1 font-semibold">
@@ -1119,13 +1131,15 @@ function PortefeuilleCdf() {
                   </td>
                   <td className="whitespace-nowrap px-2 py-1">{r.statut_libelle ? <Badge cls={r.ar_recu ? 'bg-emerald-50 text-emerald-700' : 'bg-[#F4F3F0] text-[#5E5A44]'}>{r.statut_libelle}</Badge> : <span className="text-[#C9C3B5]">—</span>}</td>
                   <td className="whitespace-nowrap px-2 py-1 font-mono text-[11.5px]">
-                    {r.container ? <span className={r.container_valide ? '' : 'text-red-700'} title={r.container_source === 'sage' ? 'Lu dans SAGE' : 'Saisi dans l’app'}>{r.container}{r.container_source === 'saisie' && <span className="ml-0.5 font-sans text-[10px] text-[#8A8474]">✎</span>}</span>
+                    {r.container ? <span className={!r.container_valide ? 'text-red-700' : etape ? `rounded px-1 py-0.5 ${etape.puce}` : ''} title={`${r.container_source === 'sage' ? 'Lu dans SAGE' : 'Saisi dans l’app'}${etape && r.statut_suivi ? ` · ${STATUT_SUIVI[r.statut_suivi]}` : ''}`}>{r.container}{r.container_source === 'saisie' && <span className="ml-0.5 font-sans text-[10px] text-[#8A8474]">✎</span>}</span>
                       : r.est_cont ? <span className="font-sans text-[11px] text-red-700">à obtenir</span> : <span className="text-[#C9C3B5]">—</span>}
                   </td>
                   <td className="max-w-[200px] truncate px-2 py-1" title={[r.armateur, r.navire, r.port_arrivee].filter(Boolean).join(' · ')}>
-                    {r.eta_port ? <>{fmtDate(r.eta_port)} <span className="text-[10.5px] text-[#8A8474]">{r.navire || r.armateur || ''}{r.statut_suivi ? ` · ${STATUT_SUIVI[r.statut_suivi]}` : ''}</span></> : <span className="text-[#C9C3B5]">—</span>}
+                    {r.eta_port ? <>{fmtDate(r.eta_port)} <span className="text-[10.5px] text-[#8A8474]">{r.navire || r.armateur || ''}</span>{r.statut_suivi && <span className={`text-[10.5px] ${etape ? etape.texte : 'text-[#8A8474]'}`}> · {STATUT_SUIVI[r.statut_suivi]}</span>}</> : <span className="text-[#C9C3B5]">—</span>}
                   </td>
-                  <td className="whitespace-nowrap px-2 py-1">{r.verdict ? <Badge cls={VERDICT[r.verdict].cls}>{r.marge_jours} j · {VERDICT[r.verdict].label}</Badge> : <span className="text-[#C9C3B5]">—</span>}</td>
+                  <td className="whitespace-nowrap px-2 py-1">{etape
+                    ? <Badge cls={etape.badge} title={r.verdict ? `Marge ${r.marge_jours} j · ${VERDICT[r.verdict].label} (calculée sur l’ETA port)` : undefined}>{r.marge_jours !== null ? `${r.marge_jours} j · ` : ''}{etape.label}</Badge>
+                    : r.verdict ? <Badge cls={VERDICT[r.verdict].cls}>{r.marge_jours} j · {VERDICT[r.verdict].label}</Badge> : <span className="text-[#C9C3B5]">—</span>}</td>
                   <td className="whitespace-nowrap px-2 py-1 text-right">{r.nb_cdc ? <span title={`1re livraison client ${fmtDate(r.premiere_livraison_cdc)}`}><b>{fmtNum(r.nb_cdc)}</b>{r.nb_cdc_tardives ? <span className="ml-1 text-[10.5px] text-orange-700">({fmtNum(r.nb_cdc_tardives)} tard.)</span> : ''}</span> : <span className="text-[#C9C3B5]">—</span>}</td>
                   <td className="whitespace-nowrap px-2 py-1 text-right" title={familleF ? `${fmtNum(r.nb_lignes)} ligne(s) ${familleF} · ${fmtNum(r.qte)} pièces` : `${fmtNum(r.nb_lignes)} ligne(s) · ${fmtNum(r.qte)} pièces`}>{fmtNum(r.montant_ht)}</td>
                   <td className="px-2 py-1"><span className="inline-flex flex-wrap gap-1">{r.alertes.map((a) => <Badge key={a} cls={ALERTE[a].cls} title={ALERTE[a].title}>{libelleAlerte(a, r)}</Badge>)}</span></td>
@@ -1139,7 +1153,7 @@ function PortefeuilleCdf() {
                   </tr>
                 )}
                 </React.Fragment>
-              ))}
+              )})}
             </tbody>
           </table>
         </section>
