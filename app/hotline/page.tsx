@@ -44,7 +44,7 @@ import {
   identifierAppelant,
   libelleFiliere,
   libelleMotif,
-  mailtoDocument,
+  creerBrouillonEmail,
   majTicket,
   messageErreur,
   rechercherTiers,
@@ -71,6 +71,7 @@ type Formulaire = {
   numero_tiers: string
   intitule_tiers: string
   contact_nom: string
+  contact_email: string
   chantier: string
   numero_serie: string
   reference_article: string
@@ -83,6 +84,7 @@ const FORM_VIDE: Formulaire = {
   numero_tiers: '',
   intitule_tiers: '',
   contact_nom: '',
+  contact_email: '',
   chantier: '',
   numero_serie: '',
   reference_article: '',
@@ -121,6 +123,8 @@ function HotlineConsole() {
   const [contexte, setContexte] = useState<Contexte>(CONTEXTE_VIDE)
   const [contexteLoading, setContexteLoading] = useState(false)
   const [erreur, setErreur] = useState<string | null>(null)
+  const [info, setInfo] = useState<string | null>(null)
+  const [envoiEnCours, setEnvoiEnCours] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
 
   // Diagnostic guidé
@@ -172,6 +176,7 @@ function HotlineConsole() {
           numero_tiers: a.numero_tiers || f.numero_tiers,
           intitule_tiers: a.intitule || f.intitule_tiers,
           contact_nom: f.contact_nom || (a.source !== 'SAGE fiche tiers' ? a.contact || '' : ''),
+          contact_email: f.contact_email || a.email || '',
         }))
       }
     } catch (e) {
@@ -187,7 +192,7 @@ function HotlineConsole() {
   }, [identifier])
 
   function choisirAppelant(a: AppelantGroupe) {
-    patch({ numero_tiers: a.numero_tiers || '', intitule_tiers: a.intitule || '', contact_nom: a.contact || '' })
+    patch({ numero_tiers: a.numero_tiers || '', intitule_tiers: a.intitule || '', contact_nom: a.contact || '', contact_email: a.email || '' })
     setListeOuverte(false)
   }
 
@@ -277,6 +282,7 @@ function HotlineConsole() {
           numero_tiers: form.numero_tiers || null,
           intitule_tiers: form.intitule_tiers || null,
           contact_nom: form.contact_nom || null,
+          contact_email: form.contact_email.trim() || null,
           chantier: form.chantier || null,
           numero_serie: form.numero_serie || null,
           reference_article: form.reference_article || null,
@@ -313,6 +319,7 @@ function HotlineConsole() {
         numero_tiers: form.numero_tiers || null,
         intitule_tiers: form.intitule_tiers || null,
         contact_nom: form.contact_nom || null,
+        contact_email: form.contact_email.trim() || null,
         chantier: form.chantier || null,
         numero_serie: form.numero_serie || null,
         reference_article: form.reference_article || null,
@@ -385,14 +392,34 @@ function HotlineConsole() {
     }
   }
 
+  // Brouillon Outlook (.eml) avec le document en pièce jointe quand il est
+  // téléchargeable, sinon avec le lien (voir lib/hotline.ts).
   async function envoyerDocument(doc: DocumentLien) {
-    window.open(mailtoDocument(doc, ticket?.numero), '_blank')
-    if (!ticket) return
+    setEnvoiEnCours(doc.titre)
     try {
-      await ajouterEtape(ticket.id, 'DOCUMENT', `Document envoyé : ${doc.titre}`, { details: { ...doc } })
-      await rafraichirEtapes(ticket.id)
+      const destinataire = form.contact_email.trim()
+      const { joint } = await creerBrouillonEmail({
+        doc,
+        destinataire,
+        contactNom: form.contact_nom,
+        ticketNumero: ticket?.numero,
+      })
+      setInfo(
+        `Brouillon d’e-mail « ${doc.titre} » téléchargé${destinataire ? ` pour ${destinataire}` : ' (destinataire à saisir)'} : ${
+          joint ? 'document en pièce jointe' : 'document non téléchargeable, le lien est dans le texte'
+        }. Ouvrez-le pour l’envoyer depuis Outlook.`,
+      )
+      window.setTimeout(() => setInfo(null), 8000)
+      if (ticket) {
+        await ajouterEtape(ticket.id, 'DOCUMENT', `Document envoyé${joint ? ' (pièce jointe)' : ' (lien)'} : ${doc.titre}${destinataire ? ` → ${destinataire}` : ''}`, {
+          details: { ...doc, destinataire: destinataire || null, piece_jointe: joint },
+        })
+        await rafraichirEtapes(ticket.id)
+      }
     } catch (e) {
       setErreur(messageErreur(e))
+    } finally {
+      setEnvoiEnCours(null)
     }
   }
 
@@ -439,6 +466,7 @@ function HotlineConsole() {
 
       <main className="mx-auto w-full max-w-[1760px] px-4 py-5 md:px-8">
         {erreur ? <HotlineErreur message={erreur} onClose={() => setErreur(null)} /> : null}
+        {info ? <div className="mb-4 rounded-xl border border-[#CDE5D1] bg-[#EEF7EF] px-4 py-2.5 text-[13px] text-[#2F6B3A]">{info}</div> : null}
 
         <div className="grid grid-cols-1 gap-4 xl:grid-cols-12">
           {/* ── Appelant et ticket ───────────────────────────────────── */}
@@ -513,7 +541,9 @@ function HotlineConsole() {
                   mode="code"
                   value={form.numero_tiers}
                   onChange={(v) => patch({ numero_tiers: v.toUpperCase() })}
-                  onSelect={(t) => patch({ numero_tiers: t.numero_tiers, intitule_tiers: t.intitule || '' })}
+                  onSelect={(t) =>
+                  setForm((f) => ({ ...f, numero_tiers: t.numero_tiers, intitule_tiers: t.intitule || '', contact_email: f.contact_email || t.email || '' }))
+                }
                 />
                 <label className="text-[11px] font-semibold text-slate-500">
                   Contact
@@ -525,8 +555,20 @@ function HotlineConsole() {
                 mode="nom"
                 value={form.intitule_tiers}
                 onChange={(v) => patch({ intitule_tiers: v })}
-                onSelect={(t) => patch({ numero_tiers: t.numero_tiers, intitule_tiers: t.intitule || '' })}
+                onSelect={(t) =>
+                  setForm((f) => ({ ...f, numero_tiers: t.numero_tiers, intitule_tiers: t.intitule || '', contact_email: f.contact_email || t.email || '' }))
+                }
               />
+              <label className="block text-[11px] font-semibold text-slate-500">
+                E-mail du contact
+                <input
+                  type="email"
+                  value={form.contact_email}
+                  onChange={(e) => patch({ contact_email: e.target.value })}
+                  placeholder="Pré-rempli depuis la fiche contact"
+                  className={champ}
+                />
+              </label>
               <div className="grid grid-cols-2 gap-2">
                 <label className="text-[11px] font-semibold text-slate-500">
                   Chantier / référence
@@ -710,8 +752,14 @@ function HotlineConsole() {
                             Ouvrir
                           </a>
                         ) : null}
-                        <button type="button" onClick={() => envoyerDocument(d)} className="text-[12px] font-semibold text-[#B4761A] underline">
-                          Envoyer
+                        <button
+                          type="button"
+                          onClick={() => envoyerDocument(d)}
+                          disabled={envoiEnCours !== null}
+                          title={form.contact_email ? `Brouillon Outlook pour ${form.contact_email}, document en pièce jointe` : 'Brouillon Outlook, document en pièce jointe'}
+                          className="text-[12px] font-semibold text-[#B4761A] underline disabled:opacity-50"
+                        >
+                          {envoiEnCours === d.titre ? 'Préparation…' : 'Envoyer'}
                         </button>
                       </span>
                     </div>
@@ -990,6 +1038,7 @@ function regrouperAppelants(liste: Appelant[]): AppelantGroupe[] {
       existant.ville = existant.ville || a.ville
       existant.agence = existant.agence || a.agence
       existant.contact = existant.contact || (contactUtile ? a.contact : null)
+      existant.email = existant.email || a.email || null
     } else {
       groupes.set(cle, { ...a, contact: contactUtile ? a.contact : null, sources: [a.source] })
     }

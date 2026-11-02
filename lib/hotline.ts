@@ -108,6 +108,7 @@ export type Ticket = {
   numero_tiers: string | null
   intitule_tiers: string | null
   contact_nom: string | null
+  contact_email: string | null
   chantier: string | null
   numero_serie: string | null
   reference_article: string | null
@@ -144,6 +145,8 @@ export type Appelant = {
   ville: string | null
   agence: string | null
   representant: string | null
+  /** (02/11/2026) Contact (carnet hotline, SAGE, BLG), sinon fiche tiers. */
+  email?: string | null
 }
 
 export type TicketHistorique = Pick<
@@ -195,6 +198,7 @@ export type TiersTrouve = {
   code_postal: string | null
   agence: string | null
   telephone: string | null
+  email?: string | null
 }
 
 export type Ligne = { numero: string; filiere: Filiere; libelle: string; actif: boolean }
@@ -408,10 +412,148 @@ export async function rouvrir(ticketId: string) {
   await ajouterEtape(ticketId, 'REOUVERTURE', 'Ticket rouvert')
 }
 
-/** Lien mailto pour envoyer un document à l'appelant (le lien est aussi
- * journalisé dans la chronologie du ticket par l'écran appelant). */
-export function mailtoDocument(doc: DocumentLien, ticketNumero?: string | null) {
-  const subject = `${ticketNumero ? `[${ticketNumero}] ` : ''}${doc.titre}`
-  const body = `Bonjour,\n\nVoici le document « ${doc.titre} » évoqué au téléphone :\n${doc.url || '(lien à compléter)'}\n\nLe support technique CEGECLIM`
-  return `mailto:?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`
+// ----------------------------------------------------------------------------
+// Envoi d'un document à l'appelant (02/11/2026)
+// ----------------------------------------------------------------------------
+// Un lien mailto: ne peut pas porter de pièce jointe. On génère donc un
+// brouillon d'e-mail .eml (en-tête « X-Unsent: 1 ») : Outlook l'ouvre comme un
+// NOUVEAU message, destinataire, objet, texte et pièce jointe déjà remplis, il
+// ne reste qu'à cliquer sur Envoyer.
+// Le document est téléchargé depuis son lien ; si le site qui l'héberge
+// l'interdit (CORS) ou si le lien est vide, le message part avec le lien dans
+// le texte à la place de la pièce jointe.
+// Pour qu'Outlook s'ouvre directement : associer les fichiers .eml à Outlook
+// (Mac : clic droit sur un .eml › Lire les informations › Ouvrir avec ›
+// Microsoft Outlook › Tout modifier ; Windows : Ouvrir avec › Outlook ›
+// Toujours).
+
+const MIME_PAR_EXTENSION: Record<string, string> = {
+  pdf: 'application/pdf',
+  xls: 'application/vnd.ms-excel',
+  xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  doc: 'application/msword',
+  docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  png: 'image/png',
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  zip: 'application/zip',
+  bin: 'application/octet-stream',
+  hex: 'application/octet-stream',
+  mp4: 'video/mp4',
+}
+
+const EXTENSION_PAR_MIME: Record<string, string> = Object.fromEntries(
+  Object.entries(MIME_PAR_EXTENSION).map(([ext, mime]) => [mime, ext]),
+)
+
+function base64Utf8(text: string) {
+  const bytes = new TextEncoder().encode(text)
+  let bin = ''
+  bytes.forEach((b) => (bin += String.fromCharCode(b)))
+  return btoa(bin)
+}
+
+function base64Blob(buffer: ArrayBuffer) {
+  const bytes = new Uint8Array(buffer)
+  let bin = ''
+  const pas = 0x8000
+  for (let i = 0; i < bytes.length; i += pas) bin += String.fromCharCode(...bytes.subarray(i, i + pas))
+  return btoa(bin)
+}
+
+/** Lignes de 76 caractères (RFC 2045). */
+function plier(base64: string) {
+  return base64.replace(/.{1,76}/g, '$&\r\n').trimEnd()
+}
+
+function enTeteUtf8(text: string) {
+  return /^[\x20-\x7e]*$/.test(text) ? text : `=?UTF-8?B?${base64Utf8(text)}?=`
+}
+
+function nomFichier(doc: DocumentLien, mime: string) {
+  const depuisUrl = (() => {
+    try {
+      const chemin = decodeURIComponent(new URL(String(doc.url)).pathname)
+      return chemin.split('/').pop() || ''
+    } catch {
+      return ''
+    }
+  })()
+  const extUrl = /\.([a-z0-9]{2,5})$/i.exec(depuisUrl)?.[1]?.toLowerCase()
+  const ext = extUrl || EXTENSION_PAR_MIME[mime] || (doc.type || 'pdf').toLowerCase()
+  const base = (doc.titre || 'document').replace(/[\\/:*?"<>|]+/g, ' ').trim() || 'document'
+  return base.toLowerCase().endsWith(`.${ext}`) ? base : `${base}.${ext}`
+}
+
+async function telechargerDocument(doc: DocumentLien) {
+  if (!doc.url || !/^https?:\/\//i.test(doc.url)) return null
+  try {
+    const res = await fetch(doc.url, { mode: 'cors', credentials: 'omit' })
+    if (!res.ok) return null
+    const blob = await res.blob()
+    if (blob.size > 20 * 1024 * 1024) return null // au-delà, le lien est plus raisonnable
+    const mime = (blob.type || '').split(';')[0] || 'application/octet-stream'
+    return { mime, contenu: base64Blob(await blob.arrayBuffer()) }
+  } catch {
+    return null
+  }
+}
+
+/** Crée et télécharge le brouillon .eml. Renvoie si le document a pu être joint. */
+export async function creerBrouillonEmail(params: {
+  doc: DocumentLien
+  destinataire?: string | null
+  contactNom?: string | null
+  ticketNumero?: string | null
+}): Promise<{ joint: boolean; fichier: string }> {
+  const { doc } = params
+  const piece = await telechargerDocument(doc)
+  const objet = `${params.ticketNumero ? `[${params.ticketNumero}] ` : ''}${doc.titre}`
+  const bonjour = params.contactNom ? `Bonjour ${params.contactNom},` : 'Bonjour,'
+  const corps = piece
+    ? `${bonjour}\n\nComme convenu au téléphone, vous trouverez ci-joint le document « ${doc.titre} ».\n\nBien cordialement,\nLe support technique CEGECLIM`
+    : `${bonjour}\n\nComme convenu au téléphone, voici le document « ${doc.titre} » :\n${doc.url || '(lien à compléter)'}\n\nBien cordialement,\nLe support technique CEGECLIM`
+
+  const frontiere = `----=_Hotline_${Date.now().toString(36)}`
+  const lignes = [
+    'X-Unsent: 1',
+    `To: ${params.destinataire || ''}`,
+    `Subject: ${enTeteUtf8(objet)}`,
+    'MIME-Version: 1.0',
+  ]
+  if (piece) {
+    const fichier = nomFichier(doc, piece.mime)
+    lignes.push(
+      `Content-Type: multipart/mixed; boundary="${frontiere}"`,
+      '',
+      `--${frontiere}`,
+      'Content-Type: text/plain; charset=UTF-8',
+      'Content-Transfer-Encoding: base64',
+      '',
+      plier(base64Utf8(corps)),
+      '',
+      `--${frontiere}`,
+      `Content-Type: ${piece.mime}; name="${enTeteUtf8(fichier)}"`,
+      'Content-Transfer-Encoding: base64',
+      `Content-Disposition: attachment; filename="${enTeteUtf8(fichier)}"; filename*=UTF-8''${encodeURIComponent(fichier)}`,
+      '',
+      plier(piece.contenu),
+      '',
+      `--${frontiere}--`,
+      '',
+    )
+  } else {
+    lignes.push('Content-Type: text/plain; charset=UTF-8', 'Content-Transfer-Encoding: base64', '', plier(base64Utf8(corps)), '')
+  }
+
+  const fichierEml = `${(objet || 'document').replace(/[\\/:*?"<>|]+/g, ' ').trim()}.eml`
+  const url = URL.createObjectURL(new Blob([lignes.join('\r\n')], { type: 'message/rfc822' }))
+  const a = document.createElement('a')
+  a.href = url
+  a.download = fichierEml
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  window.setTimeout(() => URL.revokeObjectURL(url), 60_000)
+  return { joint: Boolean(piece), fichier: fichierEml }
 }
