@@ -148,7 +148,20 @@ export type Appelant = {
 
 export type TicketHistorique = Pick<
   Ticket,
-  'id' | 'numero' | 'filiere' | 'motif' | 'statut' | 'niveau' | 'opened_at' | 'description' | 'preconisation' | 'chantier' | 'numero_serie'
+  | 'id'
+  | 'numero'
+  | 'filiere'
+  | 'motif'
+  | 'statut'
+  | 'niveau'
+  | 'opened_at'
+  | 'description'
+  | 'preconisation'
+  | 'chantier'
+  | 'numero_serie'
+  | 'contact_nom'
+  | 'intitule_tiers'
+  | 'numero_tiers'
 >
 
 export type DocumentVente = {
@@ -163,7 +176,26 @@ export type DocumentVente = {
   series: string[] | null
 }
 
-export type Contexte = { tickets: TicketHistorique[]; documents: DocumentVente[] }
+/** (02/11/2026) Trois historiques distincts : client (code tiers), contact
+ * (même numéro appelant, ou même contact chez ce client), chantier / machine
+ * (même chantier ou même n° de série). */
+export type Contexte = {
+  ticketsClient: TicketHistorique[]
+  ticketsContact: TicketHistorique[]
+  ticketsChantier: TicketHistorique[]
+  documents: DocumentVente[]
+}
+
+export const CONTEXTE_VIDE: Contexte = { ticketsClient: [], ticketsContact: [], ticketsChantier: [], documents: [] }
+
+export type TiersTrouve = {
+  numero_tiers: string
+  intitule: string | null
+  ville: string | null
+  code_postal: string | null
+  agence: string | null
+  telephone: string | null
+}
 
 export type Ligne = { numero: string; filiere: Filiere; libelle: string; actif: boolean }
 
@@ -273,16 +305,32 @@ export async function chargerContexte(params: {
   telephone?: string | null
   chantier?: string | null
   numeroSerie?: string | null
+  contactNom?: string | null
 }): Promise<Contexte> {
   const { data, error } = await supabase.rpc('hotline_contexte', {
     p_numero_tiers: params.numeroTiers || null,
     p_telephone: params.telephone || null,
     p_chantier: params.chantier || null,
     p_numero_serie: params.numeroSerie || null,
+    p_contact_nom: params.contactNom || null,
   })
   if (error) throw error
-  const value = (data || {}) as Partial<Contexte>
-  return { tickets: value.tickets || [], documents: value.documents || [] }
+  const value = (data || {}) as Record<string, unknown>
+  const liste = (k: string) => (Array.isArray(value[k]) ? (value[k] as TicketHistorique[]) : [])
+  return {
+    ticketsClient: liste('tickets_client'),
+    ticketsContact: liste('tickets_contact'),
+    ticketsChantier: liste('tickets_chantier'),
+    documents: Array.isArray(value.documents) ? (value.documents as DocumentVente[]) : [],
+  }
+}
+
+/** Aide à la saisie du client : par code tiers (début) ou par nom (contient). */
+export async function rechercherTiers(q: string): Promise<TiersTrouve[]> {
+  if (q.trim().length < 2) return []
+  const { data, error } = await supabase.rpc('hotline_rechercher_tiers', { p_q: q.trim() })
+  if (error) throw error
+  return (Array.isArray(data) ? data : []) as TiersTrouve[]
 }
 
 export async function chargerLignes(): Promise<Ligne[]> {

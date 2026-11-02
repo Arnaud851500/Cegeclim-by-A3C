@@ -10,8 +10,9 @@
  * - Colonne gauche : appelant, filière / motif, champs du ticket, chronologie.
  * - Colonne centrale : diagnostic guidé (arbre de questions-réponses de la
  *   filière et du motif) ; chaque réponse est horodatée dans le ticket.
- * - Colonne droite : contexte en temps réel (tickets précédents du client ou du
- *   numéro, documents de vente filtrés par chantier / n° de série) et
+ * - Colonne droite : contexte en temps réel — trois historiques hotline
+ *   (client, contact, chantier / machine), documents de vente filtrés par
+ *   chantier / n° de série — et
  *   documents proposés par le diagnostic, envoyables à l'appelant.
  * Tables / RPC : migration 20261102_hotline_technique.sql.
  */
@@ -29,6 +30,7 @@ import {
   STATUTS,
   ajouterEtape,
   chargerArbres,
+  CONTEXTE_VIDE,
   chargerContexte,
   chargerEtapes,
   chargerLignes,
@@ -45,6 +47,7 @@ import {
   mailtoDocument,
   majTicket,
   messageErreur,
+  rechercherTiers,
   resoudre,
   telCle,
   type Appelant,
@@ -58,6 +61,8 @@ import {
   type Motif,
   type Noeud,
   type Ticket,
+  type TicketHistorique,
+  type TiersTrouve,
 } from '@/lib/hotline'
 
 type Formulaire = {
@@ -110,7 +115,7 @@ function HotlineConsole() {
   const [form, setForm] = useState<Formulaire>(FORM_VIDE)
   const [ticket, setTicket] = useState<Ticket | null>(null)
   const [etapes, setEtapes] = useState<Etape[]>([])
-  const [contexte, setContexte] = useState<Contexte>({ tickets: [], documents: [] })
+  const [contexte, setContexte] = useState<Contexte>(CONTEXTE_VIDE)
   const [contexteLoading, setContexteLoading] = useState(false)
   const [erreur, setErreur] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
@@ -151,13 +156,16 @@ function HotlineConsole() {
     try {
       const liste = await identifierAppelant(tel)
       setAppelants(liste)
+      // Contact déjà enregistré par la hotline (appel précédent) : pré-saisie
+      // directe, il fait foi. Sinon, pré-saisie si un seul client correspond.
       const tiers = Array.from(new Set(liste.map((a) => a.numero_tiers).filter(Boolean)))
-      if (liste.length && tiers.length === 1) {
-        const a = liste[0]
+      const memorise = liste.find((a) => a.source === 'Hotline')
+      const a = memorise || (liste.length && tiers.length === 1 ? liste[0] : null)
+      if (a) {
         setForm((f) => ({
           ...f,
-          numero_tiers: a.numero_tiers || '',
-          intitule_tiers: a.intitule || '',
+          numero_tiers: a.numero_tiers || f.numero_tiers,
+          intitule_tiers: a.intitule || f.intitule_tiers,
           contact_nom: f.contact_nom || (a.source !== 'SAGE fiche tiers' ? a.contact || '' : ''),
         }))
       }
@@ -180,8 +188,8 @@ function HotlineConsole() {
   // Contexte temps réel (debounce 400 ms) -----------------------------------
   useEffect(() => {
     const handle = window.setTimeout(async () => {
-      if (!form.numero_tiers && !form.numero_serie && telCle(telephone).length < 9) {
-        setContexte({ tickets: [], documents: [] })
+      if (!form.numero_tiers && !form.numero_serie && !form.chantier && telCle(telephone).length < 9) {
+        setContexte(CONTEXTE_VIDE)
         return
       }
       setContexteLoading(true)
@@ -192,6 +200,7 @@ function HotlineConsole() {
             telephone,
             chantier: form.chantier,
             numeroSerie: form.numero_serie,
+            contactNom: form.contact_nom,
           }),
         )
       } catch (e) {
@@ -201,7 +210,7 @@ function HotlineConsole() {
       }
     }, 400)
     return () => window.clearTimeout(handle)
-  }, [form.numero_tiers, form.chantier, form.numero_serie, telephone, ticket?.id])
+  }, [form.numero_tiers, form.chantier, form.numero_serie, form.contact_nom, telephone, ticket?.id])
 
   // Arbre de diagnostic ------------------------------------------------------
   const arbresPossibles = useMemo(
@@ -507,19 +516,25 @@ function HotlineConsole() {
               </div>
 
               <div className="grid grid-cols-2 gap-2">
-                <label className="text-[11px] font-semibold text-slate-500">
-                  Code tiers
-                  <input value={form.numero_tiers} onChange={(e) => patch({ numero_tiers: e.target.value.toUpperCase() })} className={champ} />
-                </label>
+                <ChampTiers
+                  label="Code tiers"
+                  mode="code"
+                  value={form.numero_tiers}
+                  onChange={(v) => patch({ numero_tiers: v.toUpperCase() })}
+                  onSelect={(t) => patch({ numero_tiers: t.numero_tiers, intitule_tiers: t.intitule || '' })}
+                />
                 <label className="text-[11px] font-semibold text-slate-500">
                   Contact
                   <input value={form.contact_nom} onChange={(e) => patch({ contact_nom: e.target.value })} className={champ} />
                 </label>
               </div>
-              <label className="block text-[11px] font-semibold text-slate-500">
-                Client
-                <input value={form.intitule_tiers} onChange={(e) => patch({ intitule_tiers: e.target.value })} className={champ} />
-              </label>
+              <ChampTiers
+                label="Client"
+                mode="nom"
+                value={form.intitule_tiers}
+                onChange={(v) => patch({ intitule_tiers: v })}
+                onSelect={(t) => patch({ numero_tiers: t.numero_tiers, intitule_tiers: t.intitule || '' })}
+              />
               <div className="grid grid-cols-2 gap-2">
                 <label className="text-[11px] font-semibold text-slate-500">
                   Chantier / référence
@@ -715,35 +730,30 @@ function HotlineConsole() {
               </div>
             </div>
 
-            <div className={carte}>
-              <div className={`${titreCarte} flex items-center justify-between`}>
-                <span>Historique hotline</span>
-                {contexteLoading ? <span className="text-[11px] font-normal text-slate-400">mise à jour…</span> : null}
-              </div>
-              <div className="space-y-1.5 p-4">
-                {contexte.tickets.filter((t) => t.id !== ticket?.id).length ? (
-                  contexte.tickets
-                    .filter((t) => t.id !== ticket?.id)
-                    .map((t) => (
-                      <Link key={t.id} href={`/hotline/tickets?id=${t.id}`} className="block rounded-lg border border-[#E2DFD8] px-3 py-2 text-[12px] hover:border-[#B4761A]">
-                        <div className="flex items-center justify-between gap-2">
-                          <span className="font-semibold text-slate-900">
-                            {t.numero} · {fmtDateHeure(t.opened_at)}
-                          </span>
-                          <Pastille {...STATUTS[t.statut]} />
-                        </div>
-                        <div className="text-slate-600">
-                          {libelleFiliere(t.filiere)} · {libelleMotif(t.motif)} · N{t.niveau}
-                        </div>
-                        {t.description ? <div className="truncate text-slate-500">{t.description}</div> : null}
-                        {t.preconisation ? <div className="truncate text-[#2F6B3A]">→ {t.preconisation}</div> : null}
-                      </Link>
-                    ))
-                ) : (
-                  <p className="text-[12px] text-slate-500">Aucun appel précédent pour ce client ou ce numéro.</p>
-                )}
-              </div>
-            </div>
+            <PaveHistorique
+              titre="HOTLINE Historique Client"
+              precision={form.intitule_tiers || form.numero_tiers || ''}
+              tickets={contexte.ticketsClient.filter((t) => t.id !== ticket?.id)}
+              chargement={contexteLoading}
+              vide={form.numero_tiers ? 'Aucun appel précédent pour ce client.' : 'Identifier le client pour afficher ses appels.'}
+            />
+            <PaveHistorique
+              titre="HOTLINE Historique Contact"
+              precision={form.contact_nom || (telCle(telephone) ? fmtTel(telephone) : '')}
+              tickets={contexte.ticketsContact.filter((t) => t.id !== ticket?.id)}
+              chargement={contexteLoading}
+              vide={telCle(telephone) || form.contact_nom ? 'Aucun appel précédent de ce contact.' : 'Saisir le numéro ou le contact pour afficher ses appels.'}
+              afficherClient
+            />
+            <PaveHistorique
+              titre="HOTLINE Historique Chantier / Machine"
+              precision={[form.chantier, form.numero_serie].filter(Boolean).join(' · ')}
+              tickets={contexte.ticketsChantier.filter((t) => t.id !== ticket?.id)}
+              chargement={contexteLoading}
+              vide={form.chantier || form.numero_serie ? 'Aucun appel précédent sur ce chantier ou cette machine.' : 'Saisir le chantier ou le n° de série pour afficher son historique.'}
+              afficherClient
+              afficherChantier
+            />
 
             <div className={carte}>
               <div className={titreCarte}>
@@ -782,5 +792,180 @@ function HotlineConsole() {
         </div>
       </main>
     </div>
+  )
+}
+
+// ── Historique (client / contact / chantier-machine) ─────────────────────────
+function PaveHistorique({
+  titre,
+  precision,
+  tickets,
+  chargement,
+  vide,
+  afficherClient,
+  afficherChantier,
+}: {
+  titre: string
+  precision?: string
+  tickets: TicketHistorique[]
+  chargement: boolean
+  vide: string
+  afficherClient?: boolean
+  afficherChantier?: boolean
+}) {
+  return (
+    <div className={carte}>
+      <div className={`${titreCarte} flex items-center justify-between gap-2`}>
+        <span className="min-w-0 truncate">
+          {titre}
+          {precision ? <span className="ml-2 text-[12px] font-normal text-slate-500">{precision}</span> : null}
+        </span>
+        <span className="shrink-0 text-[11px] font-normal text-slate-400">{chargement ? 'mise à jour…' : tickets.length ? `${tickets.length} appel${tickets.length > 1 ? 's' : ''}` : ''}</span>
+      </div>
+      <div className="max-h-[300px] space-y-1.5 overflow-y-auto p-4">
+        {tickets.length ? (
+          tickets.map((t) => (
+            <Link key={t.id} href={`/hotline/tickets?id=${t.id}`} className="block rounded-lg border border-[#E2DFD8] px-3 py-2 text-[12px] hover:border-[#B4761A]">
+              <div className="flex items-center justify-between gap-2">
+                <span className="font-semibold text-slate-900">
+                  {t.numero} · {fmtDateHeure(t.opened_at)}
+                </span>
+                <Pastille {...STATUTS[t.statut]} />
+              </div>
+              <div className="text-slate-600">
+                {libelleFiliere(t.filiere)} · {libelleMotif(t.motif)} · N{t.niveau}
+              </div>
+              {afficherClient && (t.intitule_tiers || t.contact_nom) ? (
+                <div className="truncate text-slate-600">{[t.intitule_tiers || t.numero_tiers, t.contact_nom].filter(Boolean).join(' · ')}</div>
+              ) : null}
+              {afficherChantier && (t.chantier || t.numero_serie) ? (
+                <div className="truncate text-slate-600">{[t.chantier, t.numero_serie ? `n° ${t.numero_serie}` : ''].filter(Boolean).join(' · ')}</div>
+              ) : null}
+              {t.description ? <div className="truncate text-slate-500">{t.description}</div> : null}
+              {t.preconisation ? <div className="truncate text-[#2F6B3A]">→ {t.preconisation}</div> : null}
+            </Link>
+          ))
+        ) : (
+          <p className="text-[12px] text-slate-500">{vide}</p>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// ── Aide à la saisie du client (code tiers ou nom) ───────────────────────────
+// Liste SAGE (ref_tiers) dès 2 caractères ; choisir une ligne remplit le code
+// ET le nom. Code saisi en entier puis sortie du champ : le nom se remplit seul.
+function ChampTiers({
+  label,
+  mode,
+  value,
+  onChange,
+  onSelect,
+}: {
+  label: string
+  mode: 'code' | 'nom'
+  value: string
+  onChange: (value: string) => void
+  onSelect: (tiers: TiersTrouve) => void
+}) {
+  const [saisie, setSaisie] = useState<string | null>(null)
+  const [resultats, setResultats] = useState<TiersTrouve[]>([])
+  const [ouvert, setOuvert] = useState(false)
+  const [actif, setActif] = useState(0)
+
+  // Recherche seulement sur une frappe de l'utilisateur (pas quand le champ est
+  // rempli par l'identification ou par l'autre champ).
+  useEffect(() => {
+    if (saisie === null) return
+    const q = saisie.trim()
+    const handle = window.setTimeout(async () => {
+      if (q.length < 2) {
+        setResultats([])
+        return
+      }
+      try {
+        const liste = await rechercherTiers(q)
+        setResultats(liste)
+        setActif(0)
+        setOuvert(liste.length > 0)
+      } catch {
+        setResultats([])
+      }
+    }, 250)
+    return () => window.clearTimeout(handle)
+  }, [saisie])
+
+  function choisir(t: TiersTrouve) {
+    onSelect(t)
+    setSaisie(null)
+    setResultats([])
+    setOuvert(false)
+  }
+
+  function quitter() {
+    window.setTimeout(() => setOuvert(false), 150)
+    if (mode === 'code' && value.trim()) {
+      const exact = resultats.find((t) => t.numero_tiers.toUpperCase() === value.trim().toUpperCase())
+      if (exact) choisir(exact)
+    }
+  }
+
+  return (
+    <label className="relative block text-[11px] font-semibold text-slate-500">
+      {label}
+      <input
+        value={value}
+        onChange={(e) => {
+          onChange(e.target.value)
+          setSaisie(e.target.value)
+        }}
+        onFocus={() => resultats.length && setOuvert(true)}
+        onBlur={quitter}
+        onKeyDown={(e) => {
+          if (!ouvert || !resultats.length) return
+          if (e.key === 'ArrowDown') {
+            e.preventDefault()
+            setActif((i) => Math.min(resultats.length - 1, i + 1))
+          } else if (e.key === 'ArrowUp') {
+            e.preventDefault()
+            setActif((i) => Math.max(0, i - 1))
+          } else if (e.key === 'Enter') {
+            e.preventDefault()
+            choisir(resultats[actif])
+          } else if (e.key === 'Escape') {
+            setOuvert(false)
+          }
+        }}
+        placeholder={mode === 'code' ? 'Code SAGE…' : 'Nom du client…'}
+        autoComplete="off"
+        className={champ}
+      />
+      {ouvert && resultats.length ? (
+        <div
+          className={`absolute left-0 top-full z-30 mt-1 max-h-[280px] overflow-y-auto rounded-lg border border-[#D8D3C8] bg-white py-1 font-normal shadow-lg ${
+            mode === 'code' ? 'w-[340px]' : 'w-full min-w-[340px]'
+          }`}
+        >
+          {resultats.map((t, i) => (
+            <button
+              key={t.numero_tiers}
+              type="button"
+              onMouseDown={(e) => {
+                e.preventDefault()
+                choisir(t)
+              }}
+              onMouseEnter={() => setActif(i)}
+              className={`block w-full px-3 py-1.5 text-left text-[12px] ${i === actif ? 'bg-[#FDF7EA]' : ''}`}
+            >
+              <div className="text-slate-900">
+                <span className="font-semibold">{t.numero_tiers}</span> · {t.intitule || '—'}
+              </div>
+              <div className="text-[11px] text-slate-500">{[t.code_postal, t.ville, t.agence].filter(Boolean).join(' · ')}</div>
+            </button>
+          ))}
+        </div>
+      ) : null}
+    </label>
   )
 }
