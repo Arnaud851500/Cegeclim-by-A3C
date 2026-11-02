@@ -16,6 +16,7 @@
  *                            n° SAGE ≠ n° saisi, plusieurs containers sur une CDF ;
  *  - CONT_SANS_SUIVI / CONT_SUIVI_ANCIEN : pas de relevé bateau (ETA) ou relevé trop ancien ;
  *  - CONT_MARGE            : marge (date livraison CDF − ETA port) en retard / intenable / très juste ;
+ *                            (plus levée une fois le container arrivé au port / déchargé / livré — 02/11/2026) ;
  *  - SANS_AR               : CDF à destination de FMS sans statut SAGE « AR OK » après N jours ;
  *  - CDC_A_CONFIRMER       : CDF attendue par des commandes clients, due sous N jours → faire confirmer ;
  *  - DATE_DEPASSEE / SANS_DATE : nettoyage.
@@ -425,7 +426,7 @@ function CdfModal({ ligne, armateurs, parametres, onClose, onSaved, position, on
     const alertes = ligne.alertes.filter((a) => !['CONT_SANS_SUIVI', 'CONT_SUIVI_ANCIEN', 'CONT_MARGE'].includes(a)
       && !(a === 'CONT_SANS_CONTAINER' && containerRetenu && containerValide(containerRetenu))
       && !(a === 'CONT_CONTAINER_INVALIDE' && containerRetenu && containerValide(containerRetenu)))
-    if (verdictPrevu && ['RETARD', 'INTENABLE', 'TRES_JUSTE'].includes(verdictPrevu)) alertes.push('CONT_MARGE')
+    if (verdictPrevu && ['RETARD', 'INTENABLE', 'TRES_JUSTE'].includes(verdictPrevu) && !(f.statut && ETAPE_BATEAU[f.statut])) alertes.push('CONT_MARGE')
     onSaved({
       container: containerRetenu,
       container_source: ligne.container_source || (cont ? 'saisie' : null),
@@ -592,7 +593,9 @@ function CdfModal({ ligne, armateurs, parametres, onClose, onSaved, position, on
                   <input className={ctl} value={f.port_arrivee} onChange={(e) => setF({ ...f, port_arrivee: e.target.value })} /></label>
                 <label className="space-y-0.5"><span className="font-bold text-[#5E5A44]">ETA port</span>
                   <input type="date" className={ctl} value={f.eta_port} onChange={(e) => setF({ ...f, eta_port: e.target.value })} />
-                  {verdictPrevu && <span className="text-[10.5px]">Marge {marge} j → <Badge cls={VERDICT[verdictPrevu].cls}>{VERDICT[verdictPrevu].label}</Badge></span>}
+                  {f.statut && ETAPE_BATEAU[f.statut]
+                    ? <span className="text-[10.5px]">Marge {marge !== null ? `${marge} j` : '—'} → <Badge cls={ETAPE_BATEAU[f.statut]!.badge} title={verdictPrevu ? `Verdict de marge : ${VERDICT[verdictPrevu].label} (sans objet une fois le bateau à quai)` : undefined}>{ETAPE_BATEAU[f.statut]!.label}</Badge></span>
+                    : verdictPrevu && <span className="text-[10.5px]">Marge {marge} j → <Badge cls={VERDICT[verdictPrevu].cls}>{VERDICT[verdictPrevu].label}</Badge></span>}
                 </label>
                 <label className="space-y-0.5"><span className="font-bold text-[#5E5A44]">Statut</span>
                   <select className={ctl} value={f.statut} onChange={(e) => setF({ ...f, statut: e.target.value as StatutSuivi | '' })}>
