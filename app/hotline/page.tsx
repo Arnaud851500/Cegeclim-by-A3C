@@ -37,6 +37,7 @@ import {
   chargerArbres,
   CONTEXTE_VIDE,
   chargerContexte,
+  chargerLivraisons,
   chargerEtapes,
   chargerLignes,
   chargerNoeuds,
@@ -67,6 +68,7 @@ import {
   type Etape,
   type Filiere,
   type Ligne,
+  type Livraison,
   type Motif,
   type Noeud,
   type Ticket,
@@ -131,6 +133,8 @@ function HotlineConsole() {
   const [etapes, setEtapes] = useState<Etape[]>([])
   const [contexte, setContexte] = useState<Contexte>(CONTEXTE_VIDE)
   const [contexteLoading, setContexteLoading] = useState(false)
+  const [livraisons, setLivraisons] = useState<Livraison[]>([])
+  const [livraisonsLoading, setLivraisonsLoading] = useState(false)
   const [erreur, setErreur] = useState<string | null>(null)
   const [info, setInfo] = useState<string | null>(null)
   const [envoiEnCours, setEnvoiEnCours] = useState<string | null>(null)
@@ -282,6 +286,28 @@ function HotlineConsole() {
     }, 400)
     return () => window.clearTimeout(handle)
   }, [form.numero_tiers, form.chantier, form.numero_serie, form.contact_nom, telephone, ticket?.id])
+
+  // Commande initiale & livraison (chantier / référence produit / n° série) ---
+  useEffect(() => {
+    const chantier = form.chantier.trim()
+    const article = form.reference_article.trim()
+    const serie = form.numero_serie.trim()
+    const handle = window.setTimeout(async () => {
+      if (chantier.length < 3 && serie.length < 4 && !(article.length >= 3 && form.numero_tiers)) {
+        setLivraisons([])
+        return
+      }
+      setLivraisonsLoading(true)
+      try {
+        setLivraisons(await chargerLivraisons({ numeroTiers: form.numero_tiers, chantier, referenceArticle: article, numeroSerie: serie }))
+      } catch (e) {
+        setErreur(messageErreur(e))
+      } finally {
+        setLivraisonsLoading(false)
+      }
+    }, 500)
+    return () => window.clearTimeout(handle)
+  }, [form.numero_tiers, form.chantier, form.reference_article, form.numero_serie])
 
   // Arbre de diagnostic ------------------------------------------------------
   const arbresPossibles = useMemo(
@@ -893,6 +919,13 @@ function HotlineConsole() {
               </div>
             </div>
 
+            <PaveLivraisons
+              livraisons={livraisons}
+              chargement={livraisonsLoading}
+              criteres={[form.chantier, form.reference_article, form.numero_serie].filter((v) => v.trim()).join(' · ')}
+              articleSansClient={Boolean(form.reference_article.trim()) && !form.numero_tiers && !form.chantier.trim() && !form.numero_serie.trim()}
+            />
+
             <PaveHistorique
               titre="HOTLINE Historique Contact"
               precision={form.contact_nom || (telCle(telephone) ? fmtTel(telephone) : '')}
@@ -1354,6 +1387,81 @@ function FenetreEnvoi({
             </button>
           </div>
         </div>
+      </div>
+    </div>
+  )
+}
+
+// ── Commande initiale & livraison ────────────────────────────────────────────
+function PaveLivraisons({
+  livraisons,
+  chargement,
+  criteres,
+  articleSansClient,
+}: {
+  livraisons: Livraison[]
+  chargement: boolean
+  criteres: string
+  articleSansClient: boolean
+}) {
+  return (
+    <div className={carte}>
+      <div className={`${titreCarte} flex items-center justify-between gap-2`}>
+        <span className="min-w-0 truncate">
+          Commande initiale &amp; livraison
+          {criteres ? <span className="ml-2 text-[12px] font-normal text-slate-500">{criteres}</span> : null}
+        </span>
+        <span className="shrink-0 text-[11px] font-normal text-slate-400">
+          {chargement ? 'recherche…' : livraisons.length ? `${livraisons.length} expédition${livraisons.length > 1 ? 's' : ''}` : ''}
+        </span>
+      </div>
+      <div className="max-h-[460px] space-y-2 overflow-y-auto p-4">
+        {livraisons.length ? (
+          livraisons.map((l) => (
+            <div key={l.numero_bl} className="rounded-lg border border-[#E2DFD8] text-[12px]">
+              <div className="space-y-0.5 border-b border-[#EFEDE8] bg-[#FAF9F7] px-3 py-2">
+                <div className="flex flex-wrap items-baseline justify-between gap-x-3">
+                  <span className="font-semibold text-slate-900">
+                    Commande {l.numero_cdc || '—'}
+                    {l.date_cdc ? <span className="font-normal text-slate-500"> du {fmtDate(l.date_cdc)}</span> : null}
+                  </span>
+                  <span className="font-semibold text-[#2F6B3A]">
+                    Expédiée le {fmtDate(l.date_bl)}
+                    <span className="font-normal text-slate-500"> · {l.numero_bl}</span>
+                  </span>
+                </div>
+                <div className="truncate text-slate-600">
+                  {[l.intitule || l.numero_tiers, l.chantier, l.projet, l.depot ? `dépôt ${l.depot}` : '', l.factures?.length ? `facture ${l.factures.join(', ')}` : '']
+                    .filter(Boolean)
+                    .join(' · ')}
+                </div>
+              </div>
+              <ul className="divide-y divide-[#F1EFEA]">
+                {l.lignes.map((p, i) => (
+                  <li key={`${p.reference_article}-${i}`} className={`flex items-baseline gap-2 px-3 py-1.5 ${p.correspond ? 'bg-[#FDF7EA]' : ''}`}>
+                    <span className="w-10 shrink-0 text-right font-semibold tabular-nums text-slate-900">{p.quantite ?? ''}</span>
+                    <span className="min-w-0 flex-1">
+                      <span className="font-semibold text-slate-800">{p.reference_article || '—'}</span>{' '}
+                      <span className="text-slate-600">{p.designation}</span>
+                      {p.series?.length ? <span className="block text-[11px] text-slate-500">N° série : {p.series.join(', ')}</span> : null}
+                    </span>
+                    {p.correspond ? <span className="shrink-0 text-[10px] font-bold uppercase text-[#B4761A]">recherché</span> : null}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ))
+        ) : (
+          <p className="text-[12px] text-slate-500">
+            {chargement
+              ? 'Recherche des livraisons…'
+              : articleSansClient
+                ? 'Identifier le client (ou saisir le chantier) pour retrouver la livraison de cette référence.'
+                : criteres
+                  ? 'Aucune livraison facturée trouvée sur 5 ans pour ces critères.'
+                  : 'Saisir un chantier, une référence produit ou un n° de série pour retrouver la commande initiale, la date d’expédition et les produits livrés ensemble.'}
+          </p>
+        )}
       </div>
     </div>
   )

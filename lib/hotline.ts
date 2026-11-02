@@ -329,6 +329,48 @@ export async function chargerContexte(params: {
   }
 }
 
+/** (02/11/2026) Expédition retrouvée par chantier / référence produit / n° de
+ * série : commande initiale (CDC), date d'expédition (BL), factures et tous
+ * les produits livrés avec ce BL. RPC hotline_livraisons. */
+export type LigneLivree = {
+  reference_article: string | null
+  designation: string | null
+  quantite: number | null
+  series: string[] | null
+  correspond: boolean
+}
+
+export type Livraison = {
+  numero_bl: string
+  date_bl: string | null
+  numero_cdc: string | null
+  date_cdc: string | null
+  factures: string[] | null
+  numero_tiers: string | null
+  intitule: string | null
+  chantier: string | null
+  projet: string | null
+  depot: string | null
+  collaborateur: string | null
+  lignes: LigneLivree[]
+}
+
+export async function chargerLivraisons(params: {
+  numeroTiers?: string | null
+  chantier?: string | null
+  referenceArticle?: string | null
+  numeroSerie?: string | null
+}): Promise<Livraison[]> {
+  const { data, error } = await supabase.rpc('hotline_livraisons', {
+    p_numero_tiers: params.numeroTiers || null,
+    p_chantier: params.chantier || null,
+    p_reference_article: params.referenceArticle || null,
+    p_numero_serie: params.numeroSerie || null,
+  })
+  if (error) throw error
+  return (Array.isArray(data) ? data : []) as Livraison[]
+}
+
 /** Aide à la saisie du client : par code tiers (début) ou par nom (contient). */
 export async function rechercherTiers(q: string): Promise<TiersTrouve[]> {
   if (q.trim().length < 2) return []
