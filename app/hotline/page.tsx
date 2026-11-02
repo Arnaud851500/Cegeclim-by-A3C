@@ -110,7 +110,10 @@ function HotlineConsole() {
   const [ligneAppelee] = useState(params.get('ligne') || '')
   const [lignes, setLignes] = useState<Ligne[]>([])
   const [arbres, setArbres] = useState<Arbre[]>([])
-  const [appelants, setAppelants] = useState<Appelant[] | null>(null)
+  const [appelants, setAppelants] = useState<AppelantGroupe[] | null>(null)
+  // Liste des propositions repliée dès qu'un appelant est retenu (auto ou clic).
+  const [listeOuverte, setListeOuverte] = useState(false)
+  const [voirTout, setVoirTout] = useState(false)
   const [recherche, setRecherche] = useState(false)
   const [form, setForm] = useState<Formulaire>(FORM_VIDE)
   const [ticket, setTicket] = useState<Ticket | null>(null)
@@ -154,13 +157,15 @@ function HotlineConsole() {
     if (telCle(tel).length < 9) return
     setRecherche(true)
     try {
-      const liste = await identifierAppelant(tel)
+      const liste = regrouperAppelants(await identifierAppelant(tel))
       setAppelants(liste)
+      setVoirTout(false)
       // Contact déjà enregistré par la hotline (appel précédent) : pré-saisie
       // directe, il fait foi. Sinon, pré-saisie si un seul client correspond.
       const tiers = Array.from(new Set(liste.map((a) => a.numero_tiers).filter(Boolean)))
-      const memorise = liste.find((a) => a.source === 'Hotline')
+      const memorise = liste.find((a) => a.sources.includes('Hotline'))
       const a = memorise || (liste.length && tiers.length === 1 ? liste[0] : null)
+      setListeOuverte(!a)
       if (a) {
         setForm((f) => ({
           ...f,
@@ -181,8 +186,9 @@ function HotlineConsole() {
     if (telInitial.current) void identifier(telInitial.current)
   }, [identifier])
 
-  function choisirAppelant(a: Appelant) {
+  function choisirAppelant(a: AppelantGroupe) {
     patch({ numero_tiers: a.numero_tiers || '', intitule_tiers: a.intitule || '', contact_nom: a.contact || '' })
+    setListeOuverte(false)
   }
 
   // Contexte temps réel (debounce 400 ms) -----------------------------------
@@ -459,33 +465,19 @@ function HotlineConsole() {
 
               {appelants !== null ? (
                 appelants.length ? (
-                  <div className="space-y-1.5">
-                    {appelants.map((a, i) => {
-                      const choisi = a.numero_tiers === form.numero_tiers && (a.contact || '') === form.contact_nom
-                      return (
-                        <button
-                          key={`${a.source}-${a.numero_tiers}-${a.contact}-${i}`}
-                          type="button"
-                          onClick={() => choisirAppelant(a)}
-                          className={`block w-full rounded-lg border px-3 py-2 text-left text-[12px] ${
-                            choisi ? 'border-[#B4761A] bg-[#FDF7EA]' : 'border-[#E2DFD8] hover:border-[#B4761A]'
-                          }`}
-                        >
-                          <div className="font-semibold text-slate-900">
-                            {a.intitule || 'Tiers inconnu'} <span className="font-normal text-slate-500">· {a.numero_tiers || '—'}</span>
-                          </div>
-                          <div className="text-slate-600">
-                            {a.contact ? `${a.contact} · ` : ''}
-                            {[a.ville, a.agence].filter(Boolean).join(' · ')}
-                          </div>
-                          <div className="text-[11px] text-slate-400">{a.source}</div>
-                        </button>
-                      )
-                    })}
-                  </div>
+                  <PropositionsAppelant
+                    appelants={appelants}
+                    numeroTiers={form.numero_tiers}
+                    contactNom={form.contact_nom}
+                    ouverte={listeOuverte}
+                    voirTout={voirTout}
+                    onOuvrir={() => setListeOuverte(true)}
+                    onVoirTout={() => setVoirTout(true)}
+                    onChoisir={choisirAppelant}
+                  />
                 ) : (
                   <div className="rounded-lg border border-[#EBD8AE] bg-[#FDF7EA] px-3 py-2 text-[12px] text-[#6B470E]">
-                    Numéro inconnu dans SAGE et BLG : saisir le code tiers ou le nom ci-dessous.
+                    Numéro inconnu dans SAGE et BLG : saisir le code tiers ou le nom ci-dessous. Il sera mémorisé à l’ouverture du ticket.
                   </div>
                 )
               ) : null}
@@ -731,13 +723,6 @@ function HotlineConsole() {
             </div>
 
             <PaveHistorique
-              titre="HOTLINE Historique Client"
-              precision={form.intitule_tiers || form.numero_tiers || ''}
-              tickets={contexte.ticketsClient.filter((t) => t.id !== ticket?.id)}
-              chargement={contexteLoading}
-              vide={form.numero_tiers ? 'Aucun appel précédent pour ce client.' : 'Identifier le client pour afficher ses appels.'}
-            />
-            <PaveHistorique
               titre="HOTLINE Historique Contact"
               precision={form.contact_nom || (telCle(telephone) ? fmtTel(telephone) : '')}
               tickets={contexte.ticketsContact.filter((t) => t.id !== ticket?.id)}
@@ -967,5 +952,127 @@ function ChampTiers({
         </div>
       ) : null}
     </label>
+  )
+}
+
+// ── Propositions d'appelant ──────────────────────────────────────────────────
+// Un même client / contact remonte souvent plusieurs fois (fiche SAGE, contact
+// SAGE, contact BLG, carnet hotline) : on regroupe par client + contact (nom
+// normalisé, « Jean MORA » = « MORA Jean »), on écarte les codes tiers
+// inconnus quand le même contact existe sur un client connu, et on n'affiche
+// que les 3 premières propositions (carnet hotline d'abord).
+type AppelantGroupe = Appelant & { sources: string[] }
+
+const PROPOSITIONS_VISIBLES = 3
+
+function normaliserNom(value: string | null | undefined) {
+  return String(value || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter(Boolean)
+    .sort()
+    .join(' ')
+}
+
+function regrouperAppelants(liste: Appelant[]): AppelantGroupe[] {
+  const groupes = new Map<string, AppelantGroupe>()
+  for (const a of liste) {
+    const contact = normaliserNom(a.contact)
+    // Contact = raison sociale (fiche tiers) : pas un vrai contact.
+    const contactUtile = contact && contact !== normaliserNom(a.intitule) ? contact : ''
+    const cle = `${a.numero_tiers || ''}|${contactUtile}`
+    const existant = groupes.get(cle)
+    if (existant) {
+      if (!existant.sources.includes(a.source)) existant.sources.push(a.source)
+      existant.intitule = existant.intitule || a.intitule
+      existant.ville = existant.ville || a.ville
+      existant.agence = existant.agence || a.agence
+      existant.contact = existant.contact || (contactUtile ? a.contact : null)
+    } else {
+      groupes.set(cle, { ...a, contact: contactUtile ? a.contact : null, sources: [a.source] })
+    }
+  }
+  const tous = Array.from(groupes.values())
+  const contactsConnus = new Set(tous.filter((g) => g.intitule && g.contact).map((g) => normaliserNom(g.contact)))
+  const rang = (g: AppelantGroupe) => (g.sources.includes('Hotline') ? 0 : g.intitule ? (g.contact ? 1 : 2) : 3)
+  return tous
+    .filter((g) => g.intitule || !g.contact || !contactsConnus.has(normaliserNom(g.contact)))
+    .sort((a, b) => rang(a) - rang(b))
+}
+
+function PropositionsAppelant({
+  appelants,
+  numeroTiers,
+  contactNom,
+  ouverte,
+  voirTout,
+  onOuvrir,
+  onVoirTout,
+  onChoisir,
+}: {
+  appelants: AppelantGroupe[]
+  numeroTiers: string
+  contactNom: string
+  ouverte: boolean
+  voirTout: boolean
+  onOuvrir: () => void
+  onVoirTout: () => void
+  onChoisir: (a: AppelantGroupe) => void
+}) {
+  const estChoisi = (a: AppelantGroupe) => a.numero_tiers === numeroTiers && normaliserNom(a.contact) === normaliserNom(contactNom)
+  const choisi = appelants.find(estChoisi) || appelants.find((a) => a.numero_tiers === numeroTiers) || null
+
+  if (!ouverte && choisi) {
+    return (
+      <div className="flex items-center justify-between gap-2 rounded-lg border border-[#CDE5D1] bg-[#EEF7EF] px-3 py-2 text-[12px]">
+        <span className="min-w-0 truncate text-[#2F6B3A]">
+          ✓ Reconnu : <span className="font-semibold">{choisi.intitule || choisi.numero_tiers}</span>
+          {choisi.contact ? ` · ${choisi.contact}` : ''}
+          <span className="text-[11px] text-[#5E8A66]"> ({choisi.sources.join(', ')})</span>
+        </span>
+        {appelants.length > 1 ? (
+          <button type="button" onClick={onOuvrir} className="shrink-0 font-semibold text-slate-600 underline">
+            Changer ({appelants.length})
+          </button>
+        ) : null}
+      </div>
+    )
+  }
+
+  const visibles = voirTout ? appelants : appelants.slice(0, PROPOSITIONS_VISIBLES)
+  return (
+    <div className="space-y-1">
+      <div className="text-[11px] font-semibold text-slate-500">
+        {appelants.length > 1 ? `${appelants.length} correspondances : choisir l’appelant` : 'Correspondance trouvée'}
+      </div>
+      {visibles.map((a, i) => (
+        <button
+          key={`${a.numero_tiers}-${a.contact}-${i}`}
+          type="button"
+          onClick={() => onChoisir(a)}
+          className={`block w-full rounded-lg border px-3 py-1.5 text-left text-[12px] ${
+            estChoisi(a) ? 'border-[#B4761A] bg-[#FDF7EA]' : 'border-[#E2DFD8] hover:border-[#B4761A]'
+          }`}
+        >
+          <div className="truncate text-slate-900">
+            <span className="font-semibold">{a.intitule || 'Code non trouvé dans SAGE'}</span>
+            <span className="text-slate-500"> · {a.numero_tiers || '—'}</span>
+            {a.contact ? <span className="text-slate-600"> · {a.contact}</span> : null}
+          </div>
+          <div className="truncate text-[11px] text-slate-400">
+            {[a.ville, a.agence].filter(Boolean).join(' · ')}
+            {a.ville || a.agence ? ' — ' : ''}
+            {a.sources.join(', ')}
+          </div>
+        </button>
+      ))}
+      {!voirTout && appelants.length > PROPOSITIONS_VISIBLES ? (
+        <button type="button" onClick={onVoirTout} className="text-[12px] font-semibold text-slate-500 underline">
+          Voir les {appelants.length - PROPOSITIONS_VISIBLES} autres
+        </button>
+      ) : null}
+    </div>
   )
 }
