@@ -327,6 +327,14 @@ function FicheTicket({ id, onClose, onChange }: { id: string; onClose: () => voi
           </div>
         ) : null}
 
+        <a
+          href={`/hotline?ticket=${ticket.id}`}
+          className="flex h-10 w-full items-center justify-center rounded-lg bg-[#B4761A] text-[14px] font-bold text-white hover:bg-[#9A6414]"
+          title="Recharge le ticket dans la console : documents de vente, historiques, envoi de documents et diagnostic là où il s'était arrêté"
+        >
+          {actif ? 'Reprendre dans la console' : 'Rouvrir dans la console'}
+        </a>
+
         <div className="flex flex-wrap gap-2">
           {ticket.assigne_a !== email ? (
             <button

@@ -14,6 +14,11 @@
  *   (client, contact, chantier / machine), documents de vente filtrés par
  *   chantier / n° de série — et
  *   documents proposés par le diagnostic, envoyables à l'appelant.
+ * - Reprise d'un ticket non résolu (02/11/2026) : /hotline?ticket=<id> (bouton
+ *   « Reprendre dans la console » de la liste des tickets) recharge le ticket,
+ *   ses documents de vente, ses historiques et le diagnostic là où il s'était
+ *   arrêté (réponses rejouées depuis la chronologie) ; on peut renvoyer des
+ *   documents, poursuivre ou recommencer le parcours.
  * Tables / RPC : migration 20261102_hotline_technique.sql.
  */
 
@@ -144,6 +149,7 @@ function HotlineConsole() {
       .then(([l, a]) => {
         setLignes(l)
         setArbres(a)
+        setArbresCharges(true)
       })
       .catch((e) => setErreur(messageErreur(e)))
   }, [])
@@ -185,6 +191,55 @@ function HotlineConsole() {
       setRecherche(false)
     }
   }, [])
+
+  // Reprise d'un ticket existant -------------------------------------------
+  const ticketAReprendre = useRef(params.get('ticket') || '')
+  // Réponses à rejouer quand les questions de l'arbre du ticket sont chargées.
+  const aRejouer = useRef<{ arbreId: string; reponses: Etape[] } | null>(null)
+  const [arbresCharges, setArbresCharges] = useState(false)
+
+  useEffect(() => {
+    const id = ticketAReprendre.current
+    if (!id || !arbresCharges) return
+    ticketAReprendre.current = ''
+    void (async () => {
+      try {
+        const { data, error } = await supabase.from('hotline_tickets').select('*').eq('id', id).maybeSingle()
+        if (error) throw error
+        if (!data) throw new Error('Ticket introuvable.')
+        const t = data as Ticket
+        const liste = await chargerEtapes(t.id)
+        setTelephone(t.telephone_appelant || '')
+        setForm({
+          filiere: t.filiere,
+          motif: t.motif,
+          numero_tiers: t.numero_tiers || '',
+          intitule_tiers: t.intitule_tiers || '',
+          contact_nom: t.contact_nom || '',
+          contact_email: t.contact_email || '',
+          chantier: t.chantier || '',
+          numero_serie: t.numero_serie || '',
+          reference_article: t.reference_article || '',
+          description: t.description || '',
+        })
+        if (t.arbre_id) {
+          aRejouer.current = { arbreId: t.arbre_id, reponses: liste.filter((e) => e.type === 'QUESTION' && e.noeud_id) }
+          setArbreId(t.arbre_id)
+        }
+        // Reprise = prise en charge par la personne qui rouvre la console.
+        // Un ticket résolu ou clos rouvert depuis la liste repart « en cours ».
+        const statut = 'EN_COURS' as const
+        const qui = String(email || '').split('@')[0]
+        await majTicket(t.id, { assigne_a: email || t.assigne_a, statut })
+        if (t.statut === 'RESOLU' || t.statut === 'CLOS') await ajouterEtape(t.id, 'REOUVERTURE', `Ticket rouvert dans la console par ${qui} (niveau ${t.niveau})`)
+        else await ajouterEtape(t.id, 'COMMENTAIRE', `Repris dans la console par ${qui} (niveau ${t.niveau})`)
+        setTicket({ ...t, assigne_a: email || t.assigne_a, statut })
+        setEtapes(await chargerEtapes(t.id))
+      } catch (e) {
+        setErreur(messageErreur(e))
+      }
+    })()
+  }, [arbresCharges, email])
 
   const telInitial = useRef(params.get('tel') || '')
   useEffect(() => {
@@ -246,10 +301,43 @@ function HotlineConsole() {
         setNoeuds(liste)
         const arbre = arbres.find((a) => a.id === arbreId)
         const racine = liste.find((n) => n.id === arbre?.noeud_racine) || liste[0]
-        if (racine) {
-          setNoeudCourant(racine.id)
-          setDocsDiagnostic(racine.documents)
+        if (!racine) return
+        // Reprise : on rejoue les réponses déjà données (chronologie du ticket)
+        // pour revenir à la question où le diagnostic s'était arrêté.
+        const rejeu = aRejouer.current
+        if (rejeu && rejeu.arbreId === arbreId) {
+          aRejouer.current = null
+          const map = new Map(liste.map((n) => [n.id, n]))
+          let courant = racine.id
+          let finRejeu: Choix | null = null
+          const chemin: Array<{ noeud: string; choix: string }> = []
+          const docs = [...racine.documents]
+          for (const e of rejeu.reponses) {
+            const n = map.get(String(e.noeud_id))
+            const libelle = e.libelle.split(' → ').pop() || ''
+            const c = n?.choix.find((x) => x.libelle === libelle)
+            if (!n || !c) continue
+            chemin.push({ noeud: n.id, choix: c.libelle })
+            const suivant = c.suivant ? map.get(c.suivant) : null
+            if (suivant) {
+              courant = suivant.id
+              finRejeu = null
+              suivant.documents.forEach((d) => {
+                if (!docs.some((x) => x.titre === d.titre)) docs.push(d)
+              })
+            } else {
+              courant = n.id
+              finRejeu = c
+            }
+          }
+          setParcours(chemin)
+          setNoeudCourant(courant)
+          setFin(finRejeu)
+          setDocsDiagnostic(docs)
+          return
         }
+        setNoeudCourant(racine.id)
+        setDocsDiagnostic(racine.documents)
       })
       .catch((e) => setErreur(messageErreur(e)))
   }, [arbreId, arbres])
@@ -366,6 +454,17 @@ function HotlineConsole() {
     } finally {
       setBusy(false)
     }
+  }
+
+  function recommencer() {
+    const arbre = arbres.find((a) => a.id === arbreId)
+    const racine = noeuds.find((n) => n.id === arbre?.noeud_racine) || noeuds[0]
+    if (!racine) return
+    setParcours([])
+    setFin(null)
+    setNoeudCourant(racine.id)
+    setDocsDiagnostic((docs) => [...docs, ...racine.documents.filter((d) => !docs.some((x) => x.titre === d.titre))])
+    if (ticket) void ajouterEtape(ticket.id, 'COMMENTAIRE', 'Diagnostic recommencé depuis la première question').then(() => rafraichirEtapes(ticket.id))
   }
 
   function revenir() {
@@ -699,9 +798,14 @@ function HotlineConsole() {
                   )}
 
                   {parcours.length ? (
-                    <button type="button" onClick={revenir} className="text-[12px] font-semibold text-slate-500 hover:text-slate-800">
-                      ← Revenir à la question précédente
-                    </button>
+                    <div className="flex flex-wrap gap-4">
+                      <button type="button" onClick={revenir} className="text-[12px] font-semibold text-slate-500 hover:text-slate-800">
+                        ← Revenir à la question précédente
+                      </button>
+                      <button type="button" onClick={recommencer} className="text-[12px] font-semibold text-slate-500 hover:text-slate-800">
+                        ↺ Recommencer le diagnostic
+                      </button>
+                    </div>
                   ) : null}
                 </div>
               )}
