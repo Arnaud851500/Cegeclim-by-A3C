@@ -505,14 +505,18 @@ export async function creerBrouillonEmail(params: {
   destinataire?: string | null
   contactNom?: string | null
   ticketNumero?: string | null
+  /** Objet et texte saisis dans la fenêtre d'envoi (sinon textes par défaut). */
+  objet?: string | null
+  texte?: string | null
 }): Promise<{ joint: boolean; fichier: string }> {
   const { doc } = params
   const piece = await telechargerDocument(doc)
-  const objet = `${params.ticketNumero ? `[${params.ticketNumero}] ` : ''}${doc.titre}`
+  const objet = params.objet || `${params.ticketNumero ? `[${params.ticketNumero}] ` : ''}${doc.titre}`
   const bonjour = params.contactNom ? `Bonjour ${params.contactNom},` : 'Bonjour,'
-  const corps = piece
-    ? `${bonjour}\n\nComme convenu au téléphone, vous trouverez ci-joint le document « ${doc.titre} ».\n\nBien cordialement,\nLe support technique CEGECLIM`
-    : `${bonjour}\n\nComme convenu au téléphone, voici le document « ${doc.titre} » :\n${doc.url || '(lien à compléter)'}\n\nBien cordialement,\nLe support technique CEGECLIM`
+  const corpsBase =
+    params.texte ||
+    `${bonjour}\n\nComme convenu au téléphone, vous trouverez ci-joint le document « ${doc.titre} ».\n\nBien cordialement,\nLe support technique CEGECLIM`
+  const corps = piece || !doc.url ? corpsBase : `${corpsBase}\n\nLien vers le document « ${doc.titre} » :\n${doc.url}`
 
   const frontiere = `----=_Hotline_${Date.now().toString(36)}`
   const lignes = [
@@ -558,28 +562,43 @@ export async function creerBrouillonEmail(params: {
   return { joint: Boolean(piece), fichier: fichierEml }
 }
 
-/** (02/11/2026) Envoi par le compagnon : e-mail avec le document en pièce
- * jointe, via /api/hotline/envoyer-document (Resend), réponse au technicien,
- * trace dans le ticket. Le brouillon .eml ci-dessus reste disponible en repli. */
-export async function envoyerDocumentParEmail(params: {
-  ticketId?: string | null
-  to: string
-  copieAMoi: boolean
-  subject: string
-  text: string
-  document: DocumentLien
-}): Promise<{ joint: boolean; fichier: string | null }> {
-  const { data } = await supabase.auth.getSession()
-  const token = data.session?.access_token
-  if (!token) throw new Error('Session expirée : reconnectez-vous.')
-  const res = await fetch('/api/hotline/envoyer-document', {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify(params),
-  })
-  const json = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string; joint?: boolean; fichier?: string | null }
-  if (!res.ok || !json.ok) throw new Error(json.error || `Envoi impossible (${res.status})`)
-  return { joint: Boolean(json.joint), fichier: json.fichier || null }
+// ----------------------------------------------------------------------------
+// Envoi par la messagerie du poste (02/11/2026, demande d'Arnaud : pas d'envoi
+// par un service tiers, le mail part du client de messagerie de l'utilisateur)
+// ----------------------------------------------------------------------------
+// Un navigateur ne peut pas déposer une pièce jointe dans la messagerie locale.
+// - Windows : brouillon .eml (X-Unsent) → Outlook l'ouvre en NOUVEAU message,
+//   document déjà joint.
+// - Mac / autres : Outlook pour Mac et Apple Mail ouvrent un .eml en lecture
+//   seule. On ouvre donc un nouveau message via mailto: (destinataire, objet,
+//   texte) et on télécharge le document à côté, à glisser dans le message.
+
+export function posteWindows() {
+  return typeof navigator !== 'undefined' && /windows/i.test(navigator.userAgent)
+}
+
+/** Télécharge le document sur le poste. Renvoie le nom du fichier, ou null si
+ * le document n'est pas récupérable depuis le navigateur. */
+export async function telechargerPieceJointe(doc: DocumentLien): Promise<string | null> {
+  const piece = await telechargerDocument(doc)
+  if (!piece) return null
+  const fichier = nomFichier(doc, piece.mime)
+  const octets = Uint8Array.from(atob(piece.contenu), (c) => c.charCodeAt(0))
+  const url = URL.createObjectURL(new Blob([octets], { type: piece.mime }))
+  const a = document.createElement('a')
+  a.href = url
+  a.download = fichier
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  window.setTimeout(() => URL.revokeObjectURL(url), 60_000)
+  return fichier
+}
+
+/** Ouvre un nouveau message dans la messagerie par défaut du poste. */
+export function ouvrirMessagerie(params: { to: string; subject: string; body: string }) {
+  const enc = (v: string) => encodeURIComponent(v).replace(/%0A/g, '%0D%0A')
+  window.location.href = `mailto:${encodeURIComponent(params.to.trim()).replace(/%40/g, '@')}?subject=${enc(params.subject)}&body=${enc(params.body)}`
 }
 
 export function messageEnvoiDocument(doc: DocumentLien, contactNom?: string | null) {

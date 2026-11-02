@@ -50,7 +50,9 @@ import {
   libelleFiliere,
   libelleMotif,
   creerBrouillonEmail,
-  envoyerDocumentParEmail,
+  ouvrirMessagerie,
+  posteWindows,
+  telechargerPieceJointe,
   messageEnvoiDocument,
   majTicket,
   messageErreur,
@@ -494,39 +496,44 @@ function HotlineConsole() {
     }
   }
 
-  // Envoi d'un document : fenêtre d'aperçu (destinataire, objet, message),
-  // puis envoi par le compagnon avec le document en pièce jointe (02/11/2026).
-  // Repli : brouillon .eml (Outlook Windows) depuis la même fenêtre.
+  // Envoi d'un document par la messagerie du poste (02/11/2026) : fenêtre
+  // d'aperçu (destinataire, objet, message), puis
+  //  - Windows : brouillon .eml ouvert par Outlook, document joint ;
+  //  - Mac : nouveau message (mailto) + document téléchargé à glisser dedans.
+  // Rien n'est envoyé par le compagnon ; l'envoi est noté dans le ticket.
   function envoyerDocument(doc: DocumentLien) {
     setDocAEnvoyer(doc)
   }
 
-  async function confirmerEnvoi(v: { to: string; copieAMoi: boolean; subject: string; text: string }) {
+  async function preparerMessage(v: { to: string; subject: string; text: string; mode: 'auto' | 'eml' }) {
     if (!docAEnvoyer) return
     const doc = docAEnvoyer
     setEnvoiEnCours(doc.titre)
     try {
-      const { joint } = await envoyerDocumentParEmail({ ticketId: ticket?.id || null, document: doc, ...v })
+      let detail: string
+      if (v.mode === 'eml' || posteWindows()) {
+        const { joint } = await creerBrouillonEmail({ doc, destinataire: v.to, contactNom: form.contact_nom, ticketNumero: ticket?.numero, objet: v.subject, texte: v.text })
+        detail = joint ? 'brouillon Outlook, document joint' : 'brouillon Outlook, lien dans le texte'
+        setInfo(`Brouillon « ${doc.titre} » téléchargé : ouvrez-le, il s’affiche dans Outlook en nouveau message${joint ? ' avec le document joint' : ''}. Rien n’a été envoyé.`)
+      } else {
+        const fichier = await telechargerPieceJointe(doc)
+        const body = fichier || !doc.url ? v.text : `${v.text}\n\nLien vers le document « ${doc.titre} » :\n${doc.url}`
+        ouvrirMessagerie({ to: v.to, subject: v.subject, body })
+        detail = fichier ? `messagerie + fichier « ${fichier} » à joindre` : 'messagerie, lien dans le texte'
+        setInfo(
+          fichier
+            ? `Votre messagerie s’ouvre avec le message prêt. Le document « ${fichier} » vient d’être téléchargé : glissez-le dans le message, puis envoyez.`
+            : `Votre messagerie s’ouvre avec le message prêt (le document n’a pas pu être téléchargé : son lien est dans le texte).`,
+        )
+      }
+      window.setTimeout(() => setInfo(null), 12000)
       setDocAEnvoyer(null)
-      setInfo(`E-mail envoyé à ${v.to} : « ${doc.titre} » ${joint ? 'en pièce jointe' : '(document non récupérable : lien dans le message)'}${v.copieAMoi ? ', copie dans votre boîte' : ''}.`)
-      window.setTimeout(() => setInfo(null), 8000)
-      if (ticket) await rafraichirEtapes(ticket.id)
-    } catch (e) {
-      setErreur(messageErreur(e))
-    } finally {
-      setEnvoiEnCours(null)
-    }
-  }
-
-  async function brouillonEml(v: { to: string }) {
-    if (!docAEnvoyer) return
-    const doc = docAEnvoyer
-    setEnvoiEnCours(doc.titre)
-    try {
-      const { joint } = await creerBrouillonEmail({ doc, destinataire: v.to, contactNom: form.contact_nom, ticketNumero: ticket?.numero })
-      setDocAEnvoyer(null)
-      setInfo(`Brouillon .eml « ${doc.titre} » téléchargé (${joint ? 'pièce jointe' : 'lien'}). Rien n’a été envoyé.`)
-      window.setTimeout(() => setInfo(null), 8000)
+      if (ticket) {
+        await ajouterEtape(ticket.id, 'DOCUMENT', `Document préparé pour envoi${v.to ? ` à ${v.to}` : ''} (${detail}) : ${doc.titre}`, {
+          details: { ...doc, destinataire: v.to || null, mode: detail },
+        })
+        await rafraichirEtapes(ticket.id)
+      }
     } catch (e) {
       setErreur(messageErreur(e))
     } finally {
@@ -872,7 +879,7 @@ function HotlineConsole() {
                           type="button"
                           onClick={() => envoyerDocument(d)}
                           disabled={envoiEnCours !== null}
-                          title={form.contact_email ? `Envoyer à ${form.contact_email}, document en pièce jointe` : 'Envoyer par e-mail, document en pièce jointe'}
+                          title={form.contact_email ? `Préparer un e-mail à ${form.contact_email} dans votre messagerie` : 'Préparer un e-mail dans votre messagerie'}
                           className="text-[12px] font-semibold text-[#B4761A] underline disabled:opacity-50"
                         >
                           {envoiEnCours === d.titre ? 'Préparation…' : 'Envoyer'}
@@ -948,8 +955,8 @@ function HotlineConsole() {
           objetParDefaut={`${ticket ? `[${ticket.numero}] ` : ''}${docAEnvoyer.titre}`}
           messageParDefaut={messageEnvoiDocument(docAEnvoyer, form.contact_nom)}
           envoiEnCours={envoiEnCours !== null}
-          onEnvoyer={confirmerEnvoi}
-          onBrouillon={brouillonEml}
+          windows={posteWindows()}
+          onPreparer={preparerMessage}
           onFermer={() => setDocAEnvoyer(null)}
         />
       ) : null}
@@ -1255,15 +1262,15 @@ function PropositionsAppelant({
   )
 }
 
-// ── Fenêtre d'envoi d'un document ────────────────────────────────────────────
+// ── Fenêtre d'envoi d'un document (messagerie du poste) ─────────────────────
 function FenetreEnvoi({
   doc,
   destinataire,
   objetParDefaut,
   messageParDefaut,
   envoiEnCours,
-  onEnvoyer,
-  onBrouillon,
+  windows,
+  onPreparer,
   onFermer,
 }: {
   doc: DocumentLien
@@ -1271,15 +1278,14 @@ function FenetreEnvoi({
   objetParDefaut: string
   messageParDefaut: string
   envoiEnCours: boolean
-  onEnvoyer: (v: { to: string; copieAMoi: boolean; subject: string; text: string }) => void
-  onBrouillon: (v: { to: string }) => void
+  windows: boolean
+  onPreparer: (v: { to: string; subject: string; text: string; mode: 'auto' | 'eml' }) => void
   onFermer: () => void
 }) {
   const [to, setTo] = useState(destinataire)
   const [subject, setSubject] = useState(objetParDefaut)
   const [text, setText] = useState(messageParDefaut)
-  const [copieAMoi, setCopieAMoi] = useState(true)
-  const adresseOk = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(to.trim())
+  const adresseOk = !to.trim() || /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(to.trim())
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-[rgba(6,10,18,0.55)] p-4" onClick={onFermer}>
@@ -1313,32 +1319,38 @@ function FenetreEnvoi({
             <span className="min-w-0 truncate">📎 {doc.titre}</span>
             {!doc.url ? <span className="ml-auto shrink-0 text-[#A32C2C]">aucun lien : rien à joindre</span> : null}
           </div>
-          <label className="flex items-center gap-2 text-[12px] text-slate-600">
-            <input type="checkbox" checked={copieAMoi} onChange={(e) => setCopieAMoi(e.target.checked)} className="h-3.5 w-3.5 accent-[#B4761A]" />
-            M’envoyer une copie (les réponses du client arrivent dans ma boîte)
-          </label>
+          <p className="text-[12px] leading-snug text-slate-500">
+            {windows
+              ? 'Le message s’ouvre dans Outlook comme un nouveau message, document déjà joint. Vous relisez et cliquez sur Envoyer dans Outlook.'
+              : 'Votre messagerie s’ouvre avec le message prêt, et le document est téléchargé en même temps : glissez-le dans le message, puis cliquez sur Envoyer dans votre messagerie.'}{' '}
+            Le compagnon n’envoie rien lui-même.
+          </p>
         </div>
         <div className="flex flex-wrap items-center justify-between gap-2 border-t border-[#EFEDE8] px-5 py-3">
-          <button
-            type="button"
-            onClick={() => onBrouillon({ to: to.trim() })}
-            disabled={envoiEnCours}
-            className="text-[12px] font-semibold text-slate-500 underline disabled:opacity-40"
-            title="Télécharge un brouillon .eml sans rien envoyer (s'ouvre en nouveau message dans Outlook pour Windows)"
-          >
-            Télécharger en brouillon (.eml)
-          </button>
+          {!windows ? (
+            <button
+              type="button"
+              onClick={() => onPreparer({ to: to.trim(), subject: subject.trim(), text, mode: 'eml' })}
+              disabled={envoiEnCours}
+              className="text-[12px] font-semibold text-slate-500 underline disabled:opacity-40"
+              title="Fichier .eml avec le document joint (s'ouvre en nouveau message dans Outlook pour Windows ; en lecture seule sur Mac)"
+            >
+              Télécharger en .eml
+            </button>
+          ) : (
+            <span />
+          )}
           <div className="flex gap-2">
             <button type="button" onClick={onFermer} className="rounded-lg border border-[#D8D3C8] px-4 py-2 text-[13px] font-semibold text-slate-700">
               Annuler
             </button>
             <button
               type="button"
-              onClick={() => onEnvoyer({ to: to.trim(), copieAMoi, subject: subject.trim(), text })}
+              onClick={() => onPreparer({ to: to.trim(), subject: subject.trim(), text, mode: 'auto' })}
               disabled={envoiEnCours || !adresseOk || !subject.trim()}
               className="rounded-lg bg-[#B4761A] px-4 py-2 text-[13px] font-bold text-white hover:bg-[#9A6414] disabled:opacity-40"
             >
-              {envoiEnCours ? 'Envoi…' : 'Envoyer'}
+              {envoiEnCours ? 'Préparation…' : 'Ouvrir dans ma messagerie'}
             </button>
           </div>
         </div>
