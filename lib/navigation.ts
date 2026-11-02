@@ -46,6 +46,9 @@
 // ÉVOLUTION (2026-11-01) : « Inventaire – pilotage achats » (/stock/inventaire, can_appro) et
 // « Inventaire – saisie dépôt » (/stock/inventaire/saisie, can_stocks, dépôt de l'agence).
 // Migration 20261101_inventaire_annuel.sql.
+// ÉVOLUTION (2026-11-02) : nouveau bloc « Hotline technique » (SAV PV / thermique) :
+// console d'appel et tickets (can_hotline), éditeur de diagnostic et statistiques
+// (can_hotline_expert). Migration 20261102_hotline_technique.sql.
 // Le bloc « Mes alertes » de l'accueil n'est pas ici : il n'a pas de page, il
 // ouvre le Centre d'alertes (components/AlertsContext.tsx + ClientRootShell).
 
@@ -218,6 +221,21 @@ export const NAV_BLOCS: NavBloc[] = [
       { label: 'Parcours des dossiers CEE', path: '/financement', accessKey: 'can_financement', description: 'Tableau de bord des dossiers par étape : prêt, à corriger, bloqué.' },
       { label: 'Contrôle des pièces (IA)', path: '/financement/controle-pieces', activeLabel: 'Contrôle des pièces CEE', accessKey: 'can_financement', description: 'Vérification assistée des pièces et de la note de dimensionnement.' },
       { label: 'Clients Convention CEE', path: '/financement/clients-cee', activeLabel: 'Clients Convention-CEE', accessKey: 'can_financement', description: 'Clients SAGE « Convention CEE = OUI » : devis, commandes, BL et factures (R/O, CEE Premium).' },
+    ],
+  },
+  {
+    id: 'hotline',
+    label: 'Hotline technique',
+    subtitle: 'SAV photovoltaïque et thermique',
+    icon: '🎧',
+    icons: ['🎧', '☀️', '🔥'],
+    gradient: ['#8C5A1C', '#5A3810'],
+    iconBg: 'rgba(255,255,255,0.18)',
+    pages: [
+      { label: 'Console d’appel', path: '/hotline', activeLabel: 'Hotline – console d’appel', accessKey: 'can_hotline', description: 'Appel entrant (3CX) : identification du client SAGE / BLG, ticket pré-rempli, diagnostic guidé, documents à envoyer.' },
+      { label: 'Tickets', path: '/hotline/tickets', activeLabel: 'Hotline – tickets', accessKey: 'can_hotline', description: 'Tickets ouverts, en cours et escaladés (niveaux 1, 2, 3), chronologie horodatée, prise en charge.' },
+      { label: 'Éditeur de diagnostic', path: '/hotline/diagnostic', activeLabel: 'Hotline – éditeur de diagnostic', accessKey: 'can_hotline_expert', description: 'Parcours de questions-réponses par filière et motif, documents à proposer, préconisations, lignes 3CX.' },
+      { label: 'Statistiques hotline', path: '/hotline/stats', activeLabel: 'Hotline – statistiques', accessKey: 'can_hotline_expert', description: 'Origine des appels, mise en service vs exploitation, délais de prise en charge et de résolution, escalades.' },
     ],
   },
   {

@@ -26,6 +26,9 @@ export type AccessRights = {
   can_superuser: boolean
   can_projetblg: boolean
   can_paiement: boolean
+  /** (2026-11-02) Hotline technique : console + tickets ; expert = niveaux 2/3, éditeur, statistiques. */
+  can_hotline: boolean
+  can_hotline_expert: boolean
   can_change_scope: boolean
   allowed_scopes: string[]
   allowed_agences: string[]
@@ -102,6 +105,8 @@ type AccessProfileRow = {
   can_superuser?: boolean | null
   can_projetblg?: boolean | null
   can_paiement?: boolean | null
+  can_hotline?: boolean | null
+  can_hotline_expert?: boolean | null
   can_change_scope?: boolean | null
   default_landing_page?: string | null
   show_alert_cerfa_ko?: boolean | null
@@ -170,6 +175,8 @@ export const defaultRights: AccessRights = {
   can_superuser: false,
   can_projetblg: false,
   can_paiement: false,
+  can_hotline: false,
+  can_hotline_expert: false,
   can_change_scope: false,
   allowed_scopes: ['Global'],
   allowed_agences: [],
@@ -245,6 +252,9 @@ const PAGE_ACCESS_CHECKS: Array<[string, keyof AccessRights]> = [
   ['/financement', 'can_financement'],
   ['/suivi-agences', 'can_suivi_agences'],
   ['/objectifs', 'can_objectifs'],
+  ['/hotline/diagnostic', 'can_hotline_expert'],
+  ['/hotline/stats', 'can_hotline_expert'],
+  ['/hotline', 'can_hotline'],
 ]
 
 function isPathAllowed(path: string, rights: AccessRights) {
@@ -278,6 +288,7 @@ export function getFirstAllowedPath(rights: AccessRights) {
   if (rights.can_paiement) return '/retards-paiement'
   if (rights.can_financement) return '/financement'
   if (rights.can_suivi_agences) return '/suivi-agences'
+  if (rights.can_hotline) return '/hotline'
 
   return '/unauthorized'
 }
@@ -305,6 +316,8 @@ const PROFILE_FLAG_KEYS = [
   'can_superuser',
   'can_projetblg',
   'can_paiement',
+  'can_hotline',
+  'can_hotline_expert',
   'can_change_scope',
   'show_alert_cerfa_ko',
   'show_alert_cdc_liv_avant_2026',
@@ -445,7 +458,8 @@ export function AccessProvider({ children }: { children: React.ReactNode }) {
     setEmail(result.email)
     // Allocation AirH2O : vue complète + saisie (liste nominative) ou vue agence en lecture
     // (droit can_dashboard ou droit de profil can_allocation_airh2o) — 26/10/2026.
-    setRights({ ...result.rights, can_allocation_ro: peutVoirAllocationRo(result.email) || result.rights.can_allocation_airh2o || result.rights.can_dashboard })
+    // Hotline (02/11/2026) : l'expert a aussi la console et les tickets.
+    setRights({ ...result.rights, can_hotline: result.rights.can_hotline || result.rights.can_hotline_expert, can_allocation_ro: peutVoirAllocationRo(result.email) || result.rights.can_allocation_airh2o || result.rights.can_dashboard })
     setLoading(false)
   }, [])
 
