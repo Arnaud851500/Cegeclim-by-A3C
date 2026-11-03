@@ -2,8 +2,13 @@
 // lib/hotlineExcel.ts — Hotline : fichier Excel normé des parcours de
 // diagnostic (03/11/2026)
 // ----------------------------------------------------------------------------
-// Un seul format sert de modèle, d'export et d'import :
-//   Mode d'emploi · Parcours · Questions · Réponses · Documents
+// Un seul format sert de modèle, d'export et d'import : TOUT sur un seul
+// onglet « Parcours de diagnostic », une ligne par réponse possible ; les
+// cellules du parcours et de la question ne sont écrites que sur leur première
+// ligne (vide = « comme au-dessus »). Les documents d'une question tiennent
+// dans une cellule, un par ligne : Titre | Type | Lien.
+// L'ancien format à 4 onglets (Parcours/Questions/Réponses/Documents) reste
+// accepté à l'import.
 // Parcours et questions sont désignés par leur CODE : code existant = mise à
 // jour, nouveau code = création. Un parcours présent dans le fichier est
 // remplacé entièrement par son contenu ; les parcours absents ne bougent pas.
@@ -58,37 +63,6 @@ const COLONNES = {
   Documents: ['Code parcours', 'Code question', 'Titre du document', 'Type', 'Lien'],
 } as const
 
-const LARGEURS: Record<string, number[]> = {
-  Parcours: [16, 14, 20, 40, 20, 10, 16],
-  Questions: [16, 14, 8, 60, 50, 10],
-  'Réponses': [16, 14, 32, 18, 60, 18],
-  Documents: [16, 14, 45, 12, 70],
-}
-
-const MODE_EMPLOI = [
-  'PARCOURS DE DIAGNOSTIC — HOTLINE TECHNIQUE CEGECLIM',
-  '',
-  'Ce fichier sert à créer ou mettre à jour les parcours de diagnostic suivis par le niveau 1.',
-  'Il s’importe dans le compagnon : Hotline technique › Éditeur de diagnostic › « Importer un Excel ».',
-  '',
-  'RÈGLES',
-  '• Chaque parcours a un CODE unique (ex. TH-MES-1). Code déjà connu = mise à jour ; nouveau code = création.',
-  '• Un parcours présent dans le fichier est REMPLACÉ par son contenu : ses questions absentes du fichier sont supprimées.',
-  '• Les parcours absents du fichier ne sont pas modifiés. Pour ne retoucher qu’un parcours, ne laissez que ses lignes.',
-  '• Chaque question a un CODE unique dans son parcours (ex. Q1, Q2, CODE_DEFAUT…).',
-  '• Une seule question « Départ » = OUI par parcours (sinon la première question est le départ).',
-  '',
-  'ONGLETS',
-  '• Parcours : une ligne par parcours. Filière = PV ou THERMIQUE. Motif = MISE_EN_SERVICE ou EXPLOITATION. Actif / Publié extranet = OUI ou NON.',
-  '• Questions : une ligne par question. Consigne niveau 1 = aide affichée sous la question (facultatif).',
-  '• Réponses : une ligne par réponse possible. « Question suivante » = code de la question qui suit.',
-  '   Laisser « Question suivante » vide = fin du parcours : renseigner alors la « Préconisation » donnée à l’appelant,',
-  '   et « Proposer escalade » = OUI si ce cas relève du niveau supérieur.',
-  '• Documents : documents proposés à l’envoi quand la question s’affiche (procédure, schéma, firmware…). Lien = adresse web du document.',
-  '',
-  'À l’import, tout le fichier est contrôlé avant d’être appliqué : en cas d’erreur, rien n’est modifié et la liste des erreurs s’affiche.',
-]
-
 function chargerExcelJS() {
   return import('exceljs').then((m) => (m.default || m) as typeof ExcelJS)
 }
@@ -106,77 +80,160 @@ function telecharger(buffer: ArrayBuffer, nom: string) {
   window.setTimeout(() => URL.revokeObjectURL(url), 60_000)
 }
 
-/** Export de tous les parcours (ou modèle vide avec un exemple si aucun). */
+// ----------------------------------------------------------------------------
+// Format à un seul onglet
+// ----------------------------------------------------------------------------
+const ONGLET_UNIQUE = 'Parcours de diagnostic'
+const COLONNES_UNIQUE = [
+  'Code parcours', 'Filière', 'Motif', 'Nom du parcours', 'Famille produit', 'Actif', 'Publié extranet',
+  'Code question', 'Ordre', 'Départ', 'Question', 'Consigne niveau 1', 'Documents (Titre | Type | Lien)',
+  'Réponse', 'Question suivante', 'Rappel : question suivante', 'Préconisation (fin de parcours)', 'Proposer escalade',
+] as const
+const LARGEURS_UNIQUE = [14, 12, 17, 30, 14, 8, 10, 11, 7, 8, 48, 40, 40, 26, 12, 40, 48, 11]
+// Colonnes (1-based) : blocs parcours / question / réponse
+const BLOC_PARCOURS = [1, 7]
+const BLOC_QUESTION = [8, 13]
+
+const MODE_EMPLOI_UNIQUE = [
+  'PARCOURS DE DIAGNOSTIC — HOTLINE TECHNIQUE CEGECLIM',
+  '',
+  'Tout se trouve dans l’onglet « Parcours de diagnostic » : UNE LIGNE PAR RÉPONSE POSSIBLE.',
+  'Il s’importe dans le compagnon : Hotline technique › Éditeur de diagnostic › « Importer un Excel ».',
+  '',
+  'LECTURE DE L’ONGLET',
+  '• Colonnes bleues = le parcours. Elles ne sont remplies que sur la première ligne du parcours.',
+  '• Colonnes vertes = la question. Elles ne sont remplies que sur la première réponse de la question.',
+  '• Colonnes orange = la réponse : libellé, question suivante (ou préconisation si fin de parcours), escalade.',
+  '• Une cellule vide dans un bloc bleu ou vert veut dire « comme au-dessus ».',
+  '• « Rappel : question suivante » recopie le texte de la question visée, pour s’y retrouver. Elle est ignorée à l’import.',
+  '',
+  'RÈGLES',
+  '• Chaque parcours a un CODE unique (ex. TH-MES-1). Code déjà connu = mise à jour ; nouveau code = création.',
+  '• Un parcours présent dans le fichier est REMPLACÉ par son contenu : ses questions absentes du fichier sont supprimées.',
+  '• Les parcours absents du fichier ne sont pas modifiés. Pour ne retoucher qu’un parcours, ne laissez que ses lignes.',
+  '• Chaque question a un CODE unique dans son parcours (ex. Q1, Q2…). Une seule question « Départ » = OUI par parcours.',
+  '• Filière = PV ou THERMIQUE. Motif = MISE_EN_SERVICE ou EXPLOITATION. Actif, Publié extranet, Départ, Proposer escalade = OUI ou NON.',
+  '• « Question suivante » vide = fin du parcours : renseigner alors la Préconisation donnée à l’appelant.',
+  '• Documents : un document par ligne dans la cellule (Alt+Entrée), sous la forme  Titre | Type | Lien.',
+  '  Types : PDF, SCHEMA, FIRMWARE, VIDEO, XLS, LIEN.',
+  '• Pour ajouter une réponse à une question : insérer une ligne sous ses réponses et ne remplir que les colonnes orange.',
+  '',
+  'À l’import, tout le fichier est contrôlé avant d’être appliqué : en cas d’erreur, rien n’est modifié et la liste des erreurs s’affiche.',
+]
+
+const COULEURS = { parcours: 'FF1E3A8A', question: 'FF166534', reponse: 'FF9A3412' }
+const FONDS = { parcours: 'FFEFF6FF', question: 'FFF0FDF4' }
+
+type LigneUnique = (string | number)[]
+
+/** Export de tous les parcours sur un seul onglet (ou modèle avec un exemple si aucun). */
 export async function exporterParcoursExcel(arbres: Arbre[]) {
   const Excel = await chargerExcelJS()
   const { data, error } = await supabase.from('hotline_noeuds').select('*').order('ordre')
   if (error) throw error
   const noeuds = ((data || []) as Record<string, unknown>[]).map((r) => ({ ...normaliserNoeud(r), code: String(r.code || '') }))
-  const codeParId = new Map(noeuds.map((n) => [n.id, n.code]))
+  const parId = new Map(noeuds.map((n) => [n.id, n]))
 
   const wb = new Excel.Workbook()
   wb.creator = 'Compagnon CEGECLIM'
+  const ws = wb.addWorksheet(ONGLET_UNIQUE, { views: [{ state: 'frozen', ySplit: 1 }] })
   const guide = wb.addWorksheet('Mode d’emploi')
   guide.getColumn(1).width = 130
-  MODE_EMPLOI.forEach((l, i) => {
+  MODE_EMPLOI_UNIQUE.forEach((l, i) => {
     const c = guide.getCell(i + 1, 1)
     c.value = l
-    if (i === 0 || l === 'RÈGLES' || l === 'ONGLETS') c.font = { bold: true, color: { argb: 'FF0B1220' }, size: i === 0 ? 14 : 11 }
+    if (i === 0 || l === 'RÈGLES' || l === 'LECTURE DE L’ONGLET') c.font = { bold: true, color: { argb: 'FF0B1220' }, size: i === 0 ? 14 : 11 }
   })
 
-  const feuilles: Record<string, ExcelJS.Worksheet> = {}
-  for (const [nom, cols] of Object.entries(COLONNES)) {
-    const ws = wb.addWorksheet(nom, { views: [{ state: 'frozen', ySplit: 1 }] })
-    ws.addRow([...cols])
-    ws.getRow(1).font = { bold: true, color: { argb: 'FFFFFFFF' } }
-    ws.getRow(1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF0B1220' } }
-    LARGEURS[nom].forEach((w, i) => (ws.getColumn(i + 1).width = w))
-    feuilles[nom] = ws
-  }
+  ws.addRow([...COLONNES_UNIQUE])
+  const entete = ws.getRow(1)
+  entete.height = 32
+  COLONNES_UNIQUE.forEach((_, i) => {
+    const col = i + 1
+    const bloc = col <= BLOC_PARCOURS[1] ? 'parcours' : col <= BLOC_QUESTION[1] ? 'question' : 'reponse'
+    const c = entete.getCell(col)
+    c.font = { bold: true, color: { argb: 'FFFFFFFF' } }
+    c.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: COULEURS[bloc] } }
+    c.alignment = { wrapText: true, vertical: 'middle' }
+    ws.getColumn(col).width = LARGEURS_UNIQUE[i]
+  })
 
+  // Construction des lignes : [ligne, est 1re du parcours, est 1re de la question, n° de question dans le parcours]
+  const lignes: Array<{ v: LigneUnique; debutParcours: boolean; debutQuestion: boolean; rangQuestion: number }> = []
   const tries = [...arbres].sort((a, b) => String(a.code || '').localeCompare(String(b.code || '')))
   if (!tries.length) {
-    feuilles.Parcours.addRow(['TH-MES-1', 'THERMIQUE', 'MISE_EN_SERVICE', 'Mise en service PAC air/eau', 'PAC', 'OUI', 'NON'])
-    feuilles.Questions.addRow(['TH-MES-1', 'Q1', 1, 'La PAC affiche-t-elle un code défaut ?', 'Faire lire l’afficheur de la télécommande.', 'OUI'])
-    feuilles.Questions.addRow(['TH-MES-1', 'Q2', 2, 'Quel code défaut ?', '', 'NON'])
-    feuilles['Réponses'].addRow(['TH-MES-1', 'Q1', 'Oui', 'Q2', '', 'NON'])
-    feuilles['Réponses'].addRow(['TH-MES-1', 'Q1', 'Non', '', 'Vérifier l’alimentation puis relancer la mise en service', 'NON'])
-    feuilles['Réponses'].addRow(['TH-MES-1', 'Q2', 'Autre code', '', 'Escalade niveau 2 avec le code relevé', 'OUI'])
-    feuilles.Documents.addRow(['TH-MES-1', 'Q1', 'Procédure de mise en service', 'PDF', 'https://…'])
+    const P: LigneUnique = ['TH-MES-1', 'THERMIQUE', 'MISE_EN_SERVICE', 'Mise en service PAC air/eau', 'PAC', 'OUI', 'NON']
+    const vide7: LigneUnique = ['', '', '', '', '', '', '']
+    const vide6: LigneUnique = ['', '', '', '', '', '']
+    const q1: LigneUnique = ['Q1', 1, 'OUI', 'La PAC affiche-t-elle un code défaut ?', 'Faire lire l’afficheur de la télécommande.', 'Procédure de mise en service | PDF | https://…']
+    const q2: LigneUnique = ['Q2', 2, 'NON', 'Quel code défaut ?', '', '']
+    lignes.push({ v: [...P, ...q1, 'Oui', 'Q2', 'Quel code défaut ?', '', 'NON'], debutParcours: true, debutQuestion: true, rangQuestion: 0 })
+    lignes.push({ v: [...vide7, ...vide6, 'Non', '', '', 'Vérifier l’alimentation puis relancer la mise en service', 'NON'], debutParcours: false, debutQuestion: false, rangQuestion: 0 })
+    lignes.push({ v: [...vide7, ...q2, 'Autre code', '', '', 'Escalade niveau 2 avec le code relevé', 'OUI'], debutParcours: false, debutQuestion: true, rangQuestion: 1 })
   }
   for (const a of tries) {
-    feuilles.Parcours.addRow([a.code || '', a.filiere, a.motif, a.nom, a.famille || '', ouiNon(a.actif), ouiNon(a.publie_extranet)])
     const ns = noeuds.filter((n) => n.arbre_id === a.id).sort((x, y) => x.ordre - y.ordre)
-    for (const n of ns) {
-      feuilles.Questions.addRow([a.code || '', n.code, n.ordre, n.question, n.aide || '', ouiNon(n.id === a.noeud_racine)])
-      for (const c of n.choix) {
-        feuilles['Réponses'].addRow([a.code || '', n.code, c.libelle, c.suivant ? codeParId.get(c.suivant) || '' : '', c.suivant ? '' : c.preconisation || '', ouiNon(Boolean(c.escalade))])
-      }
-      for (const d of n.documents) {
-        feuilles.Documents.addRow([a.code || '', n.code, d.titre, d.type || 'PDF', d.url || ''])
-      }
+    const P: LigneUnique = [a.code || '', a.filiere, a.motif, a.nom, a.famille || '', ouiNon(a.actif), ouiNon(a.publie_extranet)]
+    if (!ns.length) {
+      lignes.push({ v: [...P], debutParcours: true, debutQuestion: true, rangQuestion: 0 })
+      continue
     }
+    ns.forEach((n, iq) => {
+      const Q: LigneUnique = [
+        n.code, n.ordre, ouiNon(n.id === a.noeud_racine), n.question, n.aide || '',
+        n.documents.map((d) => [d.titre, d.type || 'PDF', d.url || ''].join(' | ')).join('\n'),
+      ]
+      const choix = n.choix.length ? n.choix : [null]
+      choix.forEach((c, ic) => {
+        const suivant = c?.suivant ? parId.get(c.suivant) : undefined
+        const R: LigneUnique = c
+          ? [c.libelle, suivant?.code || '', suivant?.question || '', c.suivant ? '' : c.preconisation || '', ouiNon(Boolean(c.escalade))]
+          : ['', '', '', '', '']
+        const premier = iq === 0 && ic === 0
+        lignes.push({
+          v: [...(premier ? P : P.map(() => '')), ...(ic === 0 ? Q : Q.map(() => '')), ...R],
+          debutParcours: premier,
+          debutQuestion: ic === 0,
+          rangQuestion: iq,
+        })
+      })
+    })
   }
-  // Listes déroulantes posées APRÈS les données : poser une validation crée la
-  // ligne, et addRow écrirait ensuite les données sous la dernière ligne créée.
-  const liste = (ws: ExcelJS.Worksheet, col: string, valeurs: string[]) => {
-    const fin = Math.max(ws.rowCount, 1) + 300
+
+  const bordure = { style: 'thin' as const, color: { argb: 'FFCBD5E1' } }
+  const forte = { style: 'medium' as const, color: { argb: 'FF0B1220' } }
+  lignes.forEach((l) => {
+    const row = ws.addRow(l.v)
+    row.alignment = { wrapText: true, vertical: 'top' }
+    for (let col = 1; col <= COLONNES_UNIQUE.length; col++) {
+      const c = row.getCell(col)
+      if (col <= BLOC_PARCOURS[1]) c.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: FONDS.parcours } }
+      else if (col <= BLOC_QUESTION[1] && l.rangQuestion % 2 === 0) c.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: FONDS.question } }
+      if (l.debutParcours) c.border = { top: forte }
+      else if (l.debutQuestion) c.border = { top: bordure }
+      if (col === 16) c.font = { italic: true, color: { argb: 'FF64748B' } }
+    }
+    if (l.debutParcours) {
+      for (let col = 1; col <= 4; col++) row.getCell(col).font = { bold: true }
+    }
+    if (l.debutQuestion) {
+      row.getCell(8).font = { bold: true }
+      row.getCell(11).font = { bold: true }
+    }
+  })
+
+  // Listes déroulantes posées APRÈS les données (sinon les lignes créées
+  // repoussent les données vers le bas).
+  const fin = Math.max(ws.rowCount, 1) + 300
+  const liste = (col: string, valeurs: string[]) => {
     for (let r = 2; r <= fin; r++) {
       ws.getCell(`${col}${r}`).dataValidation = { type: 'list', allowBlank: true, formulae: [`"${valeurs.join(',')}"`] }
     }
   }
-  liste(feuilles.Parcours, 'B', ['PV', 'THERMIQUE'])
-  liste(feuilles.Parcours, 'C', ['MISE_EN_SERVICE', 'EXPLOITATION'])
-  liste(feuilles.Parcours, 'F', ['OUI', 'NON'])
-  liste(feuilles.Parcours, 'G', ['OUI', 'NON'])
-  liste(feuilles.Questions, 'F', ['OUI', 'NON'])
-  liste(feuilles['Réponses'], 'F', ['OUI', 'NON'])
-  liste(feuilles.Documents, 'D', ['PDF', 'SCHEMA', 'FIRMWARE', 'VIDEO', 'XLS', 'LIEN'])
-
-  ;[feuilles.Questions, feuilles['Réponses']].forEach((ws) => {
-    ws.getColumn(4).alignment = { wrapText: true, vertical: 'top' }
-    ws.getColumn(5).alignment = { wrapText: true, vertical: 'top' }
-  })
+  liste('B', ['PV', 'THERMIQUE'])
+  liste('C', ['MISE_EN_SERVICE', 'EXPLOITATION'])
+  ;['F', 'G', 'J', 'R'].forEach((c) => liste(c, ['OUI', 'NON']))
+  ws.autoFilter = { from: { row: 1, column: 1 }, to: { row: 1, column: COLONNES_UNIQUE.length } }
 
   const date = new Date().toISOString().slice(0, 10)
   telecharger((await wb.xlsx.writeBuffer()) as ArrayBuffer, `parcours-diagnostic-hotline-${date}.xlsx`)
@@ -237,7 +294,8 @@ function lignes(wb: ExcelJS.Workbook, nom: string, attendues: readonly string[],
   ws.getRow(1).eachCell((c, i) => {
     const k = cle(texteCellule(c))
     if (!k) return
-    const trouve = attendues.find((a) => cle(a) === k || k.startsWith(cle(a)) || cle(a).startsWith(k))
+    // Correspondance exacte d'abord (« Question » ≠ « Question suivante »), puis approchée
+    const trouve = attendues.find((a) => cle(a) === k) || attendues.find((a) => k.startsWith(cle(a)) || cle(a).startsWith(k))
     if (trouve) entetes[i] = trouve
   })
   const manquantes = attendues.filter((a) => !Object.values(entetes).includes(a)).filter((a) => ['Code parcours', 'Code question'].includes(a))
@@ -257,10 +315,132 @@ function lignes(wb: ExcelJS.Workbook, nom: string, attendues: readonly string[],
   return res
 }
 
-export async function lireExcelParcours(fichier: File): Promise<{ parcours: ParcoursImport[]; erreurs: string[] }> {
+type Resultat = { parcours: ParcoursImport[]; erreurs: string[] }
+
+export async function lireExcelParcours(fichier: File): Promise<Resultat> {
   const Excel = await chargerExcelJS()
   const wb = new Excel.Workbook()
   await wb.xlsx.load(await fichier.arrayBuffer())
+  const unique = wb.worksheets.find((w) => cle(w.name) === cle(ONGLET_UNIQUE))
+  const ancien = wb.worksheets.some((w) => cle(w.name) === 'questions')
+  if (unique || !ancien) return lireUnOnglet(wb, unique)
+  return lireMultiOnglets(wb)
+}
+
+/** Documents d'une cellule : un par ligne, « Titre | Type | Lien ». */
+function lireDocuments(texte: string, ou: string, erreurs: string[]): DocumentImport[] {
+  const TYPES = ['PDF', 'SCHEMA', 'FIRMWARE', 'VIDEO', 'XLS', 'LIEN']
+  return texte
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter(Boolean)
+    .map((l) => {
+      const parts = l.split('|').map((x) => x.trim())
+      let titre = parts[0] || ''
+      let type = ''
+      let url = ''
+      if (parts.length >= 3) {
+        type = parts[1]
+        url = parts.slice(2).join('|')
+      } else if (parts.length === 2) {
+        if (TYPES.includes(parts[1].toUpperCase())) type = parts[1]
+        else url = parts[1]
+      } else if (/^https?:\/\//i.test(titre)) {
+        url = titre
+        titre = titre.replace(/^https?:\/\//i, '').split(/[?#]/)[0]
+      }
+      type = (type || (url ? 'PDF' : 'LIEN')).toUpperCase()
+      if (!TYPES.includes(type)) erreurs.push(`${ou} : type de document « ${type} » inconnu (${TYPES.join(', ')}).`)
+      return { titre, type, url }
+    })
+    .filter((d) => d.titre)
+}
+
+function lireUnOnglet(wb: ExcelJS.Workbook, ws: ExcelJS.Worksheet | undefined): Resultat {
+  const erreurs: string[] = []
+  const feuille = ws || wb.worksheets.find((w) => {
+    const t = (w.getRow(1).values as unknown[]).map((v) => cle(String(v ?? '')))
+    return t.includes('code question') && t.includes('reponse')
+  })
+  if (!feuille) return { parcours: [], erreurs: [`Onglet « ${ONGLET_UNIQUE} » introuvable.`] }
+  const rows = lignes(wb, feuille.name, COLONNES_UNIQUE, erreurs)
+
+  const parcours = new Map<string, ParcoursImport>()
+  let p: ParcoursImport | null = null
+  let q: QuestionImport | null = null
+  for (const r of rows) {
+    // Bloc parcours : vide = comme au-dessus
+    const codeP = (r['Code parcours'] || '').trim().toUpperCase()
+    if (codeP) {
+      p = parcours.get(codeP) || null
+      if (!p) {
+        p = {
+          code: codeP,
+          filiere: filiere(r['Filière'] || ''),
+          motif: motif(r['Motif'] || ''),
+          nom: (r['Nom du parcours'] || '').trim(),
+          famille: (r['Famille produit'] || '').trim(),
+          actif: oui(r['Actif'] || '', true),
+          publie_extranet: oui(r['Publié extranet'] || '', false),
+          questions: [],
+        }
+        parcours.set(codeP, p)
+      }
+      q = null
+    }
+    if (!p) {
+      erreurs.push(`${r._ligne} : aucun code parcours au-dessus de cette ligne.`)
+      continue
+    }
+    // Bloc question : vide = comme au-dessus
+    const codeQ = (r['Code question'] || '').trim().toUpperCase()
+    if (codeQ) {
+      q = p.questions.find((x) => x.code === codeQ) || null
+      if (!q) {
+        const ordreTxt = String(r['Ordre'] || '').trim()
+        const ordre = Number(ordreTxt.replace(',', '.'))
+        q = {
+          code: codeQ,
+          ordre: ordreTxt && Number.isFinite(ordre) ? Math.round(ordre) : null,
+          question: (r['Question'] || '').trim(),
+          aide: (r['Consigne niveau 1'] || '').trim(),
+          depart: oui(r['Départ'] || ''),
+          reponses: [],
+          documents: lireDocuments(r['Documents (Titre | Type | Lien)'] || '', r._ligne, erreurs),
+        }
+        p.questions.push(q)
+      } else {
+        // Question déjà vue plus haut : on complète ce qui manquait
+        if (!q.question) q.question = (r['Question'] || '').trim()
+        if (!q.aide) q.aide = (r['Consigne niveau 1'] || '').trim()
+        if (!q.depart) q.depart = oui(r['Départ'] || '')
+        q.documents.push(...lireDocuments(r['Documents (Titre | Type | Lien)'] || '', r._ligne, erreurs))
+      }
+    } else if ((r['Question'] || '').trim() && q) {
+      erreurs.push(`${r._ligne} : texte de question sans code question.`)
+    }
+    // Bloc réponse
+    const libelle = (r['Réponse'] || '').trim()
+    const suivant = (r['Question suivante'] || '').trim().toUpperCase()
+    const precon = (r['Préconisation (fin de parcours)'] || '').trim()
+    if (!libelle && !suivant && !precon) continue
+    if (!q) {
+      erreurs.push(`${r._ligne} : réponse sans question au-dessus.`)
+      continue
+    }
+    if (!libelle) erreurs.push(`${r._ligne} : libellé de réponse vide.`)
+    q.reponses.push({
+      libelle,
+      suivant,
+      preconisation: suivant ? '' : precon,
+      escalade: oui(r['Proposer escalade'] || ''),
+    })
+  }
+  return { parcours: Array.from(parcours.values()), erreurs }
+}
+
+/** Ancien format à 4 onglets (Parcours / Questions / Réponses / Documents). */
+function lireMultiOnglets(wb: ExcelJS.Workbook): Resultat {
   const erreurs: string[] = []
   const lp = lignes(wb, 'Parcours', COLONNES.Parcours, erreurs)
   const lq = lignes(wb, 'Questions', COLONNES.Questions, erreurs)
