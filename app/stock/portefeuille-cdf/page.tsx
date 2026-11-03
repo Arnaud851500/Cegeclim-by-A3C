@@ -16,6 +16,7 @@
  *                            n° SAGE ≠ n° saisi, plusieurs containers sur une CDF ;
  *  - CONT_SANS_SUIVI / CONT_SUIVI_ANCIEN : pas de relevé bateau (ETA) ou relevé trop ancien ;
  *  - CONT_MARGE            : marge (date livraison CDF − ETA port) en retard / intenable / très juste ;
+ *                            (plus levée une fois le container arrivé au port / déchargé / livré — 02/11/2026) ;
  *  - SANS_AR               : CDF à destination de FMS sans statut SAGE « AR OK » après N jours ;
  *  - CDC_A_CONFIRMER       : CDF attendue par des commandes clients, due sous N jours → faire confirmer ;
  *  - DATE_DEPASSEE / SANS_DATE : nettoyage.
@@ -49,6 +50,18 @@
  *  - alertes par bloc : « Date dépassée » dès qu'un bloc est passé (montant concerné), « CDC attendent »
  *    sur les blocs dus sous N jours ;
  *  - vue « Par échéance » (lecture) : une ligne par CDF × date, triée par date, pour préparer les réceptions FMS.
+ *
+ * 02/11/2026 — code couleur des containers : bateau arrivé au port = bleu, container déchargé = sarcelle,
+ *  livré FMS = vert (n° de container, colonne « Bateau · ETA », badge de marge qui affiche l'étape et
+ *  garde la marge et le verdict en info-bulle).
+ *
+ * 02/11/2026 — RDV de déchargement chez FMS par container : saisie libre (date, heure facultative,
+ *  commentaire) directement dans la colonne « RDV FMS » de la liste ou dans la fiche, historisée dans
+ *  appro_cdf_rdv_fms (RDV en vigueur : v_appro_cdf_rdv_fms_actuel). Contrôles de cohérence (controleRdv) :
+ *  rouge = RDV avant l'ETA port, un week-end, après la date de livraison SAGE de la CDF, ou passé alors que
+ *  la CDF est toujours ouverte ; orange = moins de 2 j après l'ETA, plus de 10 j après l'ETA (frais de
+ *  stationnement), réception d'hier pas encore vue dans SAGE, heure hors 6h–18h, pas de n° de container.
+ *  Migration : supabase/sql/20261102b_portefeuille_cdf_rdv_fms.sql.
  *
  * Sources : RPC get_appro_portefeuille_cdf / get_appro_cdf_detail ; tables appro_container_releves,
  * appro_cdf_actions, appro_armateurs, appro_cdf_statuts ; sage.cdf_statut et sage.bdcf_commentaires
@@ -92,6 +105,12 @@ type Ligne = {
   derniere_action: { action: string; alerte_code: string | null; commentaire: string | null; le: string; par: string | null } | null
   date_premiere: string | null; date_derniere: string | null; nb_dates: number; blocs: Bloc[]
   nb_blocs_depasses: number; montant_depasse: number; nb_cdc_horizon: number
+  rdv?: RdvFms | null   // RDV de déchargement FMS en vigueur (chargé à part, v_appro_cdf_rdv_fms_actuel)
+}
+type RdvFms = {
+  id: number; cdf_numero: string; container_numero: string | null
+  rdv_date: string | null; rdv_heure: string | null; commentaire: string | null
+  created_at: string; created_by: string | null
 }
 type Bloc = {
   date: string | null; nb_lignes: number; qte: number; montant_ht: number; nb_cdc: number; depasse: boolean
@@ -146,6 +165,14 @@ const VERDICT: Record<Verdict, { label: string; cls: string }> = {
 }
 const STATUT_SUIVI: Record<StatutSuivi, string> = {
   booke: 'Booké', embarque: 'Embarqué', en_mer: 'En mer', arrive: 'Arrivé au port', decharge: 'Déchargé', livre: 'Livré FMS',
+}
+// 02/11/2026 — code couleur des containers selon l'avancement du bateau : dès que le bateau est
+// arrivé au port, puis quand le container est déchargé, la ligne change de couleur (n° de container,
+// colonne « Bateau · ETA » et badge de marge). Avant l'arrivée, la couleur reste celle du verdict de marge.
+const ETAPE_BATEAU: Partial<Record<StatutSuivi, { label: string; badge: string; texte: string; puce: string }>> = {
+  arrive: { label: 'Au port', badge: 'bg-sky-600 text-white', texte: 'font-bold text-sky-700', puce: 'bg-sky-100 text-sky-800 ring-1 ring-sky-300' },
+  decharge: { label: 'Déchargé', badge: 'bg-teal-600 text-white', texte: 'font-bold text-teal-700', puce: 'bg-teal-100 text-teal-800 ring-1 ring-teal-300' },
+  livre: { label: 'Livré FMS', badge: 'bg-emerald-700 text-white', texte: 'font-bold text-emerald-700', puce: 'bg-emerald-100 text-emerald-800 ring-1 ring-emerald-300' },
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -221,6 +248,121 @@ function Kpi({ label, value, sub, tone, onClick, actif, title }: {
 }
 function Badge({ cls, children, title }: { cls: string; children: React.ReactNode; title?: string }) {
   return <span title={title} className={`whitespace-nowrap rounded-full px-2 py-0.5 text-[10.5px] font-bold ${cls}`}>{children}</span>
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// RDV de déchargement FMS (02/11/2026)
+// ─────────────────────────────────────────────────────────────────────────
+
+const RDV_DELAI_MIN_APRES_ETA = 2   // j : déchargement, dédouanement et transport port → FMS
+const RDV_DELAI_MAX_APRES_ETA = 10  // j : au-delà, risque de frais de stationnement / surestaries
+
+function ecartJours(a: string, b: string): number {
+  return Math.round((new Date(`${a.slice(0, 10)}T12:00:00`).getTime() - new Date(`${b.slice(0, 10)}T12:00:00`).getTime()) / 86400000)
+}
+function fmtRdv(rdv: { rdv_date: string | null; rdv_heure: string | null }): string {
+  if (!rdv.rdv_date) return '—'
+  const d = new Date(`${rdv.rdv_date}T12:00:00`).toLocaleDateString('fr-FR', { weekday: 'short', day: '2-digit', month: '2-digit' })
+  return `${d}${rdv.rdv_heure ? ` ${rdv.rdv_heure.slice(0, 5).replace(':', 'h')}` : ''}`
+}
+
+type ControleRdv = { niveau: 'rouge' | 'orange' | null; motifs: { niveau: 'rouge' | 'orange'; texte: string }[] }
+
+/** Cohérence d'un RDV FMS avec l'ETA port, la date de livraison SAGE et le calendrier. */
+function controleRdv(rdvDate: string | null, rdvHeure: string | null, r: Ligne, auj: string): ControleRdv {
+  const motifs: ControleRdv['motifs'] = []
+  if (!rdvDate) return { niveau: null, motifs }
+  const jour = new Date(`${rdvDate}T12:00:00`).getDay()
+  if (jour === 0 || jour === 6) motifs.push({ niveau: 'rouge', texte: `RDV un ${jour === 0 ? 'dimanche' : 'samedi'}` })
+  if (r.eta_port) {
+    const e = ecartJours(rdvDate, r.eta_port)
+    if (e < 0) motifs.push({ niveau: 'rouge', texte: `RDV ${-e} j avant l’arrivée du bateau au port (ETA ${fmtDate(r.eta_port)})` })
+    else if (e < RDV_DELAI_MIN_APRES_ETA) motifs.push({ niveau: 'orange', texte: `RDV ${e === 0 ? 'le jour' : 'le lendemain'} de l’arrivée au port : déchargement, dédouanement et transport à caser` })
+    else if (e > RDV_DELAI_MAX_APRES_ETA) motifs.push({ niveau: 'orange', texte: `RDV ${e} j après l’arrivée au port : risque de frais de stationnement` })
+  }
+  if (r.date_livraison && ecartJours(rdvDate, r.date_livraison) > 0) {
+    motifs.push({ niveau: 'rouge', texte: `RDV après la date de livraison de la CDF dans SAGE (${fmtDate(r.date_livraison)}) : recaler la CDF, les commandes clients s’appuient sur cette date` })
+  }
+  const passe = ecartJours(auj, rdvDate)
+  if (passe > 1) motifs.push({ niveau: 'rouge', texte: `RDV passé depuis ${passe} j et CDF toujours ouverte : réceptionner dans SAGE ou reprendre un RDV` })
+  else if (passe === 1) motifs.push({ niveau: 'orange', texte: 'RDV d’hier : réception pas encore vue dans SAGE (synchro de la nuit)' })
+  if (rdvHeure) {
+    const h = Number(rdvHeure.slice(0, 2))
+    if (h < 6 || h >= 18) motifs.push({ niveau: 'orange', texte: `Heure inhabituelle (${rdvHeure.slice(0, 5)})` })
+  }
+  if (!r.container) motifs.push({ niveau: 'orange', texte: 'Pas de n° de container connu pour ce RDV' })
+  const niveau = motifs.some((m) => m.niveau === 'rouge') ? 'rouge' : motifs.length ? 'orange' : null
+  return { niveau, motifs }
+}
+const RDV_CLS = { rouge: 'bg-red-600 text-white', orange: 'bg-orange-100 text-orange-800', ok: 'bg-indigo-50 text-indigo-800 ring-1 ring-indigo-200' }
+
+async function enregistrerRdvFms(r: Ligne, date: string | null, heure: string | null, commentaire: string | null): Promise<{ rdv: RdvFms | null; erreur: string | null }> {
+  const { data, error } = await supabase.from('appro_cdf_rdv_fms').insert({
+    cdf_numero: r.numero,
+    container_numero: r.container || null,
+    rdv_date: date || null,
+    rdv_heure: date && heure ? heure : null,
+    commentaire: commentaire?.trim() || null,
+  }).select('*').single()
+  if (error) return { rdv: null, erreur: messageErreur(error) }
+  const rdv = data as RdvFms
+  return { rdv: rdv.rdv_date ? rdv : null, erreur: null }
+}
+
+/** Cellule « RDV FMS » de la liste : affichage coloré + saisie sur place (sans ouvrir la fiche). */
+function RdvCellule({ r, auj, onChange }: { r: Ligne; auj: string; onChange: (numero: string, rdv: RdvFms | null) => void }) {
+  const [edit, setEdit] = useState(false)
+  const [date, setDate] = useState('')
+  const [heure, setHeure] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [err, setErr] = useState<string | null>(null)
+  const rdv = r.rdv || null
+  const ctrl = controleRdv(edit ? date : rdv?.rdv_date || null, edit ? heure : rdv?.rdv_heure || null, r, auj)
+
+  function ouvrir(e: React.MouseEvent) {
+    e.stopPropagation()
+    setDate(rdv?.rdv_date || ''); setHeure(rdv?.rdv_heure?.slice(0, 5) || ''); setErr(null); setEdit(true)
+  }
+  async function valider(retirer = false) {
+    setSaving(true); setErr(null)
+    const res = await enregistrerRdvFms(r, retirer ? null : date || null, retirer ? null : heure || null, retirer ? 'RDV retiré' : rdv?.commentaire || null)
+    setSaving(false)
+    if (res.erreur) { setErr(res.erreur); return }
+    onChange(r.numero, res.rdv); setEdit(false)
+  }
+
+  if (edit) {
+    return (
+      <div className="flex flex-col gap-1" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center gap-1">
+          <input type="date" autoFocus value={date} onChange={(e) => setDate(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter') void valider(); if (e.key === 'Escape') setEdit(false) }}
+            className={`h-7 rounded border px-1 text-[11.5px] ${ctrl.niveau === 'rouge' ? 'border-red-500 text-red-700' : ctrl.niveau === 'orange' ? 'border-orange-400' : 'border-[#E5E1D8]'}`} />
+          <input type="time" value={heure} onChange={(e) => setHeure(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter') void valider(); if (e.key === 'Escape') setEdit(false) }}
+            className="h-7 w-[78px] rounded border border-[#E5E1D8] px-1 text-[11.5px]" />
+          <button type="button" disabled={saving || !date} onClick={() => void valider()} title="Enregistrer le RDV (Entrée)"
+            className="h-7 rounded bg-[#111820] px-2 text-[11.5px] font-bold text-white disabled:opacity-40">{saving ? '…' : '✓'}</button>
+          {rdv && <button type="button" disabled={saving} onClick={() => void valider(true)} title="Retirer le RDV"
+            className="h-7 rounded border border-red-300 px-1.5 text-[11.5px] text-red-700">🗑</button>}
+          <button type="button" onClick={() => setEdit(false)} title="Annuler (Échap)" className="h-7 px-1 text-[12px] text-[#8A8474]">✕</button>
+        </div>
+        {ctrl.motifs.length > 0 && <div className={`max-w-[260px] whitespace-normal text-[10.5px] font-semibold ${ctrl.niveau === 'rouge' ? 'text-red-700' : 'text-orange-700'}`}>{ctrl.motifs.map((m) => m.texte).join(' · ')}</div>}
+        {err && <div className="text-[10.5px] font-semibold text-red-700">{err}</div>}
+      </div>
+    )
+  }
+  if (rdv?.rdv_date) {
+    const titre = [`RDV déchargement FMS ${fmtRdv(rdv)}`, rdv.commentaire, ...ctrl.motifs.map((m) => `⚠ ${m.texte}`),
+      `Saisi le ${fmtDateHeure(rdv.created_at)}${rdv.created_by ? ` par ${rdv.created_by.split('@')[0]}` : ''} — cliquer pour modifier`].filter(Boolean).join('\n')
+    return (
+      <button type="button" onClick={ouvrir} title={titre}>
+        <Badge cls={ctrl.niveau ? RDV_CLS[ctrl.niveau] : RDV_CLS.ok}>{ctrl.niveau === 'rouge' ? '⚠ ' : ''}{fmtRdv(rdv)}</Badge>
+      </button>
+    )
+  }
+  if (!r.est_cont && !r.container) return <span className="text-[#C9C3B5]">—</span>
+  return <button type="button" onClick={ouvrir} title="Saisir la date du RDV de déchargement chez FMS" className="rounded px-1 text-[11px] font-semibold text-[#1D5C86] hover:bg-[#1D5C86]/10">+ RDV</button>
 }
 
 function ouvrirSuivi(container: string | null, armateurCode: string | null, armateurs: Armateur[]) {
@@ -312,8 +454,9 @@ function LienFavori() {
   )
 }
 
-function CdfModal({ ligne, armateurs, parametres, onClose, onSaved, position, onPrev, onNext, prefill, famille }: {
+function CdfModal({ ligne, armateurs, parametres, onClose, onSaved, onRdv, position, onPrev, onNext, prefill, famille }: {
   ligne: Ligne; armateurs: Armateur[]; parametres: Parametres | null
+  onRdv: (numero: string, rdv: RdvFms | null) => void
   onClose: () => void; onSaved: (patch: Partial<Ligne>) => void; position: string | null; onPrev?: () => void; onNext?: () => void
   prefill?: SuiviLu | null
   famille?: string
@@ -323,6 +466,17 @@ function CdfModal({ ligne, armateurs, parametres, onClose, onSaved, position, on
   const [erreur, setErreur] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
   const [ok, setOk] = useState<string | null>(null)
+  // RDV de déchargement FMS
+  const [rdvDate, setRdvDate] = useState(ligne.rdv?.rdv_date || '')
+  const [rdvHeure, setRdvHeure] = useState(ligne.rdv?.rdv_heure?.slice(0, 5) || '')
+  const [rdvCommentaire, setRdvCommentaire] = useState(ligne.rdv?.commentaire || '')
+  const [rdvHisto, setRdvHisto] = useState<RdvFms[]>([])
+  const chargerRdvHisto = useCallback(async () => {
+    const { data } = await supabase.from('appro_cdf_rdv_fms').select('*').eq('cdf_numero', ligne.numero)
+      .order('created_at', { ascending: false }).order('id', { ascending: false }).limit(20)
+    setRdvHisto((data || []) as RdvFms[])
+  }, [ligne.numero])
+  useEffect(() => { void chargerRdvHisto() }, [chargerRdvHisto])
   const [f, setF] = useState(() => {
     const base = {
       container: ligne.container || '',
@@ -413,7 +567,7 @@ function CdfModal({ ligne, armateurs, parametres, onClose, onSaved, position, on
     const alertes = ligne.alertes.filter((a) => !['CONT_SANS_SUIVI', 'CONT_SUIVI_ANCIEN', 'CONT_MARGE'].includes(a)
       && !(a === 'CONT_SANS_CONTAINER' && containerRetenu && containerValide(containerRetenu))
       && !(a === 'CONT_CONTAINER_INVALIDE' && containerRetenu && containerValide(containerRetenu)))
-    if (verdictPrevu && ['RETARD', 'INTENABLE', 'TRES_JUSTE'].includes(verdictPrevu)) alertes.push('CONT_MARGE')
+    if (verdictPrevu && ['RETARD', 'INTENABLE', 'TRES_JUSTE'].includes(verdictPrevu) && !(f.statut && ETAPE_BATEAU[f.statut])) alertes.push('CONT_MARGE')
     onSaved({
       container: containerRetenu,
       container_source: ligne.container_source || (cont ? 'saisie' : null),
@@ -427,6 +581,17 @@ function CdfModal({ ligne, armateurs, parametres, onClose, onSaved, position, on
     if (suivant && onNext) { onNext(); return }
     setOk('Suivi enregistré.'); setF((x) => ({ ...x, commentaire: '' }))
     void charger()
+  }
+
+  async function enregistrerRdv(retirer = false) {
+    setSaving(true); setErreur(null); setOk(null)
+    const res = await enregistrerRdvFms(ligne, retirer ? null : rdvDate || null, retirer ? null : rdvHeure || null, retirer ? 'RDV retiré' : rdvCommentaire)
+    setSaving(false)
+    if (res.erreur) { setErreur(res.erreur); return }
+    onRdv(ligne.numero, res.rdv)
+    if (retirer) { setRdvDate(''); setRdvHeure(''); setRdvCommentaire('') }
+    setOk(retirer ? 'RDV FMS retiré.' : 'RDV FMS enregistré.')
+    void chargerRdvHisto()
   }
 
   async function enregistrerAction(action: 'relance' | 'confirme' | 'commentaire') {
@@ -580,7 +745,9 @@ function CdfModal({ ligne, armateurs, parametres, onClose, onSaved, position, on
                   <input className={ctl} value={f.port_arrivee} onChange={(e) => setF({ ...f, port_arrivee: e.target.value })} /></label>
                 <label className="space-y-0.5"><span className="font-bold text-[#5E5A44]">ETA port</span>
                   <input type="date" className={ctl} value={f.eta_port} onChange={(e) => setF({ ...f, eta_port: e.target.value })} />
-                  {verdictPrevu && <span className="text-[10.5px]">Marge {marge} j → <Badge cls={VERDICT[verdictPrevu].cls}>{VERDICT[verdictPrevu].label}</Badge></span>}
+                  {f.statut && ETAPE_BATEAU[f.statut]
+                    ? <span className="text-[10.5px]">Marge {marge !== null ? `${marge} j` : '—'} → <Badge cls={ETAPE_BATEAU[f.statut]!.badge} title={verdictPrevu ? `Verdict de marge : ${VERDICT[verdictPrevu].label} (sans objet une fois le bateau à quai)` : undefined}>{ETAPE_BATEAU[f.statut]!.label}</Badge></span>
+                    : verdictPrevu && <span className="text-[10.5px]">Marge {marge} j → <Badge cls={VERDICT[verdictPrevu].cls}>{VERDICT[verdictPrevu].label}</Badge></span>}
                 </label>
                 <label className="space-y-0.5"><span className="font-bold text-[#5E5A44]">Statut</span>
                   <select className={ctl} value={f.statut} onChange={(e) => setF({ ...f, statut: e.target.value as StatutSuivi | '' })}>
@@ -618,6 +785,53 @@ function CdfModal({ ligne, armateurs, parametres, onClose, onSaved, position, on
               )}
             </section>
           )}
+
+          {/* RDV de déchargement FMS */}
+          {(ligne.est_cont || ligne.container) && (() => {
+            const ctrl = controleRdv(rdvDate || null, rdvHeure || null, ligne, isoAujourdhui())
+            const modifie = (rdvDate || '') !== (ligne.rdv?.rdv_date || '') || (rdvHeure || '') !== (ligne.rdv?.rdv_heure?.slice(0, 5) || '') || (rdvCommentaire || '') !== (ligne.rdv?.commentaire || '')
+            return (
+              <section className={`rounded-xl border bg-white p-3 ${ctrl.niveau === 'rouge' ? 'border-red-300' : ctrl.niveau === 'orange' ? 'border-orange-300' : 'border-[#E5E1D8]'}`}>
+                <div className="mb-2 flex items-center justify-between gap-2">
+                  <h3 className="text-[11px] font-bold uppercase tracking-wide text-[#8A8474]">RDV de déchargement chez FMS</h3>
+                  {ligne.rdv?.rdv_date && <span className="text-[10.5px] text-[#8A8474]">en vigueur : <b>{fmtRdv(ligne.rdv)}</b> · saisi le {fmtDateHeure(ligne.rdv.created_at)}{ligne.rdv.created_by ? ` par ${ligne.rdv.created_by.split('@')[0]}` : ''}</span>}
+                </div>
+                <div className="grid grid-cols-[1fr_110px] gap-2 text-[11.5px]">
+                  <label className="space-y-0.5"><span className="font-bold text-[#5E5A44]">Date du RDV</span>
+                    <input type="date" className={`${ctl} ${ctrl.niveau === 'rouge' ? 'border-red-500 text-red-700' : ctrl.niveau === 'orange' ? 'border-orange-400' : ''}`} value={rdvDate} onChange={(e) => setRdvDate(e.target.value)} /></label>
+                  <label className="space-y-0.5"><span className="font-bold text-[#5E5A44]">Heure</span>
+                    <input type="time" className={ctl} value={rdvHeure} onChange={(e) => setRdvHeure(e.target.value)} /></label>
+                  <label className="col-span-2 space-y-0.5"><span className="font-bold text-[#5E5A44]">Commentaire</span>
+                    <input className={ctl} value={rdvCommentaire} onChange={(e) => setRdvCommentaire(e.target.value)} placeholder="ex. créneau confirmé par FMS, transporteur…" /></label>
+                </div>
+                {ctrl.motifs.length > 0 && (
+                  <ul className="mt-2 space-y-0.5 text-[11.5px] font-semibold">
+                    {ctrl.motifs.map((m, i) => <li key={i} className={m.niveau === 'rouge' ? 'text-red-700' : 'text-orange-700'}>⚠ {m.texte}</li>)}
+                  </ul>
+                )}
+                {rdvDate && ctrl.motifs.length === 0 && <p className="mt-2 text-[11.5px] font-semibold text-emerald-700">✓ Cohérent avec l’arrivée au port et la date de livraison de la CDF.</p>}
+                <div className="mt-2 flex justify-end gap-1.5">
+                  {ligne.rdv?.rdv_date && <button type="button" onClick={() => void enregistrerRdv(true)} disabled={saving}
+                    className="h-9 rounded-lg border border-red-300 bg-white px-3 text-[12.5px] font-bold text-red-700 disabled:opacity-40">Retirer le RDV</button>}
+                  <button type="button" onClick={() => void enregistrerRdv()} disabled={saving || !rdvDate || !modifie}
+                    className="h-9 rounded-lg bg-[#111820] px-4 text-[12.5px] font-bold text-white disabled:opacity-40">{saving ? '…' : 'Enregistrer le RDV'}</button>
+                </div>
+                {rdvHisto.length > 0 && (
+                  <div className="mt-2 max-h-32 overflow-y-auto border-t border-[#E5E1D8] pt-2">
+                    <table className="w-full text-[11px]">
+                      <thead><tr className="text-left text-[#8A8474]"><th className="px-1">Saisi le</th><th className="px-1">Par</th><th className="px-1">RDV</th><th className="px-1">Container</th><th className="px-1">Commentaire</th></tr></thead>
+                      <tbody>{rdvHisto.map((h) => (
+                        <tr key={h.id} className="border-t border-[#F0EDE6]">
+                          <td className="whitespace-nowrap px-1">{fmtDateHeure(h.created_at)}</td><td className="px-1">{h.created_by?.split('@')[0] || '—'}</td>
+                          <td className="whitespace-nowrap px-1">{h.rdv_date ? fmtRdv(h) : <span className="text-[#8A8474]">retiré</span>}</td>
+                          <td className="px-1 font-mono">{h.container_numero || '—'}</td><td className="px-1">{h.commentaire || ''}</td>
+                        </tr>))}</tbody>
+                    </table>
+                  </div>
+                )}
+              </section>
+            )
+          })()}
 
           {/* Commentaires SAGE */}
           <section className="rounded-xl border border-[#E5E1D8] bg-white p-3">
@@ -715,7 +929,7 @@ function CdfModal({ ligne, armateurs, parametres, onClose, onSaved, position, on
 // ─────────────────────────────────────────────────────────────────────────
 
 type Perimetre = 'tous' | 'cont' | 'fms'
-type CleTri = 'numero' | 'fournisseur' | 'date_commande' | 'date_livraison' | 'eta_port' | 'marge_jours' | 'nb_cdc' | 'montant_ht' | 'alertes'
+type CleTri = 'numero' | 'fournisseur' | 'date_commande' | 'date_livraison' | 'eta_port' | 'marge_jours' | 'nb_cdc' | 'montant_ht' | 'alertes' | 'rdv'
 
 function PortefeuilleCdf() {
   const router = useRouter()
@@ -747,13 +961,27 @@ function PortefeuilleCdf() {
   const [ordreNav, setOrdreNav] = useState<string[] | null>(null)
   const idEnvoiRef = React.useRef<string | null>(null)
 
+  // RDV de déchargement FMS en vigueur, par CDF (chargés à part du portefeuille)
+  const [rdvs, setRdvs] = useState<Record<string, RdvFms>>({})
+  const chargerRdvs = useCallback(async () => {
+    const { data, error } = await supabase.from('v_appro_cdf_rdv_fms_actuel').select('*')
+    if (error) { setErreur('RDV FMS : ' + messageErreur(error)); return }
+    const m: Record<string, RdvFms> = {}
+    ;((data || []) as RdvFms[]).forEach((x) => { m[x.cdf_numero] = x })
+    setRdvs(m)
+  }, [])
+  const majRdv = useCallback((numero: string, rdv: RdvFms | null) => {
+    setRdvs((prev) => { const n = { ...prev }; if (rdv) n[numero] = rdv; else delete n[numero]; return n })
+  }, [])
+
   /** silencieux = recalcul en arrière-plan : la liste reste affichée et utilisable. */
   const charger = useCallback(async (silencieux = false) => {
     if (silencieux) setMajFond(true); else { setLoading(true); setErreur(null) }
+    void chargerRdvs()
     const { data, error } = await supabase.rpc('get_appro_portefeuille_cdf')
     if (error) { setErreur(messageErreur(error)); if (!silencieux) setRep(null) } else setRep(data as Reponse)
     if (silencieux) setMajFond(false); else setLoading(false)
-  }, [])
+  }, [chargerRdvs])
 
   /** Mise à jour immédiate d'une ligne (après un relevé ou une action), avant le recalcul en arrière-plan. */
   const majLigne = useCallback((numero: string, patch: Partial<Ligne>) => {
@@ -820,7 +1048,7 @@ function PortefeuilleCdf() {
     router.replace(qs ? `/stock/portefeuille-cdf?${qs}` : '/stock/portefeuille-cdf', { scroll: false })
   }
 
-  const rows = useMemo(() => rep?.rows || [], [rep])
+  const rows = useMemo(() => (rep?.rows || []).map((r) => ({ ...r, rdv: rdvs[r.numero] || null })), [rep, rdvs])
   const armateurs = rep?.armateurs || []
   const auj = isoAujourdhui()
 
@@ -864,7 +1092,7 @@ function PortefeuilleCdf() {
       if (alerteF && !r.alertes.includes(alerteF)) return false
       if (!alerteF && seulementAlertes && r.alertes.length === 0) return false
       if (termes.length) {
-        const hay = normaliser(`${r.numero} ${r.reference} ${r.fournisseur_code} ${r.fournisseur_nom} ${r.depot} ${r.container} ${r.navire} ${r.commentaires.join(' ')}`)
+        const hay = normaliser(`${r.numero} ${r.reference} ${r.fournisseur_code} ${r.fournisseur_nom} ${r.depot} ${r.container} ${r.navire} ${r.rdv?.rdv_date ? fmtDate(r.rdv.rdv_date) : ''} ${r.rdv?.commentaire || ''} ${r.commentaires.join(' ')}`)
         if (!termes.every((t) => hay.includes(t))) return false
       }
       return true
@@ -873,6 +1101,7 @@ function PortefeuilleCdf() {
       switch (tri.k) {
         case 'fournisseur': return r.fournisseur_nom || r.fournisseur_code
         case 'alertes': return r.alertes.length
+        case 'rdv': return r.rdv?.rdv_date ? `${r.rdv.rdv_date} ${r.rdv.rdv_heure || ''}` : null
         default: return (r[tri.k] as string | number | null) ?? null
       }
     }
@@ -926,6 +1155,9 @@ function PortefeuilleCdf() {
         { h: 'Armateur', f: (r) => r.armateur }, { h: 'Navire', f: (r) => r.navire, w: 20 }, { h: 'ETA port', f: (r) => fmtDate(r.eta_port) },
         { h: 'Statut suivi', f: (r) => (r.statut_suivi ? STATUT_SUIVI[r.statut_suivi] : '') }, { h: 'Relevé le', f: (r) => fmtDateHeure(r.releve_le) },
         { h: 'Marge (j)', f: (r) => r.marge_jours }, { h: 'Verdict', f: (r) => (r.verdict ? VERDICT[r.verdict].label : '') },
+        { h: 'RDV FMS', f: (r) => (r.rdv?.rdv_date ? fmtDate(r.rdv.rdv_date) : '') }, { h: 'Heure RDV', f: (r) => r.rdv?.rdv_heure?.slice(0, 5) || '' },
+        { h: 'Commentaire RDV', f: (r) => r.rdv?.commentaire || '', w: 30 },
+        { h: 'Contrôle RDV', f: (r) => controleRdv(r.rdv?.rdv_date || null, r.rdv?.rdv_heure || null, r, auj).motifs.map((m) => m.texte).join(' | '), w: 50 },
         { h: 'CDC en attente', f: (r) => r.nb_cdc }, { h: '1re livraison CDC', f: (r) => fmtDate(r.premiere_livraison_cdc) },
         { h: familleF ? `Lignes ${familleF}` : 'Lignes', f: (r) => r.nb_lignes }, { h: familleF ? `Pièces ${familleF}` : 'Pièces', f: (r) => r.qte },
         { h: familleF ? `Montant HT ${familleF}` : 'Montant HT', f: (r) => r.montant_ht },
@@ -1054,11 +1286,11 @@ function PortefeuilleCdf() {
               <thead className="sticky top-0 z-10 bg-white">
                 <tr className="border-b border-[#E5E1D8] text-left text-[10.5px] font-bold uppercase tracking-wide text-[#8A8474]">
                   <th className="px-2 py-1.5">Date de livraison</th><th className="px-2">CDF</th><th className="px-2">Fournisseur</th><th className="px-2">Référence</th>
-                  <th className="px-2 text-right">Lignes</th><th className="px-2 text-right">Qté</th><th className="px-2 text-right">Montant HT</th><th className="px-2 text-right">CDC</th><th className="px-2">Statut</th>
+                  <th className="px-2 text-right">Lignes</th><th className="px-2 text-right">Qté</th><th className="px-2 text-right">Montant HT</th><th className="px-2 text-right">CDC</th><th className="px-2">Statut</th><th className="px-2">RDV FMS</th>
                 </tr>
               </thead>
               <tbody>
-                {echeances.length === 0 && <tr><td colSpan={9} className="px-3 py-6 text-center text-[#8A8474]">Aucune échéance avec ces filtres.</td></tr>}
+                {echeances.length === 0 && <tr><td colSpan={10} className="px-3 py-6 text-center text-[#8A8474]">Aucune échéance avec ces filtres.</td></tr>}
                 {echeances.map(({ r, b }, i) => {
                   const debutSemaine = i === 0 || (echeances[i - 1].b.date || '').slice(0, 10) !== (b.date || '').slice(0, 10)
                   return (
@@ -1072,6 +1304,7 @@ function PortefeuilleCdf() {
                       <td className="px-2 py-1 text-right">{fmtNum(b.montant_ht)}</td>
                       <td className="px-2 py-1 text-right">{b.nb_cdc ? <b>{fmtNum(b.nb_cdc)}</b> : <span className="text-[#C9C3B5]">—</span>}</td>
                       <td className="whitespace-nowrap px-2 py-1">{r.statut_libelle ? <Badge cls={r.ar_recu ? 'bg-emerald-50 text-emerald-700' : 'bg-[#F4F3F0] text-[#5E5A44]'}>{r.statut_libelle}</Badge> : ''}</td>
+                      <td className="whitespace-nowrap px-2 py-1"><RdvCellule r={r} auj={auj} onChange={majRdv} /></td>
                     </tr>
                   )
                 })}
@@ -1087,14 +1320,14 @@ function PortefeuilleCdf() {
               <tr className="border-b border-[#E5E1D8]">
                 <Th k="numero">CDF</Th><Th k="fournisseur">Fournisseur</Th><Th>Référence</Th>
                 <Th k="date_commande">Commande</Th><Th k="date_livraison">Livraison</Th><Th>Statut</Th>
-                <Th>Container</Th><Th k="eta_port">Bateau · ETA</Th><Th k="marge_jours">Marge</Th>
+                <Th>Container</Th><Th k="eta_port">Bateau · ETA</Th><Th k="marge_jours">Marge</Th><Th k="rdv">RDV FMS</Th>
                 <Th k="nb_cdc" cls="text-right">CDC</Th><Th k="montant_ht" cls="text-right">Montant HT</Th><Th k="alertes">Alertes</Th><Th>Dernière action</Th>
               </tr>
             </thead>
             <tbody>
-              {loading && !rep && <tr><td colSpan={13} className="px-3 py-6 text-center text-[#8A8474]">Chargement du portefeuille…</td></tr>}
-              {!(loading && !rep) && filtres.length === 0 && <tr><td colSpan={13} className="px-3 py-6 text-center font-semibold text-emerald-700">Aucune CDF à traiter avec ces filtres.</td></tr>}
-              {!(loading && !rep) && filtres.map((r) => (
+              {loading && !rep && <tr><td colSpan={14} className="px-3 py-6 text-center text-[#8A8474]">Chargement du portefeuille…</td></tr>}
+              {!(loading && !rep) && filtres.length === 0 && <tr><td colSpan={14} className="px-3 py-6 text-center font-semibold text-emerald-700">Aucune CDF à traiter avec ces filtres.</td></tr>}
+              {!(loading && !rep) && filtres.map((r) => { const etape = r.statut_suivi ? ETAPE_BATEAU[r.statut_suivi] : undefined; return (
                 <React.Fragment key={r.numero}>
                 <tr onClick={() => ouvrirCdf(r.numero)} className="cursor-pointer border-b border-[#F0EDE6] hover:bg-[#FAF8F3]">
                   <td className="whitespace-nowrap px-2 py-1 font-semibold">
@@ -1119,13 +1352,16 @@ function PortefeuilleCdf() {
                   </td>
                   <td className="whitespace-nowrap px-2 py-1">{r.statut_libelle ? <Badge cls={r.ar_recu ? 'bg-emerald-50 text-emerald-700' : 'bg-[#F4F3F0] text-[#5E5A44]'}>{r.statut_libelle}</Badge> : <span className="text-[#C9C3B5]">—</span>}</td>
                   <td className="whitespace-nowrap px-2 py-1 font-mono text-[11.5px]">
-                    {r.container ? <span className={r.container_valide ? '' : 'text-red-700'} title={r.container_source === 'sage' ? 'Lu dans SAGE' : 'Saisi dans l’app'}>{r.container}{r.container_source === 'saisie' && <span className="ml-0.5 font-sans text-[10px] text-[#8A8474]">✎</span>}</span>
+                    {r.container ? <span className={!r.container_valide ? 'text-red-700' : etape ? `rounded px-1 py-0.5 ${etape.puce}` : ''} title={`${r.container_source === 'sage' ? 'Lu dans SAGE' : 'Saisi dans l’app'}${etape && r.statut_suivi ? ` · ${STATUT_SUIVI[r.statut_suivi]}` : ''}`}>{r.container}{r.container_source === 'saisie' && <span className="ml-0.5 font-sans text-[10px] text-[#8A8474]">✎</span>}</span>
                       : r.est_cont ? <span className="font-sans text-[11px] text-red-700">à obtenir</span> : <span className="text-[#C9C3B5]">—</span>}
                   </td>
                   <td className="max-w-[200px] truncate px-2 py-1" title={[r.armateur, r.navire, r.port_arrivee].filter(Boolean).join(' · ')}>
-                    {r.eta_port ? <>{fmtDate(r.eta_port)} <span className="text-[10.5px] text-[#8A8474]">{r.navire || r.armateur || ''}{r.statut_suivi ? ` · ${STATUT_SUIVI[r.statut_suivi]}` : ''}</span></> : <span className="text-[#C9C3B5]">—</span>}
+                    {r.eta_port ? <>{fmtDate(r.eta_port)} <span className="text-[10.5px] text-[#8A8474]">{r.navire || r.armateur || ''}</span>{r.statut_suivi && <span className={`text-[10.5px] ${etape ? etape.texte : 'text-[#8A8474]'}`}> · {STATUT_SUIVI[r.statut_suivi]}</span>}</> : <span className="text-[#C9C3B5]">—</span>}
                   </td>
-                  <td className="whitespace-nowrap px-2 py-1">{r.verdict ? <Badge cls={VERDICT[r.verdict].cls}>{r.marge_jours} j · {VERDICT[r.verdict].label}</Badge> : <span className="text-[#C9C3B5]">—</span>}</td>
+                  <td className="whitespace-nowrap px-2 py-1">{etape
+                    ? <Badge cls={etape.badge} title={r.verdict ? `Marge ${r.marge_jours} j · ${VERDICT[r.verdict].label} (calculée sur l’ETA port)` : undefined}>{r.marge_jours !== null ? `${r.marge_jours} j · ` : ''}{etape.label}</Badge>
+                    : r.verdict ? <Badge cls={VERDICT[r.verdict].cls}>{r.marge_jours} j · {VERDICT[r.verdict].label}</Badge> : <span className="text-[#C9C3B5]">—</span>}</td>
+                  <td className="whitespace-nowrap px-2 py-1"><RdvCellule r={r} auj={auj} onChange={majRdv} /></td>
                   <td className="whitespace-nowrap px-2 py-1 text-right">{r.nb_cdc ? <span title={`1re livraison client ${fmtDate(r.premiere_livraison_cdc)}`}><b>{fmtNum(r.nb_cdc)}</b>{r.nb_cdc_tardives ? <span className="ml-1 text-[10.5px] text-orange-700">({fmtNum(r.nb_cdc_tardives)} tard.)</span> : ''}</span> : <span className="text-[#C9C3B5]">—</span>}</td>
                   <td className="whitespace-nowrap px-2 py-1 text-right" title={familleF ? `${fmtNum(r.nb_lignes)} ligne(s) ${familleF} · ${fmtNum(r.qte)} pièces` : `${fmtNum(r.nb_lignes)} ligne(s) · ${fmtNum(r.qte)} pièces`}>{fmtNum(r.montant_ht)}</td>
                   <td className="px-2 py-1"><span className="inline-flex flex-wrap gap-1">{r.alertes.map((a) => <Badge key={a} cls={ALERTE[a].cls} title={ALERTE[a].title}>{libelleAlerte(a, r)}</Badge>)}</span></td>
@@ -1135,11 +1371,11 @@ function PortefeuilleCdf() {
                 </tr>
                 {deplies.has(r.numero) && (
                   <tr className="border-b border-[#F0EDE6] bg-[#FAF8F3]">
-                    <td colSpan={13} className="px-8 py-2"><BlocsTable blocs={r.blocs} /></td>
+                    <td colSpan={14} className="px-8 py-2"><BlocsTable blocs={r.blocs} /></td>
                   </tr>
                 )}
                 </React.Fragment>
-              ))}
+              )})}
             </tbody>
           </table>
         </section>
@@ -1153,7 +1389,7 @@ function PortefeuilleCdf() {
           onNext={indexOuvert >= 0 && indexOuvert < listeNav.length - 1 ? () => setUrl({ cdf: listeNav[indexOuvert + 1] }) : undefined}
           prefill={prefill && prefill.cdf === ligneOuverte.numero ? prefill.lu : null}
           onClose={() => { setPrefill(null); setOrdreNav(null); setUrl({ cdf: null }) }}
-          onSaved={(patch) => majLigne(ligneOuverte.numero, patch)} />
+          onSaved={(patch) => majLigne(ligneOuverte.numero, patch)} onRdv={majRdv} />
       )}
     </main>
   )

@@ -43,6 +43,14 @@
  *    le 26/10, avec la date de disponibilité (stock actuel ou CDF), calculée par la base (restes servis après toutes les
  *    CDC 2026 ouvertes, à la suite entre agences : ANGLET, SAV / JMLADEUIX, puis ordre alphabétique).
  *
+ * 02/11/2026 (Arnaud) : « À son tour ? » pour les PL et les BL depuis le 26/10 — une PL bloque le stock et un BL
+ *  l'a déjà sorti, on ne voyait plus si la commande pouvait être servie si tôt. La base rejoue la file toutes agences
+ *  (stock physique PL comprises + BL depuis le 26/10 remis en stock, puis CDF par date de réception ; CDC, PL et BL
+ *  servis par date de livraison puis date de création) : stock actuel = à son tour ; sinon préparée / livrée en avance,
+ *  avec la CDF qui l'aurait couverte et les CDC dues avant elle qui attendent aujourd'hui une CDF (« passée devant »).
+ *  Affiché dans « Livrable à la date demandée » (onglet CDC), dans une colonne « À son tour ? » (onglets BL et
+ *  CDC des 7 derniers jours) et dans la fenêtre de détail. Migration : supabase/sql/20261102c_allocation_airh2o_file_pl_bl.sql.
+ *
  * Sources : RPC get_allocation_ro / set_allocation_ro (supabase/sql/20261024_allocation_airh2o.sql).
  */
 
@@ -82,6 +90,11 @@ type LigneDoc = {
   /** CDC : couverture à la date demandée (v_portefeuille_couverture_stock). */
   couv_statut?: 'COUVERT' | 'COUVERT_PAR_RECEPTION' | 'RECEPTION_TARDIVE' | 'RUPTURE' | 'A_COUVRIR_PAR_APPRO' | null
   couv_cdf?: string | null; couv_date?: string | null; couv_retard?: number | null
+  /** PL et BL depuis le 26/10 : couverture « à son tour » dans la file toutes agences (02/11/2026). */
+  file_statut?: 'COUVERT' | 'COUVERT_PAR_RECEPTION' | 'RECEPTION_TARDIVE' | 'RUPTURE' | null
+  file_cdf?: string | null; file_date?: string | null; file_retard?: number | null
+  /** CDC dues avant elle qui attendent aujourd'hui une CDF (seulement si elle n'était pas couverte par le stock à son tour). */
+  file_doublees?: number | null; file_doublees_q?: number | null; file_doublees_cdc?: string | null
   /** Ligne « Reste à affecter » (nature RESTE). */
   reste?: Reste
 }
@@ -205,6 +218,8 @@ function DetailModal({ detail, lignes, onClose }: { detail: Detail; lignes: Lign
   const total = liste.reduce((s, l) => s + n0(l.q), 0)
   // 26/10/2026 : même information que l'onglet « CDC à livrer »
   const avecCouv = detail.natures.some((n) => n === 'CDC' || n === 'CDC_ANNEE_SUIVANTE')
+  // 02/11/2026 : PL et BL depuis le 26/10 — servies à leur tour ?
+  const avecTour = !avecCouv && detail.natures.some((n) => estPl(n) || n === 'POST_BL')
   useEffect(() => {
     const k = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
     window.addEventListener('keydown', k); return () => window.removeEventListener('keydown', k)
@@ -226,10 +241,11 @@ function DetailModal({ detail, lignes, onClose }: { detail: Detail; lignes: Lign
               <th className="px-1.5 py-1">Nature</th><th className="px-1.5">Référence</th><th className="px-1.5">Pièce</th><th className="px-1.5">N° CDC</th>
               <th className="px-1.5">Date CDC</th><th className="px-1.5">Livraison demandée</th>
               {avecCouv ? <th className="px-1.5">Livrable à la date demandée</th> : <th className="px-1.5">Date BL</th>}
+              {avecTour && <th className="px-1.5">À son tour ?</th>}
               <th className="px-1.5 text-right">Qté</th><th className="px-1.5">Client</th><th className="px-1.5">Réf. chantier</th><th className="px-1.5">Représentant</th><th className="px-1.5">Agence</th>
             </tr></thead>
             <tbody>
- {liste.length === 0 && <tr><td colSpan={12} className="px-2 py-6 text-center text-[#8A8474]">Aucune ligne.</td></tr>}
+ {liste.length === 0 && <tr><td colSpan={avecTour ? 13 : 12} className="px-2 py-6 text-center text-[#8A8474]">Aucune ligne.</td></tr>}
               {liste.map((l, i) => (
                 <tr key={`${l.piece}-${l.ref}-${i}`} className={`border-t border-[#F0EDE6] ${l.bloc === 'JITHURBIDE' ? 'bg-[#F4F0FA]' : ''}`}>
                   <td className="whitespace-nowrap px-1.5 py-0.5">{LIB_NATURE[l.nature]}</td>
@@ -241,6 +257,7 @@ function DetailModal({ detail, lignes, onClose }: { detail: Detail; lignes: Lign
                   {avecCouv
                     ? <td className={`whitespace-nowrap px-1.5 ${clsCouverture(l)}`}>{libCouverture(l) ?? '—'}</td>
                     : <td className="whitespace-nowrap px-1.5">{fmtDate(l.date_bl)}</td>}
+                  {avecTour && <td className={`whitespace-nowrap px-1.5 ${clsFile(l)}`}>{libFile(l) ?? '—'}</td>}
                   <td className="px-1.5 text-right font-bold">{fmtNum(l.q)}</td>
                   <td className="max-w-[260px] truncate px-1.5" title={`${l.tiers || ''} ${l.client || ''}`}>{l.client || l.tiers}</td>
                   <td className="max-w-[200px] truncate px-1.5" title={l.chantier || ''}>{l.chantier || '—'}</td>
@@ -283,6 +300,40 @@ function dispoAnneeSuivante(l: LigneDoc): { date: string; retard: number; cdf: s
   return { date, retard, cdf: couvTardive ? l.couv_cdf || null : null }
 }
 
+/** PL / BL depuis le 26/10 : servie à son tour dans la file (date de livraison puis date de création) ? */
+const avecFile = (l: LigneDoc) => (estPl(l.nature) || l.nature === 'POST_BL') && !!l.file_statut
+function libFile(l: LigneDoc): string | null {
+  if (!avecFile(l)) return null
+  const quoi = estPl(l.nature) ? 'Préparée' : 'Livrée'
+  const dt = l.file_date ? ` le ${fmtDate(l.file_date)}` : ''
+  let t: string
+  switch (l.file_statut) {
+    case 'COUVERT': t = `${quoi} à son tour (stock actuel)`; break
+    case 'COUVERT_PAR_RECEPTION': t = `${quoi} en avance : à son tour via ${l.file_cdf || 'CDF'}${dt} (à l’heure)`; break
+    case 'RECEPTION_TARDIVE': t = `${quoi} en avance : à son tour via ${l.file_cdf || 'CDF'}${dt} · retard ${fmtNum(l.file_retard)} j`; break
+    default: t = `${quoi} en avance : aucune CDF ne la couvrait à son tour`
+  }
+  const nb = n0(l.file_doublees)
+  if (nb > 0) {
+    const liste = (l.file_doublees_cdc || '').split(', ').filter(Boolean)
+    t += ` · passée devant ${fmtNum(nb)} CDC en attente (${liste.slice(0, 3).join(', ')}${liste.length > 3 ? '…' : ''})`
+  }
+  return t
+}
+function clsFile(l: LigneDoc): string {
+  if (!avecFile(l)) return ''
+  if (n0(l.file_doublees) > 0 || l.file_statut === 'RUPTURE') return 'font-bold text-red-700'
+  switch (l.file_statut) {
+    case 'COUVERT': return 'font-semibold text-[#1E6B3A]'
+    case 'COUVERT_PAR_RECEPTION': return 'font-semibold text-[#1D5C86]'
+    default: return 'font-bold text-orange-700'
+  }
+}
+function rangFile(l: LigneDoc): number {
+  if (!avecFile(l) || l.file_statut === 'COUVERT') return 6
+  return n0(l.file_doublees) > 0 || l.file_statut === 'RUPTURE' ? 0 : l.file_statut === 'RECEPTION_TARDIVE' ? 1 : 3
+}
+
 /** Livrable à la date demandée ? (CDC à livrer) */
 function libCouverture(l: LigneDoc): string | null {
   if (l.nature === 'CDC_ANNEE_SUIVANTE') {
@@ -302,7 +353,7 @@ function libCouverture(l: LigneDoc): string | null {
     if (parts.length === 0) return x.insuffisant ? 'Pas encore couvert (stock + CDF en cours insuffisants)' : 'Stock actuel (disponible maintenant)'
     return parts.join(' + ')
   }
-  if (estPl(l.nature)) return 'Préparée (stock réservé)'
+  if (estPl(l.nature)) return libFile(l) ?? 'Préparée (stock réservé)'
   if (l.nature !== 'CDC') return null
   const dc = l.couv_date ? fmtDate(l.couv_date) : null
   switch (l.couv_statut) {
@@ -324,7 +375,7 @@ function clsCouverture(l: LigneDoc): string {
     const tard = (l.reste.sources || []).some((y) => y.cdf && y.date > `${new Date().getFullYear()}-12-31`)
     return tard ? 'font-bold text-orange-700' : 'font-semibold text-[#1D5C86]'
   }
-  if (estPl(l.nature)) return 'text-sky-800'
+  if (estPl(l.nature)) return avecFile(l) ? clsFile(l) : 'text-sky-800'
   switch (l.couv_statut) {
     case 'COUVERT': return 'font-semibold text-[#1E6B3A]'
     case 'COUVERT_PAR_RECEPTION': return 'font-semibold text-[#1D5C86]'
@@ -338,7 +389,7 @@ function clsCouverture(l: LigneDoc): string {
 function rangCouverture(l: LigneDoc): number {
   if (l.nature === 'RESTE') return 7
   if (l.nature === 'CDC_ANNEE_SUIVANTE' && l.couv_statut !== 'RUPTURE' && l.couv_statut !== 'A_COUVRIR_PAR_APPRO') return dispoAnneeSuivante(l).retard > 0 ? 1 : 3
-  if (estPl(l.nature)) return 6
+  if (estPl(l.nature)) return rangFile(l)
   return ({ RUPTURE: 0, RECEPTION_TARDIVE: 1, A_COUVRIR_PAR_APPRO: 2, COUVERT_PAR_RECEPTION: 3, COUVERT: 4 } as Record<string, number>)[l.couv_statut || ''] ?? 5
 }
 
@@ -582,6 +633,8 @@ function AllocationAirH2O() {
     { h: 'Période', v: (l) => (l.nature === 'POST_BL' ? `depuis le ${debutLib}` : l.nature === 'BL_M' ? `${libMois(d?.mois_m || '')} (→ ${veilleLib})` : libMois(d?.mois_m1 || '')), w: 14 },
     { h: 'N° BL / facture', v: (l) => l.piece, w: 13 }, { h: 'Date BL', v: (l) => l.date_bl, date: true, w: 11 },
     { h: 'N° CDC', v: (l) => l.cdc, w: 11 }, { h: 'Date CDC', v: (l) => l.date_cdc, date: true, w: 11 },
+    { h: 'Livraison demandée', v: (l) => l.date_livraison, date: true, w: 12 },
+    { h: 'À son tour ?', v: (l) => libFile(l), cls: (l) => clsFile(l), s: (l) => rangFile(l) * 1000 + n0(l.file_retard), w: 40 },
     ...colClient]
   const colsRecentes: Col<LR>[] = [
     { h: 'Statut', v: (l) => STATUT_NATURE[l.nature], cls: (l) => (estBl(l.nature) ? 'font-bold text-[#1E6B3A]' : estPl(l.nature) ? 'text-sky-800' : ''), w: 18 },
@@ -590,6 +643,7 @@ function AllocationAirH2O() {
     { h: 'BL / PL', v: (l) => (l.nature === 'CDC' || l.nature === 'CDC_ANNEE_SUIVANTE' ? null : l.piece), w: 11 },
     { h: 'Date BL', v: (l) => l.date_bl, date: true, w: 11 },
     { h: 'Livraison demandée', v: (l) => l.date_livraison, date: true, w: 12 },
+    { h: 'À son tour ?', v: (l) => libFile(l), cls: (l) => clsFile(l), s: (l) => rangFile(l) * 1000 + n0(l.file_retard), w: 40 },
     ...colClient,
     { h: 'CDC plus anciennes en attente', v: (l) => l.anciennes ?? 0, right: true, w: 12 },
     { h: 'dont dues au plus tard le jour du BL', v: (l) => l.anciennesDues ?? 0, right: true, cls: (l) => ((l.anciennesDues ?? 0) > 0 ? 'font-bold text-red-700' : ''), w: 14 },
@@ -757,12 +811,12 @@ function AllocationAirH2O() {
 
         {d && onglet === 'cdc' && (
           <ListeDetail titre={`CDC à livrer ${annee} et ${Number(annee) + 1}`}
-            sousTitre={`${fmtNum(sommeQ(lignesReste))} groupe(s) d’allocation restant à affecter (lignes jaunes, hors total : dispo après toutes les CDC ${annee} ouvertes, agences servies à la suite) ; dont en préparation (PL) ; livraison demandée en rouge = déjà passée ; « Livrable » : stock actuel, ou CDF qui la complète (à l’heure / en retard) ; CDC ${Number(annee) + 1} livrables à partir du 31/03/${Number(annee) + 1} (stock et CDF alloués sur ${annee}), CDC servies par date de livraison puis date de création ; clic sur un en-tête pour trier`}
+            sousTitre={`${fmtNum(sommeQ(lignesReste))} groupe(s) d’allocation restant à affecter (lignes jaunes, hors total : dispo après toutes les CDC ${annee} ouvertes, agences servies à la suite) ; dont en préparation (PL) : servie « à son tour » si le stock la couvrait dans la file (date de livraison puis date de création, toutes agences), sinon « en avance » avec la CDF qui l’aurait couverte et les CDC passées derrière ; livraison demandée en rouge = déjà passée ; « Livrable » : stock actuel, ou CDF qui la complète (à l’heure / en retard) ; CDC ${Number(annee) + 1} livrables à partir du 31/03/${Number(annee) + 1} (stock et CDF alloués sur ${annee}), CDC servies par date de livraison puis date de création ; clic sur un en-tête pour trier`}
             cols={colsCdc} rows={listeCdc} cle={(l, i) => `${l.piece}-${l.ref}-${i}`} totalQte={sommeQ(listeCdc.filter((l) => l.nature !== 'RESTE'))}
             rowCls={(l) => (l.nature === 'RESTE' ? 'bg-[#FFF8D6] italic' : l.bloc === 'JITHURBIDE' ? 'bg-[#F4F0FA]' : '')} />
         )}
         {d && onglet === 'bl' && (
-          <ListeDetail titre={`BL ${lm1}, ${lm} et depuis le ${debutLib}`} sousTitre={`BL facturés ou non, hors retours ; ${lm} = jusqu’au ${veilleLib}, puis « depuis le ${debutLib} »`}
+          <ListeDetail titre={`BL ${lm1}, ${lm} et depuis le ${debutLib}`} sousTitre={`BL facturés ou non, hors retours ; ${lm} = jusqu’au ${veilleLib}, puis « depuis le ${debutLib} » ; « À son tour ? » (BL depuis le ${debutLib}) : le stock la couvrait-il dans la file des commandes (date de livraison puis date de création, toutes agences), ou aurait-elle dû attendre une CDF`}
             cols={colsBl} rows={listeBl} cle={(l, i) => `${l.piece}-${l.ref}-${i}`} totalQte={sommeQ(listeBl)}
             rowCls={(l) => (l.bloc === 'JITHURBIDE' ? 'bg-[#F4F0FA]' : '')} />
         )}

@@ -26,6 +26,14 @@
 // sans commande BLG ; migration 20261030_portefeuille_absentes_blg.sql.
 // 30/10/2026 (b) : volet Achats (?domaine=achat) — commandes d'achat BLG × CDF / BLF / FAF SAGE
 // (sage.bdcf) ; migration 20261030b_portefeuille_achats_blg_sage.sql.
+// 03/11/2026 : reprend tout le périmètre de l'écran « Activité SAGE ↔ statuts BLG » (retiré du menu) :
+//   - ligne « Commande terminée » (S42) : terminée dans BLG mais encore ouverte dans SAGE → à corriger ;
+//   - ligne « Sans CDC (PL / BL / BR) » (SANS_CDC) : pièces SAGE en cours non rattachées à une CDC,
+//     une ligne par pièce ; PL > 30 j = à corriger (dans SAGE), BL / BR > 30 j = à analyser ;
+//   - nouvelle colonne « Bon de retour » (BR).
+//   Migration 20261103_portefeuille_blg_sage_terminees_sans_cdc.sql.
+// 03/11/2026 (b) : code couleur des cases renforcé (fond plus opaque, bordure 6 px, contour et
+//   chiffre dans la couleur du verdict hors « Cohérent »).
 // URL : ?statut=S43&situation=FACTUREE&verdict=A_CORRIGER&agence=PAU
 // ============================================================================
 
@@ -110,6 +118,7 @@ const SITUATIONS_VENTE: { code: string; label: string; hint: string }[] = [
   { code: 'A_LIVRER', label: 'CDC à livrer', hint: 'La CDC a encore des lignes à livrer dans SAGE' },
   { code: 'PL', label: 'En préparation (PL)', hint: 'Lignes en préparation de livraison dans SAGE' },
   { code: 'BL', label: 'BL non facturé', hint: 'Lignes livrées, BL pas encore facturé dans SAGE' },
+  { code: 'BR', label: 'Bon de retour', hint: 'Bon de retour SAGE en cours, non rattaché à une CDC' },
   { code: 'FACTUREE', label: 'Soldée, facturée', hint: 'Plus rien en cours dans SAGE ; au moins une facture rattachée à la CDC' },
   { code: 'SOLDEE', label: 'Soldée, sans facture', hint: 'En-tête SAGE connu, plus aucune ligne en cours ni facturée (lignes supprimées / soldées)' },
   { code: 'ABSENTE', label: 'Absente de SAGE', hint: 'Aucune trace de la CDC dans l’activité ni dans les factures SAGE' },
@@ -128,10 +137,10 @@ const TEXTES: Record<Domaine, {
 }> = {
   VENTE: {
     titre: 'Portefeuille BLG ↔ SAGE — Ventes',
-    sousTitre: 'Commandes clients BLG ouvertes (validée, en cours, à facturer) et archivées, plus les CDC SAGE absentes de BLG, rangées selon leur situation dans SAGE. Les cases « À corriger dans BLG » sont la liste de travail quotidienne.',
+    sousTitre: 'Commandes clients BLG ouvertes (validée, en cours, à facturer), terminées encore ouvertes dans SAGE et archivées, plus les CDC SAGE absentes de BLG et les PL / BL / BR SAGE sans CDC, rangées selon leur situation dans SAGE. Les cases « À corriger » sont la liste de travail quotidienne.',
     tiers: 'Client', lieu: 'Agence', reste: 'Reste à livrer BLG', resteCourt: 'Reste BLG',
     piecesSage: 'Pièces SAGE en cours', facturesSage: 'Factures SAGE',
-    note: 'Périmètre BLG : ventes CDC (hors service) au statut Commande validée, en cours, à facturer (et statut 21), plus les commandes archivées. Ligne « Absente de BLG » : CDC du portefeuille SAGE sans commande BLG — décalage normal si créée aujourd’hui (interface de la nuit), à corriger sinon. Situation SAGE lue dans l’activité du dernier import (CDC à livrer, PL, BL non facturés) puis dans les factures rattachées à la CDC. Reste à livrer BLG = quantité non livrée × prix net des lignes BLG. Calcul mis à jour chaque heure (h+42) ou avec « Recalculer ».',
+    note: 'Périmètre BLG : ventes CDC (hors service) au statut Commande validée, en cours, à facturer (et statut 21), Commande terminée seulement si la CDC est encore ouverte dans SAGE (à corriger), plus les commandes archivées. Ligne « Absente de BLG » : CDC du portefeuille SAGE sans commande BLG — décalage normal si créée aujourd’hui (interface de la nuit), à corriger sinon. Ligne « Sans CDC » : PL, BL et BR SAGE en cours non rattachés à une CDC (une ligne par pièce) — décalage normal sous 30 jours ; au-delà, PL à corriger (préparation orpheline à nettoyer dans SAGE), BL / BR à analyser. Situation SAGE lue dans l’activité du dernier import (CDC à livrer, PL, BL non facturés) puis dans les factures rattachées à la CDC. Reste à livrer BLG = quantité non livrée × prix net des lignes BLG. Calcul mis à jour chaque heure (h+42) ou avec « Recalculer ».',
     noteListe: '« Facture récente » : la CDC a été facturée dans SAGE il y a 2 jours ou moins ; BLG ne l’a peut-être pas encore reçue (synchro de nuit), ce n’est pas forcément un écart. Le lien ↗ ouvre la commande dans BLG.',
   },
   ACHAT: {
@@ -145,10 +154,10 @@ const TEXTES: Record<Domaine, {
 }
 
 const VERDICTS: Record<Verdict, { label: string; color: string; bg: string; hint: string }> = {
-  A_CORRIGER: { label: 'À corriger dans BLG', color: '#E07A4E', bg: 'rgba(224,122,78,0.16)', hint: 'Commande ouverte dans BLG mais sortie du portefeuille SAGE (ou archivée à tort) : solder, archiver ou désarchiver dans BLG.' },
-  A_ANALYSER: { label: 'À analyser', color: '#E0A961', bg: 'rgba(224,169,97,0.14)', hint: 'Statut BLG et situation SAGE peu compatibles, à regarder au cas par cas.' },
-  DECALAGE: { label: 'Décalage normal', color: '#8FC7DA', bg: 'rgba(143,199,218,0.12)', hint: 'BL SAGE pas encore facturé (se résorbe à la facturation), ou CDC créée aujourd’hui dans SAGE qui attend l’interface SAGE → BLG de la nuit.' },
-  OK: { label: 'Cohérent', color: '#7FC79A', bg: 'rgba(127,199,154,0.08)', hint: 'Statut BLG cohérent avec la situation SAGE.' },
+  A_CORRIGER: { label: 'À corriger dans BLG', color: '#E07A4E', bg: 'rgba(224,122,78,0.40)', hint: 'Commande ouverte dans BLG mais sortie du portefeuille SAGE (ou archivée / terminée à tort) : solder, archiver ou désarchiver dans BLG. Ligne « Sans CDC » : PL orpheline de plus de 30 jours à nettoyer dans SAGE.' },
+  A_ANALYSER: { label: 'À analyser', color: '#E0A961', bg: 'rgba(224,169,97,0.32)', hint: 'Statut BLG et situation SAGE peu compatibles, à regarder au cas par cas.' },
+  DECALAGE: { label: 'Décalage normal', color: '#8FC7DA', bg: 'rgba(143,199,218,0.24)', hint: 'BL SAGE pas encore facturé (se résorbe à la facturation), ou CDC créée aujourd’hui dans SAGE qui attend l’interface SAGE → BLG de la nuit.' },
+  OK: { label: 'Cohérent', color: '#7FC79A', bg: 'rgba(127,199,154,0.16)', hint: 'Statut BLG cohérent avec la situation SAGE.' },
 }
 const VERDICT_ORDRE: Verdict[] = ['A_CORRIGER', 'A_ANALYSER', 'DECALAGE', 'OK']
 
@@ -542,14 +551,14 @@ function PortefeuilleBlgSageContent() {
   }
 
   // ── Rendu d'une case ──────────────────────────────────────────────────────
-  const renderValue = (a?: Agg) => {
+  const renderValue = (a?: Agg, verdict: Verdict | null = null) => {
     if (!a) return null
     const main =
       metric === 'nb' ? nf0.format(a.nb) : metric === 'reste' ? nfEur.format(a.reste) : metric === 'sage' ? nfEur.format(a.sage) : nfEur.format(a.facture)
     const sub = metric === 'nb' ? `reste BLG ${nfEur.format(a.reste)}` : `${nf0.format(a.nb)} cde`
     return (
       <>
-        <span style={s.big}>{main}</span>
+        <span style={{ ...s.big, ...(verdict && verdict !== 'OK' ? { color: tc(VERDICTS[verdict].color), fontWeight: 700 } : {}) }}>{main}</span>
         <span style={s.small}>{sub}</span>
       </>
     )
@@ -565,7 +574,9 @@ function PortefeuilleBlgSageContent() {
       whiteSpace: 'nowrap',
       fontVariantNumeric: 'tabular-nums',
       background: v ? tc(v.bg) : undefined,
-      borderLeft: v ? `3px solid ${tc(v.color)}` : undefined,
+      borderLeft: v ? `6px solid ${tc(v.color)}` : undefined,
+      outline: v && verdict !== 'OK' ? `1px solid ${tc(v.color)}` : undefined,
+      outlineOffset: -1,
       boxShadow: selected ? `inset 0 0 0 2px ${tc('#A6A181')}` : undefined,
     }
   }
@@ -697,7 +708,7 @@ function PortefeuilleBlgSageContent() {
                     const v = cellVerdict(st.code, x.code)
                     return (
                       <td key={x.code} style={cellStyle(v, isSelected(sel))} onClick={() => select(sel)} title={v ? `${VERDICTS[v].label} — ${VERDICTS[v].hint}` : undefined}>
-                        {renderValue(a)}
+                        {renderValue(a, v)}
                       </td>
                     )
                   })}
@@ -757,7 +768,7 @@ function PortefeuilleBlgSageContent() {
             <table style={s.table}>
               <thead>
                 <tr>
-                  <th style={{ ...s.th, ...s.sortable }} onClick={() => toggleSort('reference')}>{domaine === 'ACHAT' ? 'CDF BLG' : 'CDC BLG'}</th>
+                  <th style={{ ...s.th, ...s.sortable }} onClick={() => toggleSort('reference')}>{domaine === 'ACHAT' ? 'CDF BLG' : 'CDC / pièce SAGE'}</th>
                   <th style={s.th}>Statut BLG</th>
                   <th style={{ ...s.th, ...s.sortable }} onClick={() => toggleSort('blg_order_date')}>Cde BLG</th>
                   <th style={{ ...s.th, ...s.sortable }} onClick={() => toggleSort('intitule_tiers')}>{T.tiers}</th>

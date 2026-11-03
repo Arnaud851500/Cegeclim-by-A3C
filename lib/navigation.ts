@@ -49,6 +49,18 @@
 // ÉVOLUTION (2026-11-02) : nouveau bloc « Hotline technique » (SAV PV / thermique) :
 // console d'appel et tickets (can_hotline), éditeur de diagnostic et statistiques
 // (can_hotline_expert). Migration 20261102_hotline_technique.sql.
+// ÉVOLUTION (2026-11-03) : « Contrats d’objectifs » (/objectifs/contrats) ajouté au bloc
+// Mes agences / Mes commerciaux (menu sous can_dashboard ; lecture / écriture contrôlées
+// en base par obj_peut_lire / obj_peut_modifier). Migration 20261103_contrats_objectifs.sql.
+// ÉVOLUTION (2026-11-03, suite) : l'écran Objectifs (/objectifs) est retiré du menu — les
+// objectifs du suivi agences / commerciaux viennent désormais des contrats d'objectifs
+// (get_suivi_objectifs, migration 20261103f). La page reste ouvrable par URL.
+// ÉVOLUTION (2026-11-03, suite) : « Activité SAGE – statuts BLG » retiré du menu — son périmètre
+// (commandes terminées dans BLG encore ouvertes dans SAGE, PL / BL / BR sans CDC) est repris par
+// « Portefeuille BLG – SAGE » (migration 20261103_portefeuille_blg_sage_terminees_sans_cdc.sql).
+// La page reste ouvrable par URL.
+// ÉVOLUTION (2026-11-03, suite) : nouveau bloc « Guides BLG » (/guides-blg, droit can_guides_blg) —
+// chapitres HTML des modes opératoires BLG Cloud déposés tels quels (migration 20261103g_guides_blg.sql).
 // Le bloc « Mes alertes » de l'accueil n'est pas ici : il n'a pas de page, il
 // ouvre le Centre d'alertes (components/AlertsContext.tsx + ClientRootShell).
 
@@ -155,7 +167,7 @@ export const NAV_BLOCS: NavBloc[] = [
     iconBg: 'rgba(255,255,255,0.18)',
     pages: [
       { label: 'Suivi agences – commerciaux', path: '/suivi-agences', activeLabel: 'Suivi agences – commerciaux', accessKey: 'can_suivi_agences', description: 'CA facturé N-2 / N-1 / N par agence et collaborateur, évolution vs N-1 et vs entreprise, croix de positionnement trimestrielle, fiche détaillée — limité aux agences / collaborateurs autorisés.' },
-      { label: 'Objectifs', path: '/objectifs', activeLabel: 'Objectifs commerciaux', accessKey: 'can_objectifs', description: 'Objectifs entreprise, agences et commerciaux : CA, évolution, marge, familles suivies, structure clients.' },
+      { label: 'Contrats d’objectifs', path: '/objectifs/contrats', activeLabel: 'Contrats d’objectifs', accessKey: 'can_dashboard', description: 'Contrat d’objectifs signé par chaque commercial : objectif CA, commission sur marge, avances, primes annuelles. Le commercial voit sa fiche ; la direction modifie, évalue et importe le classeur.' },
     ],
   },
   {
@@ -250,9 +262,19 @@ export const NAV_BLOCS: NavBloc[] = [
       { label: 'Clients SAGE – BLG', path: '/controle-sage-blg/clients', activeLabel: 'Contrôle cohérence Client SAGE-BLG', accessKey: 'can_projetblg', description: 'Contrôle de cohérence des tiers, contacts et adresses de livraison.' },
       { label: 'Fournisseurs SAGE – BLG', path: '/controle-sage-blg/fournisseur-sage-blg', activeLabel: 'Contrôle cohérence Fournisseur SAGE-BLG', accessKey: 'can_projetblg', description: 'Contrôle de cohérence fournisseurs et articles entre SAGE et BLG.' },
       { label: 'Rapprochement SAGE-BLG', path: '/controle-sage-blg/rapprochement-sage-blg', activeLabel: 'Rapprochement Sage-BLG, CDC, CDF, Stocks', accessKey: 'can_projetblg', description: 'Contrôle de cohérence SAGE-BLG CDC, CDF, Stock' },
-      { label: 'Activité SAGE – statuts BLG', path: '/controle-sage-blg/activite-sage-blg', activeLabel: 'Activité SAGE ↔ statuts BLG', accessKey: 'can_projetblg', description: 'CDC, PL, BL et BR SAGE en cours rangés par statut BLG (devis, en cours, à facturer, terminée, archives, absentes, sans CDC) : nombre de pièces, lignes et valeur, liste détaillée et pendant BLG.' },
-      { label: 'Portefeuille BLG – SAGE', path: '/controle-sage-blg/portefeuille-blg-sage', activeLabel: 'Portefeuille BLG ↔ SAGE', accessKey: 'can_projetblg', description: 'Ventes (CDC) et achats (CDF) : commandes BLG ouvertes et archivées × situation dans SAGE, plus les commandes SAGE absentes de BLG — cases à corriger chaque jour dans BLG, listes et export.' },
+      { label: 'Portefeuille BLG – SAGE', path: '/controle-sage-blg/portefeuille-blg-sage', activeLabel: 'Portefeuille BLG ↔ SAGE', accessKey: 'can_projetblg', description: 'Ventes (CDC) et achats (CDF) : commandes BLG ouvertes, terminées encore ouvertes dans SAGE et archivées × situation dans SAGE, plus les commandes SAGE absentes de BLG et les PL / BL / BR sans CDC — cases à corriger chaque jour, listes et export.' },
       
+    ],
+  },
+  {
+    id: 'guides',
+    label: 'Guides BLG',
+    subtitle: 'Modes opératoires BLG Cloud',
+    icon: '📘',
+    gradient: ['#2E6E66', '#173C3A'],
+    iconBg: 'rgba(255,255,255,0.18)',
+    pages: [
+      { label: 'Guides BLG', path: '/guides-blg', activeLabel: 'Guides BLG — modes opératoires', accessKey: 'can_guides_blg', description: 'Chapitres des modes opératoires BLG Cloud : fiches clients, contacts, adresses de livraison, blocage, archivage, recherches…' },
     ],
   },
   {

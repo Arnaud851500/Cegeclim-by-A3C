@@ -588,8 +588,8 @@ function SuiviAgencesPage() {
                 </option>
               ))}
             </select>
-            <a href="/objectifs" className="flex h-9 items-center rounded-lg border border-[color:var(--cg-hdr-line)] px-3 text-sm font-semibold text-[color:var(--cg-hdr-ink-2)] hover:border-[#B4761A] hover:text-[color:var(--cg-hdr-ink)]">
-              🎯 Objectifs
+            <a href={`/objectifs/contrats?annee=${annee}`} className="flex h-9 items-center rounded-lg border border-[color:var(--cg-hdr-line)] px-3 text-sm font-semibold text-[color:var(--cg-hdr-ink-2)] hover:border-[#B4761A] hover:text-[color:var(--cg-hdr-ink)]">
+              🎯 Contrats d’objectifs
             </a>
           </div>
         </div>
