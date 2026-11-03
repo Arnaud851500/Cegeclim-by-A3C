@@ -134,19 +134,6 @@ export async function exporterParcoursExcel(arbres: Arbre[]) {
     feuilles[nom] = ws
   }
 
-  const liste = (ws: ExcelJS.Worksheet, col: string, valeurs: string[]) => {
-    for (let r = 2; r <= 1000; r++) {
-      ws.getCell(`${col}${r}`).dataValidation = { type: 'list', allowBlank: true, formulae: [`"${valeurs.join(',')}"`] }
-    }
-  }
-  liste(feuilles.Parcours, 'B', ['PV', 'THERMIQUE'])
-  liste(feuilles.Parcours, 'C', ['MISE_EN_SERVICE', 'EXPLOITATION'])
-  liste(feuilles.Parcours, 'F', ['OUI', 'NON'])
-  liste(feuilles.Parcours, 'G', ['OUI', 'NON'])
-  liste(feuilles.Questions, 'F', ['OUI', 'NON'])
-  liste(feuilles['Réponses'], 'F', ['OUI', 'NON'])
-  liste(feuilles.Documents, 'D', ['PDF', 'SCHEMA', 'FIRMWARE', 'VIDEO', 'XLS', 'LIEN'])
-
   const tries = [...arbres].sort((a, b) => String(a.code || '').localeCompare(String(b.code || '')))
   if (!tries.length) {
     feuilles.Parcours.addRow(['TH-MES-1', 'THERMIQUE', 'MISE_EN_SERVICE', 'Mise en service PAC air/eau', 'PAC', 'OUI', 'NON'])
@@ -170,6 +157,22 @@ export async function exporterParcoursExcel(arbres: Arbre[]) {
       }
     }
   }
+  // Listes déroulantes posées APRÈS les données : poser une validation crée la
+  // ligne, et addRow écrirait ensuite les données sous la dernière ligne créée.
+  const liste = (ws: ExcelJS.Worksheet, col: string, valeurs: string[]) => {
+    const fin = Math.max(ws.rowCount, 1) + 300
+    for (let r = 2; r <= fin; r++) {
+      ws.getCell(`${col}${r}`).dataValidation = { type: 'list', allowBlank: true, formulae: [`"${valeurs.join(',')}"`] }
+    }
+  }
+  liste(feuilles.Parcours, 'B', ['PV', 'THERMIQUE'])
+  liste(feuilles.Parcours, 'C', ['MISE_EN_SERVICE', 'EXPLOITATION'])
+  liste(feuilles.Parcours, 'F', ['OUI', 'NON'])
+  liste(feuilles.Parcours, 'G', ['OUI', 'NON'])
+  liste(feuilles.Questions, 'F', ['OUI', 'NON'])
+  liste(feuilles['Réponses'], 'F', ['OUI', 'NON'])
+  liste(feuilles.Documents, 'D', ['PDF', 'SCHEMA', 'FIRMWARE', 'VIDEO', 'XLS', 'LIEN'])
+
   ;[feuilles.Questions, feuilles['Réponses']].forEach((ws) => {
     ws.getColumn(4).alignment = { wrapText: true, vertical: 'top' }
     ws.getColumn(5).alignment = { wrapText: true, vertical: 'top' }
