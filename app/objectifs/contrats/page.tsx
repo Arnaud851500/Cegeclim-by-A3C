@@ -727,24 +727,43 @@ function PrimesAnnuelles({ fiche, calc, modifier, onChange }: { fiche: FicheCont
 }
 
 function PaliersBar({ paliers, valeur, projection }: { paliers: Prime['paliers']; valeur: number | null; projection: number | null }) {
-  const max = Math.max(...paliers.map((p) => p.seuil), valeur || 0, projection || 0) * 1.05 || 1
+  // Barre sans libellés (repères seuls) + paliers en pastilles alignées dessous :
+  // plus de chevauchement quand les seuils sont proches.
+  const tries = [...paliers].sort((a, b) => a.seuil - b.seuil)
+  const max = Math.max(...tries.map((p) => p.seuil), valeur || 0, projection || 0) * 1.05 || 1
   const pos = (v: number) => `${Math.max(0, Math.min(100, (v / max) * 100))}%`
   return (
     <div className="mt-3">
       <div className="relative h-2.5 rounded-full bg-[#E7E3DA]">
         {valeur != null && <div className="absolute left-0 top-0 h-full rounded-full bg-[#2D6F86]" style={{ width: pos(valeur) }} />}
-        {projection != null && <div className="absolute top-[-3px] h-4 w-[2px] bg-[#B4761A]" style={{ left: pos(projection) }} title="Projection" />}
-        {paliers.map((p, i) => (
-          <div key={i} className="absolute top-[-4px] h-[18px] w-[2px] bg-[#0B1220]" style={{ left: pos(p.seuil) }} />
+        {tries.map((p, i) => (
+          <div key={i} className="absolute top-[-3px] h-4 w-[2px] rounded bg-[#0B1220]/70" style={{ left: pos(p.seuil) }} />
         ))}
+        {projection != null && (
+          <div className="absolute top-[-5px] h-5 w-[3px] rounded bg-[#B4761A]" style={{ left: pos(projection) }} title={`Projection ${fmtK(projection)}`} />
+        )}
       </div>
-      <div className="relative mt-1 h-8 text-[10px] text-slate-600">
-        {paliers.map((p, i) => (
-          <div key={i} className="absolute -translate-x-1/2 text-center leading-tight" style={{ left: pos(p.seuil) }}>
-            <div className="font-semibold">{fmtK(p.seuil)}</div>
-            <div>{fmtE(p.montant)}</div>
-          </div>
-        ))}
+      <div className="mt-2.5 flex flex-wrap gap-1.5">
+        {tries.map((p, i) => {
+          const atteint = valeur != null && valeur >= p.seuil
+          const projete = !atteint && projection != null && projection >= p.seuil
+          return (
+            <div
+              key={i}
+              className={`min-w-[96px] flex-1 rounded-md border px-2 py-1 text-center leading-tight ${
+                atteint
+                  ? 'border-[#2F7A4A] bg-[#E3F1E7] text-[#1F5A35]'
+                  : projete
+                    ? 'border-dashed border-[#B4761A] bg-[#FBF3E4] text-[#7A4E0E]'
+                    : 'border-[#E2DFD8] bg-white text-slate-500'
+              }`}
+            >
+              <div className="text-[11px] font-semibold tabular-nums">≥ {fmtK(p.seuil)}</div>
+              <div className="text-[13px] font-bold tabular-nums">{fmtE(p.montant)}</div>
+              <div className="text-[10px]">{atteint ? '✓ atteint' : projete ? 'en projection' : 'non atteint'}</div>
+            </div>
+          )
+        })}
       </div>
     </div>
   )
