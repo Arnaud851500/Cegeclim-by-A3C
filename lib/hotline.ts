@@ -31,9 +31,9 @@ export type TypeEtape =
   | 'REOUVERTURE'
   | 'PIECE_JOINTE'
 
-export const FILIERES: Array<{ value: Filiere; label: string; icon: string }> = [
-  { value: 'PV', label: 'Photovoltaïque', icon: '☀️' },
-  { value: 'THERMIQUE', label: 'Thermique', icon: '🔥' },
+export const FILIERES: Array<{ value: Filiere; label: string; court: string; icon: string }> = [
+  { value: 'PV', label: 'Photovoltaïque', court: 'Photo', icon: '☀️' },
+  { value: 'THERMIQUE', label: 'Thermique', court: 'Thermie', icon: '🔥' },
 ]
 
 export const MOTIFS: Array<{ value: Motif; label: string }> = [
@@ -76,6 +76,8 @@ export type Choix = {
 
 export type Arbre = {
   id: string
+  /** Code stable (ex. TH-MES-1), clé de l'import Excel. */
+  code?: string | null
   filiere: Filiere
   motif: Motif
   nom: string
@@ -89,6 +91,8 @@ export type Arbre = {
 
 export type Noeud = {
   id: string
+  /** Code stable dans le parcours (ex. Q1), clé de l'import Excel. */
+  code?: string | null
   arbre_id: string
   question: string
   aide: string | null
@@ -283,6 +287,7 @@ export function normaliserNoeud(row: Record<string, unknown>): Noeud {
   const choix = Array.isArray(row.choix) ? (row.choix as Choix[]) : []
   return {
     id: String(row.id),
+    code: (row.code as string | null) ?? null,
     arbre_id: String(row.arbre_id),
     question: String(row.question || ''),
     aide: (row.aide as string | null) ?? null,

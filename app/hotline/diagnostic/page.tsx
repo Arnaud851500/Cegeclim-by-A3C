@@ -10,12 +10,16 @@
  *   (procédures, schémas, firmwares), réponses → question suivante, ou fin de
  *   parcours avec préconisation (et option « proposer l'escalade »).
  * - Lignes 3CX : numéro appelé → filière.
+ * - Fichier Excel normé (03/11/2026) : export de tous les parcours (sert aussi
+ *   de modèle) et import contrôlé avec bilan avant application
+ *   (lib/hotlineExcel.ts, RPC hotline_importer_parcours).
  */
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { supabase } from '@/lib/supabaseClient'
 import { useAccess } from '@/components/AccessContext'
 import HotlineHeader, { HotlineErreur } from '@/components/hotline/HotlineHeader'
+import { exporterParcoursExcel, importerParcours, lireExcelParcours, type BilanImport, type ParcoursImport } from '@/lib/hotlineExcel'
 import {
   FILIERES,
   MOTIFS,
@@ -49,6 +53,7 @@ export default function HotlineDiagnosticPage() {
   const [erreur, setErreur] = useState<string | null>(null)
   const [info, setInfo] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+  const [importEnCours, setImportEnCours] = useState<{ fichier: string; parcours: ParcoursImport[]; bilan: BilanImport | null; erreurs: string[] } | null>(null)
   const [nouveau, setNouveau] = useState<{ filiere: Filiere; motif: Motif; nom: string; famille: string }>({
     filiere: 'THERMIQUE',
     motif: 'MISE_EN_SERVICE',
@@ -79,7 +84,7 @@ export default function HotlineDiagnosticPage() {
   }, [arbreId])
 
   const arbre = arbres.find((a) => a.id === arbreId) || null
-  const libellesNoeuds = useMemo(() => new Map(noeuds.map((n, i) => [n.id, `Q${i + 1} · ${n.question || 'Sans titre'}`])), [noeuds])
+  const libellesNoeuds = useMemo(() => new Map(noeuds.map((n, i) => [n.id, `${n.code || `Q${i + 1}`} · ${n.question || 'Sans titre'}`])), [noeuds])
 
   function patchArbre(p: Partial<Arbre>) {
     setArbres((list) => list.map((a) => (a.id === arbreId ? { ...a, ...p } : a)))
@@ -219,6 +224,40 @@ export default function HotlineDiagnosticPage() {
     }, 'Question supprimée')
   }
 
+  async function exporterExcel() {
+    await run(() => exporterParcoursExcel(arbres), 'Fichier Excel téléchargé')
+  }
+
+  async function choisirFichierExcel(f: File | undefined) {
+    if (!f) return
+    await run(async () => {
+      const { parcours, erreurs } = await lireExcelParcours(f)
+      if (erreurs.length || !parcours.length) {
+        setImportEnCours({ fichier: f.name, parcours, bilan: null, erreurs: erreurs.length ? erreurs : ['Aucun parcours trouvé dans le fichier.'] })
+        return
+      }
+      const bilan = await importerParcours(parcours, true)
+      setImportEnCours({ fichier: f.name, parcours, bilan, erreurs: bilan.ok ? [] : bilan.erreurs || ['Fichier refusé.'] })
+    })
+  }
+
+  async function confirmerImport() {
+    if (!importEnCours) return
+    const { parcours } = importEnCours
+    await run(async () => {
+      const bilan = await importerParcours(parcours, false)
+      if (!bilan.ok) {
+        setImportEnCours((v) => (v ? { ...v, bilan, erreurs: bilan.erreurs || ['Import refusé.'] } : v))
+        return
+      }
+      setImportEnCours(null)
+      await chargerTout()
+      if (arbreId) setNoeuds(await chargerNoeuds(arbreId))
+      setInfo(`Import terminé : ${bilan.parcours_crees} parcours créé(s), ${bilan.parcours_maj} mis à jour.`)
+      window.setTimeout(() => setInfo(null), 5000)
+    })
+  }
+
   async function enregistrerLignes() {
     await run(async () => {
       const rows = lignes
@@ -280,6 +319,7 @@ export default function HotlineDiagnosticPage() {
                       >
                         <div className={`font-semibold ${a.actif ? 'text-slate-900' : 'text-slate-400 line-through'}`}>{a.nom}</div>
                         <div className="text-[11px] text-slate-500">
+                          {a.code ? <span className="mr-1 font-mono text-slate-400">{a.code}</span> : null}
                           {libelleMotif(a.motif)}
                           {a.famille ? ` · ${a.famille}` : ''}
                           {a.publie_extranet ? ' · extranet' : ''}
@@ -312,6 +352,30 @@ export default function HotlineDiagnosticPage() {
               <button type="button" disabled={busy || !nouveau.nom.trim()} onClick={creerArbre} className="h-9 w-full rounded-lg bg-[#0B1220] text-[13px] font-semibold text-white disabled:opacity-40">
                 Créer le parcours
               </button>
+            </div>
+          </section>
+
+          <section className="rounded-2xl border border-[#E2DFD8] bg-white">
+            <div className="border-b border-[#EFEDE8] px-4 py-3 text-[14px] font-bold text-slate-900">Fichier Excel</div>
+            <div className="space-y-2 p-3 text-[12px] text-slate-600">
+              <p>Charger ou mettre à jour les parcours depuis un fichier Excel normé. L’export sert de modèle : modifiez-le puis réimportez-le.</p>
+              <div className="flex flex-wrap gap-2">
+                <button type="button" disabled={busy} onClick={exporterExcel} className={petitBouton}>
+                  ⬇ Exporter / modèle
+                </button>
+                <label className={`${petitBouton} cursor-pointer`}>
+                  ⬆ Importer un Excel
+                  <input
+                    type="file"
+                    accept=".xlsx"
+                    className="hidden"
+                    onChange={(e) => {
+                      void choisirFichierExcel(e.target.files?.[0])
+                      e.target.value = ''
+                    }}
+                  />
+                </label>
+              </div>
             </div>
           </section>
 
@@ -417,7 +481,7 @@ export default function HotlineDiagnosticPage() {
                 <div key={n.id} className={`rounded-2xl border bg-white p-4 ${modifies.has(n.id) ? 'border-[#B4761A]' : 'border-[#E2DFD8]'}`}>
                   <div className="mb-2 flex items-center justify-between gap-2">
                     <span className="text-[12px] font-bold uppercase tracking-[0.05em] text-slate-500">
-                      Q{idx + 1}
+                      {n.code || `Q${idx + 1}`}
                       {arbre.noeud_racine === n.id ? <span className="ml-2 rounded bg-[#FDF2DD] px-1.5 py-0.5 text-[10px] text-[#8A5A11]">départ</span> : null}
                       {modifies.has(n.id) ? <span className="ml-2 text-[10px] text-[#B4761A]">non enregistré</span> : null}
                     </span>
@@ -531,6 +595,61 @@ export default function HotlineDiagnosticPage() {
           )}
         </section>
       </main>
+
+      {importEnCours ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-[rgba(6,10,18,0.55)] p-4" onClick={() => setImportEnCours(null)}>
+          <div className="max-h-[85vh] w-full max-w-[640px] overflow-y-auto rounded-2xl bg-white shadow-2xl" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between border-b border-[#EFEDE8] px-5 py-3">
+              <div className="text-[15px] font-bold text-slate-900">Import Excel — {importEnCours.fichier}</div>
+              <button type="button" onClick={() => setImportEnCours(null)} className="text-[13px] font-semibold text-slate-500 hover:text-slate-900">
+                Fermer ✕
+              </button>
+            </div>
+            <div className="space-y-3 p-5 text-[13px]">
+              {importEnCours.erreurs.length ? (
+                <>
+                  <div className="rounded-lg border border-[#F0C5BE] bg-[#FCEFEC] px-3 py-2 font-semibold text-[#7F1D1D]">
+                    Le fichier contient {importEnCours.erreurs.length} erreur{importEnCours.erreurs.length > 1 ? 's' : ''} : rien n’a été modifié.
+                  </div>
+                  <ul className="list-disc space-y-1 pl-5 text-[12px] text-slate-700">
+                    {importEnCours.erreurs.map((e, i) => (
+                      <li key={i}>{e}</li>
+                    ))}
+                  </ul>
+                </>
+              ) : importEnCours.bilan ? (
+                <>
+                  <div className="rounded-lg border border-[#CDE5D1] bg-[#EEF7EF] px-3 py-2 text-[#2F6B3A]">Fichier contrôlé : aucune erreur. Voici ce que l’import va faire.</div>
+                  <ul className="space-y-1 text-slate-700">
+                    <li>
+                      Parcours créés : <b>{importEnCours.bilan.parcours_crees}</b> · mis à jour (remplacés) : <b>{importEnCours.bilan.parcours_maj}</b>
+                    </li>
+                    <li>
+                      Questions : <b>{importEnCours.bilan.questions}</b> · réponses : <b>{importEnCours.bilan.reponses}</b> · documents : <b>{importEnCours.bilan.documents}</b>
+                    </li>
+                    {importEnCours.bilan.questions_supprimees ? (
+                      <li className="text-[#A32C2C]">
+                        Questions supprimées (absentes du fichier dans des parcours mis à jour) : <b>{importEnCours.bilan.questions_supprimees}</b>
+                      </li>
+                    ) : null}
+                    <li className="text-slate-500">Parcours concernés : {importEnCours.parcours.map((p) => p.code).join(', ')}. Les autres parcours ne sont pas modifiés.</li>
+                  </ul>
+                </>
+              ) : null}
+            </div>
+            <div className="flex justify-end gap-2 border-t border-[#EFEDE8] px-5 py-3">
+              <button type="button" onClick={() => setImportEnCours(null)} className="rounded-lg border border-[#D8D3C8] px-4 py-2 text-[13px] font-semibold text-slate-700">
+                {importEnCours.erreurs.length ? 'Fermer' : 'Annuler'}
+              </button>
+              {!importEnCours.erreurs.length && importEnCours.bilan?.ok ? (
+                <button type="button" disabled={busy} onClick={confirmerImport} className="rounded-lg bg-[#B4761A] px-4 py-2 text-[13px] font-bold text-white disabled:opacity-40">
+                  {busy ? 'Import…' : 'Confirmer l’import'}
+                </button>
+              ) : null}
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   )
 }

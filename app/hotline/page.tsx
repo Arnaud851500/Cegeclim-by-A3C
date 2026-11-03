@@ -707,7 +707,7 @@ function HotlineConsole() {
                     onClick={() => patch({ filiere: f.value })}
                     className={`flex-1 rounded-md px-2 py-1.5 font-semibold ${form.filiere === f.value ? 'bg-[#0B1220] text-white' : 'text-slate-600'}`}
                   >
-                    {f.icon} {f.label}
+                    {f.icon} {f.court}
                   </button>
                 ))}
               </div>
