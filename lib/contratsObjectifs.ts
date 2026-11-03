@@ -45,6 +45,8 @@ export type Contrat = {
   taux_commission: number
   avance_mensuelle_saisie: number | null
   avance_mensuelle: number
+  perimetre_objectif: 'perso' | 'agence'
+  date_fin: string | null
   statut: 'brouillon' | 'valide' | 'signe'
   commentaire: string | null
   source_fichier: string | null
@@ -95,6 +97,12 @@ export type LigneListe = {
   ca: number
   marge: number
   ca_n1_a_date: number
+  perimetre_objectif: 'perso' | 'agence'
+  ca_objectif: number
+  ca_objectif_n1_a_date: number
+  date_fin: string | null
+  mois_fin: number
+  mois_calc: number
   nb_primes: number
   nb_a_evaluer: number
   updated_at: string
@@ -142,19 +150,37 @@ export const fmtPct = (v: number | null | undefined, d = 1) =>
 // ---------------------------------------------------------------------------
 // Calculs
 // ---------------------------------------------------------------------------
+/** CA servant à mesurer l'objectif CA HT : CA perso (mois clos) ou CA de l'agence (mois clos). */
+export function caObjectif(f: FicheContrat, calc: CalculContrat) {
+  const agence = f.contrat?.perimetre_objectif === 'agence'
+  const realise = agence ? f.ca_agence ?? 0 : calc.caTotal
+  const projection = calc.part > 0 ? realise / calc.part : null
+  return { agence, realise, projection, libelle: agence ? `CA HT agence ${f.agence || ''}`.trim() : 'CA HT perso' }
+}
+
 export function avanceTheorique(margeN1: number | null | undefined, tauxBase: number, tauxCommission: number) {
   return Math.round((margeN1 || 0) * tauxBase * tauxCommission)
 }
 
-/** Part de l'année écoulée (0..1) d'après la répartition mensuelle du bilan ; à défaut linéaire. */
-export function partAnnee(repartition: Array<{ mois: number; pct: number }>, moisClos: number) {
-  if (moisClos <= 0) return 0
-  if (moisClos >= 12) return 1
-  const tot = repartition.reduce((s, r) => s + Number(r.pct || 0), 0)
-  if (repartition.length >= 12 && tot > 0) {
-    return repartition.filter((r) => r.mois <= moisClos).reduce((s, r) => s + Number(r.pct || 0), 0) / tot
-  }
-  return moisClos / 12
+/** Dernier mois de calcul du contrat pour l'année : 12 sans date de fin, mois de la date de fin (inclus), 0 si antérieure. */
+export function moisFinContrat(dateFin: string | null | undefined, annee: number) {
+  if (!dateFin) return 12
+  const d = new Date(dateFin)
+  if (Number.isNaN(d.getTime())) return 12
+  if (d.getFullYear() > annee) return 12
+  if (d.getFullYear() < annee) return 0
+  return d.getMonth() + 1
+}
+
+/** Part écoulée (0..1) de la période du contrat (janvier → mois de fin), d'après la répartition mensuelle du bilan ; à défaut linéaire. */
+export function partAnnee(repartition: Array<{ mois: number; pct: number }>, moisClos: number, moisFin = 12) {
+  const fin = Math.max(0, Math.min(12, moisFin))
+  const clos = Math.min(moisClos, fin)
+  if (clos <= 0 || fin <= 0) return 0
+  if (clos >= fin) return 1
+  const somme = (n: number) => repartition.filter((r) => r.mois <= n).reduce((s, r) => s + Number(r.pct || 0), 0)
+  if (repartition.length >= 12 && somme(fin) > 0) return somme(clos) / somme(fin)
+  return clos / fin
 }
 
 export type LigneMois = {
@@ -163,6 +189,7 @@ export type LigneMois = {
   marge: number | null
   clos: boolean
   enCours: boolean
+  horsContrat: boolean
   avance: number
   avanceVersee: boolean // true = versement saisi ou mois passé ; false = prévu
 }
@@ -192,12 +219,16 @@ export type CalculContrat = {
   commissionProjetee: number | null
   soldeProjete: number | null
   avance: number
+  moisFin: number
+  moisCalc: number
 }
 
 export function calculerContrat(f: FicheContrat): CalculContrat {
   const c = f.contrat
   const tauxCom = c?.taux_commission ?? 0.01
   const avance = c ? c.avance_mensuelle : 0
+  const moisFin = moisFinContrat(c?.date_fin, f.annee)
+  const moisCalc = Math.min(f.mois_clos, moisFin)
   const versParMois = new Map<number, number>()
   let autres = 0
   for (const v of f.versements || []) {
@@ -218,15 +249,17 @@ export function calculerContrat(f: FicheContrat): CalculContrat {
     for (let k = 1; k <= 3; k++) {
       const m = t * 3 + k
       const r = moisMap.get(m)
-      const clos = m <= f.mois_clos
-      const enCours = m === f.mois_clos + 1 && f.annee === new Date().getFullYear()
-      const a = versParMois.has(m) ? versParMois.get(m)! : avance
+      const horsContrat = m > moisFin
+      const clos = m <= moisCalc
+      const enCours = !horsContrat && m === f.mois_clos + 1 && f.annee === new Date().getFullYear()
+      const a = versParMois.has(m) ? versParMois.get(m)! : horsContrat ? 0 : avance
       lignes.push({
         mois: m,
         ca: clos ? r?.ca ?? 0 : enCours ? r?.ca ?? null : null,
         marge: clos ? r?.marge ?? 0 : enCours ? r?.marge ?? null : null,
         clos,
         enCours,
+        horsContrat,
         avance: a,
         avanceVersee: versParMois.has(m) || clos,
       })
@@ -240,10 +273,10 @@ export function calculerContrat(f: FicheContrat): CalculContrat {
     }
     caTotal += ca
     margeTotal += marge
-    trimestres.push({ t: t + 1, ca, marge, commission: round2(marge * tauxCom), avances, complet: (t + 1) * 3 <= f.mois_clos, mois: lignes })
+    trimestres.push({ t: t + 1, ca, marge, commission: round2(marge * tauxCom), avances, complet: (t + 1) * 3 <= moisCalc || t * 3 + 1 > moisFin, mois: lignes })
   }
   const commissionAcquise = round2(margeTotal * tauxCom)
-  const part = partAnnee(f.repartition, f.mois_clos)
+  const part = partAnnee(f.repartition, f.mois_clos, moisFin)
   const caProjete = part > 0 ? caTotal / part : null
   const commissionProjetee = part > 0 ? commissionAcquise / part : null
   return {
@@ -261,6 +294,8 @@ export function calculerContrat(f: FicheContrat): CalculContrat {
     commissionProjetee,
     soldeProjete: commissionProjetee == null ? null : commissionProjetee - avancesAnnee,
     avance,
+    moisFin,
+    moisCalc,
   }
 }
 
@@ -347,6 +382,7 @@ export function etatPrime(p: Prime, f: FicheContrat, calc: CalculContrat): EtatP
 export type OngletLu = {
   onglet: string
   objectif_caht: number | null
+  perimetre_objectif: 'perso' | 'agence'
   marge_n1: number | null
   annee_marge_n1: number | null
   taux_base: number | null
@@ -622,6 +658,7 @@ export function lireOnglet(ws: any): OngletLu {
   return {
     onglet: ws.name,
     objectif_caht: objectif,
+    perimetre_objectif: cObj && /agence/.test(norm(cObj.t)) ? 'agence' : 'perso',
     marge_n1: marge,
     annee_marge_n1: anneeMarge,
     taux_base: tauxBase,

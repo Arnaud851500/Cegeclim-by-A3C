@@ -20,6 +20,10 @@
  * obj_contrat_editeurs) et les administrateurs modifient et évaluent.
  * Contrôlés côté base (obj_peut_lire / obj_peut_modifier) —
  * migration supabase/migrations/20261103_contrats_objectifs.sql.
+ * Évolutions du 03/11/2026 : objectif porté sur le CA perso ou le CA agence
+ * (obj_contrat.perimetre_objectif, migration 20261103b) ; date de fin de
+ * contrat (obj_contrat.date_fin, migration 20261103c) — calcul arrêté au mois
+ * de la date de fin inclus, avances limitées, projection sur la période.
  * Impression (03/11/2026, demandé par Arnaud) : document A4 dédié (ImpressionFiche),
  * rendu hors du shell de l'application via un portail ; seul ce document est
  * imprimé (bandeau, menus et écran masqués).
@@ -40,6 +44,7 @@ import {
   TRIMESTRES,
   apparier,
   avanceTheorique,
+  caObjectif,
   calculerContrat,
   etatPrime,
   fmt0,
@@ -202,9 +207,9 @@ function Liste({ annee, droits, onOuvrir }: { annee: number; droits: Droits; onO
   const tot = data.rows.reduce(
     (s, r) => {
       s.obj += r.objectif_caht || 0
-      s.ca += r.ca
+      s.ca += r.ca_objectif
       s.com += r.marge * r.taux_commission
-      s.av += r.avance_mensuelle * mc
+      s.av += r.avance_mensuelle * (r.mois_calc ?? mc)
       return s
     },
     { obj: 0, ca: 0, com: 0, av: 0 },
@@ -255,18 +260,24 @@ function Liste({ annee, droits, onOuvrir }: { annee: number; droits: Droits; onO
             <tbody>
               {data.rows.map((r) => {
                 const com = r.marge * r.taux_commission
-                const av = r.avance_mensuelle * mc
-                const pct = r.objectif_caht ? r.ca / r.objectif_caht : null
-                const evol = r.ca_n1_a_date ? r.ca / r.ca_n1_a_date - 1 : null
+                const av = r.avance_mensuelle * (r.mois_calc ?? mc)
+                const pct = r.objectif_caht ? r.ca_objectif / r.objectif_caht : null
+                const evol = r.ca_objectif_n1_a_date ? r.ca_objectif / r.ca_objectif_n1_a_date - 1 : null
                 return (
                   <tr key={r.id} onClick={() => onOuvrir(r.code)} className="cursor-pointer border-t border-[#EEEBE4] hover:bg-[#FBF7EE]">
                     <td className="px-3 py-2 font-semibold text-[#0B1220]">
                       {r.nom}
                       {r.statut === 'brouillon' && <span className="ml-2 rounded bg-[#F2E3C7] px-1.5 py-0.5 text-[10px] font-bold text-[#8A5A12]">BROUILLON</span>}
+                      {r.date_fin && (
+                        <span className="ml-2 rounded bg-[#FBE6DD] px-1.5 py-0.5 text-[10px] font-bold text-[#8A3A1C]">FIN {new Date(r.date_fin).toLocaleDateString('fr-FR')}</span>
+                      )}
                     </td>
                     <td className="px-3 py-2 text-slate-600">{r.agence || '—'}</td>
-                    <td className="px-3 py-2 text-right tabular-nums">{fmtK(r.objectif_caht)}</td>
-                    <td className="px-3 py-2 text-right tabular-nums">{fmtK(r.ca)}</td>
+                    <td className="px-3 py-2 text-right tabular-nums">
+                      {fmtK(r.objectif_caht)}
+                      {r.perimetre_objectif === 'agence' && <div className="text-[10px] font-semibold uppercase text-[#2D6F86]">CA agence</div>}
+                    </td>
+                    <td className="px-3 py-2 text-right tabular-nums">{fmtK(r.ca_objectif)}</td>
                     <td className={`px-3 py-2 text-right tabular-nums ${evol == null ? '' : evol >= 0 ? 'text-[#2F7A4A]' : 'text-[#C1683C]'}`}>
                       {evol == null ? '—' : `${evol >= 0 ? '+' : ''}${fmtPct(evol)}`}
                     </td>
@@ -310,7 +321,7 @@ function Liste({ annee, droits, onOuvrir }: { annee: number; droits: Droits; onO
         </div>
       )}
       <p className="text-[11px] text-slate-500">
-        Avances versées = avance mensuelle × mois clos (hors versements saisis sur la fiche). Commission acquise = marge des mois clos × taux de commission.
+        Les contrats avec une date de fin sont calculés jusqu’au mois de cette date inclus. CA à date = CA perso, ou CA de l’agence quand l’objectif du contrat porte sur l’agence. Avances versées = avance mensuelle × mois clos (hors versements saisis sur la fiche). Commission acquise = marge perso des mois clos × taux de commission.
       </p>
     </div>
   )
@@ -359,6 +370,7 @@ function Fiche({ annee, code, droits }: { annee: number; code: string; droits: D
   if (!f || !calc) return <div className="p-6 text-sm text-slate-500">Chargement de la fiche…</div>
   const c = f.contrat
   const modifier = f.modifier && droits.modifier
+  const obj = caObjectif(f, calc)
 
   return (
     <div className="space-y-5">
@@ -371,6 +383,11 @@ function Fiche({ annee, code, droits }: { annee: number; code: string; droits: D
             {f.code} · agence {f.agence || '—'}
             {c && <> · {c.statut === 'signe' ? 'signé' : c.statut === 'brouillon' ? 'brouillon' : 'validé'}</>}
             {c?.source_onglet && <> · repris de l’onglet « {c.source_onglet} »</>}
+            {c?.date_fin && (
+              <span className="ml-2 rounded bg-[#C1683C] px-1.5 py-0.5 text-[11px] font-semibold text-white">
+                Fin de contrat le {new Date(c.date_fin).toLocaleDateString('fr-FR')} · calcul arrêté à fin {MOIS[calc.moisFin]?.toLowerCase()}
+              </span>
+            )}
             {!modifier && <span className="ml-2 rounded bg-white/10 px-1.5 py-0.5 text-[11px]">Consultation</span>}
           </div>
         </div>
@@ -404,24 +421,30 @@ function Fiche({ annee, code, droits }: { annee: number; code: string; droits: D
           <div className="grid gap-3 md:grid-cols-[1.3fr_1fr]">
             <div className="rounded-xl border border-[#C9D2A2] bg-[#E3E9C8] px-5 py-4">
               <div className="flex flex-wrap items-baseline justify-between gap-2">
-                <div className="text-[13px] font-bold text-[#3D4A12]">Objectif CA HT</div>
+                <div className="text-[13px] font-bold text-[#3D4A12]">
+                  Objectif CA HT{obj.agence ? ` agence ${f.agence || ''}` : ''}
+                  {obj.agence && <span className="ml-2 rounded bg-white/60 px-1.5 py-0.5 text-[10px] uppercase tracking-[0.06em]">porté sur le CA agence</span>}
+                </div>
                 <div className="text-[22px] font-bold tabular-nums text-[#2C360B]">{fmtE(c.objectif_caht)}</div>
               </div>
               <div className="mt-3 flex flex-wrap items-baseline justify-between gap-2 text-[13px] text-[#3D4A12]">
                 <span>
-                  Réalisé à fin {MOIS[f.mois_clos]?.toLowerCase() || '—'} : <b className="tabular-nums">{fmtE(calc.caTotal)}</b>
+                  {obj.agence ? 'CA agence' : 'Réalisé'} à fin {MOIS[calc.moisCalc]?.toLowerCase() || '—'} : <b className="tabular-nums">{fmtE(obj.realise)}</b>
                 </span>
                 <span>
-                  Projection fin d’année : <b className="tabular-nums">{fmtK(calc.caProjete)}</b>
+                  Projection {calc.moisFin < 12 ? 'fin de contrat' : 'fin d’année'} : <b className="tabular-nums">{fmtK(obj.projection)}</b>
                 </span>
               </div>
               <div className="mt-2">
                 <Jauge
-                  pct={c.objectif_caht ? calc.caTotal / c.objectif_caht : null}
-                  projection={c.objectif_caht && calc.caProjete != null ? calc.caProjete / c.objectif_caht : null}
+                  pct={c.objectif_caht ? obj.realise / c.objectif_caht : null}
+                  projection={c.objectif_caht && obj.projection != null ? obj.projection / c.objectif_caht : null}
                 />
               </div>
-              <div className="mt-1 text-[11px] text-[#5B6630]">Le trait doré marque la projection (répartition mensuelle du bilan {annee}).</div>
+              <div className="mt-1 text-[11px] text-[#5B6630]">
+                Le trait doré marque la projection (répartition mensuelle du bilan {annee}).
+                {obj.agence && <> CA perso du collaborateur : {fmtE(calc.caTotal)} (base de sa commission sur marge).</>}
+              </div>
             </div>
             <div className="rounded-xl border border-[#BFD5DF] bg-[#DCEAF0] px-5 py-4 text-[#18465A]">
               <div className="text-[13px] font-bold">
@@ -477,6 +500,7 @@ function Fiche({ annee, code, droits }: { annee: number; code: string; droits: D
             </div>
             <div className="mt-2 text-[11px] text-slate-500">
               Mois en italique = en cours, non pris dans la commission. « Déjà versé » des mois à venir = avance prévue.
+              {calc.moisFin < 12 && ' Mois barrés = après la fin du contrat, hors calcul.'}
             </div>
           </Bloc>
 
@@ -485,22 +509,24 @@ function Fiche({ annee, code, droits }: { annee: number; code: string; droits: D
             <div className="rounded-xl border border-[#D9D5EA] bg-[#ECEAF4] px-5 py-4">
               <div className="text-[13px] font-bold text-[#3A3360]">Prime à verser au 31/12/{annee} — situation à date</div>
               <Ligne libelle="Commission acquise (mois clos)" valeur={fmtE(calc.commissionAcquise)} />
-              <Ligne libelle={`Avances versées (${f.mois_clos} mois)`} valeur={fmtE(-calc.avancesADate)} />
+              <Ligne libelle={`Avances versées (${calc.moisCalc} mois)`} valeur={fmtE(-calc.avancesADate)} />
               <div className="mt-2 flex items-center justify-between rounded-md bg-[#FFF35C] px-3 py-1.5 font-bold text-[#0B1220]">
                 <span>Solde prime {fmt2(c.taux_commission * 100).replace(',00', '')} %</span>
                 <span className="tabular-nums">{fmtE(calc.soldeADate)}</span>
               </div>
             </div>
             <div className="rounded-xl border border-[#E2DFD8] bg-white px-5 py-4">
-              <div className="text-[13px] font-bold text-[#0B1220]">Projection fin d’année (régul de décembre)</div>
+              <div className="text-[13px] font-bold text-[#0B1220]">
+                {calc.moisFin < 12 ? `Projection à la fin du contrat (${MOIS[calc.moisFin]?.toLowerCase() || '—'})` : 'Projection fin d’année (régul de décembre)'}
+              </div>
               <Ligne libelle="Commission projetée" valeur={fmtE(calc.commissionProjetee)} />
-              <Ligne libelle="Avances de l’année (12 mois)" valeur={fmtE(-calc.avancesAnnee)} />
+              <Ligne libelle={`Avances du contrat (${calc.moisFin} mois)`} valeur={fmtE(-calc.avancesAnnee)} />
               <div
                 className={`mt-2 flex items-center justify-between rounded-md px-3 py-1.5 font-bold ${
                   (calc.soldeProjete || 0) >= 0 ? 'bg-[#E3F1E7] text-[#1F5A35]' : 'bg-[#FBEDE7] text-[#8A3A1C]'
                 }`}
               >
-                <span>Régul projetée</span>
+                <span>{calc.moisFin < 12 ? 'Solde de fin de contrat projeté' : 'Régul projetée'}</span>
                 <span className="tabular-nums">{fmtE(calc.soldeProjete)}</span>
               </div>
               {calc.autresVersements !== 0 && <div className="mt-1 text-[11px] text-slate-500">Autres versements saisis (régul, primes) : {fmtE(calc.autresVersements)}</div>}
@@ -566,7 +592,7 @@ function TrimestreRows({ t }: { t: ReturnType<typeof calculerContrat>['trimestre
   return (
     <>
       {t.mois.map((m) => (
-        <tr key={m.mois} className={m.enCours ? 'italic text-slate-400' : ''}>
+        <tr key={m.mois} className={m.horsContrat ? 'text-slate-300 line-through decoration-slate-300' : m.enCours ? 'italic text-slate-400' : ''}>
           <td className="border-x-2 border-[#0B1220] px-3 py-1 text-center">{MOIS[m.mois]}</td>
           <td className="border-r-2 border-[#0B1220] border-b border-b-[#E2DFD8] px-3 py-1 text-right tabular-nums">{m.ca == null ? '-' : fmt2(m.ca)}</td>
           <td className="border-r-2 border-[#0B1220] border-b border-b-[#E2DFD8] px-3 py-1 text-right tabular-nums">{m.marge == null ? '-' : fmt2(m.marge)}</td>
@@ -574,7 +600,7 @@ function TrimestreRows({ t }: { t: ReturnType<typeof calculerContrat>['trimestre
           <td />
           <td />
           <td />
-          <td className={`px-3 py-1 text-right tabular-nums ${m.avanceVersee ? 'text-slate-600' : 'text-slate-400'}`}>{fmt0(m.avance)}</td>
+          <td className={`px-3 py-1 text-right tabular-nums ${m.avanceVersee ? 'text-slate-600' : 'text-slate-400'}`}>{m.horsContrat ? '—' : fmt0(m.avance)}</td>
         </tr>
       ))}
       <tr className="font-bold">
@@ -893,6 +919,8 @@ function EditeurContrat({ fiche, onSaved }: { fiche: FicheContrat; onSaved: () =
   const [taux, setTaux] = useState(String((c?.taux_commission ?? 0.01) * 100))
   const [avance, setAvance] = useState(c?.avance_mensuelle_saisie != null ? String(c.avance_mensuelle_saisie) : '')
   const [statut, setStatut] = useState(c?.statut || 'valide')
+  const [perimetre, setPerimetre] = useState<'perso' | 'agence'>(c?.perimetre_objectif || 'perso')
+  const [dateFin, setDateFin] = useState(c?.date_fin || '')
   const [commentaire, setCommentaire] = useState(c?.commentaire || '')
   const [primes, setPrimes] = useState<PrimeEdit[]>(() =>
     (fiche.primes.length
@@ -937,6 +965,8 @@ function EditeurContrat({ fiche, onSaved }: { fiche: FicheContrat; onSaved: () =
       taux_base: (num(base) ?? 8) / 100,
       taux_commission: (num(taux) ?? 1) / 100,
       avance_mensuelle_saisie: num(avance),
+      perimetre_objectif: perimetre,
+      date_fin: dateFin || null,
       statut,
       commentaire,
       primes: primes.map(({ _k, ...p }) => ({
@@ -964,6 +994,12 @@ function EditeurContrat({ fiche, onSaved }: { fiche: FicheContrat; onSaved: () =
         <Champ libelle="Objectif CA HT (€)">
           <input value={objectif} onChange={(e) => setObjectif(e.target.value)} className={`${inp} w-full text-right`} />
         </Champ>
+        <Champ libelle="Objectif porté sur">
+          <select value={perimetre} onChange={(e) => setPerimetre(e.target.value as 'perso' | 'agence')} className={`${inp} w-full`}>
+            <option value="perso">CA HT perso du collaborateur</option>
+            <option value="agence">CA HT de l’agence {fiche.agence || ''}</option>
+          </select>
+        </Champ>
         <Champ libelle={`Marge ${fiche.annee - 1} (€)`}>
           <input value={margeN1} onChange={(e) => setMargeN1(e.target.value)} className={`${inp} w-full text-right`} />
         </Champ>
@@ -983,7 +1019,17 @@ function EditeurContrat({ fiche, onSaved }: { fiche: FicheContrat; onSaved: () =
             <option value="signe">Signé</option>
           </select>
         </Champ>
-        <div className="md:col-span-2">
+        <Champ libelle="Date de fin de contrat (vide = année complète)">
+          <div className="flex gap-1">
+            <input type="date" value={dateFin} onChange={(e) => setDateFin(e.target.value)} className={`${inp} w-full`} />
+            {dateFin && (
+              <button className={btn} onClick={() => setDateFin('')} title="Retirer la date de fin">
+                ✕
+              </button>
+            )}
+          </div>
+        </Champ>
+        <div className="md:col-span-4">
           <Champ libelle="Commentaire">
             <input value={commentaire} onChange={(e) => setCommentaire(e.target.value)} className={`${inp} w-full`} />
           </Champ>
@@ -1178,6 +1224,7 @@ function ImportClasseur({ annee, onOuvrir }: { annee: number; onOuvrir: (code: s
         annee,
         collaborateur_code: o.collaborateur_code,
         objectif_caht: o.objectif_caht,
+        perimetre_objectif: o.perimetre_objectif,
         marge_n1: o.marge_n1,
         taux_base: o.taux_base ?? 0.08,
         taux_commission: o.taux_commission ?? 0.01,
@@ -1296,7 +1343,15 @@ function ImportClasseur({ annee, onOuvrir }: { annee: number; onOuvrir: (code: s
                           {o.appariement && <div className="mt-0.5 text-[11px] text-slate-500">{o.appariement}</div>}
                           {dejaLa && <div className="mt-0.5 text-[11px] text-[#8A5A12]">Contrat {annee} existant : sera remplacé</div>}
                         </td>
-                        <td className="px-3 py-2 text-right tabular-nums">{fmtK(o.objectif_caht)}</td>
+                        <td className="px-3 py-2 text-right tabular-nums">
+                          {fmtK(o.objectif_caht)}
+                          <div>
+                            <select value={o.perimetre_objectif} disabled={o.etat === 'publie'} onChange={(e) => maj(o.onglet, { perimetre_objectif: e.target.value as 'perso' | 'agence' })} className="mt-0.5 rounded border border-[#D5D1C7] bg-white px-1 text-[11px]">
+                              <option value="perso">CA perso</option>
+                              <option value="agence">CA agence</option>
+                            </select>
+                          </div>
+                        </td>
                         <td className="px-3 py-2 text-right tabular-nums">
                           {fmt0(o.marge_n1)}
                           {o.annee_marge_n1 && o.annee_marge_n1 !== annee - 1 && <div className="text-[11px] text-[#C1683C]">marge {o.annee_marge_n1} ≠ {annee - 1}</div>}
@@ -1471,9 +1526,11 @@ const STATUT_PRIME: Record<string, { cls: string; txt: string }> = {
 function DocumentContrat({ fiche, calc }: { fiche: FicheContrat; calc: ReturnType<typeof calculerContrat> }) {
   const c = fiche.contrat!
   const tauxCom = `${fmt2(c.taux_commission * 100).replace(',00', '')} %`
-  const finMois = fiche.mois_clos > 0 ? `fin ${MOIS[fiche.mois_clos].toLowerCase()} ${fiche.annee}` : `début ${fiche.annee}`
-  const pctObj = c.objectif_caht ? calc.caTotal / c.objectif_caht : null
-  const pctProj = c.objectif_caht && calc.caProjete != null ? calc.caProjete / c.objectif_caht : null
+  const finMois = calc.moisCalc > 0 ? `fin ${MOIS[calc.moisCalc].toLowerCase()} ${fiche.annee}` : `début ${fiche.annee}`
+  const finContrat = calc.moisFin < 12 && c.date_fin ? new Date(c.date_fin).toLocaleDateString('fr-FR') : null
+  const obj = caObjectif(fiche, calc)
+  const pctObj = c.objectif_caht ? obj.realise / c.objectif_caht : null
+  const pctProj = c.objectif_caht && obj.projection != null ? obj.projection / c.objectif_caht : null
   const etats = fiche.primes.map((p) => ({ p, e: etatPrime(p, fiche, calc) }))
   const totMax = etats.reduce((s, x) => s + x.e.montantMax, 0)
   const totProj = etats.reduce((s, x) => s + x.e.montantProjete, 0)
@@ -1495,6 +1552,7 @@ function DocumentContrat({ fiche, calc }: { fiche: FicheContrat; calc: ReturnTyp
           <h1 style={{ marginTop: '1mm' }}>{fiche.nom}</h1>
           <div className="muted" style={{ marginTop: '0.6mm' }}>
             Agence {fiche.agence || '—'} · code {fiche.code} · contrat {c.statut === 'signe' ? 'signé' : c.statut === 'brouillon' ? 'en brouillon' : 'validé'}
+            {finContrat && <b style={{ color: '#B4501F' }}> · fin de contrat le {finContrat}</b>}
           </div>
         </div>
         <div style={{ textAlign: 'right' }}>
@@ -1506,13 +1564,13 @@ function DocumentContrat({ fiche, calc }: { fiche: FicheContrat; calc: ReturnTyp
       {/* Indicateurs clés */}
       <div className="kpis">
         <div className="kpi">
-          <div className="l">Objectif CA HT</div>
+          <div className="l">Objectif {obj.agence ? 'CA HT agence' : 'CA HT'}</div>
           <div className="v">{fmtK(c.objectif_caht)}</div>
-          <div className="s">Signé pour {fiche.annee}</div>
+          <div className="s">{obj.agence ? `Agence ${fiche.agence || '—'} · ${fiche.annee}` : `Signé pour ${fiche.annee}`}</div>
         </div>
         <div className="kpi">
-          <div className="l">CA HT réalisé</div>
-          <div className="v">{fmtK(calc.caTotal)}</div>
+          <div className="l">{obj.agence ? 'CA HT agence réalisé' : 'CA HT réalisé'}</div>
+          <div className="v">{fmtK(obj.realise)}</div>
           <div className="s">{pctObj == null ? '—' : `${fmtPct(pctObj, 0)} de l’objectif`}</div>
           <div className="bar">
             <i style={{ width: `${Math.min(100, (pctObj || 0) * 100)}%`, background: (pctObj || 0) >= 1 ? '#2F7A4A' : '#2D6F86' }} />
@@ -1520,13 +1578,15 @@ function DocumentContrat({ fiche, calc }: { fiche: FicheContrat; calc: ReturnTyp
         </div>
         <div className="kpi">
           <div className="l">Projection fin d’année</div>
-          <div className="v">{fmtK(calc.caProjete)}</div>
+          <div className="v">{fmtK(obj.projection)}</div>
           <div className="s">{pctProj == null ? '—' : `${fmtPct(pctProj, 0)} de l’objectif`}</div>
         </div>
         <div className="kpi">
-          <div className="l">Marge dégagée</div>
+          <div className="l">Marge dégagée{obj.agence ? ' (perso)' : ''}</div>
           <div className="v">{fmtK(calc.margeTotal)}</div>
-          <div className="s">Taux de marge {calc.tauxMarge == null ? '—' : fmtPct(calc.tauxMarge)}</div>
+          <div className="s">
+            {obj.agence ? `CA perso ${fmtK(calc.caTotal)} · ` : ''}taux {calc.tauxMarge == null ? '—' : fmtPct(calc.tauxMarge)}
+          </div>
         </div>
       </div>
 
@@ -1549,9 +1609,9 @@ function DocumentContrat({ fiche, calc }: { fiche: FicheContrat; calc: ReturnTyp
             </tr>
           </thead>
           <tbody>
-            {calc.trimestres.map((t) => (
+            {calc.trimestres.filter((t) => (t.t - 1) * 3 + 1 <= calc.moisFin).map((t) => (
               <FragmentOnglet key={t.t}>
-                {t.mois.map((m) => (
+                {t.mois.filter((m) => !m.horsContrat).map((m) => (
                   <tr key={m.mois} className={m.enCours ? 'mois encours' : 'mois'}>
                     <td>
                       {MOIS[m.mois]}
@@ -1580,7 +1640,7 @@ function DocumentContrat({ fiche, calc }: { fiche: FicheContrat; calc: ReturnTyp
               </FragmentOnglet>
             ))}
             <tr className="total">
-              <td>Total {fiche.annee}</td>
+              <td>Total {finContrat ? 'du contrat' : fiche.annee}</td>
               <td className="op-num">{fmt0(calc.caTotal)}</td>
               <td className="op-num">{fmt0(calc.margeTotal)}</td>
               <td className="op-num">{calc.tauxMarge == null ? '' : fmtPct(calc.tauxMarge)}</td>
@@ -1602,7 +1662,7 @@ function DocumentContrat({ fiche, calc }: { fiche: FicheContrat; calc: ReturnTyp
               <span className="op-num">{fmtE(calc.commissionAcquise)}</span>
             </div>
             <div className="r">
-              <span>Avances versées ({fiche.mois_clos} mois)</span>
+              <span>Avances versées ({calc.moisCalc} mois)</span>
               <span className="op-num">− {fmtE(calc.avancesADate)}</span>
             </div>
             <div className="r f">
@@ -1611,17 +1671,17 @@ function DocumentContrat({ fiche, calc }: { fiche: FicheContrat; calc: ReturnTyp
             </div>
           </div>
           <div className="box">
-            <div className="t">Projection au 31/12/{fiche.annee}</div>
+            <div className="t">{finContrat ? `Projection à la fin du contrat (${finContrat})` : `Projection au 31/12/${fiche.annee}`}</div>
             <div className="r">
               <span>Commission projetée</span>
               <span className="op-num">{fmtE(calc.commissionProjetee)}</span>
             </div>
             <div className="r">
-              <span>Avances de l’année (12 mois)</span>
+              <span>Avances du contrat ({calc.moisFin} mois)</span>
               <span className="op-num">− {fmtE(calc.avancesAnnee)}</span>
             </div>
             <div className="r f">
-              <span>Régularisation de décembre</span>
+              <span>{finContrat ? 'Solde de fin de contrat' : 'Régularisation de décembre'}</span>
               <span className={`op-num ${sens(calc.soldeProjete)}`}>{fmtE(calc.soldeProjete)}</span>
             </div>
           </div>
