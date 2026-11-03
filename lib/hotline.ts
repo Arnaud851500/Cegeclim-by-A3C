@@ -29,6 +29,7 @@ export type TypeEtape =
   | 'RESOLUTION'
   | 'CLOTURE'
   | 'REOUVERTURE'
+  | 'PIECE_JOINTE'
 
 export const FILIERES: Array<{ value: Filiere; label: string; icon: string }> = [
   { value: 'PV', label: 'Photovoltaïque', icon: '☀️' },
@@ -59,6 +60,7 @@ export const ETAPE_LIBELLES: Record<TypeEtape, string> = {
   RESOLUTION: 'Résolution',
   CLOTURE: 'Clôture',
   REOUVERTURE: 'Réouverture',
+  PIECE_JOINTE: 'Pièce jointe',
 }
 
 export type DocumentLien = { titre: string; type?: string; url?: string }
@@ -680,4 +682,143 @@ export function ouvrirMessagerie(params: { to: string; subject: string; body: st
 export function messageEnvoiDocument(doc: DocumentLien, contactNom?: string | null) {
   const bonjour = contactNom ? `Bonjour ${contactNom},` : 'Bonjour,'
   return `${bonjour}\n\nComme convenu au téléphone, vous trouverez ci-joint le document « ${doc.titre} ».\n\nBien cordialement,\nLe support technique CEGECLIM`
+}
+
+// ----------------------------------------------------------------------------
+// Pièces jointes des tickets (03/11/2026) — bucket privé « hotline-pieces »,
+// table hotline_ticket_pieces (migration 20261103_hotline_pieces_jointes.sql)
+// ----------------------------------------------------------------------------
+export const BUCKET_PIECES = 'hotline-pieces'
+export const TAILLE_MAX_PIECE = 25 * 1024 * 1024
+
+export type OriginePiece = 'PC' | 'MAIL' | 'PRESSE_PAPIER'
+
+export type PieceJointe = {
+  id: string
+  ticket_id: string
+  chemin: string
+  nom: string
+  type_mime: string | null
+  taille: number | null
+  origine: OriginePiece
+  mail_objet: string | null
+  mail_de: string | null
+  mail_date: string | null
+  ajoute_par: string
+  ajoute_le: string
+}
+
+export function estMail(nom: string, mime?: string | null) {
+  return /\.(eml|msg)$/i.test(nom) || mime === 'message/rfc822' || mime === 'application/vnd.ms-outlook'
+}
+
+export function estImage(nom: string, mime?: string | null) {
+  return (mime || '').startsWith('image/') || /\.(png|jpe?g|gif|webp|heic|bmp)$/i.test(nom)
+}
+
+export function fmtTaille(octets: number | null | undefined) {
+  if (!octets) return ''
+  if (octets < 1024) return `${octets} o`
+  if (octets < 1024 * 1024) return `${Math.round(octets / 1024)} Ko`
+  return `${(octets / 1024 / 1024).toFixed(1).replace('.', ',')} Mo`
+}
+
+/** Décode les mots encodés des en-têtes de mail (=?UTF-8?B?...?= / ?Q?). */
+function decoderEnTete(valeur: string) {
+  return valeur.replace(/\?=\s+=\?/g, '?==?').replace(/=\?([^?]+)\?([BbQq])\?([^?]*)\?=/g, (_m, charset: string, enc: string, texte: string) => {
+    try {
+      let octets: Uint8Array
+      if (enc.toUpperCase() === 'B') {
+        octets = Uint8Array.from(atob(texte), (c) => c.charCodeAt(0))
+      } else {
+        const q = texte.replace(/_/g, ' ').replace(/=([0-9A-Fa-f]{2})/g, (_x: string, h: string) => String.fromCharCode(parseInt(h, 16)))
+        octets = Uint8Array.from(q, (c) => c.charCodeAt(0))
+      }
+      return new TextDecoder(charset.toLowerCase() === 'utf8' ? 'utf-8' : charset).decode(octets)
+    } catch {
+      return texte
+    }
+  })
+}
+
+/** Objet, expéditeur et date d'un mail .eml (en-têtes RFC 822). Les .msg
+ * (format binaire Outlook Windows) gardent leur nom de fichier, qu'Outlook
+ * forme à partir de l'objet du mail. */
+export async function lireEnTetesMail(fichier: File): Promise<{ objet: string | null; de: string | null; date: string | null }> {
+  if (!/\.eml$/i.test(fichier.name) && fichier.type !== 'message/rfc822') {
+    return { objet: fichier.name.replace(/\.(msg|eml)$/i, '') || null, de: null, date: null }
+  }
+  const texte = await fichier.slice(0, 96 * 1024).text()
+  const entete = texte.split(/\r?\n\r?\n/)[0].replace(/\r?\n[ \t]+/g, ' ')
+  const champ = (nom: string) => {
+    const m = new RegExp(`^${nom}:\\s*(.*)$`, 'im').exec(entete)
+    return m ? decoderEnTete(m[1].trim()) : null
+  }
+  const brut = champ('Date')
+  const date = brut && !Number.isNaN(new Date(brut).getTime()) ? new Date(brut).toISOString() : null
+  return { objet: champ('Subject'), de: champ('From'), date }
+}
+
+export async function chargerPieces(ticketId: string): Promise<PieceJointe[]> {
+  const { data, error } = await supabase.from('hotline_ticket_pieces').select('*').eq('ticket_id', ticketId).order('ajoute_le')
+  if (error) throw error
+  return (data || []) as PieceJointe[]
+}
+
+export async function ajouterPiece(ticketId: string, fichier: File, origine: OriginePiece): Promise<PieceJointe> {
+  if (fichier.size > TAILLE_MAX_PIECE) throw new Error(`« ${fichier.name} » dépasse 25 Mo.`)
+  const mail = estMail(fichier.name, fichier.type)
+  const entetes = mail ? await lireEnTetesMail(fichier) : { objet: null, de: null, date: null }
+  const nomPropre = (fichier.name || 'fichier').normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^A-Za-z0-9._-]+/g, '_').slice(-120)
+  const chemin = `${ticketId}/${Date.now()}-${Math.random().toString(36).slice(2, 7)}-${nomPropre}`
+  const { error: errUpload } = await supabase.storage.from(BUCKET_PIECES).upload(chemin, fichier, {
+    contentType: fichier.type || (mail ? 'message/rfc822' : 'application/octet-stream'),
+    upsert: false,
+  })
+  if (errUpload) throw errUpload
+  const { data, error } = await supabase
+    .from('hotline_ticket_pieces')
+    .insert({
+      ticket_id: ticketId,
+      chemin,
+      nom: fichier.name || 'fichier',
+      type_mime: fichier.type || null,
+      taille: fichier.size,
+      origine: mail ? 'MAIL' : origine,
+      mail_objet: entetes.objet,
+      mail_de: entetes.de,
+      mail_date: entetes.date,
+    })
+    .select('*')
+    .single()
+  if (error) {
+    await supabase.storage.from(BUCKET_PIECES).remove([chemin])
+    throw error
+  }
+  const piece = data as PieceJointe
+  const libelle = mail
+    ? `Mail joint : ${entetes.objet || fichier.name}${entetes.de ? ` (de ${entetes.de})` : ''}`
+    : origine === 'PRESSE_PAPIER'
+      ? `Capture collée : ${fichier.name}`
+      : `Fichier joint : ${fichier.name}`
+  await ajouterEtape(ticketId, 'PIECE_JOINTE', libelle, { details: { piece_id: piece.id, nom: piece.nom, taille: piece.taille } })
+  return piece
+}
+
+export async function supprimerPiece(piece: PieceJointe) {
+  const { error } = await supabase.from('hotline_ticket_pieces').delete().eq('id', piece.id)
+  if (error) throw error
+  await supabase.storage.from(BUCKET_PIECES).remove([piece.chemin])
+  await ajouterEtape(piece.ticket_id, 'PIECE_JOINTE', `Pièce jointe retirée : ${piece.mail_objet || piece.nom}`)
+}
+
+export async function liensPieces(chemins: string[], telechargement = false): Promise<Record<string, string>> {
+  if (!chemins.length) return {}
+  const { data, error } = await supabase.storage.from(BUCKET_PIECES).createSignedUrls(chemins, 3600, telechargement ? { download: true } : undefined)
+  if (error) throw error
+  const res: Record<string, string> = {}
+  ;(data || []).forEach((d) => {
+    if (d.path && d.signedUrl) res[d.path] = d.signedUrl
+  })
+  return res
 }

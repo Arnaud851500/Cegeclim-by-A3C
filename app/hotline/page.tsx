@@ -28,6 +28,7 @@ import { useSearchParams } from 'next/navigation'
 import { supabase } from '@/lib/supabaseClient'
 import { useAccess } from '@/components/AccessContext'
 import HotlineHeader, { HotlineErreur, Pastille } from '@/components/hotline/HotlineHeader'
+import PiecesJointes from '@/components/hotline/PiecesJointes'
 import {
   ETAPE_LIBELLES,
   FILIERES,
@@ -924,6 +925,15 @@ function HotlineConsole() {
                   </div>
                 </div>
               ) : null}
+
+              <div className="mt-6 border-t border-[#EFEDE8] pt-4">
+                <div className="mb-2 text-[12px] font-bold uppercase tracking-[0.05em] text-slate-500">Pièces jointes</div>
+                {ticket ? (
+                  <PiecesJointes ticketId={ticket.id} onChange={() => void rafraichirEtapes(ticket.id)} />
+                ) : (
+                  <p className="text-[12px] text-slate-500">Ouvrir le ticket pour y joindre photos, mails et fichiers.</p>
+                )}
+              </div>
             </div>
           </section>
 

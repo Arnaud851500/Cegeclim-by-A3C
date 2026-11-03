@@ -14,6 +14,7 @@ import { useRouter, useSearchParams } from 'next/navigation'
 import { supabase } from '@/lib/supabaseClient'
 import { useAccess } from '@/components/AccessContext'
 import HotlineHeader, { HotlineErreur, Pastille } from '@/components/hotline/HotlineHeader'
+import PiecesJointes from '@/components/hotline/PiecesJointes'
 import {
   ETAPE_LIBELLES,
   FILIERES,
@@ -389,6 +390,11 @@ function FicheTicket({ id, onClose, onChange }: { id: string; onClose: () => voi
           >
             Ajouter le commentaire
           </button>
+        </div>
+
+        <div>
+          <div className="mb-2 text-[12px] font-bold uppercase tracking-[0.05em] text-slate-500">Pièces jointes</div>
+          <PiecesJointes key={ticket.id} ticketId={ticket.id} onChange={() => void charger()} />
         </div>
 
         <div>
