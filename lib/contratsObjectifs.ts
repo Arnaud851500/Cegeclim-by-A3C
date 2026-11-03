@@ -12,8 +12,8 @@
 // (hors statistique exclus) ; commission calculée sur les mois clos.
 // ============================================================================
 
-export type Section = 'ca_perso' | 'ca_agence' | 'qualitatif' | 'avenant' | 'avril_n1'
-export type Indicateur = 'ca_perso' | 'ca_agence' | 'zero_impaye_45j' | 'cerfa_complet' | 'manuel'
+export type Section = 'ca_perso' | 'ca_agence' | 'qualitatif' | 'familles' | 'avenant' | 'avril_n1'
+export type Indicateur = 'ca_perso' | 'ca_agence' | 'zero_impaye_45j' | 'cerfa_complet' | 'manuel' | 'evol_familles'
 export type Resultat = 'a_evaluer' | 'atteint' | 'partiel' | 'non_atteint'
 export type Echeance = '31/12' | 'avril_n1'
 
@@ -30,6 +30,11 @@ export type Prime = {
   paliers: Palier[]
   montant: number
   echeance: Echeance
+  /** Primes « évolution du CA de familles » : macro-familles et/ou familles, base perso/agence, cible (0,20 = +20 %) */
+  familles_macro?: string[]
+  familles?: string[]
+  base_ca?: 'perso' | 'agence'
+  cible_evol?: number | null
   resultat?: Resultat
   montant_retenu?: number | null
   evalue_par?: string | null
@@ -81,7 +86,10 @@ export type FicheContrat = {
   ca_agence_n1: number | null
   impayes: { date: string | null; m45: number; n45: number }
   repartition: Array<{ mois: number; pct: number }>
+  familles_resultats?: Record<string, { ca: number; ca_n1: number; mois: number }>
 }
+
+export type FamilleRef = { macro: string; familles: string[] }
 
 export type LigneListe = {
   id: string
@@ -115,6 +123,7 @@ export const SECTION_LIBELLES: Record<Section, string> = {
   ca_perso: 'Prime annuelle liée au CA HT perso',
   ca_agence: 'Prime annuelle agence',
   qualitatif: 'Prime annuelle qualitative',
+  familles: 'Prime sur le développement de familles produits',
   avenant: 'Prime liée à la vente de produits (avenant)',
   avril_n1: 'Prime individuelle versée en avril N+1',
 }
@@ -125,6 +134,17 @@ export const INDICATEUR_LIBELLES: Record<Indicateur, string> = {
   zero_impaye_45j: 'Zéro impayé > 45 j (automatique)',
   cerfa_complet: 'Cerfa complet (évalué par la direction)',
   manuel: 'Évaluée par la direction',
+  evol_familles: 'Évolution du CA de familles vs N-1 (automatique)',
+}
+
+export function fmtEvol(v: number | null | undefined, d = 1) {
+  if (v == null || !Number.isFinite(v)) return '—'
+  return `${v >= 0 ? '+' : ''}${(v * 100).toLocaleString('fr-FR', { minimumFractionDigits: d, maximumFractionDigits: d })} %`
+}
+
+export function libelleFamilles(p: Prime) {
+  const l = [...(p.familles_macro || []), ...(p.familles || [])]
+  return l.length ? l.join(', ') : 'aucune famille choisie'
 }
 
 export const RESULTAT_LIBELLES: Record<Resultat, string> = {
@@ -352,6 +372,29 @@ export function etatPrime(p: Prime, f: FicheContrat, calc: CalculContrat): EtatP
     } else {
       aDate = projete = max
       statut = 'vert'
+    }
+  } else if (p.indicateur === 'evol_familles') {
+    const r = p.id ? f.familles_resultats?.[p.id] : undefined
+    const evol = r && r.ca_n1 > 0 ? r.ca / r.ca_n1 - 1 : null
+    valeur = evol
+    projection = evol
+    const base = p.base_ca === 'agence' ? `CA agence ${f.agence || ''}`.trim() : 'CA perso'
+    if (!r) {
+      statut = 'gris'
+      texte = 'Choisir les familles concernées (modifier le contrat)'
+    } else if (p.mode === 'paliers') {
+      aDate = projete = evol == null ? 0 : palierAtteint(p.paliers, evol)
+      statut = aDate >= max && max > 0 ? 'vert' : aDate > 0 ? 'orange' : 'rouge'
+    } else {
+      const cible = Number(p.cible_evol ?? 0)
+      const ok = evol != null && evol >= cible
+      aDate = projete = ok ? max : 0
+      statut = ok ? 'vert' : 'rouge'
+    }
+    if (r) {
+      texte = `${base} ${libelleFamilles(p)} : ${fmtK(r.ca)} vs ${fmtK(r.ca_n1)} en N-1 (janv. → ${MOIS[r.mois]?.toLowerCase() || '—'}) · ${
+        evol == null ? 'pas de CA N-1' : fmtEvol(evol)
+      }${p.mode === 'forfait' ? ` · cible ${fmtEvol(Number(p.cible_evol ?? 0), 0)}` : ''}`
     }
   } else if (p.indicateur === 'zero_impaye_45j') {
     valeur = f.impayes?.m45 ?? null
