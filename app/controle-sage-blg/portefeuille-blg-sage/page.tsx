@@ -32,6 +32,8 @@
 //     une ligne par pièce ; PL > 30 j = à corriger (dans SAGE), BL / BR > 30 j = à analyser ;
 //   - nouvelle colonne « Bon de retour » (BR).
 //   Migration 20261103_portefeuille_blg_sage_terminees_sans_cdc.sql.
+// 03/11/2026 (b) : code couleur des cases renforcé (fond plus opaque, bordure 6 px, contour et
+//   chiffre dans la couleur du verdict hors « Cohérent »).
 // URL : ?statut=S43&situation=FACTUREE&verdict=A_CORRIGER&agence=PAU
 // ============================================================================
 
@@ -152,10 +154,10 @@ const TEXTES: Record<Domaine, {
 }
 
 const VERDICTS: Record<Verdict, { label: string; color: string; bg: string; hint: string }> = {
-  A_CORRIGER: { label: 'À corriger dans BLG', color: '#E07A4E', bg: 'rgba(224,122,78,0.16)', hint: 'Commande ouverte dans BLG mais sortie du portefeuille SAGE (ou archivée / terminée à tort) : solder, archiver ou désarchiver dans BLG. Ligne « Sans CDC » : PL orpheline de plus de 30 jours à nettoyer dans SAGE.' },
-  A_ANALYSER: { label: 'À analyser', color: '#E0A961', bg: 'rgba(224,169,97,0.14)', hint: 'Statut BLG et situation SAGE peu compatibles, à regarder au cas par cas.' },
-  DECALAGE: { label: 'Décalage normal', color: '#8FC7DA', bg: 'rgba(143,199,218,0.12)', hint: 'BL SAGE pas encore facturé (se résorbe à la facturation), ou CDC créée aujourd’hui dans SAGE qui attend l’interface SAGE → BLG de la nuit.' },
-  OK: { label: 'Cohérent', color: '#7FC79A', bg: 'rgba(127,199,154,0.08)', hint: 'Statut BLG cohérent avec la situation SAGE.' },
+  A_CORRIGER: { label: 'À corriger dans BLG', color: '#E07A4E', bg: 'rgba(224,122,78,0.40)', hint: 'Commande ouverte dans BLG mais sortie du portefeuille SAGE (ou archivée / terminée à tort) : solder, archiver ou désarchiver dans BLG. Ligne « Sans CDC » : PL orpheline de plus de 30 jours à nettoyer dans SAGE.' },
+  A_ANALYSER: { label: 'À analyser', color: '#E0A961', bg: 'rgba(224,169,97,0.32)', hint: 'Statut BLG et situation SAGE peu compatibles, à regarder au cas par cas.' },
+  DECALAGE: { label: 'Décalage normal', color: '#8FC7DA', bg: 'rgba(143,199,218,0.24)', hint: 'BL SAGE pas encore facturé (se résorbe à la facturation), ou CDC créée aujourd’hui dans SAGE qui attend l’interface SAGE → BLG de la nuit.' },
+  OK: { label: 'Cohérent', color: '#7FC79A', bg: 'rgba(127,199,154,0.16)', hint: 'Statut BLG cohérent avec la situation SAGE.' },
 }
 const VERDICT_ORDRE: Verdict[] = ['A_CORRIGER', 'A_ANALYSER', 'DECALAGE', 'OK']
 
@@ -549,14 +551,14 @@ function PortefeuilleBlgSageContent() {
   }
 
   // ── Rendu d'une case ──────────────────────────────────────────────────────
-  const renderValue = (a?: Agg) => {
+  const renderValue = (a?: Agg, verdict: Verdict | null = null) => {
     if (!a) return null
     const main =
       metric === 'nb' ? nf0.format(a.nb) : metric === 'reste' ? nfEur.format(a.reste) : metric === 'sage' ? nfEur.format(a.sage) : nfEur.format(a.facture)
     const sub = metric === 'nb' ? `reste BLG ${nfEur.format(a.reste)}` : `${nf0.format(a.nb)} cde`
     return (
       <>
-        <span style={s.big}>{main}</span>
+        <span style={{ ...s.big, ...(verdict && verdict !== 'OK' ? { color: tc(VERDICTS[verdict].color), fontWeight: 700 } : {}) }}>{main}</span>
         <span style={s.small}>{sub}</span>
       </>
     )
@@ -572,7 +574,9 @@ function PortefeuilleBlgSageContent() {
       whiteSpace: 'nowrap',
       fontVariantNumeric: 'tabular-nums',
       background: v ? tc(v.bg) : undefined,
-      borderLeft: v ? `3px solid ${tc(v.color)}` : undefined,
+      borderLeft: v ? `6px solid ${tc(v.color)}` : undefined,
+      outline: v && verdict !== 'OK' ? `1px solid ${tc(v.color)}` : undefined,
+      outlineOffset: -1,
       boxShadow: selected ? `inset 0 0 0 2px ${tc('#A6A181')}` : undefined,
     }
   }
@@ -704,7 +708,7 @@ function PortefeuilleBlgSageContent() {
                     const v = cellVerdict(st.code, x.code)
                     return (
                       <td key={x.code} style={cellStyle(v, isSelected(sel))} onClick={() => select(sel)} title={v ? `${VERDICTS[v].label} — ${VERDICTS[v].hint}` : undefined}>
-                        {renderValue(a)}
+                        {renderValue(a, v)}
                       </td>
                     )
                   })}
