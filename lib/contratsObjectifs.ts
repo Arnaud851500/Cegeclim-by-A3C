@@ -12,8 +12,8 @@
 // (hors statistique exclus) ; commission calculée sur les mois clos.
 // ============================================================================
 
-export type Section = 'ca_perso' | 'ca_agence' | 'qualitatif' | 'familles' | 'avenant' | 'avril_n1'
-export type Indicateur = 'ca_perso' | 'ca_agence' | 'zero_impaye_45j' | 'cerfa_complet' | 'manuel' | 'evol_familles'
+export type Section = 'ca_perso' | 'ca_agence' | 'qualitatif' | 'familles' | 'transfo' | 'avenant' | 'avril_n1'
+export type Indicateur = 'ca_perso' | 'ca_agence' | 'zero_impaye_45j' | 'cerfa_complet' | 'manuel' | 'evol_familles' | 'evol_transfo'
 export type Resultat = 'a_evaluer' | 'atteint' | 'partiel' | 'non_atteint'
 export type Echeance = '31/12' | 'avril_n1'
 
@@ -87,6 +87,17 @@ export type FicheContrat = {
   impayes: { date: string | null; m45: number; n45: number }
   repartition: Array<{ mois: number; pct: number }>
   familles_resultats?: Record<string, { ca: number; ca_n1: number; mois: number }>
+  transfo?: Partial<Record<'perso' | 'agence', TransfoResultat>>
+}
+
+/** Taux de transformation devis → commande à 120 j en CA (lecture « à âge égal » de l'écran Analyse devis). */
+export type TransfoResultat = {
+  taux: number | null
+  taux_n1: number | null
+  ca_devis: number
+  ca_devis_n1: number
+  date_debut: string
+  date_limite: string
 }
 
 export type FamilleRef = { macro: string; familles: string[] }
@@ -124,6 +135,7 @@ export const SECTION_LIBELLES: Record<Section, string> = {
   ca_agence: 'Prime annuelle agence',
   qualitatif: 'Prime annuelle qualitative',
   familles: 'Prime sur le développement de familles produits',
+  transfo: 'Prime sur le taux de transformation des devis',
   avenant: 'Prime liée à la vente de produits (avenant)',
   avril_n1: 'Prime individuelle versée en avril N+1',
 }
@@ -135,6 +147,12 @@ export const INDICATEUR_LIBELLES: Record<Indicateur, string> = {
   cerfa_complet: 'Cerfa complet (évalué par la direction)',
   manuel: 'Évaluée par la direction',
   evol_familles: 'Évolution du CA de familles vs N-1 (automatique)',
+  evol_transfo: 'Évolution du taux de transformation devis vs N-1 (automatique)',
+}
+
+export function fmtPts(v: number | null | undefined, d = 1) {
+  if (v == null || !Number.isFinite(v)) return '—'
+  return `${v >= 0 ? '+' : ''}${v.toLocaleString('fr-FR', { minimumFractionDigits: d, maximumFractionDigits: d })} pt${Math.abs(v) >= 2 ? 's' : ''}`
 }
 
 export function fmtEvol(v: number | null | undefined, d = 1) {
@@ -395,6 +413,29 @@ export function etatPrime(p: Prime, f: FicheContrat, calc: CalculContrat): EtatP
       texte = `${base} ${libelleFamilles(p)} : ${fmtK(r.ca)} vs ${fmtK(r.ca_n1)} en N-1 (janv. → ${MOIS[r.mois]?.toLowerCase() || '—'}) · ${
         evol == null ? 'pas de CA N-1' : fmtEvol(evol)
       }${p.mode === 'forfait' ? ` · cible ${fmtEvol(Number(p.cible_evol ?? 0), 0)}` : ''}`
+    }
+  } else if (p.indicateur === 'evol_transfo') {
+    const r = f.transfo?.[p.base_ca === 'agence' ? 'agence' : 'perso']
+    const ecart = r && r.taux != null && r.taux_n1 != null ? Math.round((r.taux - r.taux_n1) * 10) / 10 : null
+    valeur = ecart
+    projection = ecart
+    if (!r) {
+      statut = 'gris'
+      texte = 'Pas encore de devis de l’année âgés de 120 jours'
+    } else {
+      if (p.mode === 'paliers') {
+        aDate = projete = ecart == null ? 0 : palierAtteint(p.paliers, ecart)
+        statut = aDate >= max && max > 0 ? 'vert' : aDate > 0 ? 'orange' : 'rouge'
+      } else {
+        const ok = ecart != null && ecart >= Number(p.cible_evol ?? 0)
+        aDate = projete = ok ? max : 0
+        statut = ok ? 'vert' : 'rouge'
+      }
+      const d1 = new Date(r.date_debut).toLocaleDateString('fr-FR')
+      const d2 = new Date(r.date_limite).toLocaleDateString('fr-FR')
+      texte = `Taux de transfo à 120 j ${p.base_ca === 'agence' ? `agence ${f.agence || ''}` : 'perso'} (devis du ${d1} au ${d2}) : ${
+        r.taux == null ? '—' : `${r.taux.toLocaleString('fr-FR')} %`
+      } vs ${r.taux_n1 == null ? '—' : `${r.taux_n1.toLocaleString('fr-FR')} %`} en N-1 · ${fmtPts(ecart)}${p.mode === 'forfait' ? ` · cible ${fmtPts(Number(p.cible_evol ?? 0), 0)}` : ''}`
     }
   } else if (p.indicateur === 'zero_impaye_45j') {
     valeur = f.impayes?.m45 ?? null

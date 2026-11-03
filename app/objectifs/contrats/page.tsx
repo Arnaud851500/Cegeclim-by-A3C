@@ -27,6 +27,9 @@
  * Primes « évolution du CA de familles » (03/11/2026, migration 20261103d) :
  * macro-familles / familles au choix, base CA perso ou agence, comparaison N vs
  * N-1 sur les mêmes mois, résultat automatique (forfait avec cible % ou paliers %).
+ * Primes « évolution du taux de transformation » (03/11/2026, migration 20261103e) :
+ * taux devis → commande à 120 j en CA (lecture à âge égal de l'écran Analyse devis),
+ * devis du 01/01 au dernier jour mûr vs mêmes dates N-1, cible en points.
  * Impression (03/11/2026, demandé par Arnaud) : document A4 dédié (ImpressionFiche),
  * rendu hors du shell de l'application via un portail ; seul ce document est
  * imprimé (bandeau, menus et écran masqués).
@@ -55,6 +58,7 @@ import {
   fmtE,
   fmtEvol,
   fmtK,
+  fmtPts,
   libelleFamilles,
   fmtPct,
   lireClasseur,
@@ -642,7 +646,7 @@ function PrimesAnnuelles({ fiche, calc, modifier, onChange }: { fiche: FicheCont
   const totMax = etats.reduce((s, x) => s + x.e.montantMax, 0)
   const totADate = etats.reduce((s, x) => s + x.e.montantADate, 0)
   const totProj = etats.reduce((s, x) => s + x.e.montantProjete, 0)
-  const sections: Section[] = ['ca_perso', 'ca_agence', 'familles', 'qualitatif', 'avenant', 'avril_n1']
+  const sections: Section[] = ['ca_perso', 'ca_agence', 'familles', 'transfo', 'qualitatif', 'avenant', 'avril_n1']
 
   return (
     <Bloc
@@ -688,10 +692,11 @@ function PrimesAnnuelles({ fiche, calc, modifier, onChange }: { fiche: FicheCont
                         </div>
                       </div>
 
-                      {p.mode === 'paliers' && p.indicateur !== 'evol_familles' && (
+                      {p.mode === 'paliers' && p.indicateur !== 'evol_familles' && p.indicateur !== 'evol_transfo' && (
                         <PaliersBar paliers={p.paliers} valeur={e.valeur} projection={e.projection} />
                       )}
                       {p.indicateur === 'evol_familles' && <EvolFamilles prime={p} evol={e.valeur} />}
+                      {p.indicateur === 'evol_transfo' && <EvolFamilles prime={p} evol={e.valeur} enPoints />}
                       {e.texte && <div className="mt-1.5 text-[12px] text-slate-600">{e.texte}</div>}
 
                       <div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-500">
@@ -733,22 +738,26 @@ function PrimesAnnuelles({ fiche, calc, modifier, onChange }: { fiche: FicheCont
   )
 }
 
-function EvolFamilles({ prime, evol }: { prime: Prime; evol: number | null }) {
+function EvolFamilles({ prime, evol, enPoints = false }: { prime: Prime; evol: number | null; enPoints?: boolean }) {
+  const fmt = (v: number | null, d = 1) => (enPoints ? fmtPts(v, d) : fmtEvol(v, d))
   const seuils = prime.mode === 'paliers' ? [...prime.paliers].sort((a, b) => a.seuil - b.seuil) : [{ seuil: Number(prime.cible_evol ?? 0), montant: prime.montant }]
   return (
     <div className="mt-2.5">
       <div className="mb-1.5 flex flex-wrap gap-1">
-        {[...(prime.familles_macro || []).map((x) => ({ x, macro: true })), ...(prime.familles || []).map((x) => ({ x, macro: false }))].map(({ x, macro }) => (
+        {enPoints && <span className="rounded bg-[#E8F0F3] px-1.5 py-0.5 text-[10px] font-semibold text-[#18465A]">Devis → commande à 120 j</span>}
+        {[...(enPoints ? [] : prime.familles_macro || []).map((x) => ({ x, macro: true })), ...(enPoints ? [] : prime.familles || []).map((x) => ({ x, macro: false }))].map(({ x, macro }) => (
           <span key={x} className={`rounded px-1.5 py-0.5 text-[10px] font-semibold ${macro ? 'bg-[#E8F0F3] text-[#18465A]' : 'bg-[#F1EFE8] text-[#5B6370]'}`}>
             {x}
           </span>
         ))}
-        <span className="rounded bg-white px-1.5 py-0.5 text-[10px] font-semibold text-slate-500 ring-1 ring-[#E2DFD8]">base {prime.base_ca === 'agence' ? 'CA agence' : 'CA perso'}</span>
+        <span className="rounded bg-white px-1.5 py-0.5 text-[10px] font-semibold text-slate-500 ring-1 ring-[#E2DFD8]">
+          base {prime.base_ca === 'agence' ? (enPoints ? 'agence' : 'CA agence') : enPoints ? 'perso' : 'CA perso'}
+        </span>
       </div>
       <div className="flex flex-wrap gap-1.5">
         <div className="min-w-[96px] flex-1 rounded-md border border-[#0B1220] bg-[#0B1220] px-2 py-1 text-center leading-tight text-white">
           <div className="text-[11px] font-semibold">Évolution à date</div>
-          <div className="text-[13px] font-bold tabular-nums">{fmtEvol(evol)}</div>
+          <div className="text-[13px] font-bold tabular-nums">{fmt(evol)}</div>
         </div>
         {seuils.map((p, i) => {
           const atteint = evol != null && evol >= p.seuil
@@ -759,7 +768,7 @@ function EvolFamilles({ prime, evol }: { prime: Prime; evol: number | null }) {
                 atteint ? 'border-[#2F7A4A] bg-[#E3F1E7] text-[#1F5A35]' : 'border-[#E2DFD8] bg-white text-slate-500'
               }`}
             >
-              <div className="text-[11px] font-semibold tabular-nums">≥ {fmtEvol(p.seuil, 0)}</div>
+              <div className="text-[11px] font-semibold tabular-nums">≥ {fmt(p.seuil, 0)}</div>
               <div className="text-[13px] font-bold tabular-nums">{fmtE(p.montant)}</div>
               <div className="text-[10px]">{atteint ? '✓ atteint' : 'non atteint'}</div>
             </div>
@@ -967,14 +976,15 @@ function nouvellePrime(section: Section): PrimeEdit {
     libelle: SECTION_LIBELLES[section],
     description: '',
     mode: paliers ? 'paliers' : 'forfait',
-    indicateur: section === 'ca_perso' ? 'ca_perso' : section === 'ca_agence' ? 'ca_agence' : section === 'familles' ? 'evol_familles' : 'manuel',
+    indicateur:
+      section === 'ca_perso' ? 'ca_perso' : section === 'ca_agence' ? 'ca_agence' : section === 'familles' ? 'evol_familles' : section === 'transfo' ? 'evol_transfo' : 'manuel',
     paliers: paliers ? [{ seuil: 0, montant: 0 }] : [],
     montant: 0,
     echeance: 'avril_n1',
     familles_macro: [],
     familles: [],
     base_ca: 'perso',
-    cible_evol: section === 'familles' ? 0.2 : null,
+    cible_evol: section === 'familles' ? 0.2 : section === 'transfo' ? 2 : null,
   }
 }
 
@@ -1053,7 +1063,7 @@ function EditeurContrat({ fiche, onSaved }: { fiche: FicheContrat; onSaved: () =
         familles_macro: p.indicateur === 'evol_familles' ? p.familles_macro || [] : [],
         familles: p.indicateur === 'evol_familles' ? p.familles || [] : [],
         base_ca: p.base_ca || 'perso',
-        cible_evol: p.indicateur === 'evol_familles' && p.mode === 'forfait' ? p.cible_evol ?? 0 : null,
+        cible_evol: (p.indicateur === 'evol_familles' || p.indicateur === 'evol_transfo') && p.mode === 'forfait' ? p.cible_evol ?? 0 : null,
       })),
     }
     const { error } = await supabase.rpc('save_obj_contrat', { p: payload })
@@ -1138,7 +1148,14 @@ function EditeurContrat({ fiche, onSaved }: { fiche: FicheContrat; onSaved: () =
                 value={p.indicateur}
                 onChange={(e) => {
                   const ind = e.target.value as Indicateur
-                  maj(p._k, ind === 'evol_familles' ? { indicateur: ind, section: 'familles', cible_evol: p.cible_evol ?? 0.2, base_ca: p.base_ca || 'perso' } : { indicateur: ind })
+                  maj(
+                    p._k,
+                    ind === 'evol_familles'
+                      ? { indicateur: ind, section: 'familles', cible_evol: 0.2, base_ca: p.base_ca || 'perso' }
+                      : ind === 'evol_transfo'
+                        ? { indicateur: ind, section: 'transfo', cible_evol: 2, base_ca: p.base_ca || 'perso' }
+                        : { indicateur: ind },
+                  )
                 }}
                 className={inp}
               >
@@ -1175,6 +1192,21 @@ function EditeurContrat({ fiche, onSaved }: { fiche: FicheContrat; onSaved: () =
                 <>
                   <input value={String(p.montant)} onChange={(e) => maj(p._k, { montant: num(e.target.value) ?? 0 })} className={`${inp} w-28 text-right`} />
                   <span>€</span>
+                  {p.indicateur === 'evol_transfo' && (
+                    <span className="ml-2 flex items-center gap-1">
+                      si taux de transfo ≥ +
+                      <input
+                        value={String(Number(p.cible_evol ?? 0))}
+                        onChange={(e) => maj(p._k, { cible_evol: num(e.target.value) ?? 0 })}
+                        className={`${inp} h-7 w-16 text-right`}
+                      />
+                      pts vs N-1
+                      <select value={p.base_ca || 'perso'} onChange={(e) => maj(p._k, { base_ca: e.target.value as 'perso' | 'agence' })} className={`${inp} ml-2 h-7`}>
+                        <option value="perso">devis du collaborateur</option>
+                        <option value="agence">devis de l’agence</option>
+                      </select>
+                    </span>
+                  )}
                   {p.indicateur === 'evol_familles' && (
                     <span className="ml-2 flex items-center gap-1">
                       si évolution ≥ +
@@ -1187,17 +1219,23 @@ function EditeurContrat({ fiche, onSaved }: { fiche: FicheContrat; onSaved: () =
                     </span>
                   )}
                 </>
-              ) : p.indicateur === 'evol_familles' ? (
+              ) : p.indicateur === 'evol_familles' || p.indicateur === 'evol_transfo' ? (
                 <>
                   {p.paliers.map((x, i) => (
                     <span key={i} className="flex items-center gap-1 rounded-md border border-[#E2DFD8] bg-white px-1.5 py-1">
-                      évol. ≥ +
+                      {p.indicateur === 'evol_transfo' ? 'transfo ≥ +' : 'évol. ≥ +'}
                       <input
-                        value={String(Math.round(x.seuil * 1000) / 10)}
-                        onChange={(e) => maj(p._k, { paliers: p.paliers.map((y, j) => (j === i ? { ...y, seuil: (num(e.target.value) ?? 0) / 100 } : y)) })}
+                        value={String(p.indicateur === 'evol_transfo' ? x.seuil : Math.round(x.seuil * 1000) / 10)}
+                        onChange={(e) =>
+                          maj(p._k, {
+                            paliers: p.paliers.map((y, j) =>
+                              j === i ? { ...y, seuil: p.indicateur === 'evol_transfo' ? num(e.target.value) ?? 0 : (num(e.target.value) ?? 0) / 100 } : y,
+                            ),
+                          })
+                        }
                         className={`${inp} h-7 w-16 text-right`}
                       />
-                      % →
+                      {p.indicateur === 'evol_transfo' ? 'pts →' : '% →'}
                       <input
                         value={String(x.montant)}
                         onChange={(e) => maj(p._k, { paliers: p.paliers.map((y, j) => (j === i ? { ...y, montant: num(e.target.value) ?? 0 } : y)) })}
@@ -1731,7 +1769,11 @@ function DocumentContrat({ fiche, calc }: { fiche: FicheContrat; calc: ReturnTyp
   const sens = (v: number | null | undefined) => (v == null ? '' : v >= 0 ? 'pos' : 'neg')
 
   const condition = (p: Prime) =>
-    p.indicateur === 'evol_familles'
+    p.indicateur === 'evol_transfo'
+      ? `Taux de transfo devis à 120 j ${p.base_ca === 'agence' ? 'agence' : 'perso'} vs N-1 : ${
+          p.mode === 'paliers' ? p.paliers.map((x) => `≥ ${fmtPts(x.seuil, 0)} : ${fmtE(x.montant)}`).join(' · ') : `≥ ${fmtPts(Number(p.cible_evol ?? 0), 0)}`
+        }`
+      : p.indicateur === 'evol_familles'
       ? `${p.base_ca === 'agence' ? 'CA agence' : 'CA perso'} ${libelleFamilles(p)} vs N-1 : ${
           p.mode === 'paliers' ? p.paliers.map((x) => `≥ ${fmtEvol(x.seuil, 0)} : ${fmtE(x.montant)}`).join(' · ') : `≥ ${fmtEvol(Number(p.cible_evol ?? 0), 0)}`
         }`
