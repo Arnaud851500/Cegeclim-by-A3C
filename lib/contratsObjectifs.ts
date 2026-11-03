@@ -12,8 +12,8 @@
 // (hors statistique exclus) ; commission calculée sur les mois clos.
 // ============================================================================
 
-export type Section = 'ca_perso' | 'ca_agence' | 'qualitatif' | 'familles' | 'transfo' | 'avenant' | 'avril_n1'
-export type Indicateur = 'ca_perso' | 'ca_agence' | 'zero_impaye_45j' | 'cerfa_complet' | 'manuel' | 'evol_familles' | 'evol_transfo'
+export type Section = 'ca_perso' | 'ca_agence' | 'qualitatif' | 'familles' | 'transfo' | 'clients' | 'avenant' | 'avril_n1'
+export type Indicateur = 'ca_perso' | 'ca_agence' | 'zero_impaye_45j' | 'cerfa_complet' | 'manuel' | 'evol_familles' | 'evol_transfo' | 'nb_clients'
 export type Resultat = 'a_evaluer' | 'atteint' | 'partiel' | 'non_atteint'
 export type Echeance = '31/12' | 'avril_n1'
 
@@ -35,6 +35,9 @@ export type Prime = {
   familles?: string[]
   base_ca?: 'perso' | 'agence'
   cible_evol?: number | null
+  /** Primes « nombre de clients par tranche de CA 12 mois glissants » */
+  tranche?: Tranche | null
+  cible_nb?: number | null
   resultat?: Resultat
   montant_retenu?: number | null
   evalue_par?: string | null
@@ -88,6 +91,16 @@ export type FicheContrat = {
   repartition: Array<{ mois: number; pct: number }>
   familles_resultats?: Record<string, { ca: number; ca_n1: number; mois: number }>
   transfo?: Partial<Record<'perso' | 'agence', TransfoResultat>>
+  clients_resultats?: Record<string, { nb: number; nb_n1: number; mois: number }>
+}
+
+export type Tranche = 't400' | 't200' | 't100' | 't50' | 't20'
+export const TRANCHES: Record<Tranche, string> = {
+  t400: 'Clients ≥ 400 k€',
+  t200: 'Clients 200 – 400 k€',
+  t100: 'Clients 100 – 200 k€',
+  t50: 'Clients 50 – 100 k€',
+  t20: 'Clients 20 – 50 k€',
 }
 
 /** Taux de transformation devis → commande à 120 j en CA (lecture « à âge égal » de l'écran Analyse devis). */
@@ -136,6 +149,7 @@ export const SECTION_LIBELLES: Record<Section, string> = {
   qualitatif: 'Prime annuelle qualitative',
   familles: 'Prime sur le développement de familles produits',
   transfo: 'Prime sur le taux de transformation des devis',
+  clients: 'Objectif nombre de clients par tranche de CA',
   avenant: 'Prime liée à la vente de produits (avenant)',
   avril_n1: 'Prime individuelle versée en avril N+1',
 }
@@ -148,6 +162,7 @@ export const INDICATEUR_LIBELLES: Record<Indicateur, string> = {
   manuel: 'Évaluée par la direction',
   evol_familles: 'Évolution du CA de familles vs N-1 (automatique)',
   evol_transfo: 'Évolution du taux de transformation devis vs N-1 (automatique)',
+  nb_clients: 'Nombre de clients par tranche de CA 12 mois glissants (automatique)',
 }
 
 export function fmtPts(v: number | null | undefined, d = 1) {
@@ -413,6 +428,22 @@ export function etatPrime(p: Prime, f: FicheContrat, calc: CalculContrat): EtatP
       texte = `${base} ${libelleFamilles(p)} : ${fmtK(r.ca)} vs ${fmtK(r.ca_n1)} en N-1 (janv. → ${MOIS[r.mois]?.toLowerCase() || '—'}) · ${
         evol == null ? 'pas de CA N-1' : fmtEvol(evol)
       }${p.mode === 'forfait' ? ` · cible ${fmtEvol(Number(p.cible_evol ?? 0), 0)}` : ''}`
+    }
+  } else if (p.indicateur === 'nb_clients') {
+    const r = p.id ? f.clients_resultats?.[p.id] : undefined
+    const cible = Number(p.cible_nb ?? 0)
+    valeur = r ? r.nb : null
+    projection = valeur
+    if (!r || !p.tranche) {
+      statut = 'gris'
+      texte = 'Choisir la tranche et le nombre de clients visé (modifier le contrat)'
+    } else {
+      const ok = r.nb >= cible
+      aDate = projete = ok ? max : 0
+      statut = ok ? 'vert' : r.nb >= cible - 1 ? 'orange' : 'rouge'
+      texte = `${TRANCHES[p.tranche]} (CA 12 mois glissants à fin ${MOIS[r.mois]?.toLowerCase() || '—'}, ${
+        p.base_ca === 'agence' ? `agence ${f.agence || ''}` : 'perso'
+      }) : ${r.nb} client${r.nb > 1 ? 's' : ''} · cible ${cible} · N-1 : ${r.nb_n1}`
     }
   } else if (p.indicateur === 'evol_transfo') {
     const r = f.transfo?.[p.base_ca === 'agence' ? 'agence' : 'perso']

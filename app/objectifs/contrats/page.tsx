@@ -30,6 +30,9 @@
  * Primes « évolution du taux de transformation » (03/11/2026, migration 20261103e) :
  * taux devis → commande à 120 j en CA (lecture à âge égal de l'écran Analyse devis),
  * devis du 01/01 au dernier jour mûr vs mêmes dates N-1, cible en points.
+ * Primes « nombre de clients par tranche de CA 12 mois glissants » (03/11/2026,
+ * migration 20261103f) ; ces contrats alimentent aussi les objectifs de l'écran
+ * Suivi agences – commerciaux (get_suivi_objectifs), agence = somme.
  * Impression (03/11/2026, demandé par Arnaud) : document A4 dédié (ImpressionFiche),
  * rendu hors du shell de l'application via un portail ; seul ce document est
  * imprimé (bandeau, menus et écran masqués).
@@ -47,6 +50,7 @@ import {
   MOIS,
   RESULTAT_LIBELLES,
   SECTION_LIBELLES,
+  TRANCHES,
   TRIMESTRES,
   apparier,
   avanceTheorique,
@@ -72,6 +76,7 @@ import {
   type Prime,
   type Resultat,
   type Section,
+  type Tranche,
 } from '@/lib/contratsObjectifs'
 
 type Droits = { modifier: boolean; mon_code: string | null; suivi: boolean }
@@ -646,7 +651,7 @@ function PrimesAnnuelles({ fiche, calc, modifier, onChange }: { fiche: FicheCont
   const totMax = etats.reduce((s, x) => s + x.e.montantMax, 0)
   const totADate = etats.reduce((s, x) => s + x.e.montantADate, 0)
   const totProj = etats.reduce((s, x) => s + x.e.montantProjete, 0)
-  const sections: Section[] = ['ca_perso', 'ca_agence', 'familles', 'transfo', 'qualitatif', 'avenant', 'avril_n1']
+  const sections: Section[] = ['ca_perso', 'ca_agence', 'familles', 'transfo', 'clients', 'qualitatif', 'avenant', 'avril_n1']
 
   return (
     <Bloc
@@ -697,6 +702,23 @@ function PrimesAnnuelles({ fiche, calc, modifier, onChange }: { fiche: FicheCont
                       )}
                       {p.indicateur === 'evol_familles' && <EvolFamilles prime={p} evol={e.valeur} />}
                       {p.indicateur === 'evol_transfo' && <EvolFamilles prime={p} evol={e.valeur} enPoints />}
+                      {p.indicateur === 'nb_clients' && p.tranche && (
+                        <div className="mt-2.5 flex flex-wrap gap-1.5">
+                          <div className="min-w-[96px] flex-1 rounded-md border border-[#0B1220] bg-[#0B1220] px-2 py-1 text-center leading-tight text-white">
+                            <div className="text-[11px] font-semibold">{TRANCHES[p.tranche]}</div>
+                            <div className="text-[13px] font-bold tabular-nums">{e.valeur ?? '—'} client(s)</div>
+                          </div>
+                          <div
+                            className={`min-w-[96px] flex-1 rounded-md border px-2 py-1 text-center leading-tight ${
+                              e.statut === 'vert' ? 'border-[#2F7A4A] bg-[#E3F1E7] text-[#1F5A35]' : 'border-[#E2DFD8] bg-white text-slate-500'
+                            }`}
+                          >
+                            <div className="text-[11px] font-semibold">Cible ≥ {Number(p.cible_nb ?? 0)}</div>
+                            <div className="text-[13px] font-bold tabular-nums">{fmtE(e.montantMax)}</div>
+                            <div className="text-[10px]">{e.statut === 'vert' ? '✓ atteint' : 'non atteint'}</div>
+                          </div>
+                        </div>
+                      )}
                       {e.texte && <div className="mt-1.5 text-[12px] text-slate-600">{e.texte}</div>}
 
                       <div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-500">
@@ -977,7 +999,7 @@ function nouvellePrime(section: Section): PrimeEdit {
     description: '',
     mode: paliers ? 'paliers' : 'forfait',
     indicateur:
-      section === 'ca_perso' ? 'ca_perso' : section === 'ca_agence' ? 'ca_agence' : section === 'familles' ? 'evol_familles' : section === 'transfo' ? 'evol_transfo' : 'manuel',
+      section === 'ca_perso' ? 'ca_perso' : section === 'ca_agence' ? 'ca_agence' : section === 'familles' ? 'evol_familles' : section === 'transfo' ? 'evol_transfo' : section === 'clients' ? 'nb_clients' : 'manuel',
     paliers: paliers ? [{ seuil: 0, montant: 0 }] : [],
     montant: 0,
     echeance: 'avril_n1',
@@ -985,6 +1007,8 @@ function nouvellePrime(section: Section): PrimeEdit {
     familles: [],
     base_ca: 'perso',
     cible_evol: section === 'familles' ? 0.2 : section === 'transfo' ? 2 : null,
+    tranche: section === 'clients' ? 't100' : null,
+    cible_nb: section === 'clients' ? 5 : null,
   }
 }
 
@@ -1064,6 +1088,8 @@ function EditeurContrat({ fiche, onSaved }: { fiche: FicheContrat; onSaved: () =
         familles: p.indicateur === 'evol_familles' ? p.familles || [] : [],
         base_ca: p.base_ca || 'perso',
         cible_evol: (p.indicateur === 'evol_familles' || p.indicateur === 'evol_transfo') && p.mode === 'forfait' ? p.cible_evol ?? 0 : null,
+        tranche: p.indicateur === 'nb_clients' ? p.tranche || 't100' : null,
+        cible_nb: p.indicateur === 'nb_clients' ? p.cible_nb ?? 0 : null,
       })),
     }
     const { error } = await supabase.rpc('save_obj_contrat', { p: payload })
@@ -1154,7 +1180,9 @@ function EditeurContrat({ fiche, onSaved }: { fiche: FicheContrat; onSaved: () =
                       ? { indicateur: ind, section: 'familles', cible_evol: 0.2, base_ca: p.base_ca || 'perso' }
                       : ind === 'evol_transfo'
                         ? { indicateur: ind, section: 'transfo', cible_evol: 2, base_ca: p.base_ca || 'perso' }
-                        : { indicateur: ind },
+                        : ind === 'nb_clients'
+                          ? { indicateur: ind, section: 'clients', mode: 'forfait', tranche: p.tranche || 't100', cible_nb: p.cible_nb ?? 5, base_ca: p.base_ca || 'perso' }
+                          : { indicateur: ind },
                   )
                 }}
                 className={inp}
@@ -1192,6 +1220,24 @@ function EditeurContrat({ fiche, onSaved }: { fiche: FicheContrat; onSaved: () =
                 <>
                   <input value={String(p.montant)} onChange={(e) => maj(p._k, { montant: num(e.target.value) ?? 0 })} className={`${inp} w-28 text-right`} />
                   <span>€</span>
+                  {p.indicateur === 'nb_clients' && (
+                    <span className="ml-2 flex flex-wrap items-center gap-1">
+                      si au moins
+                      <input value={String(Number(p.cible_nb ?? 0))} onChange={(e) => maj(p._k, { cible_nb: num(e.target.value) ?? 0 })} className={`${inp} h-7 w-14 text-right`} />
+                      <select value={p.tranche || 't100'} onChange={(e) => maj(p._k, { tranche: e.target.value as Tranche })} className={`${inp} h-7`}>
+                        {(Object.keys(TRANCHES) as Tranche[]).map((t) => (
+                          <option key={t} value={t}>
+                            {TRANCHES[t].replace('Clients ', 'clients ')}
+                          </option>
+                        ))}
+                      </select>
+                      (CA 12 mois glissants)
+                      <select value={p.base_ca || 'perso'} onChange={(e) => maj(p._k, { base_ca: e.target.value as 'perso' | 'agence' })} className={`${inp} ml-1 h-7`}>
+                        <option value="perso">clients du collaborateur</option>
+                        <option value="agence">clients de l’agence</option>
+                      </select>
+                    </span>
+                  )}
                   {p.indicateur === 'evol_transfo' && (
                     <span className="ml-2 flex items-center gap-1">
                       si taux de transfo ≥ +
@@ -1769,7 +1815,9 @@ function DocumentContrat({ fiche, calc }: { fiche: FicheContrat; calc: ReturnTyp
   const sens = (v: number | null | undefined) => (v == null ? '' : v >= 0 ? 'pos' : 'neg')
 
   const condition = (p: Prime) =>
-    p.indicateur === 'evol_transfo'
+    p.indicateur === 'nb_clients'
+      ? `${p.tranche ? TRANCHES[p.tranche] : 'Tranche ?'} (12 mois glissants, ${p.base_ca === 'agence' ? 'agence' : 'perso'}) : au moins ${Number(p.cible_nb ?? 0)}`
+      : p.indicateur === 'evol_transfo'
       ? `Taux de transfo devis à 120 j ${p.base_ca === 'agence' ? 'agence' : 'perso'} vs N-1 : ${
           p.mode === 'paliers' ? p.paliers.map((x) => `≥ ${fmtPts(x.seuil, 0)} : ${fmtE(x.montant)}`).join(' · ') : `≥ ${fmtPts(Number(p.cible_evol ?? 0), 0)}`
         }`

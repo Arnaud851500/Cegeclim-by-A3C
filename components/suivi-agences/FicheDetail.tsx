@@ -9,6 +9,7 @@ import { useEffect, useMemo, useState } from 'react'
 import type React from 'react'
 import { Bar, CartesianGrid, ComposedChart, Legend, Line, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
 import { supabase } from '@/lib/supabaseClient'
+import ContratsSuivi from '@/components/suivi-agences/ContratsSuivi'
 import {
   DYNAMIQUE_LIBELLES,
   FAMILLES_LIBELLES,
@@ -339,7 +340,21 @@ export default function FicheDetail({
           {/* Objectifs — remonté sous les indicateurs (15/10/2026, demandé par
               Arnaud) et découpé en 4 blocs distincts : CA et marge, évolutions
               d'activité par famille, groupes de clients, impayés. */}
-          <Section title="Objectifs" hint="Objectifs fixés dans l’écran Objectifs pour ce périmètre (à défaut : objectifs de l’agence puis de l’entreprise).">
+          {/* Contrat d'objectifs (03/11/2026) : suivi du contrat signé (collaborateur)
+              ou des contrats de l'agence. */}
+          {entity.kind !== 'entreprise' && (
+            <Section
+              title={entity.kind === 'collaborateur' ? 'Contrat d’objectifs' : 'Contrats d’objectifs de l’agence'}
+              hint="Commission sur marge, avances et primes annuelles du contrat signé (écran Contrats d’objectifs)."
+            >
+              <ContratsSuivi entity={entity} annee={annee} />
+            </Section>
+          )}
+
+          <Section
+            title="Objectifs"
+            hint="Objectifs issus des contrats d’objectifs : collaborateur = son contrat, agence = somme des contrats de ses collaborateurs, entreprise = somme des agences."
+          >
             {objectifs.heritesDe && (
               <p className="-mt-1 mb-3 text-[11px] text-slate-500">
                 Agence à un seul commercial : les objectifs non fixés en propre sont repris de l’{objectifs.heritesDe} (mention sur le pavé).
@@ -379,7 +394,7 @@ export default function FicheDetail({
                 }))}
               >
                 {famillesSuivies.length === 0 ? (
-                  <AucunObjectif texte={`Aucune famille de produits n’est listée dans les objectifs ${annee} de ce périmètre, de son agence ou de l’entreprise. Ajoutez-en dans l’écran Objectifs (bloc « CA par famille » ou « Marge par famille »).`} />
+                  <AucunObjectif texte={`Aucune famille de produits n’est listée dans les objectifs ${annee} de ce périmètre, de son agence ou de l’entreprise. Ajoutez une prime « développement de familles produits » dans le contrat d’objectifs.`} />
                 ) : (
                   <div className="overflow-x-auto">
                     <table className="w-full min-w-[900px] text-[13px]">
@@ -439,7 +454,7 @@ export default function FicheDetail({
                 bilan={bilan(objectifsClients.map((o) => reelPour(o, aDate, tauxN, tauxN1, attenduADate, ctxReel).statut))}
               >
                 {objectifsClients.length === 0 ? (
-                  <AucunObjectif texte="Aucun objectif de nombre de clients par tranche de CA fixé." />
+                  <AucunObjectif texte="Aucun objectif de nombre de clients par tranche de CA dans le contrat d’objectifs." />
                 ) : (
                   <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-5">
                     {objectifsClients.map((o) => (
