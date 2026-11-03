@@ -26,6 +26,8 @@ export type AccessRights = {
   can_superuser: boolean
   can_projetblg: boolean
   can_paiement: boolean
+  /** (2026-11-03) Bloc « Guides BLG » : modes opératoires BLG Cloud (HTML déposés). */
+  can_guides_blg: boolean
   can_change_scope: boolean
   allowed_scopes: string[]
   allowed_agences: string[]
@@ -102,6 +104,7 @@ type AccessProfileRow = {
   can_superuser?: boolean | null
   can_projetblg?: boolean | null
   can_paiement?: boolean | null
+  can_guides_blg?: boolean | null
   can_change_scope?: boolean | null
   default_landing_page?: string | null
   show_alert_cerfa_ko?: boolean | null
@@ -170,6 +173,7 @@ export const defaultRights: AccessRights = {
   can_superuser: false,
   can_projetblg: false,
   can_paiement: false,
+  can_guides_blg: false,
   can_change_scope: false,
   allowed_scopes: ['Global'],
   allowed_agences: [],
@@ -245,6 +249,7 @@ const PAGE_ACCESS_CHECKS: Array<[string, keyof AccessRights]> = [
   ['/financement', 'can_financement'],
   ['/suivi-agences', 'can_suivi_agences'],
   ['/objectifs', 'can_objectifs'],
+  ['/guides-blg', 'can_guides_blg'],
 ]
 
 function isPathAllowed(path: string, rights: AccessRights) {
@@ -278,6 +283,7 @@ export function getFirstAllowedPath(rights: AccessRights) {
   if (rights.can_paiement) return '/retards-paiement'
   if (rights.can_financement) return '/financement'
   if (rights.can_suivi_agences) return '/suivi-agences'
+  if (rights.can_guides_blg) return '/guides-blg'
 
   return '/unauthorized'
 }
@@ -305,6 +311,7 @@ const PROFILE_FLAG_KEYS = [
   'can_superuser',
   'can_projetblg',
   'can_paiement',
+  'can_guides_blg',
   'can_change_scope',
   'show_alert_cerfa_ko',
   'show_alert_cdc_liv_avant_2026',

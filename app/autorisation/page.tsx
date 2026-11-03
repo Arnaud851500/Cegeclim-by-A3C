@@ -28,6 +28,7 @@ type PermissionKey =
   | 'can_superuser'
   | 'can_projetblg'
   | 'can_paiement'
+  | 'can_guides_blg'
 
 type AlertKey =
   | 'show_alert_cerfa_ko'
@@ -172,6 +173,13 @@ const PERMISSION_GROUPS: Array<{
     ],
   },
   {
+    family: 'Guides BLG',
+    hint: 'Bloc « Guides BLG » : modes opératoires BLG Cloud',
+    items: [
+      { key: 'can_guides_blg', label: 'Guides BLG', description: 'Lecture des chapitres de modes opératoires BLG Cloud (clients, commandes…). Le dépôt des chapitres reste réservé aux administrateurs.' },
+    ],
+  },
+  {
     family: 'Administration',
     hint: 'À réserver aux administrateurs',
     items: [
@@ -258,6 +266,7 @@ const EMPTY_PROFILE: AccessProfile = {
   can_superuser: false,
   can_projetblg: false,
   can_paiement: false,
+  can_guides_blg: false,
   show_alert_cerfa_ko: false,
   show_alert_cdc_liv_avant_2026: false,
   show_alert_controle_frais_port: false,
