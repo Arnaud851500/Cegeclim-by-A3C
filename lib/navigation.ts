@@ -46,6 +46,9 @@
 // ÉVOLUTION (2026-11-01) : « Inventaire – pilotage achats » (/stock/inventaire, can_appro) et
 // « Inventaire – saisie dépôt » (/stock/inventaire/saisie, can_stocks, dépôt de l'agence).
 // Migration 20261101_inventaire_annuel.sql.
+// ÉVOLUTION (2026-11-03) : « Contrats d’objectifs » (/objectifs/contrats) ajouté au bloc
+// Mes agences / Mes commerciaux (menu sous can_dashboard ; lecture / écriture contrôlées
+// en base par obj_peut_lire / obj_peut_modifier). Migration 20261103_contrats_objectifs.sql.
 // Le bloc « Mes alertes » de l'accueil n'est pas ici : il n'a pas de page, il
 // ouvre le Centre d'alertes (components/AlertsContext.tsx + ClientRootShell).
 
@@ -153,6 +156,7 @@ export const NAV_BLOCS: NavBloc[] = [
     pages: [
       { label: 'Suivi agences – commerciaux', path: '/suivi-agences', activeLabel: 'Suivi agences – commerciaux', accessKey: 'can_suivi_agences', description: 'CA facturé N-2 / N-1 / N par agence et collaborateur, évolution vs N-1 et vs entreprise, croix de positionnement trimestrielle, fiche détaillée — limité aux agences / collaborateurs autorisés.' },
       { label: 'Objectifs', path: '/objectifs', activeLabel: 'Objectifs commerciaux', accessKey: 'can_objectifs', description: 'Objectifs entreprise, agences et commerciaux : CA, évolution, marge, familles suivies, structure clients.' },
+      { label: 'Contrats d’objectifs', path: '/objectifs/contrats', activeLabel: 'Contrats d’objectifs', accessKey: 'can_dashboard', description: 'Contrat d’objectifs signé par chaque commercial : objectif CA, commission sur marge, avances, primes annuelles. Le commercial voit sa fiche ; la direction modifie, évalue et importe le classeur.' },
     ],
   },
   {
