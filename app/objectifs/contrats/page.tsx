@@ -20,12 +20,16 @@
  * obj_contrat_editeurs) et les administrateurs modifient et évaluent.
  * Contrôlés côté base (obj_peut_lire / obj_peut_modifier) —
  * migration supabase/migrations/20261103_contrats_objectifs.sql.
+ * Impression (03/11/2026, demandé par Arnaud) : document A4 dédié (ImpressionFiche),
+ * rendu hors du shell de l'application via un portail ; seul ce document est
+ * imprimé (bandeau, menus et écran masqués).
  * Marge PV ignorée pour l'instant. Réalisé = indicateur_factures_mensuel
  * (hors statistique exclus), commission calculée sur les mois clos.
  */
 
 import { Suspense, useCallback, useEffect, useMemo, useState } from 'react'
 import type React from 'react'
+import { createPortal } from 'react-dom'
 import { useRouter, useSearchParams } from 'next/navigation'
 import { supabase } from '@/lib/supabaseClient'
 import {
@@ -508,6 +512,8 @@ function Fiche({ annee, code, droits }: { annee: number; code: string; droits: D
 
           {/* Versements */}
           <Versements fiche={f} modifier={modifier} onChange={() => setRev((x) => x + 1)} />
+
+          <ImpressionFiche fiche={f} calc={calc} />
 
           {c.commentaire && (
             <div className="rounded-xl border border-[#E2DFD8] bg-white px-5 py-3 text-[13px] text-slate-700">
@@ -1382,4 +1388,327 @@ function ImportClasseur({ annee, onOuvrir }: { annee: number; onOuvrir: (code: s
 
 function FragmentOnglet({ children }: { children: React.ReactNode }) {
   return <>{children}</>
+}
+
+// ============================================================================
+// Impression : document A4 dédié, monté directement sous <body> (portail) pour
+// que @media print n'imprime que lui (le shell de l'application est masqué).
+// ============================================================================
+const PRINT_CSS = `
+#obj-print-root { display: none; }
+@media print {
+  @page { size: A4 portrait; margin: 11mm 11mm 12mm 11mm; }
+  html, body { background: #fff !important; height: auto !important; overflow: visible !important; }
+  body > *:not(#obj-print-root) { display: none !important; }
+  #obj-print-root { display: block !important; }
+  #obj-print-root * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+}
+#obj-print-root .op { font-family: var(--font-body, 'IBM Plex Sans'), 'IBM Plex Sans', Arial, sans-serif; color: #0B1220; font-size: 8.6pt; line-height: 1.35; }
+#obj-print-root .op-num { font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
+#obj-print-root .op h1 { font-family: var(--font-display, 'Space Grotesk'), 'Space Grotesk', Arial, sans-serif; font-size: 17pt; font-weight: 700; margin: 0; letter-spacing: -0.01em; }
+#obj-print-root .op h2 { font-family: var(--font-display, 'Space Grotesk'), 'Space Grotesk', Arial, sans-serif; font-size: 9.5pt; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; margin: 0 0 2mm 0; color: #0B1220; border-bottom: 1.2pt solid #0B1220; padding-bottom: 1mm; }
+#obj-print-root .op section { margin-top: 5mm; break-inside: avoid; }
+#obj-print-root .op table { width: 100%; border-collapse: collapse; }
+#obj-print-root .op th { font-size: 7.4pt; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; color: #5B6370; text-align: right; padding: 1.2mm 1.6mm; border-bottom: 0.8pt solid #0B1220; }
+#obj-print-root .op th:first-child { text-align: left; }
+#obj-print-root .op td { padding: 0.9mm 1.6mm; border-bottom: 0.4pt solid #E2DFD8; }
+#obj-print-root .op tr.mois td { color: #3A4250; }
+#obj-print-root .op tr.mois td:first-child { padding-left: 4mm; }
+#obj-print-root .op tr.encours td { color: #A0A4AA; font-style: italic; }
+#obj-print-root .op tr.trim td { background: #F1EFE8; font-weight: 700; border-bottom: 0.8pt solid #C9C4B8; }
+#obj-print-root .op tr.total td { background: #0B1220; color: #fff; font-weight: 700; border: none; padding-top: 1.6mm; padding-bottom: 1.6mm; }
+#obj-print-root .op .kpis { display: grid; grid-template-columns: repeat(4, 1fr); gap: 2.5mm; margin-top: 5mm; }
+#obj-print-root .op .kpi { border: 0.6pt solid #D5D1C7; border-radius: 1.5mm; padding: 2.2mm 3mm; }
+#obj-print-root .op .kpi .l { font-size: 7pt; text-transform: uppercase; letter-spacing: 0.06em; color: #5B6370; }
+#obj-print-root .op .kpi .v { font-size: 13pt; font-weight: 700; margin-top: 0.8mm; font-variant-numeric: tabular-nums; }
+#obj-print-root .op .kpi .s { font-size: 7.4pt; color: #5B6370; margin-top: 0.4mm; }
+#obj-print-root .op .bar { height: 1.6mm; background: #E7E3DA; border-radius: 1mm; margin-top: 1.4mm; position: relative; overflow: hidden; }
+#obj-print-root .op .bar > i { position: absolute; left: 0; top: 0; bottom: 0; background: #2D6F86; border-radius: 1mm; }
+#obj-print-root .op .solde { display: grid; grid-template-columns: 1fr 1fr; gap: 3mm; margin-top: 3mm; }
+#obj-print-root .op .box { border: 0.6pt solid #D5D1C7; border-radius: 1.5mm; padding: 2.4mm 3mm; }
+#obj-print-root .op .box .t { font-weight: 700; font-size: 8.4pt; margin-bottom: 1.2mm; }
+#obj-print-root .op .box .r { display: flex; justify-content: space-between; padding: 0.5mm 0; }
+#obj-print-root .op .box .r.f { border-top: 0.8pt solid #0B1220; margin-top: 1mm; padding-top: 1.2mm; font-weight: 700; font-size: 9.6pt; }
+#obj-print-root .op .pos { color: #2F7A4A; }
+#obj-print-root .op .neg { color: #B4501F; }
+#obj-print-root .op .pill { display: inline-block; padding: 0.3mm 1.8mm; border-radius: 3mm; font-size: 7pt; font-weight: 700; white-space: nowrap; }
+#obj-print-root .op .p-vert { background: #E3F1E7; color: #1F5A35; }
+#obj-print-root .op .p-orange { background: #F7EBD3; color: #8A5A12; }
+#obj-print-root .op .p-rouge { background: #FBE6DD; color: #8A3A1C; }
+#obj-print-root .op .p-gris { background: #ECEAE4; color: #4A4F57; }
+#obj-print-root .op .muted { color: #6B7280; }
+#obj-print-root .op .small { font-size: 7.2pt; }
+#obj-print-root .op section.p2 { break-before: page; margin-top: 0; }
+#obj-print-root .op .rappel { display: flex; justify-content: space-between; font-size: 7.6pt; color: #5B6370; border-bottom: 0.6pt solid #D5D1C7; padding-bottom: 1.5mm; margin-bottom: 5mm; }
+#obj-print-root .op .rappel b { color: #0B1220; }
+#obj-print-root .op .sig { display: grid; grid-template-columns: 1fr 1fr; gap: 8mm; margin-top: 7mm; break-inside: avoid; }
+#obj-print-root .op .sig div { border-top: 0.6pt solid #9C9A92; padding-top: 1.2mm; height: 16mm; font-size: 7.4pt; color: #5B6370; }
+`
+
+function ImpressionFiche({ fiche, calc }: { fiche: FicheContrat; calc: ReturnType<typeof calculerContrat> }) {
+  const [monte, setMonte] = useState(false)
+  useEffect(() => {
+    const t = setTimeout(() => setMonte(true), 0)
+    return () => clearTimeout(t)
+  }, [])
+  if (!monte || !fiche.contrat) return null
+  return createPortal(
+    <div id="obj-print-root">
+      <style>{PRINT_CSS}</style>
+      <DocumentContrat fiche={fiche} calc={calc} />
+    </div>,
+    document.body,
+  )
+}
+
+const STATUT_PRIME: Record<string, { cls: string; txt: string }> = {
+  vert: { cls: 'p-vert', txt: 'Acquis' },
+  orange: { cls: 'p-orange', txt: 'En bonne voie' },
+  rouge: { cls: 'p-rouge', txt: 'Non atteint à date' },
+  gris: { cls: 'p-gris', txt: 'À évaluer' },
+}
+
+function DocumentContrat({ fiche, calc }: { fiche: FicheContrat; calc: ReturnType<typeof calculerContrat> }) {
+  const c = fiche.contrat!
+  const tauxCom = `${fmt2(c.taux_commission * 100).replace(',00', '')} %`
+  const finMois = fiche.mois_clos > 0 ? `fin ${MOIS[fiche.mois_clos].toLowerCase()} ${fiche.annee}` : `début ${fiche.annee}`
+  const pctObj = c.objectif_caht ? calc.caTotal / c.objectif_caht : null
+  const pctProj = c.objectif_caht && calc.caProjete != null ? calc.caProjete / c.objectif_caht : null
+  const etats = fiche.primes.map((p) => ({ p, e: etatPrime(p, fiche, calc) }))
+  const totMax = etats.reduce((s, x) => s + x.e.montantMax, 0)
+  const totProj = etats.reduce((s, x) => s + x.e.montantProjete, 0)
+  const totADate = etats.reduce((s, x) => s + x.e.montantADate, 0)
+  const aujourdhui = new Date().toLocaleDateString('fr-FR', { day: '2-digit', month: 'long', year: 'numeric' })
+  const sens = (v: number | null | undefined) => (v == null ? '' : v >= 0 ? 'pos' : 'neg')
+
+  const condition = (p: Prime) =>
+    p.mode === 'paliers'
+      ? p.paliers.map((x) => `≥ ${fmtK(x.seuil)} : ${fmtE(x.montant)}`).join(' · ')
+      : p.description || INDICATEUR_LIBELLES[p.indicateur]
+
+  return (
+    <div className="op">
+      {/* En-tête */}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', borderBottom: '2pt solid #0B1220', paddingBottom: '2.5mm' }}>
+        <div>
+          <div style={{ fontSize: '7.4pt', fontWeight: 700, letterSpacing: '0.2em', color: '#B4761A', textTransform: 'uppercase' }}>CEGECLIM · Contrat d’objectifs {fiche.annee}</div>
+          <h1 style={{ marginTop: '1mm' }}>{fiche.nom}</h1>
+          <div className="muted" style={{ marginTop: '0.6mm' }}>
+            Agence {fiche.agence || '—'} · code {fiche.code} · contrat {c.statut === 'signe' ? 'signé' : c.statut === 'brouillon' ? 'en brouillon' : 'validé'}
+          </div>
+        </div>
+        <div style={{ textAlign: 'right' }}>
+          <div style={{ fontSize: '9pt', fontWeight: 700 }}>Situation à {finMois}</div>
+          <div className="muted small">Édité le {aujourdhui}</div>
+        </div>
+      </div>
+
+      {/* Indicateurs clés */}
+      <div className="kpis">
+        <div className="kpi">
+          <div className="l">Objectif CA HT</div>
+          <div className="v">{fmtK(c.objectif_caht)}</div>
+          <div className="s">Signé pour {fiche.annee}</div>
+        </div>
+        <div className="kpi">
+          <div className="l">CA HT réalisé</div>
+          <div className="v">{fmtK(calc.caTotal)}</div>
+          <div className="s">{pctObj == null ? '—' : `${fmtPct(pctObj, 0)} de l’objectif`}</div>
+          <div className="bar">
+            <i style={{ width: `${Math.min(100, (pctObj || 0) * 100)}%`, background: (pctObj || 0) >= 1 ? '#2F7A4A' : '#2D6F86' }} />
+          </div>
+        </div>
+        <div className="kpi">
+          <div className="l">Projection fin d’année</div>
+          <div className="v">{fmtK(calc.caProjete)}</div>
+          <div className="s">{pctProj == null ? '—' : `${fmtPct(pctProj, 0)} de l’objectif`}</div>
+        </div>
+        <div className="kpi">
+          <div className="l">Marge dégagée</div>
+          <div className="v">{fmtK(calc.margeTotal)}</div>
+          <div className="s">Taux de marge {calc.tauxMarge == null ? '—' : fmtPct(calc.tauxMarge)}</div>
+        </div>
+      </div>
+
+      {/* 1. Commission trimestrielle */}
+      <section>
+        <h2>1 · Prime trimestrielle sur la marge dégagée</h2>
+        <div className="muted small" style={{ marginBottom: '1.5mm' }}>
+          Commission de {tauxCom} de la marge. Avance mensuelle de {fmtE(c.avance_mensuelle)} = {fmt0(c.taux_base * 100)} % de la marge {fiche.annee - 1} ({fmtE(c.marge_n1)}) × {tauxCom}, régularisée en décembre.
+        </div>
+        <table>
+          <thead>
+            <tr>
+              <th style={{ width: '22%' }}>Période</th>
+              <th>CA HT réalisé</th>
+              <th>Marge dégagée</th>
+              <th>Taux</th>
+              <th>Commission {tauxCom}</th>
+              <th>Avances</th>
+              <th>Écart</th>
+            </tr>
+          </thead>
+          <tbody>
+            {calc.trimestres.map((t) => (
+              <FragmentOnglet key={t.t}>
+                {t.mois.map((m) => (
+                  <tr key={m.mois} className={m.enCours ? 'mois encours' : 'mois'}>
+                    <td>
+                      {MOIS[m.mois]}
+                      {m.enCours ? ' (en cours)' : ''}
+                    </td>
+                    <td className="op-num">{m.ca == null ? '–' : fmt0(m.ca)}</td>
+                    <td className="op-num">{m.marge == null ? '–' : fmt0(m.marge)}</td>
+                    <td className="op-num">{m.ca && m.marge != null ? fmtPct(m.marge / m.ca) : ''}</td>
+                    <td />
+                    <td className="op-num">{fmt0(m.avance)}{!m.avanceVersee ? '*' : ''}</td>
+                    <td />
+                  </tr>
+                ))}
+                <tr className="trim">
+                  <td>
+                    {TRIMESTRES[t.t - 1]}
+                    {!t.complet && t.marge > 0 ? ' (partiel)' : ''}
+                  </td>
+                  <td className="op-num">{t.ca ? fmt0(t.ca) : '–'}</td>
+                  <td className="op-num">{t.marge ? fmt0(t.marge) : '–'}</td>
+                  <td className="op-num">{t.ca ? fmtPct(t.marge / t.ca) : ''}</td>
+                  <td className="op-num">{t.marge ? fmtE(t.commission) : '–'}</td>
+                  <td className="op-num">{fmtE(t.avances)}</td>
+                  <td className={`op-num ${t.complet ? sens(t.commission - t.avances) : ''}`}>{t.complet ? fmtE(t.commission - t.avances) : ''}</td>
+                </tr>
+              </FragmentOnglet>
+            ))}
+            <tr className="total">
+              <td>Total {fiche.annee}</td>
+              <td className="op-num">{fmt0(calc.caTotal)}</td>
+              <td className="op-num">{fmt0(calc.margeTotal)}</td>
+              <td className="op-num">{calc.tauxMarge == null ? '' : fmtPct(calc.tauxMarge)}</td>
+              <td className="op-num">{fmtE(calc.commissionAcquise)}</td>
+              <td className="op-num">{fmtE(calc.avancesAnnee)}</td>
+              <td />
+            </tr>
+          </tbody>
+        </table>
+        <div className="muted small" style={{ marginTop: '1mm' }}>
+          * avance prévue. Réalisé = CA facturé hors statistique ; la commission ne porte que sur les mois clos ; écart affiché sur les trimestres complets.
+        </div>
+
+        <div className="solde">
+          <div className="box">
+            <div className="t">Solde de la prime {tauxCom} à {finMois}</div>
+            <div className="r">
+              <span>Commission acquise</span>
+              <span className="op-num">{fmtE(calc.commissionAcquise)}</span>
+            </div>
+            <div className="r">
+              <span>Avances versées ({fiche.mois_clos} mois)</span>
+              <span className="op-num">− {fmtE(calc.avancesADate)}</span>
+            </div>
+            <div className="r f">
+              <span>Solde</span>
+              <span className={`op-num ${sens(calc.soldeADate)}`}>{fmtE(calc.soldeADate)}</span>
+            </div>
+          </div>
+          <div className="box">
+            <div className="t">Projection au 31/12/{fiche.annee}</div>
+            <div className="r">
+              <span>Commission projetée</span>
+              <span className="op-num">{fmtE(calc.commissionProjetee)}</span>
+            </div>
+            <div className="r">
+              <span>Avances de l’année (12 mois)</span>
+              <span className="op-num">− {fmtE(calc.avancesAnnee)}</span>
+            </div>
+            <div className="r f">
+              <span>Régularisation de décembre</span>
+              <span className={`op-num ${sens(calc.soldeProjete)}`}>{fmtE(calc.soldeProjete)}</span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      {/* 2. Primes annuelles */}
+      {etats.length > 0 && (
+        <section className="p2">
+          <div className="rappel">
+            <span>
+              <b>{fiche.nom}</b> · agence {fiche.agence || '—'}
+            </span>
+            <span>Contrat d’objectifs {fiche.annee} · situation à {finMois}</span>
+          </div>
+          <h2>2 · Primes annuelles</h2>
+          <table>
+            <thead>
+              <tr>
+                <th style={{ width: '24%' }}>Prime</th>
+                <th style={{ textAlign: 'left', width: '25%' }}>Condition</th>
+                <th style={{ textAlign: 'left', width: '23%' }}>Situation à date</th>
+                <th>Maximum</th>
+                <th>Probable</th>
+                <th style={{ textAlign: 'center' }}>Statut</th>
+              </tr>
+            </thead>
+            <tbody>
+              {etats.map(({ p, e }, i) => {
+                const st = e.evaluee
+                  ? { cls: STATUT_PRIME[e.statut].cls, txt: RESULTAT_LIBELLES[p.resultat as Resultat] }
+                  : p.indicateur === 'manuel' || p.indicateur === 'cerfa_complet'
+                    ? STATUT_PRIME.gris
+                    : STATUT_PRIME[e.statut]
+                return (
+                  <tr key={p.id || i} style={{ verticalAlign: 'top' }}>
+                    <td>
+                      <div style={{ fontWeight: 600 }}>{p.libelle}</div>
+                      <div className="muted small">
+                        {SECTION_LIBELLES[p.section]} · {p.echeance === '31/12' ? 'versée au 31/12' : `versée en avril ${fiche.annee + 1}`}
+                      </div>
+                    </td>
+                    <td className="small">{condition(p)}</td>
+                    <td className="small">
+                      {e.texte}
+                      {p.commentaire_evaluation ? <div className="muted">« {p.commentaire_evaluation} »</div> : null}
+                    </td>
+                    <td className="op-num">{fmtE(e.montantMax)}</td>
+                    <td className="op-num" style={{ fontWeight: 700 }}>
+                      {fmtE(e.montantProjete)}
+                    </td>
+                    <td style={{ textAlign: 'center' }}>
+                      <span className={`pill ${st.cls}`}>{st.txt}</span>
+                    </td>
+                  </tr>
+                )
+              })}
+              <tr className="total">
+                <td colSpan={3}>
+                  Total primes annuelles <span style={{ fontWeight: 400, opacity: 0.75 }}>(acquis à date {fmtE(totADate)})</span>
+                </td>
+                <td className="op-num">{fmtE(totMax)}</td>
+                <td className="op-num">{fmtE(totProj)}</td>
+                <td />
+              </tr>
+            </tbody>
+          </table>
+          <div className="muted small" style={{ marginTop: '1mm' }}>
+            Primes à paliers et zéro impayé calculées automatiquement (à date et en projection) ; primes qualitatives et Cerfa évaluées par la direction.
+          </div>
+        </section>
+      )}
+
+      {c.commentaire && (
+        <section>
+          <h2>Commentaire</h2>
+          <div>{c.commentaire}</div>
+        </section>
+      )}
+
+      <div className="sig">
+        <div>Pour la direction — date et signature</div>
+        <div>Le collaborateur — date et signature</div>
+      </div>
+      <div className="muted small" style={{ marginTop: '3mm', textAlign: 'center' }}>
+        Document généré par le compagnon CEGECLIM · données de facturation arrêtées à {finMois}
+      </div>
+    </div>
+  )
 }
