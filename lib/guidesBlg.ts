@@ -193,3 +193,279 @@ export function formatTaille(octets: number | null | undefined): string {
   if (n < 1024 * 1024) return `${Math.round(n / 1024)} Ko`
   return `${(n / (1024 * 1024)).toFixed(1).replace('.', ',')} Mo`
 }
+
+// ============================================================================
+// 03/11/2026 (b) — Index de recherche et icônes des chapitres
+// ----------------------------------------------------------------------------
+// indexerGuide()     : à partir de la page déposée, liste des modes opératoires avec
+//                      résumé et étapes (titre + texte), les étapes étant rattachées au
+//                      mode opératoire qui les précède dans le document.
+// rechercherModops() : question libre → modes opératoires pertinents (mots-clés
+//                      normalisés, racines françaises simples, quelques synonymes
+//                      métier), avec l'étape la plus proche pour ouvrir au bon endroit.
+// ============================================================================
+
+export type GuideEtapeIndex = { id: string; numero: string; titre: string; texte: string }
+export type GuideModopIndex = {
+  id: string
+  numero: string
+  titre: string
+  resume: string
+  texte: string
+  etapes: GuideEtapeIndex[]
+}
+
+export function indexerGuide(html: string): GuideModopIndex[] {
+  const doc = new DOMParser().parseFromString(html, 'text/html')
+  const modops: GuideModopIndex[] = []
+  const parId = new Map<string, GuideModopIndex>()
+  let courant: GuideModopIndex | null = null
+  doc.querySelectorAll('section[id]').forEach((sec) => {
+    const id = sec.getAttribute('id') ?? ''
+    if (sec.classList.contains('intro')) {
+      courant = {
+        id,
+        numero: texte(sec.querySelector('.k')).split('·')[0].trim(),
+        titre: texte(sec.querySelector('h2')) || id,
+        resume: texte(sec.querySelector('.sub')),
+        texte: [texte(sec.querySelector('.sub')), texte(sec.querySelector('.cas'))].filter(Boolean).join(' '),
+        etapes: [],
+      }
+      modops.push(courant)
+      parId.set(id, courant)
+      return
+    }
+    if (!sec.classList.contains('step')) return
+    const cible = parId.get(sec.getAttribute('data-m') ?? '') ?? courant
+    if (!cible) return
+    const parties = Array.from(sec.querySelectorAll('.do, .encart, .cap, .att')).map((e) => texte(e))
+    cible.etapes.push({
+      id,
+      numero: texte(sec.querySelector('.badge')),
+      titre: texte(sec.querySelector('h3')),
+      texte: parties.join(' '),
+    })
+  })
+  return modops
+}
+
+const MOTS_VIDES = new Set(
+  (
+    'a au aux avec ce ces cet cette comment dans de des du d elle en est et etre faire fait faut il ils je j l la le les leur lui ' +
+    'ma mais me mes mon ne nous on ou par pas peut peux plus pour quand que quel quelle quelles quels qui quoi qu sa se ses si son ' +
+    'sont sur ta te tes ton tu un une vous veux voudrais souhaite dois doit y savoir comme ca cela ceci via apres avant'
+  ).split(' '),
+)
+
+const SYNONYMES: Record<string, string[]> = {
+  cde: ['command'],
+  cdc: ['command', 'client'],
+  cdf: ['command', 'fournisseur'],
+  bl: ['livr'],
+  pl: ['reserv', 'prepar'],
+  frs: ['fournisseur'],
+  fournisseurs: ['fournisseur'],
+  prepa: ['prepar', 'reserv'],
+  preparation: ['prepar', 'reserv'],
+  supprimer: ['archiv', 'retir', 'supprim'],
+  effacer: ['archiv', 'retir'],
+  trouver: ['recherch'],
+  chercher: ['recherch'],
+  retrouver: ['recherch', 'retrouv'],
+  bloque: ['bloqu'],
+  encours: ['encour'],
+  adresse: ['adress'],
+  expedier: ['livr', 'expedi'],
+  expedition: ['livr', 'expedi'],
+  envoyer: ['livr'],
+  comptoir: ['comptoir', 'enlev'],
+  devis: ['devi'],
+}
+
+const SUFFIXES = [
+  'issements', 'issement', 'aisons', 'aison', 'ations', 'ation', 'ements', 'ement', 'ances', 'ance',
+  'ages', 'age', 'euses', 'euse', 'eurs', 'eur', 'ees', 'ee', 'ers', 'er', 'ez', 'ent', 'es', 'ir', 'is', 'e', 's', 'x',
+]
+
+function normaliser(v: string): string {
+  return sansAccents(v.toLowerCase()).replace(/[’']/g, ' ')
+}
+
+/** Racine simple d'un mot français (bloquer / bloqué / blocage → bloqu…). */
+export function racine(mot: string): string {
+  let m = normaliser(mot).replace(/[^a-z0-9]/g, '')
+  if (m.length <= 3) return m
+  for (const suf of SUFFIXES) {
+    if (m.length - suf.length >= 4 && m.endsWith(suf)) {
+      m = m.slice(0, -suf.length)
+      break
+    }
+  }
+  return m
+}
+
+function racines(v: string): Set<string> {
+  const out = new Set<string>()
+  for (const mot of normaliser(v).split(/[^a-z0-9]+/)) {
+    if (mot.length < 2 || MOTS_VIDES.has(mot)) continue
+    out.add(racine(mot))
+  }
+  return out
+}
+
+function contient(ens: Set<string>, r: string): boolean {
+  if (ens.has(r)) return true
+  if (r.length < 4) return false
+  for (const x of ens) {
+    if (x.length >= 4 && (x.startsWith(r) || r.startsWith(x))) return true
+  }
+  return false
+}
+
+export type GuidePourRecherche = { slug: string; titre: string; icone: string; modops: GuideModopIndex[] }
+export type ResultatRecherche = {
+  slug: string
+  guideTitre: string
+  icone: string
+  modop: GuideModopIndex
+  etape: GuideEtapeIndex | null
+  ancre: string
+  score: number
+  couverture: number
+}
+
+type ModopPrepare = {
+  titre: Set<string>
+  resume: Set<string>
+  texte: Set<string>
+  etapes: { e: GuideEtapeIndex; titre: Set<string>; texte: Set<string> }[]
+}
+const cachePrepare = new WeakMap<GuideModopIndex, ModopPrepare>()
+
+function preparerModop(m: GuideModopIndex): ModopPrepare {
+  const deja = cachePrepare.get(m)
+  if (deja) return deja
+  const p: ModopPrepare = {
+    titre: racines(m.titre),
+    resume: racines(m.resume),
+    texte: racines(m.texte),
+    etapes: m.etapes.map((e) => ({ e, titre: racines(e.titre), texte: racines(e.texte) })),
+  }
+  cachePrepare.set(m, p)
+  return p
+}
+
+/** Verbes génériques : comptent s'ils sont trouvés, ne pénalisent pas s'ils manquent. */
+const VERBES_GENERIQUES = new Set(
+  'modifier changer mettre gerer utiliser voir renseigner saisir indiquer completer remplir corriger faire avoir obtenir afficher acceder ouvrir'.split(' '),
+)
+
+type Terme = { alt: string[]; faible: boolean }
+
+/** Termes de la question : racines + synonymes métier (chaque terme = liste d'alternatives). */
+function termesQuestion(question: string): Terme[] {
+  const termes: Terme[] = []
+  for (const mot of normaliser(question).split(/[^a-z0-9]+/)) {
+    if (mot.length < 2 || MOTS_VIDES.has(mot)) continue
+    const alt = new Set<string>([racine(mot), ...(SYNONYMES[mot] ?? [])])
+    termes.push({ alt: Array.from(alt), faible: VERBES_GENERIQUES.has(mot) })
+  }
+  return termes
+}
+
+export function rechercherModops(question: string, guides: GuidePourRecherche[], max = 8): ResultatRecherche[] {
+  const termes = termesQuestion(question)
+  if (!termes.length) return []
+  const resultats: ResultatRecherche[] = []
+  for (const g of guides) {
+    const titreGuide = racines(g.titre)
+    for (const m of g.modops) {
+      const p = preparerModop(m)
+      let score = 0
+      let trouves = 0
+      let attendus = 0
+      for (const { alt, faible } of termes) {
+        const dans = (ens: Set<string>) => alt.some((r) => contient(ens, r))
+        let s = 0
+        if (dans(p.titre)) s = 6
+        else if (p.etapes.some((e) => dans(e.titre))) s = 3
+        else if (dans(p.resume)) s = 2.5
+        else if (dans(titreGuide)) s = 2
+        else if (dans(p.texte) || p.etapes.some((e) => dans(e.texte))) s = 1
+        if (s > 0) trouves++
+        if (s > 0 || !faible) attendus++
+        score += faible ? s / 2 : s
+      }
+      if (!trouves) continue
+      const couverture = trouves / Math.max(1, attendus)
+      // Étape la plus proche : titre d'étape (3) + texte (1) par terme.
+      let meilleure: GuideEtapeIndex | null = null
+      let meilleurScore = 0
+      for (const e of p.etapes) {
+        let s = 0
+        for (const { alt } of termes) {
+          if (alt.some((r) => contient(e.titre, r))) s += 3
+          else if (alt.some((r) => contient(e.texte, r))) s += 1
+        }
+        if (s > meilleurScore) {
+          meilleurScore = s
+          meilleure = e.e
+        }
+      }
+      // Si le titre porte toute la question (au moins 2 mots-clés), on ouvre au début du mode opératoire.
+      const present = (t: Terme) =>
+        t.alt.some((r) => contient(p.titre, r) || contient(p.resume, r) || contient(p.texte, r) || p.etapes.some((e) => contient(e.titre, r) || contient(e.texte, r)))
+      const forts = termes.filter((t) => !t.faible && present(t))
+      const titreSuffit = forts.length >= 2 && forts.every((t) => t.alt.some((r) => contient(p.titre, r)))
+      const etape = !titreSuffit && meilleurScore >= 3 ? meilleure : null
+      resultats.push({
+        slug: g.slug,
+        guideTitre: g.titre,
+        icone: g.icone,
+        modop: m,
+        etape,
+        ancre: etape?.id ?? m.id,
+        score: score * (0.4 + 0.6 * couverture * couverture),
+        couverture,
+      })
+    }
+  }
+  resultats.sort((a, b) => b.score - a.score)
+  const top = resultats[0]?.score ?? 0
+  return resultats.filter((r) => r.score >= top * 0.25).slice(0, max)
+}
+
+const ICONES: Array<[RegExp, string]> = [
+  [/client|tiers|contact/, '👥'],
+  [/article|produit|nomenclature/, '📦'],
+  [/environnement|general|prise/, '🧭'],
+  [/logisti|livraison|expedi|stock|depot/, '🚚'],
+  [/opportunit|devis|preco/, '💡'],
+  [/achat|fournisseur|appro/, '🛒'],
+  [/factur|compta|reglement|paiement/, '💶'],
+  [/vente|commande/, '🧾'],
+  [/sav|hotline|intervention|parc/, '🛠️'],
+  [/planning|agenda|rdv/, '📅'],
+  [/admin|parametr|droit/, '⚙️'],
+]
+
+export function iconeGuide(slug: string, titre: string, icone?: string | null): string {
+  if (icone && icone.trim()) return icone.trim()
+  const cle = normaliser(`${slug} ${titre}`)
+  return ICONES.find(([re]) => re.test(cle))?.[1] ?? '📘'
+}
+
+const DEGRADES: [string, string][] = [
+  ['#2E6E66', '#173C3A'],
+  ['#245A9E', '#173B6C'],
+  ['#7A5EA8', '#4B3870'],
+  ['#B5643A', '#7A3D1E'],
+  ['#3B7D4F', '#1F4A2C'],
+  ['#54459F', '#352B6B'],
+  ['#8A8466', '#4F4B38'],
+  ['#2F6E8E', '#1A4258'],
+]
+
+export function degradeGuide(index: number): [string, string] {
+  return DEGRADES[((index % DEGRADES.length) + DEGRADES.length) % DEGRADES.length]
+}
