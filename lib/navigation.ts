@@ -52,6 +52,10 @@
 // ÉVOLUTION (2026-11-03, suite) : l'écran Objectifs (/objectifs) est retiré du menu — les
 // objectifs du suivi agences / commerciaux viennent désormais des contrats d'objectifs
 // (get_suivi_objectifs, migration 20261103f). La page reste ouvrable par URL.
+// ÉVOLUTION (2026-11-03, suite) : « Activité SAGE – statuts BLG » retiré du menu — son périmètre
+// (commandes terminées dans BLG encore ouvertes dans SAGE, PL / BL / BR sans CDC) est repris par
+// « Portefeuille BLG – SAGE » (migration 20261103_portefeuille_blg_sage_terminees_sans_cdc.sql).
+// La page reste ouvrable par URL.
 // Le bloc « Mes alertes » de l'accueil n'est pas ici : il n'a pas de page, il
 // ouvre le Centre d'alertes (components/AlertsContext.tsx + ClientRootShell).
 
@@ -238,8 +242,7 @@ export const NAV_BLOCS: NavBloc[] = [
       { label: 'Clients SAGE – BLG', path: '/controle-sage-blg/clients', activeLabel: 'Contrôle cohérence Client SAGE-BLG', accessKey: 'can_projetblg', description: 'Contrôle de cohérence des tiers, contacts et adresses de livraison.' },
       { label: 'Fournisseurs SAGE – BLG', path: '/controle-sage-blg/fournisseur-sage-blg', activeLabel: 'Contrôle cohérence Fournisseur SAGE-BLG', accessKey: 'can_projetblg', description: 'Contrôle de cohérence fournisseurs et articles entre SAGE et BLG.' },
       { label: 'Rapprochement SAGE-BLG', path: '/controle-sage-blg/rapprochement-sage-blg', activeLabel: 'Rapprochement Sage-BLG, CDC, CDF, Stocks', accessKey: 'can_projetblg', description: 'Contrôle de cohérence SAGE-BLG CDC, CDF, Stock' },
-      { label: 'Activité SAGE – statuts BLG', path: '/controle-sage-blg/activite-sage-blg', activeLabel: 'Activité SAGE ↔ statuts BLG', accessKey: 'can_projetblg', description: 'CDC, PL, BL et BR SAGE en cours rangés par statut BLG (devis, en cours, à facturer, terminée, archives, absentes, sans CDC) : nombre de pièces, lignes et valeur, liste détaillée et pendant BLG.' },
-      { label: 'Portefeuille BLG – SAGE', path: '/controle-sage-blg/portefeuille-blg-sage', activeLabel: 'Portefeuille BLG ↔ SAGE', accessKey: 'can_projetblg', description: 'Ventes (CDC) et achats (CDF) : commandes BLG ouvertes et archivées × situation dans SAGE, plus les commandes SAGE absentes de BLG — cases à corriger chaque jour dans BLG, listes et export.' },
+      { label: 'Portefeuille BLG – SAGE', path: '/controle-sage-blg/portefeuille-blg-sage', activeLabel: 'Portefeuille BLG ↔ SAGE', accessKey: 'can_projetblg', description: 'Ventes (CDC) et achats (CDF) : commandes BLG ouvertes, terminées encore ouvertes dans SAGE et archivées × situation dans SAGE, plus les commandes SAGE absentes de BLG et les PL / BL / BR sans CDC — cases à corriger chaque jour, listes et export.' },
       
     ],
   },
