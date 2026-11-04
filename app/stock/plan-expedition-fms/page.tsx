@@ -47,7 +47,7 @@ type Unite = {
   nb_cdc: number; nb_lignes: number; montant_ht: number | null; date_livraison_min: string | null
   nb_lignes_dispo: number; nb_lignes_attente: number; nb_lignes_vague: number; nb_lignes_reliquat: number
   palettes_dispo: number; palettes_attente: number; palettes_vague: number; poids_dispo: number | null
-  nb_groupes_ext_dispo: number; cuivre_dispo: boolean; dim_manquante: boolean
+  nb_groupes_ext_dispo: number; nb_groupes_ext_attente: number; cuivre_dispo: boolean; dim_manquante: boolean
   date_complete_vague: string | null; rdv_simule: boolean; date_inconnue: boolean; sans_reception: boolean
   containers: string[] | null; categorie: Categorie
   anticipation_debut: string | null; anticipation_fin: string | null; anticipation_palettes: number | null
@@ -392,13 +392,14 @@ function PlanExpeditionFms() {
   const cap = meta?.parametres.capacite_palettes_jour || 100
 
   const agences = useMemo(() => {
-    const m = new Map<string, { nb: number; pal1: number; pal2: number; transfert: Unite | null }>()
+    const m = new Map<string, { nb: number; pal1: number; pal2: number; ge: number; transfert: Unite | null }>()
     unites.forEach((u) => {
       const k = u.agence || '—'
-      const e = m.get(k) || { nb: 0, pal1: 0, pal2: 0, transfert: null }
+      const e = m.get(k) || { nb: 0, pal1: 0, pal2: 0, ge: 0, transfert: null }
       e.nb += 1
       e.pal1 += u.anticipation_palettes || 0
       e.pal2 += u.reception_palettes || 0
+      e.ge += (u.nb_groupes_ext_dispo || 0) + (u.nb_groupes_ext_attente || 0)
       if (u.type_destinataire === 'AGENCE') e.transfert = u
       m.set(k, e)
     })
@@ -420,11 +421,22 @@ function PlanExpeditionFms() {
       })
   }, [unites, agenceF, categorieF, typeF, recherche])
 
+  const totaux = useMemo(() => {
+    const t = { cdc: 0, lignes: 0, palDispo: 0, lDispo: 0, geDispo: 0, palAtt: 0, lAtt: 0, geAtt: 0, pal1: 0, pal2: 0 }
+    filtres.forEach((u) => {
+      t.cdc += u.nb_cdc; t.lignes += u.nb_lignes
+      t.palDispo += Number(u.palettes_dispo) || 0; t.lDispo += u.nb_lignes_dispo; t.geDispo += Number(u.nb_groupes_ext_dispo) || 0
+      t.palAtt += Number(u.palettes_attente) || 0; t.lAtt += u.nb_lignes_attente; t.geAtt += Number(u.nb_groupes_ext_attente) || 0
+      t.pal1 += u.anticipation_palettes || 0; t.pal2 += u.reception_palettes || 0
+    })
+    return t
+  }, [filtres])
+
   const kpi = useMemo(() => {
     const parCat = Object.fromEntries(ORDRE_CAT.map((c) => [c, unites.filter((u) => u.categorie === c)])) as Record<Categorie, Unite[]>
     const pal1 = unites.reduce((s, u) => s + (u.anticipation_palettes || 0), 0)
     const pal2 = unites.reduce((s, u) => s + (u.reception_palettes || 0), 0)
-    const ge = unites.reduce((s, u) => s + (u.anticipation_palettes ? u.nb_groupes_ext_dispo : 0), 0)
+    const ge = unites.reduce((s, u) => s + (u.anticipation_palettes ? Number(u.nb_groupes_ext_dispo) || 0 : 0), 0)
     const recs = (plan?.receptions || []).filter((r) => r.est_cont && r.nb_lignes_cdc > 0)
     const sansRdv = recs.filter((r) => !r.rdv_date)
     const nonPlanifies = unites.filter((u) => (u.categorie === 'COMPLET' || u.categorie === 'ANTICIPER') && !u.anticipation_debut).length
@@ -463,12 +475,12 @@ function PlanExpeditionFms() {
       const us = agenceF ? unites.filter((u) => (u.agence || '—') === agenceF) : unites
       feuille('Préconisations', [
         { h: 'Agence' }, { h: 'Type' }, { h: 'Destinataire', w: 32 }, { h: 'N° tiers' }, { h: 'Catégorie', w: 22 }, { h: 'CDC' }, { h: 'Lignes' },
-        { h: '1re livraison' }, { h: 'Lignes dispo' }, { h: 'Palettes dispo' }, { h: 'Groupes ext. dispo' }, { h: 'Cuivre dispo' },
+        { h: '1re livraison' }, { h: 'Lignes dispo' }, { h: 'Palettes dispo' }, { h: 'Groupes ext. dispo' }, { h: 'Groupes ext. en attente' }, { h: 'Cuivre dispo' },
         { h: 'Lignes en attente' }, { h: 'dont réception datée' }, { h: 'dont reliquat' }, { h: 'Palettes en attente' },
         { h: 'Dispo complète (vague)' }, { h: 'RDV simulé' }, { h: 'Envoi anticipé du' }, { h: 'au' }, { h: 'Palettes' },
         { h: 'Envoi à réception du' }, { h: 'au' }, { h: 'Palettes' }, { h: 'Containers / CDF attendus', w: 40 }, { h: 'Préconisation', w: 90 },
       ], us.map((u) => [u.agence, u.type_destinataire === 'AGENCE' ? 'Transfert agence' : 'Client', u.libelle, u.numero_tiers, CATEGORIE[u.categorie].label,
-        u.nb_cdc, u.nb_lignes, fmtDate(u.date_livraison_min), u.nb_lignes_dispo, u.palettes_dispo, u.nb_groupes_ext_dispo, u.cuivre_dispo ? 'Oui' : '',
+        u.nb_cdc, u.nb_lignes, fmtDate(u.date_livraison_min), u.nb_lignes_dispo, u.palettes_dispo, u.nb_groupes_ext_dispo, u.nb_groupes_ext_attente, u.cuivre_dispo ? 'Oui' : '',
         u.nb_lignes_attente, u.nb_lignes_vague, u.nb_lignes_reliquat, u.palettes_attente, fmtDate(u.date_complete_vague), u.rdv_simule ? 'Oui' : '',
         fmtDate(u.anticipation_debut), fmtDate(u.anticipation_fin), u.anticipation_palettes, fmtDate(u.reception_debut), fmtDate(u.reception_fin),
         u.reception_palettes, (u.containers || []).join(', '), preco(u)]))
@@ -587,8 +599,8 @@ function PlanExpeditionFms() {
                   {agences.map(([a, e]) => (
                     <button key={a} type="button" onClick={() => setAgenceF(agenceF === a ? '' : a)}
                       className={`rounded-full px-3 py-1 text-[12px] font-bold ${agenceF === a ? 'bg-[#111820] text-white' : 'border border-[#E5E1D8] bg-white text-[#5E5A44]'}`}
-                      title={`${e.nb} destinataire(s) · ${fmtNum(e.pal1)} pal. dès maintenant · ${fmtNum(e.pal2)} pal. à réception`}>
-                      {a} <span className="opacity-60">{e.nb} · {fmtNum(e.pal1)}/{fmtNum(e.pal2)} pal.</span>
+                      title={`${e.nb} destinataire(s) · ${fmtNum(e.pal1)} pal. dès maintenant · ${fmtNum(e.pal2)} pal. à réception · ${fmtNum(e.ge)} groupes extérieurs`}>
+                      {a} <span className="opacity-60">{e.nb} · {fmtNum(e.pal1)}/{fmtNum(e.pal2)} pal. · {fmtNum(e.ge)} GE</span>
                     </button>
                   ))}
                 </section>
@@ -626,7 +638,7 @@ function PlanExpeditionFms() {
                   <span className="ml-auto text-[11.5px] text-[#8A8474]">{filtres.length} destinataire(s)</span>
                 </section>
 
-                <section className="overflow-auto rounded-xl border border-[#E5E1D8] bg-white">
+                <section className="max-h-[calc(100vh-260px)] overflow-auto rounded-xl border border-[#E5E1D8] bg-white">
                   <table className="w-full min-w-[1400px] text-[12px]">
                     <thead className="sticky top-0 z-10 bg-[#FAF9F6] text-left text-[10.5px] uppercase tracking-wide text-[#8A8474]">
                       <tr>
@@ -652,10 +664,10 @@ function PlanExpeditionFms() {
                           <td className="whitespace-nowrap px-2 py-1.5">
                             {u.nb_groupes_ext_dispo > 0 && <span className="mr-1 rounded bg-[#7A5EA8]/15 px-1.5 text-[10.5px] font-bold text-[#5B4385]">{fmtNum(u.nb_groupes_ext_dispo)} GE</span>}
                             {u.cuivre_dispo && <span className="mr-1 rounded bg-orange-100 px-1.5 text-[10.5px] font-bold text-orange-800">Cuivre</span>}
-                            {u.dim_manquante && <span title="Certaines références n'ont ni dimensions ni poids dans BLG : palettes sous-estimées" className="text-[10.5px] font-bold text-[#C1683C]">dim. ?</span>}
+                            {u.dim_manquante && <span title="Certaines références n'ont ni dimensions ni poids dans BLG : volume estimé avec la médiane de leur famille" className="text-[10.5px] font-bold text-[#C1683C]">dim. ?</span>}
                           </td>
                           <td className="whitespace-nowrap px-2 py-1.5 text-right">
-                            {u.nb_lignes_attente > 0 ? <><b>{fmtNum(u.palettes_attente, 1)}</b> pal. <span className="text-[#8A8474]">({u.nb_lignes_attente} l.{u.nb_lignes_reliquat > 0 ? `, ${u.nb_lignes_reliquat} reliquat` : ''})</span></> : '—'}
+                            {u.nb_lignes_attente > 0 ? <>{u.nb_groupes_ext_attente > 0 && <span className="mr-1 rounded bg-[#7A5EA8]/10 px-1.5 text-[10.5px] font-bold text-[#5B4385]">{fmtNum(u.nb_groupes_ext_attente)} GE</span>}<b>{fmtNum(u.palettes_attente, 1)}</b> pal. <span className="text-[#8A8474]">({u.nb_lignes_attente} l.{u.nb_lignes_reliquat > 0 ? `, ${u.nb_lignes_reliquat} reliquat` : ''})</span></> : '—'}
                           </td>
                           <td className="whitespace-nowrap px-2 py-1.5">
                             {u.date_complete_vague ? <>{fmtJour(u.date_complete_vague)}{u.rdv_simule && <span className="text-[10.5px] font-bold text-[#C1683C]" title="Au moins un RDV simulé"> ~</span>}</> : u.nb_lignes_attente > 0 ? <span className="text-[#C1683C]">{u.sans_reception ? 'sans CDF' : 'RDV à saisir'}</span> : '—'}
@@ -667,6 +679,22 @@ function PlanExpeditionFms() {
                       ))}
                       {filtres.length === 0 && <tr><td colSpan={12} className="px-3 py-6 text-center text-[#8A8474]">Aucun destinataire pour ces filtres.</td></tr>}
                     </tbody>
+                    {filtres.length > 0 && (
+                      <tfoot className="sticky bottom-0 bg-[#111820] text-[12px] font-bold text-white">
+                        <tr>
+                          <td className="px-2 py-2" colSpan={3}>Total · {filtres.length} destinataire(s)</td>
+                          <td className="px-2 py-2 text-right">{fmtNum(totaux.cdc)} · {fmtNum(totaux.lignes)}</td>
+                          <td className="px-2 py-2" />
+                          <td className="whitespace-nowrap px-2 py-2 text-right">{fmtNum(totaux.palDispo, 1)} pal. <span className="font-semibold opacity-60">({fmtNum(totaux.lDispo)} l.)</span></td>
+                          <td className="whitespace-nowrap px-2 py-2"><span className="rounded bg-white/15 px-1.5">{fmtNum(totaux.geDispo)} GE</span></td>
+                          <td className="whitespace-nowrap px-2 py-2 text-right"><span className="mr-1 rounded bg-white/15 px-1.5">{fmtNum(totaux.geAtt)} GE</span>{fmtNum(totaux.palAtt, 1)} pal. <span className="font-semibold opacity-60">({fmtNum(totaux.lAtt)} l.)</span></td>
+                          <td className="px-2 py-2" />
+                          <td className="whitespace-nowrap px-2 py-2">{fmtNum(totaux.pal1)} pal.</td>
+                          <td className="whitespace-nowrap px-2 py-2">{fmtNum(totaux.pal2)} pal.</td>
+                          <td className="px-2 py-2" />
+                        </tr>
+                      </tfoot>
+                    )}
                   </table>
                 </section>
               </>
@@ -776,7 +804,7 @@ function PlanExpeditionFms() {
                   <li>CDC départ agence : le stock de l’agence (et de son dépôt transit) et les CDF livrées en direct en agence servent d’abord ; le reste est demandé à FMS.</li>
                   <li>Stock FMS libre (stock − préparé) servi par date de livraison puis ancienneté ; le manque est rattaché à la réception FMS qui le comble.</li>
                   <li>Date de dispo d’un container = RDV de déchargement saisi ; sans RDV : {meta.simuler_rdv ? `simulé à ETA + ${meta.parametres.rdv_simule_jours_apres_eta} jours ouvrés` : 'inconnue (non planifié)'}. Expédition possible {meta.parametres.delai_mise_en_stock_jours} jour(s) ouvré(s) après.</li>
-                  <li>Palettes : volume BLG ÷ {fmtNum(meta.parametres.volume_utile_palette_m3, 1)} m³ utiles, ou poids ÷ {fmtNum(meta.parametres.poids_max_palette_kg)} kg, le plus grand des deux.</li>
+                  <li>Palettes : volume BLG ÷ {fmtNum(meta.parametres.volume_utile_palette_m3, 1)} m³ utiles, ou poids ÷ {fmtNum(meta.parametres.poids_max_palette_kg)} kg, le plus grand des deux (sans dimensions BLG : médiane de la famille, signalé « dim. ? »).</li>
                   <li>Anticiper si le dispo contient un groupe extérieur ou fait au moins {fmtNum(meta.parametres.seuil_palettes_anticipation, 1)} palette.</li>
                   <li>Groupes extérieurs : {(plan.familles || []).filter((f) => f.role === 'GROUPE_EXT').map((f) => f.famille).join(', ') || '—'} · Cuivre : {(plan.familles || []).filter((f) => f.role === 'CUIVRE').map((f) => f.famille).join(', ') || '—'}.</li>
                 </ul>

@@ -26,8 +26,9 @@
 --     sans RDV : date inconnue, ou RDV SIMULÉ à ETA port + N jours ouvrés si la
 --     simulation est cochée (affiché comme tel). Autre CDF : date retenue.
 --  6. Palettes : volume BLG (longueur × largeur × hauteur ; unité déduite de la
---     plus grande dimension : > 3 = dm, > 30 = cm) / volume utile palette, ou
---     poids / poids max palette, le plus grand des deux.
+--     dimension du milieu : > 2 = dm, > 20 = cm) / volume utile palette (1,3 m³,
+--     repère : 18 murales RAK-VJ18 par palette), ou poids / poids max palette, le
+--     plus grand des deux. Sans dimensions ni poids : médiane de la famille.
 --  7. Catégories par destinataire :
 --       COMPLET    tout est dispo à FMS                 → expédier
 --       ANTICIPER  il manque des articles, mais le dispo contient un groupe
@@ -65,10 +66,13 @@ insert into public.appro_parametres (cle, valeur, description) values
   ('plan_exp_horizon_jours', 21, 'Plan d''expédition FMS : CDC à livrer d''ici N jours (retards compris)'),
   ('plan_exp_seuil_palettes_anticipation', 1, 'Plan d''expédition FMS : palettes dispo à partir desquelles un envoi anticipé vaut le coup (sans groupe extérieur)'),
   ('plan_exp_delai_mise_en_stock_jours', 1, 'Plan d''expédition FMS : jours ouvrés entre le RDV de déchargement et la première expédition possible'),
-  ('plan_exp_volume_utile_palette_m3', 1.2, 'Plan d''expédition FMS : volume utile d''une palette (1,2 × 0,8 × 1,8 m rempli à ~70 %)'),
+  ('plan_exp_volume_utile_palette_m3', 1.3, 'Plan d''expédition FMS : volume utile d''une palette (repère Arnaud : 18 murales RAK-VJ18 de 0,072 m³ par palette)'),
   ('plan_exp_poids_max_palette_kg', 600, 'Plan d''expédition FMS : poids max d''une palette'),
   ('plan_exp_fenetre_jours_ouvres', 20, 'Plan d''expédition FMS : nombre de jours ouvrés planifiés')
 on conflict (cle) do nothing;
+update public.appro_parametres set valeur = 1.3,
+  description = 'Plan d''expédition FMS : volume utile d''une palette (repère Arnaud : 18 murales RAK-VJ18 de 0,072 m³ par palette)'
+where cle = 'plan_exp_volume_utile_palette_m3' and valeur = 1.2;
 
 -- ─── Familles : groupes extérieurs et cuivre ────────────────────────────────
 create table if not exists public.appro_plan_exp_familles (
@@ -132,7 +136,7 @@ create table public.appro_plan_exp_unites (
   nb_cdc integer, nb_lignes integer, montant_ht numeric, date_livraison_min date,
   nb_lignes_dispo integer, nb_lignes_attente integer, nb_lignes_vague integer, nb_lignes_reliquat integer,
   palettes_dispo numeric, palettes_attente numeric, palettes_vague numeric, poids_dispo numeric,
-  nb_groupes_ext_dispo numeric, cuivre_dispo boolean, dim_manquante boolean,
+  nb_groupes_ext_dispo numeric, nb_groupes_ext_attente numeric, cuivre_dispo boolean, dim_manquante boolean,
   date_complete_vague date, rdv_simule boolean, date_inconnue boolean, sans_reception boolean,
   containers text[], categorie text,
   anticipation_debut date, anticipation_fin date, anticipation_palettes integer,
@@ -168,16 +172,19 @@ returns text language sql immutable as $$
   select nullif(replace(btrim(regexp_replace(replace(upper(coalesce(p, '')), 'CEGECLIM', ''), '^\s*TRANSIT\s+', '')), 'LA ROCHELLE', 'LAROCHELLE'), '')
 $$;
 
--- Volume en m³ d'après les dimensions BLG : saisies en m, parfois en dm ou en cm sur
--- tout l'article (ex. unités murales DODAI : 8,2 × 3,3 × 2,7) → l'unité est déduite
--- de la plus grande dimension (> 3 = dm, > 30 = cm) et appliquée aux trois côtés.
+-- Volume en m³ d'après les dimensions BLG : saisies en m, parfois 10 fois trop grandes
+-- sur tout l'article (ex. RAK-DJ saisies 8 200 × 3 300 × 2 600 mm au lieu de 820 × 330 × 260).
+-- L'unité est déduite de la dimension du MILIEU (un vrai carton n'a jamais deux côtés > 2 m) :
+-- > 20 = cm, > 2 = dm ; un rail de 3,65 m reste en m. Fiches bouche-trou (0,001 m) ignorées.
 drop function if exists public.plan_exp_dim_m(numeric);
 drop function if exists public.plan_exp_dim_m(double precision);
 create or replace function public.plan_exp_vol_m3(l double precision, w double precision, h double precision)
 returns numeric language sql immutable as $$
   select case
     when coalesce(l, 0) <= 0 or coalesce(w, 0) <= 0 or coalesce(h, 0) <= 0 then null
-    else (l * w * h)::numeric * case when greatest(l, w, h) > 30 then 0.000001 when greatest(l, w, h) > 3 then 0.001 else 1 end
+    when greatest(l, w, h) < 0.02 then null
+    else (l * w * h)::numeric * case when (l + w + h - greatest(l, w, h) - least(l, w, h)) > 20 then 0.000001
+                                     when (l + w + h - greatest(l, w, h) - least(l, w, h)) > 2 then 0.001 else 1 end
   end
 $$;
 
@@ -215,7 +222,7 @@ declare
   v_cap integer := coalesce((select valeur from appro_parametres where cle = 'plan_exp_capacite_palettes_jour')::int, 100);
   v_seuil numeric := coalesce((select valeur from appro_parametres where cle = 'plan_exp_seuil_palettes_anticipation'), 1);
   v_delai integer := coalesce((select valeur from appro_parametres where cle = 'plan_exp_delai_mise_en_stock_jours')::int, 1);
-  v_vol_pal numeric := coalesce((select valeur from appro_parametres where cle = 'plan_exp_volume_utile_palette_m3'), 1.2);
+  v_vol_pal numeric := coalesce((select valeur from appro_parametres where cle = 'plan_exp_volume_utile_palette_m3'), 1.3);
   v_poids_pal numeric := coalesce((select valeur from appro_parametres where cle = 'plan_exp_poids_max_palette_kg'), 600);
   v_fenetre integer := coalesce((select valeur from appro_parametres where cle = 'plan_exp_fenetre_jours_ouvres')::int, 20);
   v_sim_jours integer := coalesce((select valeur from appro_parametres where cle = 'plan_exp_rdv_simule_jours_apres_eta')::int, 5);
@@ -227,8 +234,7 @@ declare
   v_pals integer[];
   u record;
   i integer;
-  k integer;
-  v_pal integer;
+  n_part integer;
   v_reste integer;
   v_prise integer;
   v_min date;
@@ -238,7 +244,7 @@ begin
   v_debut := coalesce(p_debut, plan_exp_jour_ouvre(v_auj, 1));
   v_debut := plan_exp_jour_ouvre(v_debut, 0);
   v_fin := v_debut + v_horizon;
-  v_jours := array(select plan_exp_jour_ouvre(v_debut, k) from generate_series(0, v_fenetre - 1) k);
+  v_jours := array(select plan_exp_jour_ouvre(v_debut, g.n) from generate_series(0, v_fenetre - 1) as g(n));
   v_fin_fenetre := v_jours[v_fenetre];
 
   -- 1. Lignes de CDC dans l'horizon (retards compris)
@@ -354,10 +360,19 @@ begin
   create temp table _dim on commit drop as
   select distinct on (k.cle) k.cle,
          plan_exp_vol_m3(p.length, p.width, p.height) as vol,
-         nullif(p.weight, 0)::numeric as poids
+         case when p.weight > 0.05 then p.weight::numeric end as poids
   from v_appro_article_blg_cles k
   join blg.article_part p on p.id = k.part_id
   order by k.cle, (k.appariement_via = 'reference') desc;
+
+  -- Références sans dimensions ni poids dans BLG : médiane de leur famille (signalé « dim. estimée »)
+  create temp table _fam on commit drop as
+  select x.famille,
+         percentile_cont(0.5) within group (order by d.vol)::numeric as vol,
+         percentile_cont(0.5) within group (order by d.poids)::numeric as poids
+  from (select distinct famille, upper(btrim(reference_article)) as ref from _l) x
+  join _dim d on d.cle = x.ref
+  group by x.famille;
 
   delete from appro_plan_exp_lignes where true;
   insert into appro_plan_exp_lignes
@@ -368,21 +383,22 @@ begin
          l.quantite, l.montant_ht, l.qte_agence, l.qte_fms_dispo, l.qte_attente,
          l.numero_cdf, l.container, l.est_cont, l.date_dispo, l.rdv_simule, l.sans_reception,
          (l.qte_attente > 0 and l.date_dispo is not null and l.date_dispo <= v_fin_fenetre),
-         d.vol, d.poids, (d.vol is null and d.poids is null),
-         greatest(coalesce(d.vol, 0) * l.qte_fms_dispo / v_vol_pal, coalesce(d.poids, 0) * l.qte_fms_dispo / v_poids_pal),
-         greatest(coalesce(d.vol, 0) * l.qte_attente / v_vol_pal, coalesce(d.poids, 0) * l.qte_attente / v_poids_pal),
+         coalesce(d.vol, f.vol), coalesce(d.poids, f.poids), (d.vol is null and d.poids is null),
+         greatest(coalesce(d.vol, f.vol, 0) * l.qte_fms_dispo / v_vol_pal, coalesce(d.poids, f.poids, 0) * l.qte_fms_dispo / v_poids_pal),
+         greatest(coalesce(d.vol, f.vol, 0) * l.qte_attente / v_vol_pal, coalesce(d.poids, f.poids, 0) * l.qte_attente / v_poids_pal),
          case when l.qte_agence >= l.quantite then 'AGENCE'
               when l.qte_attente <= 0 then 'FMS_DISPO'
               when l.qte_fms_dispo > 0 then 'PARTIEL'
               else 'ATTENTE' end
   from _l4 l
-  left join _dim d on d.cle = upper(btrim(l.reference_article));
+  left join _dim d on d.cle = upper(btrim(l.reference_article))
+  left join _fam f on f.famille = l.famille and d.vol is null and d.poids is null;
 
   -- 7. Destinataires (seules les lignes qui passent par FMS)
   delete from appro_plan_exp_unites where true;
   insert into appro_plan_exp_unites (cle, type_destinataire, libelle, numero_tiers, agence,
     nb_cdc, nb_lignes, montant_ht, date_livraison_min, nb_lignes_dispo, nb_lignes_attente, nb_lignes_vague, nb_lignes_reliquat,
-    palettes_dispo, palettes_attente, palettes_vague, poids_dispo, nb_groupes_ext_dispo, cuivre_dispo, dim_manquante,
+    palettes_dispo, palettes_attente, palettes_vague, poids_dispo, nb_groupes_ext_dispo, nb_groupes_ext_attente, cuivre_dispo, dim_manquante,
     date_complete_vague, rdv_simule, date_inconnue, sans_reception, containers, categorie)
   select l.cle,
          case when l.cle like 'C:%' then 'CLIENT' else 'AGENCE' end,
@@ -396,6 +412,7 @@ begin
          round(coalesce(sum(l.palettes_attente) filter (where l.dans_vague), 0), 2),
          round(sum(coalesce(l.poids_unitaire, 0) * l.qte_fms_dispo), 0),
          coalesce(sum(l.qte_fms_dispo) filter (where l.role_famille = 'GROUPE_EXT'), 0),
+         coalesce(sum(l.qte_attente) filter (where l.role_famille = 'GROUPE_EXT'), 0),
          coalesce(bool_or(l.role_famille = 'CUIVRE' and l.qte_fms_dispo > 0), false),
          coalesce(bool_or(l.dim_manquante and (l.qte_fms_dispo > 0 or l.qte_attente > 0)), false),
          max(l.date_dispo) filter (where l.dans_vague),
@@ -436,10 +453,10 @@ begin
       v_reste := v_reste - v_prise;
       v_parts := v_parts || v_jours[i]; v_pals := v_pals || v_prise;
     end loop;
-    for k in 1 .. coalesce(array_length(v_parts, 1), 0) loop
+    for n_part in 1 .. coalesce(array_length(v_parts, 1), 0) loop
       insert into appro_plan_exp_envois (jour, cle, vague, type_envoi, palettes, partie, nb_parties)
-      values (v_parts[k], u.cle, 'ANTICIPATION', case when u.categorie = 'COMPLET' then 'COMPLET' else 'ANTICIPATION' end,
-              v_pals[k], k, array_length(v_parts, 1));
+      values (v_parts[n_part], u.cle, 'ANTICIPATION', case when u.categorie = 'COMPLET' then 'COMPLET' else 'ANTICIPATION' end,
+              v_pals[n_part], n_part, array_length(v_parts, 1));
     end loop;
   end loop;
 
@@ -464,10 +481,10 @@ begin
       v_reste := v_reste - v_prise;
       v_parts := v_parts || v_jours[i]; v_pals := v_pals || v_prise;
     end loop;
-    for k in 1 .. coalesce(array_length(v_parts, 1), 0) loop
+    for n_part in 1 .. coalesce(array_length(v_parts, 1), 0) loop
       insert into appro_plan_exp_envois (jour, cle, vague, type_envoi, palettes, partie, nb_parties)
-      values (v_parts[k], u.cle, 'RECEPTION', case when u.categorie = 'ANTICIPER' then 'COMPLEMENT' else 'UNIQUE' end,
-              v_pals[k], k, array_length(v_parts, 1));
+      values (v_parts[n_part], u.cle, 'RECEPTION', case when u.categorie = 'ANTICIPER' then 'COMPLEMENT' else 'UNIQUE' end,
+              v_pals[n_part], n_part, array_length(v_parts, 1));
     end loop;
   end loop;
 
