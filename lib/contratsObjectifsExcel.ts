@@ -3,7 +3,10 @@
 // ----------------------------------------------------------------------------
 // Créé le 04/11/2026 (demandé par Arnaud). Utilisé par app/objectifs/contrats.
 //
-// Un seul format Excel sert à trois usages :
+// Deux présentations du même contenu (voir aussi FEUILLE UNIQUE plus bas) :
+//   - un onglet par commercial (construireClasseur) ;
+//   - une seule feuille, une ligne par commercial (construireFeuilleUnique).
+// Le format sert à trois usages :
 //   1. export des contrats d'une année avec leur situation à date
 //      (un onglet par commercial + onglet Synthèse) ;
 //   2. travail des avenants par la direction : on modifie le classeur exporté
@@ -730,6 +733,62 @@ export function estOngletNorme(ws: WS) {
   return FORMAT_RE.test(norm(texte(ws.getCell(2, 1).value)).replace(/[–—-]/g, ' ').replace(/\s+/g, ' '))
 }
 
+/** Lit une prime à partir d'un accès par clé de colonne (onglet normé ou feuille unique). null = ligne vide. */
+function lirePrimeLigne(v: (cle: string) => unknown, lieu: string, avert: string[]): Prime | null {
+  const sectionT = texte(v('section'))
+  const libelle = texte(v('libelle'))
+  const indicT = texte(v('indicateur'))
+  const description = texte(v('description'))
+  const montantF = nombre(v('montant'))
+  const paliers = Array.from({ length: NB_PALIERS }, (_, i) => ({ seuil: nombre(v(`seuil${i + 1}`)), montant: nombre(v(`prime${i + 1}`)) })).filter(
+    (x) => x.seuil != null || x.montant != null,
+  )
+  if (!sectionT && !libelle && !indicT && !description && montantF == null && paliers.length === 0) return null
+  const ref = `${lieu}${libelle ? ` (${libelle})` : ''}`
+  const section = lireSection(sectionT)
+  let indicateur = lireIndicateur(indicT)
+  if (!section) avert.push(`Type de prime inconnu ${ref} : « ${sectionT || 'vide'} »`)
+  if (!indicateur) {
+    indicateur = section === 'ca_perso' ? 'ca_perso' : section === 'ca_agence' ? 'ca_agence' : section === 'familles' ? 'evol_familles' : section === 'transfo' ? 'evol_transfo' : section === 'clients' ? 'nb_clients' : 'manuel'
+    if (indicT) avert.push(`Indicateur inconnu ${ref} : « ${indicT} » → ${INDICATEUR_COURT[indicateur]}`)
+  }
+  const mode = lireMode(texte(v('mode'))) || (paliers.length ? 'paliers' : 'forfait')
+  if (mode === 'paliers' && paliers.some((x) => x.seuil == null || x.montant == null)) avert.push(`Palier incomplet ${ref}`)
+  if (mode === 'paliers' && paliers.length === 0) avert.push(`Aucun palier ${ref}`)
+  if (mode === 'forfait' && montantF == null) avert.push(`Montant forfait vide ${ref}`)
+  let cible = nombre(v('cible'))
+  const pal = paliers.filter((x) => x.seuil != null && x.montant != null).map((x) => ({ seuil: x.seuil!, montant: x.montant! }))
+  if (indicateur === 'evol_familles') {
+    if (cible != null && Math.abs(cible) > 1.5) cible /= 100
+    pal.forEach((x) => Math.abs(x.seuil) > 1.5 && (x.seuil /= 100))
+  }
+  const splitL = (x: unknown) =>
+    texte(x)
+      .split(/\s*[;\n]\s*/)
+      .map((s) => s.trim())
+      .filter(Boolean)
+  const tranche = lireTranche(texte(v('tranche')))
+  if (indicateur === 'nb_clients' && !tranche) avert.push(`Tranche clients manquante ${ref}`)
+  const id = texte(v('id'))
+  return {
+    id: /^[0-9a-f-]{36}$/i.test(id) ? id : undefined,
+    section: section || 'qualitatif',
+    libelle: libelle || (section ? SECTION_LIBELLES[section] : 'Prime'),
+    description: description || null,
+    mode,
+    indicateur,
+    paliers: mode === 'paliers' ? pal.sort((a, b) => a.seuil - b.seuil) : [],
+    montant: mode === 'forfait' ? montantF ?? 0 : 0,
+    echeance: lireEcheance(texte(v('echeance'))) || 'avril_n1',
+    base_ca: lireBase(texte(v('base_ca'))) || 'perso',
+    cible_evol: indicateur === 'evol_familles' || indicateur === 'evol_transfo' ? cible : null,
+    familles_macro: splitL(v('familles_macro')),
+    familles: splitL(v('familles')),
+    tranche: indicateur === 'nb_clients' ? tranche : null,
+    cible_nb: indicateur === 'nb_clients' ? nombre(v('cible_nb')) : null,
+  }
+}
+
 export function lireOngletNorme(ws: WS): OngletNorme {
   const avert: string[] = []
   const maxR = ws.rowCount
@@ -785,58 +844,8 @@ export function lireOngletNorme(ws: WS): OngletNorme {
     for (let r = rPrimes + 1; r <= fin; r++) {
       const a = norm(texte(ws.getCell(r, 1).value))
       if (/^situation a fin/.test(a)) break
-      const sectionT = texte(v(r, 'section'))
-      const libelle = texte(v(r, 'libelle'))
-      const indicT = texte(v(r, 'indicateur'))
-      const description = texte(v(r, 'description'))
-      const montantF = nombre(v(r, 'montant'))
-      const paliers = Array.from({ length: NB_PALIERS }, (_, i) => ({ seuil: nombre(v(r, `seuil${i + 1}`)), montant: nombre(v(r, `prime${i + 1}`)) })).filter(
-        (x) => x.seuil != null || x.montant != null,
-      )
-      if (!sectionT && !libelle && !indicT && !description && montantF == null && paliers.length === 0) continue
-      const ref = `ligne ${r}${libelle ? ` (${libelle})` : ''}`
-      const section = lireSection(sectionT)
-      let indicateur = lireIndicateur(indicT)
-      if (!section) avert.push(`Type de prime inconnu ${ref} : « ${sectionT || 'vide'} »`)
-      if (!indicateur) {
-        indicateur = section === 'ca_perso' ? 'ca_perso' : section === 'ca_agence' ? 'ca_agence' : section === 'familles' ? 'evol_familles' : section === 'transfo' ? 'evol_transfo' : section === 'clients' ? 'nb_clients' : 'manuel'
-        if (indicT) avert.push(`Indicateur inconnu ${ref} : « ${indicT} » → ${INDICATEUR_COURT[indicateur]}`)
-      }
-      const mode = lireMode(texte(v(r, 'mode'))) || (paliers.length ? 'paliers' : 'forfait')
-      if (mode === 'paliers' && paliers.some((x) => x.seuil == null || x.montant == null)) avert.push(`Palier incomplet ${ref}`)
-      if (mode === 'paliers' && paliers.length === 0) avert.push(`Aucun palier ${ref}`)
-      if (mode === 'forfait' && montantF == null) avert.push(`Montant forfait vide ${ref}`)
-      let cible = nombre(v(r, 'cible'))
-      const pal = paliers.filter((x) => x.seuil != null && x.montant != null).map((x) => ({ seuil: x.seuil!, montant: x.montant! }))
-      if (indicateur === 'evol_familles') {
-        if (cible != null && Math.abs(cible) > 1.5) cible /= 100
-        pal.forEach((x) => Math.abs(x.seuil) > 1.5 && (x.seuil /= 100))
-      }
-      const splitL = (x: unknown) =>
-        texte(x)
-          .split(/\s*[;\n]\s*/)
-          .map((s) => s.trim())
-          .filter(Boolean)
-      const tranche = lireTranche(texte(v(r, 'tranche')))
-      if (indicateur === 'nb_clients' && !tranche) avert.push(`Tranche clients manquante ${ref}`)
-      const id = texte(v(r, 'id'))
-      primes.push({
-        id: /^[0-9a-f-]{36}$/i.test(id) ? id : undefined,
-        section: section || 'qualitatif',
-        libelle: libelle || (section ? SECTION_LIBELLES[section] : 'Prime'),
-        description: description || null,
-        mode,
-        indicateur,
-        paliers: mode === 'paliers' ? pal.sort((a, b) => a.seuil - b.seuil) : [],
-        montant: mode === 'forfait' ? montantF ?? 0 : 0,
-        echeance: lireEcheance(texte(v(r, 'echeance'))) || 'avril_n1',
-        base_ca: lireBase(texte(v(r, 'base_ca'))) || 'perso',
-        cible_evol: indicateur === 'evol_familles' || indicateur === 'evol_transfo' ? cible : null,
-        familles_macro: splitL(v(r, 'familles_macro')),
-        familles: splitL(v(r, 'familles')),
-        tranche: indicateur === 'nb_clients' ? tranche : null,
-        cible_nb: indicateur === 'nb_clients' ? nombre(v(r, 'cible_nb')) : null,
-      })
+      const p = lirePrimeLigne((cle) => v(r, cle), `ligne ${r}`, avert)
+      if (p) primes.push(p)
     }
   }
   primes.forEach((p, i) => (p.ordre = i + 1))
@@ -877,14 +886,410 @@ export function lireOngletNorme(ws: WS): OngletNorme {
   }
 }
 
+// ============================================================================
+// FEUILLE UNIQUE — tous les commerciaux sur une seule feuille (04/11/2026)
+// ----------------------------------------------------------------------------
+// Une ligne par commercial, beaucoup de colonnes :
+//   - bloc « Contrat » (blanc, importé) : paramètres du contrat ;
+//   - bloc « Situation à fin <mois> » (gris, jamais importé) ;
+//   - un bloc par prime « P1 · … », « P2 · … » (blanc, importé ; colonnes
+//     de situation de chaque prime en gris, jamais importées).
+// La marque FEUILLE_MARQUE en A2 fait basculer l'import en lecture feuille
+// unique ; colonnes retrouvées par leur en-tête (ligne « Code collaborateur »).
+// Une ligne = un contrat (même traitement à l'import qu'un onglet normé).
+// ============================================================================
+export const FEUILLE_MARQUE = 'Format CEGECLIM – contrats d’objectifs feuille unique v1'
+const FEUILLE_RE = /^format cegeclim .*feuille unique v(\d+)/
+const FEUILLE_NOM = 'Contrats'
+const NB_PRIMES_MIN = 8
+const NB_LIGNES_VIDES = 10
+
+type ColFeuille = { cle: string; titre: string; largeur: number; info?: boolean; fmt?: string }
+const COLS_CONTRAT: ColFeuille[] = [
+  { cle: 'code', titre: 'Code collaborateur', largeur: 14 },
+  { cle: 'nom', titre: 'Nom', largeur: 24, info: true },
+  { cle: 'agence', titre: 'Agence', largeur: 14, info: true },
+  { cle: 'annee', titre: 'Année', largeur: 8 },
+  { cle: 'statut', titre: 'Statut', largeur: 10 },
+  { cle: 'objectif', titre: 'Objectif CA HT (€)', largeur: 14, fmt: EUR },
+  { cle: 'perimetre', titre: 'Objectif porté sur', largeur: 12 },
+  { cle: 'marge', titre: 'Marge N-1 (€)', largeur: 13, fmt: EUR },
+  { cle: 'taux_base', titre: 'Taux de base avance', largeur: 9, fmt: PCT },
+  { cle: 'taux_com', titre: 'Taux de commission', largeur: 9, fmt: PCT2 },
+  { cle: 'avance_calc', titre: 'Avance mensuelle calculée (€)', largeur: 11, info: true, fmt: EUR },
+  { cle: 'avance_saisie', titre: 'Avance mensuelle saisie (€)', largeur: 11, fmt: EUR },
+  { cle: 'date_fin', titre: 'Date de fin de contrat', largeur: 12, fmt: 'dd/mm/yyyy' },
+  { cle: 'commentaire', titre: 'Commentaire / avenant', largeur: 30 },
+]
+const COLS_SITUATION: ColFeuille[] = [
+  { cle: 's_ca', titre: 'CA à date (€)', largeur: 13, fmt: EUR },
+  { cle: 's_evol', titre: 'vs N-1', largeur: 8, fmt: '+0.0%;-0.0%' },
+  { cle: 's_avct', titre: 'Avancement', largeur: 9, fmt: PCT },
+  { cle: 's_proj', titre: 'CA projeté fin d’année (€)', largeur: 13, fmt: EUR },
+  { cle: 's_marge', titre: 'Marge à date (€)', largeur: 12, fmt: EUR },
+  { cle: 's_com', titre: 'Commission acquise (€)', largeur: 11, fmt: EUR },
+  { cle: 's_av', titre: 'Avances versées (€)', largeur: 11, fmt: EUR },
+  { cle: 's_solde', titre: 'Solde à date (€)', largeur: 11, fmt: EUR },
+  { cle: 's_comproj', titre: 'Commission projetée (€)', largeur: 11, fmt: EUR },
+  { cle: 's_regul', titre: 'Régul projetée (€)', largeur: 11, fmt: EUR },
+  { cle: 's_pmax', titre: 'Primes max (€)', largeur: 11, fmt: EUR },
+  { cle: 's_pdate', titre: 'Primes acquises à date (€)', largeur: 11, fmt: EUR },
+  { cle: 's_pprob', titre: 'Primes probables (€)', largeur: 11, fmt: EUR },
+  { cle: 's_aeval', titre: 'Primes à évaluer', largeur: 9 },
+]
+// Colonnes d'une prime (sans « N° » : l'ordre est celui des blocs P1, P2…)
+function colsPrime(nbPaliers: number, situation: boolean): ColPrime[] {
+  return COLS_PRIMES.filter((c) => c.cle !== 'ordre' && (!c.cle.match(/^(seuil|prime)(\d)$/) || Number(c.cle.slice(-1)) <= nbPaliers) && (situation || !c.info)).map(
+    (c) => (c.cle === 'sit_texte' ? { ...c, largeur: 34 } : c),
+  )
+}
+const titrePrime = (k: number, titre: string) => `P${k} · ${titre}`
+
+export async function construireFeuilleUnique(fiches: FicheContrat[], opt: OptionsExport): Promise<Blob> {
+  const ExcelJS = (await import('exceljs')).default
+  const wb = new ExcelJS.Workbook()
+  wb.creator = 'Compagnon CEGECLIM'
+  wb.created = new Date()
+  const prep = opt.mode === 'preparation'
+  const retenues = (prep ? fiches.filter((f) => f.contrat && (!f.contrat.date_fin || f.contrat.date_fin.slice(0, 10) >= `${f.annee}-12-31`)) : fiches.filter((f) => f.contrat)).sort(
+    (a, b) => (a.agence || '').localeCompare(b.agence || '') || a.nom.localeCompare(b.nom),
+  )
+  const anneeCible = prep ? opt.annee + 1 : opt.annee
+  const mc = retenues[0]?.mois_clos ?? 0
+  const moisClos = MOIS[mc]?.toLowerCase() || '—'
+  const nbPrimes = Math.max(NB_PRIMES_MIN, ...retenues.map((f) => (f.primes || []).length))
+  const nbPaliers = Math.min(NB_PALIERS, Math.max(2, ...retenues.flatMap((f) => (f.primes || []).map((p) => (p.mode === 'paliers' ? (p.paliers || []).length : 0)))))
+  const cp = colsPrime(nbPaliers, !prep)
+
+  ecrireModeEmploiFeuille(wb, opt, retenues.length, nbPrimes, nbPaliers)
+  const ws = wb.addWorksheet(FEUILLE_NOM, { properties: { tabColor: { argb: prep ? 'FFB4761A' : 'FF2F7A4A' } } })
+  const L = listesRef()
+
+  // Plan des colonnes
+  type Col = ColFeuille & { groupe: string; k?: number; cleP?: string }
+  const cols: Col[] = [
+    ...COLS_CONTRAT.map((c) => ({ ...c, groupe: 'Contrat' })),
+    ...(prep ? [] : COLS_SITUATION.map((c) => ({ ...c, info: true, groupe: `Situation à fin ${moisClos} ${opt.annee} (informatif)` }))),
+  ]
+  for (let k = 1; k <= nbPrimes; k++) for (const c of cp) cols.push({ cle: `p${k}_${c.cle}`, cleP: c.cle, k, titre: titrePrime(k, c.titre), largeur: c.largeur, info: c.info || c.cle === 'id', groupe: `Prime ${k}` })
+  const ix = new Map(cols.map((c, i) => [c.cle, i + 1]))
+  const lettre = (n: number) => {
+    let s = ''
+    while (n > 0) {
+      const m = (n - 1) % 26
+      s = String.fromCharCode(65 + m) + s
+      n = Math.floor((n - 1) / 26)
+    }
+    return s
+  }
+
+  // Lignes 1–2 : titre et marque
+  const t = ws.getCell(1, 1)
+  t.value = prep ? `Préparation des contrats d’objectifs ${anneeCible} — tous les commerciaux` : `Contrats d’objectifs ${anneeCible} — tous les commerciaux — réalisé à fin ${moisClos}`
+  t.font = { bold: true, size: 14, color: { argb: C.marine } }
+  const m = ws.getCell(2, 1)
+  m.value = FEUILLE_MARQUE
+  m.font = { size: 8, color: { argb: C.infoTexte } }
+  const aide = ws.getCell(2, 4)
+  aide.value = `Export du ${new Date().toLocaleDateString('fr-FR')} · une ligne par commercial · blanc = modifiable et réimportable · gris = informatif · ${nbPrimes} blocs de primes (P1…P${nbPrimes}) · voir « Mode d’emploi »`
+  aide.font = { italic: true, size: 9, color: { argb: C.infoTexte } }
+
+  // Ligne 3 : groupes ; ligne 4 : en-têtes
+  const R_GRP = 3
+  const R_HEAD = 4
+  let debut = 1
+  cols.forEach((c, i) => {
+    const suivant = cols[i + 1]
+    if (!suivant || suivant.groupe !== c.groupe) {
+      if (i + 1 > debut) ws.mergeCells(R_GRP, debut, R_GRP, i + 1)
+      const g = ws.getCell(R_GRP, debut)
+      g.value = c.groupe
+      const fond = c.groupe.startsWith('Situation') ? 'FF6B7480' : c.groupe === 'Contrat' ? C.marine : c.k! % 2 ? C.ocre : 'FF8A5A12'
+      entete(g, fond)
+      g.alignment = { vertical: 'middle', horizontal: 'left', indent: 1 }
+      debut = i + 2
+    }
+    const h = ws.getCell(R_HEAD, i + 1)
+    h.value = c.titre
+    entete(h, c.info ? 'FF6B7480' : c.k ? (c.k % 2 ? 'FF7A5A20' : 'FF5E4512') : C.marine)
+    ws.getColumn(i + 1).width = c.largeur
+  })
+  ws.getRow(R_GRP).height = 18
+  ws.getRow(R_HEAD).height = 54
+
+  // Données
+  const R0 = R_HEAD + 1
+  const lignes = [...retenues, ...Array.from({ length: NB_LIGNES_VIDES }, () => null as FicheContrat | null)]
+  lignes.forEach((f, n) => {
+    const r = R0 + n
+    const val: Record<string, unknown> = {}
+    const fmtSpec: Record<string, string> = {}
+    if (f) {
+      const c = f.contrat
+      const calc = calculerContrat(f)
+      const obj = caObjectif(f, calc)
+      const margeEstimee = calc.part > 0 ? Math.round(calc.margeTotal / calc.part) : Math.round(calc.margeTotal)
+      Object.assign(val, {
+        code: f.code,
+        nom: f.nom,
+        agence: f.agence || '',
+        annee: anneeCible,
+        statut: STATUTS[prep ? 'brouillon' : c?.statut || 'valide'],
+        objectif: c?.objectif_caht ?? null,
+        perimetre: BASES[c?.perimetre_objectif === 'agence' ? 'agence' : 'perso'],
+        marge: prep ? margeEstimee : c?.marge_n1 ?? null,
+        taux_base: c?.taux_base ?? 0.08,
+        taux_com: c?.taux_commission ?? 0.01,
+        avance_saisie: prep ? null : c?.avance_mensuelle_saisie ?? null,
+        date_fin: !prep && c?.date_fin ? new Date(c.date_fin) : null,
+        commentaire: prep ? `Préparé à partir du contrat ${f.annee}` : c?.commentaire || '',
+      })
+      const primes = f.primes || []
+      const etats = prep ? [] : primes.map((p) => etatPrime(p, f, calc))
+      if (!prep) {
+        const caN1 = obj.agence ? f.ca_agence_n1 ?? null : f.mois.filter((x) => x.mois <= calc.moisCalc).reduce((s, x) => s + (x.ca_n1 || 0), 0)
+        Object.assign(val, {
+          s_ca: obj.realise,
+          s_evol: caN1 ? obj.realise / caN1 - 1 : null,
+          s_avct: c?.objectif_caht ? obj.realise / c.objectif_caht : null,
+          s_proj: obj.projection,
+          s_marge: calc.margeTotal,
+          s_com: calc.commissionAcquise,
+          s_av: calc.avancesADate,
+          s_solde: calc.soldeADate,
+          s_comproj: calc.commissionProjetee,
+          s_regul: calc.soldeProjete,
+          s_pmax: etats.reduce((s, e) => s + e.montantMax, 0),
+          s_pdate: etats.reduce((s, e) => s + e.montantADate, 0),
+          s_pprob: etats.reduce((s, e) => s + e.montantProjete, 0),
+          s_aeval: primes.filter((p) => (!p.resultat || p.resultat === 'a_evaluer') && ['manuel', 'cerfa_complet'].includes(p.indicateur)).length,
+        })
+      }
+      primes.slice(0, nbPrimes).forEach((p, i) => {
+        const k = i + 1
+        const P = (cle: string, v: unknown) => (val[`p${k}_${cle}`] = v)
+        P('section', SECTION_LIBELLES[p.section])
+        P('libelle', p.libelle)
+        P('description', p.description || '')
+        P('mode', MODES[p.mode])
+        P('indicateur', INDICATEUR_COURT[p.indicateur])
+        P('echeance', ECHEANCES[p.echeance] || ECHEANCES.avril_n1)
+        P('montant', p.mode === 'forfait' ? Number(p.montant || 0) : null)
+        ;(p.paliers || []).slice(0, nbPaliers).forEach((x, j) => {
+          P(`seuil${j + 1}`, Number(x.seuil))
+          P(`prime${j + 1}`, Number(x.montant))
+          fmtSpec[`p${k}_seuil${j + 1}`] = formatSeuil(p)
+        })
+        P('base_ca', ['evol_familles', 'evol_transfo', 'nb_clients'].includes(p.indicateur) ? BASES[p.base_ca === 'agence' ? 'agence' : 'perso'] : null)
+        P('cible', valeurCible(p))
+        if (p.indicateur === 'evol_transfo' || p.indicateur === 'evol_familles') fmtSpec[`p${k}_cible`] = p.indicateur === 'evol_transfo' ? '0.0 "pts"' : PCT
+        P('familles_macro', (p.familles_macro || []).join(' ; '))
+        P('familles', (p.familles || []).join(' ; '))
+        P('tranche', p.tranche ? TRANCHES[p.tranche] : null)
+        P('cible_nb', p.cible_nb ?? null)
+        P('id', prep ? null : p.id || null)
+        const ep = etats[i]
+        if (ep) {
+          P('sit_max', ep.montantMax)
+          P('sit_date', ep.montantADate)
+          P('sit_proj', ep.montantProjete)
+          P('sit_eval', p.resultat ? { a_evaluer: 'À évaluer', atteint: 'Atteint', partiel: 'Partiel', non_atteint: 'Non atteint' }[p.resultat] : 'À évaluer')
+          P('sit_retenu', p.montant_retenu ?? null)
+          P('sit_texte', [ep.texte, p.commentaire_evaluation].filter(Boolean).join(' · '))
+        }
+      })
+    }
+    cols.forEach((c, i) => {
+      const cell = ws.getCell(r, i + 1)
+      const v = val[c.cle]
+      cell.value = (v === '' || v === undefined || (typeof v === 'number' && !Number.isFinite(v)) ? null : v) as any
+      cell.font = { size: 10, bold: c.cle === 'nom' }
+      remplir(cell, c.info ? C.info : C.saisie)
+      bordure(cell)
+      const cleP = c.cleP
+      const fmt = fmtSpec[c.cle] || c.fmt || (cleP && (cleP === 'montant' || cleP.startsWith('prime') || (cleP.startsWith('sit_') && !['sit_eval', 'sit_texte'].includes(cleP))) ? EUR : undefined)
+      if (fmt) cell.numFmt = fmt
+      if (cleP === 'id') cell.font = { size: 8, color: { argb: C.infoTexte } }
+      if (c.cle === 'perimetre') liste(cell, L.perimetre)
+      if (c.cle === 'statut') liste(cell, L.statut)
+      if (cleP === 'section') liste(cell, L.section)
+      if (cleP === 'mode') liste(cell, L.mode)
+      if (cleP === 'indicateur') liste(cell, L.indicateur)
+      if (cleP === 'echeance') liste(cell, L.echeance)
+      if (cleP === 'base_ca') liste(cell, L.base)
+      if (cleP === 'tranche') liste(cell, L.tranche)
+    })
+    // Avance calculée en formule (suit les modifications)
+    const cM = lettre(ix.get('marge')!)
+    const cB = lettre(ix.get('taux_base')!)
+    const cT = lettre(ix.get('taux_com')!)
+    const ac = ws.getCell(r, ix.get('avance_calc')!)
+    ac.value = f
+      ? { formula: `IF(${cM}${r}="","",ROUND(${cM}${r}*${cB}${r}*${cT}${r},0))`, result: avanceTheorique(val.marge as number | null, val.taux_base as number, val.taux_com as number) }
+      : { formula: `IF(${cM}${r}="","",ROUND(${cM}${r}*${cB}${r}*${cT}${r},0))` }
+  })
+
+  // Totaux (informatif) sur les colonnes monétaires du contrat et de la situation
+  const rT = R0 + lignes.length
+  const lastData = rT - 1
+  ws.getCell(rT, 1).value = `Total (${retenues.length})`
+  for (const cle of ['objectif', 'marge', ...(prep ? [] : COLS_SITUATION.filter((c) => c.fmt === EUR).map((c) => c.cle))]) {
+    const ci = ix.get(cle)!
+    const cell = ws.getCell(rT, ci)
+    cell.value = { formula: `SUBTOTAL(9,${lettre(ci)}${R0}:${lettre(ci)}${lastData})` }
+    cell.numFmt = EUR
+  }
+  for (let i = 1; i <= ix.get(prep ? 'commentaire' : 's_aeval')!; i++) {
+    const cell = ws.getCell(rT, i)
+    cell.font = { bold: true, size: 10 }
+    remplir(cell, C.creme)
+    bordure(cell)
+  }
+
+  ws.views = [{ state: 'frozen', xSplit: 2, ySplit: R_HEAD, showGridLines: false }]
+  ws.autoFilter = { from: { row: R_HEAD, column: 1 }, to: { row: lastData, column: cols.length } }
+
+  if (opt.familles?.length) ecrireFamilles(wb, opt.familles)
+  ajouterListes(wb)
+  const buf = await wb.xlsx.writeBuffer()
+  return new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' })
+}
+
+function ecrireModeEmploiFeuille(wb: WB, opt: OptionsExport, n: number, nbPrimes: number, nbPaliers: number) {
+  const ws = wb.addWorksheet('Mode d’emploi', { views: [{ showGridLines: false }] })
+  ws.getColumn(1).width = 4
+  ws.getColumn(2).width = 120
+  const prep = opt.mode === 'preparation'
+  const annee = prep ? opt.annee + 1 : opt.annee
+  const lignes: Array<[string, 'titre' | 'texte' | 'section']> = [
+    [prep ? `Préparation des contrats d’objectifs ${annee} — feuille unique` : `Contrats d’objectifs ${annee} — feuille unique — export du ${new Date().toLocaleDateString('fr-FR')}`, 'titre'],
+    [`${n} contrat(s) sur la feuille « ${FEUILLE_NOM} », une ligne par commercial. ${FEUILLE_MARQUE}.`, 'texte'],
+    ['Organisation de la feuille', 'section'],
+    ['• Bloc « Contrat » : code collaborateur (clé d’import), année, statut, objectif CA HT, périmètre, marge N-1, taux, avance saisie, date de fin, commentaire.', 'texte'],
+    [prep ? '• Copie de préparation : pas de bloc « Situation ».' : `• Bloc gris « Situation à fin … » : CA, avancement, marge, commission, avances, solde, régul projetée, primes — informatif, jamais importé.`, 'texte'],
+    [`• Blocs « Prime 1 » à « Prime ${nbPrimes} » : une prime par bloc (type, libellé, condition, calcul, indicateur, versement, montant ou ${nbPaliers} paliers, base CA, cible, familles, tranche, identifiant${prep ? '' : ', puis la situation de la prime en gris'}).`, 'texte'],
+    ['• Volets figés : code et nom restent visibles en défilant vers la droite ; filtres automatiques sur la ligne d’en-tête.', 'texte'],
+    ['Ce que l’on peut modifier', 'section'],
+    ['• Les cellules blanches. Les cellules grises (nom, agence, avance calculée, situation) sont informatives.', 'texte'],
+    ['• Ne pas modifier : la cellule A2 (marque du format), les en-têtes de la ligne 4, la colonne « Identifiant » des primes.', 'texte'],
+    ['• Ajouter une prime à un commercial : remplir le premier bloc de prime vide de sa ligne. Supprimer une prime : vider toutes les cellules blanches du bloc.', 'texte'],
+    ['• Nouveau commercial : remplir une ligne vide en bas (code collaborateur SAGE, année, objectif, marge N-1, primes).', 'texte'],
+    ['• Calcul « Forfait » : « Montant forfait ». Calcul « Paliers » : couples seuil / prime. Paliers CA en euros, évolution familles en %, taux de transfo en points.', 'texte'],
+    ['• Familles : noms exacts des macro-familles / familles du compagnon séparés par « ; » (onglet Familles).', 'texte'],
+    ['Réimport', 'section'],
+    [`• Compagnon › Contrats d’objectifs › année ${annee} › « Importer le classeur » : chaque ligne est rattachée par son code collaborateur et remplace son contrat ${annee}.`, 'texte'],
+    ['• Une prime qui garde son identifiant conserve l’évaluation de la direction. Les commerciaux absents de la feuille ne sont pas modifiés.', 'texte'],
+    ['• Ne pas trier en laissant des lignes à moitié remplies ; le tri et les filtres sont sans effet sur l’import.', 'texte'],
+  ]
+  let r = 2
+  for (const [t, s] of lignes) {
+    if (s === 'section') r++
+    const c = ws.getCell(r, 2)
+    c.value = t
+    c.alignment = { wrapText: true, vertical: 'top' }
+    c.font = s === 'titre' ? { bold: true, size: 16, color: { argb: C.marine } } : s === 'section' ? { bold: true, size: 11, color: { argb: C.ocre } } : { size: 10 }
+    r++
+  }
+}
+
+export function estFeuilleUnique(ws: WS) {
+  return FEUILLE_RE.test(norm(texte(ws.getCell(2, 1).value)).replace(/[–—-]/g, ' ').replace(/\s+/g, ' '))
+}
+
+/** Lit la feuille unique : une entrée par ligne renseignée (code collaborateur non vide). */
+export function lireFeuilleUnique(ws: WS): OngletNorme[] {
+  const maxR = ws.rowCount
+  const maxC = ws.columnCount
+  let rHead = 0
+  for (let r = 1; r <= Math.min(10, maxR) && !rHead; r++) if (norm(texte(ws.getCell(r, 1).value)) === 'code collaborateur') rHead = r
+  if (!rHead) return []
+  const colC = new Map<string, number>()
+  const colP = new Map<number, Map<string, number>>()
+  for (let c = 1; c <= maxC; c++) {
+    const h = norm(texte(ws.getCell(rHead, c).value))
+    if (!h) continue
+    const mp = h.match(/^p(\d+) · (.+)$/)
+    if (mp) {
+      const d = COLS_PRIMES.find((x) => norm(x.titre) === mp[2])
+      if (d) {
+        const k = Number(mp[1])
+        if (!colP.has(k)) colP.set(k, new Map())
+        colP.get(k)!.set(d.cle, c)
+      }
+      continue
+    }
+    const d = COLS_CONTRAT.find((x) => norm(x.titre) === h)
+    if (d) colC.set(d.cle, c)
+  }
+  const blocs = [...colP.keys()].sort((a, b) => a - b)
+  const res: OngletNorme[] = []
+  for (let r = rHead + 1; r <= maxR; r++) {
+    const V = (cle: string) => (colC.has(cle) ? ws.getCell(r, colC.get(cle)!).value : null)
+    const code = texte(V('code')).toUpperCase()
+    if (!code || /^total/i.test(code)) continue
+    const avert: string[] = []
+    const nom = texte(V('nom')) || null
+    const annee = nombre(V('annee'))
+    const objectif = nombre(V('objectif'))
+    const marge = nombre(V('marge'))
+    let tauxBase = nombre(V('taux_base'))
+    let tauxCom = nombre(V('taux_com'))
+    if (tauxBase != null && tauxBase > 1) tauxBase /= 100
+    if (tauxCom != null && tauxCom > 1) tauxCom /= 100
+    const dfBrute = V('date_fin')
+    const dateFin = dateIso(dfBrute)
+    if (texte(dfBrute) && !dateFin) avert.push(`Date de fin illisible : « ${texte(dfBrute)} »`)
+    if (annee == null) avert.push('Année absente')
+    if (objectif == null) avert.push('Objectif CA HT vide')
+    if (marge == null) avert.push('Marge N-1 vide')
+    const primes: Prime[] = []
+    for (const k of blocs) {
+      const cols = colP.get(k)!
+      const p = lirePrimeLigne((cle) => (cols.has(cle) ? ws.getCell(r, cols.get(cle)!).value : null), `P${k}`, avert)
+      if (p) primes.push(p)
+    }
+    primes.forEach((p, i) => (p.ordre = i + 1))
+    if (primes.length === 0) avert.push('Aucune prime')
+    const avanceSaisie = nombre(V('avance_saisie'))
+    res.push({
+      format: 'norme',
+      onglet: `Ligne ${r} · ${nom || code}`,
+      annee: annee != null ? Math.round(annee) : null,
+      code_lu: code,
+      nom_lu: nom,
+      objectif_caht: objectif,
+      perimetre_objectif: lireBase(texte(V('perimetre'))) || 'perso',
+      marge_n1: marge,
+      annee_marge_n1: annee != null ? Math.round(annee) - 1 : null,
+      taux_base: tauxBase,
+      taux_commission: tauxCom,
+      avance_excel: avanceSaisie ?? nombre(V('avance_calc')),
+      avance_saisie: avanceSaisie,
+      date_fin: dateFin,
+      statut: lireStatut(texte(V('statut'))) || 'valide',
+      commentaire: texte(V('commentaire')) || null,
+      mois: Array.from({ length: 12 }, (_, i) => ({ mois: i + 1, ca: null, marge: null })),
+      primes,
+      avertissements: avert,
+    })
+  }
+  return res
+}
+
 export type OngletAuto = OngletLu & Partial<Omit<OngletNorme, 'format' | keyof OngletLu>> & { format: 'norme' | 'libre' }
 
-/** Lit un classeur : onglets normés (marque en A2) en lecture stricte, autres onglets en lecture libre historique. */
+/** Lit un classeur : feuille unique (marque feuille unique en A2), sinon onglets normés (marque en A2) en lecture stricte, autres onglets en lecture libre historique. */
 export async function lireClasseurAuto(file: File, lireOngletLibre: (ws: WS) => OngletLu): Promise<OngletAuto[]> {
   const ExcelJS = (await import('exceljs')).default
   const wb = new ExcelJS.Workbook()
   await wb.xlsx.load(await file.arrayBuffer())
   const res: OngletAuto[] = []
+  // Feuille unique (une ligne par commercial) : prioritaire, les autres onglets sont ignorés
+  const feuilles = wb.worksheets.filter((ws: WS) => estFeuilleUnique(ws))
+  if (feuilles.length) {
+    for (const ws of feuilles) res.push(...lireFeuilleUnique(ws))
+    return res
+  }
   const nbNormes = wb.worksheets.filter((ws: WS) => estOngletNorme(ws)).length
   wb.eachSheet((ws: WS) => {
     if (ws.state === 'hidden' || ws.state === 'veryHidden') return

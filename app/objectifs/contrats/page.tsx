@@ -83,7 +83,7 @@ import {
   type Section,
   type Tranche,
 } from '@/lib/contratsObjectifs'
-import { construireClasseur, lireClasseurAuto, telecharger, type ModeExport, type OngletAuto } from '@/lib/contratsObjectifsExcel'
+import { construireClasseur, construireFeuilleUnique, lireClasseurAuto, telecharger, type ModeExport, type OngletAuto } from '@/lib/contratsObjectifsExcel'
 
 type Droits = { modifier: boolean; mon_code: string | null; suivi: boolean }
 
@@ -226,24 +226,28 @@ async function chargerFiches(annee: number, codes: string[], onProgress?: (n: nu
   return { fiches, erreurs }
 }
 
-async function exporterExcel(annee: number, fiches: FicheContrat[], mode: ModeExport) {
+type FormatExport = 'feuille' | 'onglets'
+
+async function exporterExcel(annee: number, fiches: FicheContrat[], mode: ModeExport, format: FormatExport = 'onglets') {
   const { data: familles } = await supabase.rpc('get_obj_familles')
-  const blob = await construireClasseur(fiches, { mode, annee, familles: (familles as FamilleRef[]) || [] })
+  const opt = { mode, annee, familles: (familles as FamilleRef[]) || [] }
+  const blob = format === 'feuille' ? await construireFeuilleUnique(fiches, opt) : await construireClasseur(fiches, opt)
   const jour = new Date().toISOString().slice(0, 10)
-  const suffixe = fiches.length === 1 ? `_${fiches[0].code}` : ''
+  const suffixe = (fiches.length === 1 ? `_${fiches[0].code}` : '') + (format === 'feuille' ? '_feuille_unique' : '')
   telecharger(blob, mode === 'preparation' ? `Contrats_objectifs_${annee + 1}_preparation${suffixe}_${jour}.xlsx` : `Contrats_objectifs_${annee}${suffixe}_situation_${jour}.xlsx`)
 }
 
 function BarreExport({ annee, codes, droits }: { annee: number; codes: string[]; droits: Droits }) {
   const [etat, setEtat] = useState<string | null>(null)
   const [err, setErr] = useState<string | null>(null)
+  const [format, setFormat] = useState<FormatExport>('feuille')
   const lancer = async (mode: ModeExport) => {
     setErr(null)
     setEtat(`Préparation du classeur… 0 / ${codes.length}`)
     try {
       const { fiches, erreurs } = await chargerFiches(annee, codes, (n) => setEtat(`Préparation du classeur… ${n} / ${codes.length}`))
       if (!fiches.length) throw new Error(erreurs[0] || 'Aucun contrat à exporter')
-      await exporterExcel(annee, fiches, mode)
+      await exporterExcel(annee, fiches, mode, format)
       if (erreurs.length) setErr(`${erreurs.length} contrat(s) non exporté(s) : ${erreurs.join(' · ')}`)
     } catch (e) {
       setErr((e as Error).message)
@@ -253,6 +257,10 @@ function BarreExport({ annee, codes, droits }: { annee: number; codes: string[];
   return (
     <div className="flex flex-wrap items-center gap-2 rounded-xl border border-[#E2DFD8] bg-white px-4 py-3">
       <span className="text-[13px] font-semibold text-[#0B1220]">Excel :</span>
+      <select value={format} onChange={(e) => setFormat(e.target.value as FormatExport)} className={inp} aria-label="Format du classeur">
+        <option value="feuille">Une seule feuille (une ligne par commercial)</option>
+        <option value="onglets">Un onglet par commercial</option>
+      </select>
       <button className={btn} disabled={!!etat || !codes.length} onClick={() => lancer('situation')}>
         ⬇ Exporter les contrats {annee} et la situation à date
       </button>
@@ -263,7 +271,9 @@ function BarreExport({ annee, codes, droits }: { annee: number; codes: string[];
       )}
       {etat && <span className="text-[12px] text-slate-500">{etat}</span>}
       <span className="ml-auto text-[12px] text-slate-500">
-        Classeur normé : un onglet par commercial, modifiable par la direction puis réimportable (avenants, année suivante).
+        {format === 'feuille'
+          ? 'Feuille unique : tous les commerciaux, une ligne chacun, primes en blocs P1, P2… — modifiable puis réimportable.'
+          : 'Classeur normé : un onglet par commercial, modifiable par la direction puis réimportable (avenants, année suivante).'}
       </span>
       {err && <div className="w-full text-[12px] text-[#C1683C]">{err}</div>}
     </div>
@@ -1687,10 +1697,11 @@ function ImportClasseur({ annee, onOuvrir }: { annee: number; onOuvrir: (code: s
         }}
         className={`rounded-xl border-2 border-dashed px-6 py-8 text-center ${glisse ? 'border-[#B4761A] bg-[#FBF3E4]' : 'border-[#D5D1C7] bg-white'}`}
       >
-        <div className="text-[14px] font-bold text-[#0B1220]">Classeur des objectifs commerciaux {annee} (un onglet par commercial)</div>
+        <div className="text-[14px] font-bold text-[#0B1220]">Classeur des objectifs commerciaux {annee} (feuille unique ou un onglet par commercial)</div>
         <div className="mx-auto mt-1 max-w-[720px] text-[12px] text-slate-500">
-          Classeur normé (exporté depuis la liste des contrats, « Exporter » ou « Préparer {annee + 1} ») : chaque onglet est rattaché par son code collaborateur et remplace le
-          contrat {annee} — avenant compris ; les primes gardent leur évaluation. Les anciens classeurs libres restent acceptés (rapprochement automatique).
+          Classeur exporté depuis la liste des contrats (« Exporter » ou « Préparer {annee + 1} »), en feuille unique ou un onglet par commercial : chaque ligne ou
+          onglet est rattaché par son code collaborateur et remplace le contrat {annee} — avenant compris ; les primes gardent leur évaluation. Les commerciaux absents du
+          fichier ne sont pas modifiés. Les anciens classeurs libres restent acceptés (rapprochement automatique).
         </div>
         <div className="mt-1 text-[12px] text-slate-500">Glissez le fichier .xlsx ici ou</div>
         <label className={`${btnPrim} mt-3 inline-block cursor-pointer`}>
@@ -1699,7 +1710,7 @@ function ImportClasseur({ annee, onOuvrir }: { annee: number; onOuvrir: (code: s
         </label>
         {refs.length === 0 && !err && <div className="mt-2 text-[12px] text-slate-500">Chargement des collaborateurs…</div>}
         {busy && <div className="mt-2 text-[12px] text-slate-500">Traitement…</div>}
-        {fichier && <div className="mt-2 text-[12px] text-slate-600">{fichier} · {onglets.length} onglet(s) lu(s)</div>}
+        {fichier && <div className="mt-2 text-[12px] text-slate-600">{fichier} · {onglets.length} contrat(s) lu(s)</div>}
       </div>
 
       {err && <Alerte texte={err} />}
@@ -1802,7 +1813,7 @@ function ImportClasseur({ annee, onOuvrir }: { annee: number; onOuvrir: (code: s
                           {o.format === 'norme' ? (o.avance_saisie != null ? `${fmt0(o.avance_saisie)} saisie` : `${fmt0(calc)} calc.`) : `${fmt0(o.avance_excel)} / ${fmt0(calc)}`}
                         </td>
                         <td className={`px-3 py-2 text-right tabular-nums ${ecartCa > 1 ? 'text-[#C1683C]' : 'text-[#2F7A4A]'}`}>
-                          {!ref ? '—' : ecarts.length === 0 ? 'pas de mois' : ecartCa <= 1 ? `✓ ${ecarts.length} mois` : fmtE(ecartCa)}
+                          {!ref ? '—' : ecarts.length === 0 ? (o.onglet.startsWith('Ligne ') ? 'sans objet' : 'pas de mois') : ecartCa <= 1 ? `✓ ${ecarts.length} mois` : fmtE(ecartCa)}
                           {ref && ecarts.length > 0 && <div className="text-[11px] text-slate-500">marge {ecartMarge >= 0 ? '+' : ''}{fmt0(ecartMarge)} €</div>}
                         </td>
                         <td className="px-3 py-2 text-center">{o.primes.length}</td>
