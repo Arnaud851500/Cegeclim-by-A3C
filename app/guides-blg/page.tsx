@@ -4,8 +4,12 @@
 // app/guides-blg/page.tsx — Bloc « Guides BLG » (modes opératoires BLG Cloud) — 03/11/2026
 // ----------------------------------------------------------------------------
 // Bibliothèque des chapitres HTML autonomes (CHAPITRE-Clients.html…) :
-//  - liste des chapitres (cartes) ; les administrateurs déposent / remplacent /
-//    masquent / suppriment un chapitre par glisser-déposer, sans conversion ;
+//  - zone de question en tête : texte libre → modes opératoires pertinents (recherche
+//    dans les titres, résumés et étapes de tous les chapitres), ouverts sur la bonne étape ;
+//  - un pavé par chapitre (grande icône) ; un clic ouvre une fenêtre flottante large
+//    avec la liste des modes opératoires du chapitre ;
+//  - les administrateurs déposent / remplacent / masquent / suppriment un chapitre par
+//    glisser-déposer, sans conversion, et choisissent titre, ordre et icône ;
 //  - lecture dans le compagnon : la page d'origine (sommaire, navigation, impression,
 //    PDF) s'affiche dans une iframe isolée (srcdoc + sandbox).
 // Au dépôt, les captures et PDF intégrés sont extraits en fichiers séparés (bucket
@@ -13,7 +17,7 @@
 // Droits : lecture can_guides_blg (ou administration), dépôt réservé aux
 // administrateurs — contrôlés en base (peut_lire_guides_blg / peut_gerer_guides_blg).
 // URL : ?chapitre=clients&ancre=comprendre-fiche-04 (ouvre le chapitre sur une étape).
-// Migration : supabase/migrations/20261103g_guides_blg.sql
+// Migrations : 20261103g_guides_blg.sql, 20261103h_guides_blg_icone.sql
 // ============================================================================
 
 import React, { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
@@ -25,9 +29,15 @@ import {
   GUIDES_URL_TTL,
   assetsReferences,
   construireGuide,
+  degradeGuide,
   formatTaille,
+  iconeGuide,
+  indexerGuide,
   preparerGuide,
+  rechercherModops,
+  type GuideModopIndex,
   type GuideSommaireItem,
+  type ResultatRecherche,
 } from '@/lib/guidesBlg'
 
 type GuideRow = {
@@ -46,31 +56,61 @@ type GuideRow = {
   taille_origine: number | null
   taille_page: number | null
   actif: boolean
+  icone: string | null
   updated_at: string
   updated_by: string | null
 }
 
+type IndexGuide = { prefixe: string; modops: GuideModopIndex[] }
+
+const EXEMPLES = ['bloquer un client', 'créer une adresse de livraison', 'livraison partielle', 'réserver un article', 'devis Préco']
+
 const s = themed({
   page: { padding: '20px 24px 40px', color: '#F5F3EC', fontFamily: '"IBM Plex Sans", system-ui, sans-serif', minHeight: '100vh', background: '#0B1220' },
-  header: { display: 'flex', flexWrap: 'wrap', alignItems: 'flex-end', justifyContent: 'space-between', gap: 16, marginBottom: 18 },
+  header: { display: 'flex', flexWrap: 'wrap', alignItems: 'flex-end', justifyContent: 'space-between', gap: 16, marginBottom: 16 },
   title: { margin: 0, fontFamily: '"Space Grotesk", system-ui, sans-serif', fontSize: 26, fontWeight: 700, letterSpacing: -0.3, color: '#ffffff' },
   subtitle: { margin: '6px 0 0', fontSize: 13, color: 'rgba(245,243,236,0.62)', maxWidth: 860, lineHeight: 1.5 },
-  grid: { display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(300px, 1fr))', gap: 14 },
-  card: { borderRadius: 14, background: 'rgba(255,255,255,0.045)', border: '1px solid rgba(255,255,255,0.10)', padding: '16px 18px', display: 'flex', flexDirection: 'column', gap: 10 },
-  cardTitle: { margin: 0, fontSize: 18, fontWeight: 700, color: '#ffffff', fontFamily: '"Space Grotesk", system-ui, sans-serif' },
-  cardSub: { fontSize: 13, color: 'rgba(245,243,236,0.62)' },
-  chips: { display: 'flex', flexWrap: 'wrap', gap: 6 },
-  chip: { fontSize: 11, padding: '3px 9px', borderRadius: 999, background: 'rgba(166,161,129,0.18)', color: '#E8E4D2' },
-  modops: { margin: 0, padding: 0, listStyle: 'none', display: 'flex', flexDirection: 'column', gap: 2 },
-  modop: { display: 'flex', gap: 8, alignItems: 'baseline', fontSize: 13, padding: '5px 8px', borderRadius: 8, cursor: 'pointer', color: '#F5F3EC' },
-  modopNum: { fontSize: 11, color: 'rgba(245,243,236,0.5)', minWidth: 74, whiteSpace: 'nowrap' },
-  modopCount: { marginLeft: 'auto', fontSize: 11, color: 'rgba(245,243,236,0.45)', whiteSpace: 'nowrap' },
+  // Recherche
+  askBox: { borderRadius: 16, background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.12)', padding: '16px 18px', marginBottom: 20 },
+  askLabel: { fontSize: 12, textTransform: 'uppercase', letterSpacing: 0.6, color: 'rgba(245,243,236,0.6)', fontWeight: 600, marginBottom: 8 },
+  askRow: { display: 'flex', gap: 10, alignItems: 'center' },
+  askInput: { flex: 1, minWidth: 0, background: 'rgba(11,18,32,0.9)', color: '#F5F3EC', border: '1px solid rgba(166,161,129,0.55)', borderRadius: 12, padding: '13px 16px', fontSize: 16 },
+  examples: { display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 10, alignItems: 'center' },
+  example: { fontSize: 12, padding: '4px 10px', borderRadius: 999, background: 'rgba(166,161,129,0.16)', color: '#E8E4D2', border: 'none', cursor: 'pointer' },
+  results: { display: 'flex', flexDirection: 'column', gap: 6, marginTop: 14 },
+  result: { display: 'flex', gap: 14, alignItems: 'center', padding: '10px 14px', borderRadius: 12, background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)', cursor: 'pointer' },
+  resultIcon: { fontSize: 28, width: 40, textAlign: 'center', flexShrink: 0 },
+  resultTitle: { fontSize: 15, fontWeight: 600, color: '#ffffff' },
+  resultMeta: { fontSize: 12, color: 'rgba(245,243,236,0.6)', marginTop: 2 },
+  resultStep: { fontSize: 12, color: '#8FC7DA', marginTop: 3 },
+  // Pavés
+  tiles: { display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(210px, 1fr))', gap: 16 },
+  tile: { position: 'relative', borderRadius: 18, padding: '22px 18px 18px', minHeight: 200, display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 8, cursor: 'pointer', color: '#ffffff', border: '1px solid rgba(255,255,255,0.10)', boxShadow: '0 6px 18px rgba(0,0,0,0.25)', textAlign: 'left' },
+  tileIcon: { fontSize: 54, lineHeight: 1, width: 84, height: 84, borderRadius: 20, background: 'rgba(255,255,255,0.18)', display: 'flex', alignItems: 'center', justifyContent: 'center', marginBottom: 6 },
+  tileTitle: { fontFamily: '"Space Grotesk", system-ui, sans-serif', fontSize: 21, fontWeight: 700, color: '#ffffff', margin: 0 },
+  tileSub: { fontSize: 12, color: 'rgba(255,255,255,0.78)' },
+  tileBadge: { position: 'absolute', top: 12, right: 12, fontSize: 11, padding: '3px 9px', borderRadius: 999, background: 'rgba(224,122,78,0.85)', color: '#ffffff', fontWeight: 600 },
+  // Fenêtre flottante
+  overlay: { position: 'fixed', inset: 0, zIndex: 900, background: 'rgba(5,9,18,0.72)', display: 'flex', alignItems: 'flex-start', justifyContent: 'center', padding: '5vh 2vw', overflowY: 'auto' },
+  modal: { width: 'min(1180px, 96vw)', borderRadius: 18, background: '#101A2E', border: '1px solid rgba(255,255,255,0.14)', boxShadow: '0 20px 60px rgba(0,0,0,0.5)', overflow: 'hidden' },
+  modalHead: { display: 'flex', alignItems: 'center', gap: 16, padding: '18px 22px', color: '#ffffff' },
+  modalIcon: { fontSize: 44, width: 68, height: 68, borderRadius: 16, background: 'rgba(255,255,255,0.18)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 },
+  modalTitle: { margin: 0, fontFamily: '"Space Grotesk", system-ui, sans-serif', fontSize: 24, fontWeight: 700, color: '#ffffff' },
+  modalBody: { padding: '16px 22px 20px', display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(460px, 1fr))', gap: 10 },
+  modop: { display: 'flex', gap: 14, alignItems: 'flex-start', padding: '12px 14px', borderRadius: 12, background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)', cursor: 'pointer' },
+  modopNum: { fontSize: 11, color: '#A6A181', fontWeight: 700, letterSpacing: 0.4, minWidth: 82, paddingTop: 3, whiteSpace: 'nowrap' },
+  modopTitle: { fontSize: 15, fontWeight: 600, color: '#ffffff', lineHeight: 1.35 },
+  modopResume: { fontSize: 12.5, color: 'rgba(245,243,236,0.62)', marginTop: 4, lineHeight: 1.45 },
+  modopCount: { marginLeft: 'auto', fontSize: 12, color: 'rgba(245,243,236,0.55)', whiteSpace: 'nowrap', paddingTop: 2 },
+  modalFoot: { display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center', padding: '12px 22px 16px', borderTop: '1px solid rgba(255,255,255,0.08)' },
+  // Divers
   muted: { fontSize: 12, color: 'rgba(245,243,236,0.5)' },
   btn: { background: 'rgba(255,255,255,0.08)', color: '#F5F3EC', border: '1px solid rgba(255,255,255,0.16)', borderRadius: 8, padding: '7px 12px', fontSize: 13, cursor: 'pointer' },
   btnPrimary: { background: '#A6A181', color: '#0B1220', border: '1px solid #A6A181', borderRadius: 8, padding: '8px 14px', fontSize: 13, fontWeight: 600, cursor: 'pointer' },
+  btnClose: { marginLeft: 'auto', background: 'rgba(255,255,255,0.14)', color: '#ffffff', border: 'none', borderRadius: 10, width: 38, height: 38, fontSize: 20, cursor: 'pointer', flexShrink: 0 },
   btnDanger: { background: 'transparent', color: '#E07A4E', border: '1px solid rgba(224,122,78,0.5)', borderRadius: 8, padding: '7px 12px', fontSize: 13, cursor: 'pointer' },
-  drop: { borderRadius: 14, border: '2px dashed rgba(166,161,129,0.55)', padding: '18px 20px', marginBottom: 18, display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 14, background: 'rgba(166,161,129,0.06)' },
-  dropOn: { borderRadius: 14, border: '2px dashed #A6A181', padding: '18px 20px', marginBottom: 18, display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 14, background: 'rgba(166,161,129,0.20)' },
+  drop: { borderRadius: 14, border: '2px dashed rgba(166,161,129,0.55)', padding: '14px 18px', marginTop: 22, display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 14, background: 'rgba(166,161,129,0.06)' },
+  dropOn: { borderRadius: 14, border: '2px dashed #A6A181', padding: '14px 18px', marginTop: 22, display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 14, background: 'rgba(166,161,129,0.20)' },
   error: { padding: '12px 14px', borderRadius: 10, background: 'rgba(193,104,60,0.15)', border: '1px solid rgba(193,104,60,0.5)', color: '#E07A4E', marginBottom: 16, fontSize: 13 },
   info: { padding: '10px 14px', borderRadius: 10, background: 'rgba(143,199,218,0.10)', border: '1px solid rgba(143,199,218,0.35)', color: '#8FC7DA', marginBottom: 16, fontSize: 13 },
   readerBar: { display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 10, marginBottom: 10 },
@@ -87,6 +127,12 @@ export default function GuidesBlgPage() {
   )
 }
 
+async function chargerIndex(prefixe: string): Promise<GuideModopIndex[]> {
+  const { data, error } = await supabase.storage.from(GUIDES_BUCKET).download(`${prefixe}/index.html`)
+  if (error || !data) return []
+  return indexerGuide(await data.text())
+}
+
 function GuidesBlgContent() {
   const router = useRouter()
   const searchParams = useSearchParams()
@@ -101,7 +147,12 @@ function GuidesBlgContent() {
   const [busy, setBusy] = useState<string | null>(null)
   const [dragOver, setDragOver] = useState(false)
   const [tick, setTick] = useState(0)
+  const [ouvert, setOuvert] = useState<string | null>(null)
+  const [question, setQuestion] = useState('')
+  const [indexes, setIndexes] = useState<Map<string, IndexGuide>>(new Map())
+  const [indexation, setIndexation] = useState(false)
   const fileInput = useRef<HTMLInputElement | null>(null)
+  const enCours = useRef<Set<string>>(new Set())
 
   const naviguer = useCallback(
     (slug: string | null, a?: string | null) => {
@@ -135,6 +186,53 @@ function GuidesBlgContent() {
 
   const visibles = useMemo(() => guides.filter((g) => g.actif || gestion), [guides, gestion])
   const courant = useMemo(() => (chapitre ? guides.find((g) => g.slug === chapitre) ?? null : null), [guides, chapitre])
+  const guideOuvert = useMemo(() => (ouvert ? guides.find((g) => g.slug === ouvert) ?? null : null), [guides, ouvert])
+  const rang = useMemo(() => new Map(visibles.map((g, i) => [g.slug, i])), [visibles])
+
+  // Index de recherche : page de chaque chapitre téléchargée à la demande, gardée en mémoire.
+  const indexer = useCallback(
+    async (liste: GuideRow[]) => {
+      const manquants = liste.filter((g) => indexes.get(g.slug)?.prefixe !== g.prefixe && !enCours.current.has(g.prefixe))
+      if (!manquants.length) return
+      manquants.forEach((g) => enCours.current.add(g.prefixe))
+      setIndexation(true)
+      const faits = await Promise.all(manquants.map(async (g) => [g.slug, { prefixe: g.prefixe, modops: await chargerIndex(g.prefixe) }] as const))
+      setIndexes((prev) => {
+        const next = new Map(prev)
+        faits.forEach(([slug, idx]) => next.set(slug, idx))
+        return next
+      })
+      manquants.forEach((g) => enCours.current.delete(g.prefixe))
+      setIndexation(false)
+    },
+    [indexes],
+  )
+
+  const lisibles = useMemo(() => guides.filter((g) => g.actif), [guides])
+  useEffect(() => {
+    if (question.trim().length >= 2) void indexer(lisibles)
+  }, [question, lisibles, indexer])
+  useEffect(() => {
+    if (guideOuvert) void indexer([guideOuvert])
+  }, [guideOuvert, indexer])
+
+  const resultats: ResultatRecherche[] = useMemo(() => {
+    if (question.trim().length < 2) return []
+    const corpus = lisibles
+      .map((g) => ({ slug: g.slug, titre: g.titre, icone: iconeGuide(g.slug, g.titre, g.icone), modops: indexes.get(g.slug)?.modops ?? [] }))
+      .filter((g) => g.modops.length)
+    return rechercherModops(question, corpus, 8)
+  }, [question, lisibles, indexes])
+
+  // Fenêtre flottante : Échap pour fermer.
+  useEffect(() => {
+    if (!ouvert) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setOuvert(null)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [ouvert])
 
   // ── Dépôt ────────────────────────────────────────────────────────────────
   const deposer = async (files: FileList | File[] | null) => {
@@ -148,6 +246,7 @@ function GuidesBlgContent() {
     const { data: userData } = await supabase.auth.getUser()
     const auteur = userData.user?.email ?? null
     const faits: string[] = []
+    let ordreMax = guides.reduce((m, g) => Math.max(m, g.ordre ?? 0), 0)
     try {
       for (const file of liste) {
         setBusy(`${file.name} : préparation…`)
@@ -160,8 +259,7 @@ function GuidesBlgContent() {
         let envoyes = 0
         const queue = [...prep.assets]
         const worker = async () => {
-          while (queue.length) {
-            const a = queue.shift()!
+          for (let a = queue.shift(); a; a = queue.shift()) {
             const { error: upErr } = await bucket.upload(`${prefixe}/${a.nom}`, a.blob, { contentType: a.mime, upsert: true, cacheControl: '31536000' })
             if (upErr) throw new Error(`${a.nom} : ${upErr.message}`)
             envoyes++
@@ -175,13 +273,14 @@ function GuidesBlgContent() {
         const { error: pageErr } = await bucket.upload(`${prefixe}/index.html`, page, { contentType: 'text/plain;charset=utf-8', upsert: true, cacheControl: '60' })
         if (pageErr) throw new Error(`page : ${pageErr.message}`)
 
+        if (!existant) ordreMax += 10
         const { error: rowErr } = await supabase.from('guides_blg').upsert(
           {
             slug: prep.slug,
             titre: existant?.titre ?? prep.titre,
             sous_titre: prep.sous_titre || null,
             fichier_origine: file.name,
-            ordre: existant?.ordre ?? (guides.length + 1) * 10,
+            ordre: existant?.ordre ?? ordreMax,
             version,
             prefixe,
             sommaire: prep.sommaire,
@@ -192,6 +291,7 @@ function GuidesBlgContent() {
             taille_origine: prep.taille_origine,
             taille_page: prep.taille_page,
             actif: existant?.actif ?? true,
+            icone: existant?.icone ?? null,
             updated_at: new Date().toISOString(),
             updated_by: auteur,
           },
@@ -199,7 +299,6 @@ function GuidesBlgContent() {
         )
         if (rowErr) throw new Error(`catalogue : ${rowErr.message}`)
 
-        // Ancienne version : fichiers supprimés une fois la nouvelle en place.
         if (existant?.prefixe && existant.prefixe !== prefixe) await viderDossier(existant.prefixe)
 
         faits.push(`${prep.titre} (${prep.nb_modop} modes opératoires, ${prep.nb_etapes} étapes, ${formatTaille(prep.taille_origine)} → page ${formatTaille(prep.taille_page)})`)
@@ -230,14 +329,17 @@ function GuidesBlgContent() {
     setTick((n) => n + 1)
   }
 
-  const renommer = async (g: GuideRow) => {
+  const modifier = async (g: GuideRow) => {
     const titre = window.prompt('Titre du chapitre', g.titre)
     if (titre === null || !titre.trim()) return
     const ordreTxt = window.prompt('Ordre d’affichage (nombre, du plus petit au plus grand)', String(g.ordre))
+    if (ordreTxt === null) return
+    const icone = window.prompt('Icône du pavé (un emoji, vide = icône automatique)', g.icone ?? iconeGuide(g.slug, g.titre))
+    if (icone === null) return
     const ordre = Number(ordreTxt)
     const { error: err } = await supabase
       .from('guides_blg')
-      .update({ titre: titre.trim(), ordre: Number.isFinite(ordre) ? ordre : g.ordre })
+      .update({ titre: titre.trim(), ordre: Number.isFinite(ordre) ? ordre : g.ordre, icone: icone.trim() || null })
       .eq('slug', g.slug)
     if (err) setError(err.message)
     setTick((n) => n + 1)
@@ -250,6 +352,7 @@ function GuidesBlgContent() {
     const { error: err } = await supabase.from('guides_blg').delete().eq('slug', g.slug)
     if (err) setError(err.message)
     setBusy(null)
+    setOuvert(null)
     setTick((n) => n + 1)
   }
 
@@ -273,21 +376,117 @@ function GuidesBlgContent() {
   }
 
   // ── Catalogue ────────────────────────────────────────────────────────────
+  const q = question.trim()
+  const modopsOuvert: Array<GuideSommaireItem & { resume?: string }> = guideOuvert
+    ? (() => {
+        const idx = indexes.get(guideOuvert.slug)
+        if (idx?.prefixe === guideOuvert.prefixe && idx.modops.length) {
+          return idx.modops.map((m) => ({ id: m.id, numero: m.numero, titre: m.titre, nb_etapes: m.etapes.length, resume: m.resume }))
+        }
+        return guideOuvert.sommaire ?? []
+      })()
+    : []
+  const degradeOuvert = guideOuvert ? degradeGuide(rang.get(guideOuvert.slug) ?? 0) : null
+
   return (
     <div style={s.page}>
       <div style={s.header}>
         <div>
           <h1 style={s.title}>Guides BLG</h1>
-          <p style={s.subtitle}>
-            Modes opératoires BLG Cloud, chapitre par chapitre : chaque étape illustrée, impression et PDF disponibles dans le guide.
-            Cliquez sur un chapitre, ou directement sur un mode opératoire pour l’ouvrir au bon endroit.
-          </p>
+          <p style={s.subtitle}>Modes opératoires BLG Cloud : posez votre question, ou ouvrez un chapitre pour parcourir ses modes opératoires.</p>
         </div>
       </div>
 
       {error && <div style={s.error}>{error}</div>}
       {message && <div style={s.info}>{message}</div>}
 
+      {/* Question libre */}
+      <div style={s.askBox}>
+        <div style={s.askLabel}>Que voulez-vous faire dans BLG ?</div>
+        <div style={s.askRow}>
+          <input
+            style={s.askInput}
+            value={question}
+            placeholder="Ex. : comment bloquer un client qui ne paie pas ? livrer une commande en partie ?"
+            onChange={(e) => setQuestion(e.target.value)}
+            onFocus={() => void indexer(lisibles)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && resultats[0]) naviguer(resultats[0].slug, resultats[0].ancre)
+              if (e.key === 'Escape') setQuestion('')
+            }}
+            aria-label="Question sur BLG"
+          />
+          {q && (
+            <button type="button" style={s.btn} onClick={() => setQuestion('')}>Effacer</button>
+          )}
+        </div>
+        {!q && (
+          <div style={s.examples}>
+            <span style={s.muted}>Exemples :</span>
+            {EXEMPLES.map((ex) => (
+              <button key={ex} type="button" style={s.example} onClick={() => setQuestion(ex)}>{ex}</button>
+            ))}
+          </div>
+        )}
+        {q.length >= 2 && (
+          <div style={s.results}>
+            {resultats.length === 0 ? (
+              <div style={s.muted}>{indexation ? 'Lecture des guides…' : 'Aucun mode opératoire ne correspond. Essayez avec d’autres mots (ex. « livraison », « tag », « devis »).'}</div>
+            ) : (
+              resultats.map((r) => (
+                <div
+                  key={`${r.slug}|${r.modop.id}`}
+                  style={s.result}
+                  onClick={() => naviguer(r.slug, r.ancre)}
+                  onMouseEnter={(e) => (e.currentTarget.style.borderColor = tc('#A6A181'))}
+                  onMouseLeave={(e) => (e.currentTarget.style.borderColor = tc('rgba(255,255,255,0.08)'))}
+                >
+                  <div style={s.resultIcon}>{r.icone}</div>
+                  <div style={{ minWidth: 0 }}>
+                    <div style={s.resultTitle}>{r.modop.titre}</div>
+                    <div style={s.resultMeta}>{r.guideTitre} · {r.modop.numero} · {r.modop.etapes.length} étapes{r.modop.resume ? ` — ${r.modop.resume}` : ''}</div>
+                    {r.etape && <div style={s.resultStep}>→ ouvre à l’étape {r.etape.numero} : {r.etape.titre}</div>}
+                  </div>
+                  <span style={{ ...s.muted, marginLeft: 'auto', whiteSpace: 'nowrap' }}>Ouvrir ›</span>
+                </div>
+              ))
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* Pavés */}
+      {loading ? (
+        <div style={s.muted}>Chargement…</div>
+      ) : visibles.length === 0 ? (
+        <div style={s.info}>Aucun guide publié pour le moment.</div>
+      ) : (
+        <div style={s.tiles}>
+          {visibles.map((g, i) => {
+            const [c1, c2] = degradeGuide(i)
+            return (
+              <button
+                key={g.slug}
+                type="button"
+                style={{ ...s.tile, background: `linear-gradient(160deg, ${c1}, ${c2})`, opacity: g.actif ? 1 : 0.55 }}
+                onClick={() => setOuvert(g.slug)}
+                onMouseEnter={(e) => (e.currentTarget.style.transform = 'translateY(-3px)')}
+                onMouseLeave={(e) => (e.currentTarget.style.transform = 'none')}
+              >
+                {!g.actif && <span style={s.tileBadge}>Masqué</span>}
+                <div style={s.tileIcon}>{iconeGuide(g.slug, g.titre, g.icone)}</div>
+                <h2 style={s.tileTitle}>{g.titre}</h2>
+                <div style={s.tileSub}>
+                  {g.nb_modop} mode{g.nb_modop > 1 ? 's' : ''} opératoire{g.nb_modop > 1 ? 's' : ''} · {g.nb_etapes} étapes
+                  {g.nb_pdf > 0 ? ` · ${g.nb_pdf} PDF` : ''}
+                </div>
+              </button>
+            )
+          })}
+        </div>
+      )}
+
+      {/* Dépôt (administrateurs) */}
       {gestion && (
         <div
           style={dragOver ? s.dropOn : s.drop}
@@ -326,58 +525,53 @@ function GuidesBlgContent() {
         </div>
       )}
 
-      {loading ? (
-        <div style={s.muted}>Chargement…</div>
-      ) : visibles.length === 0 ? (
-        <div style={s.info}>Aucun guide publié pour le moment.</div>
-      ) : (
-        <div style={s.grid}>
-          {visibles.map((g) => (
-            <div key={g.slug} style={{ ...s.card, ...(g.actif ? {} : { opacity: 0.55 }) }}>
-              <div style={{ cursor: 'pointer' }} onClick={() => naviguer(g.slug)}>
-                <h2 style={s.cardTitle}>📘 {g.titre}</h2>
-                {g.sous_titre && <div style={s.cardSub}>{g.sous_titre}</div>}
-              </div>
-              <div style={s.chips}>
-                <span style={s.chip}>{g.nb_modop} modes opératoires</span>
-                <span style={s.chip}>{g.nb_etapes} étapes</span>
-                {g.nb_pdf > 0 && <span style={s.chip}>{g.nb_pdf} PDF</span>}
-                {!g.actif && <span style={{ ...s.chip, background: tc('rgba(224,122,78,0.25)') }}>Masqué</span>}
-              </div>
-              {(g.sommaire ?? []).length > 0 && (
-                <ul style={s.modops}>
-                  {(g.sommaire ?? []).map((m) => (
-                    <li
-                      key={m.id}
-                      style={s.modop}
-                      onClick={() => naviguer(g.slug, m.id)}
-                      onMouseEnter={(e) => (e.currentTarget.style.background = tc('rgba(166,161,129,0.16)'))}
-                      onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
-                    >
-                      <span style={s.modopNum}>{m.numero}</span>
-                      <span>{m.titre}</span>
-                      <span style={s.modopCount}>{m.nb_etapes} ét.</span>
-                    </li>
-                  ))}
-                </ul>
-              )}
-              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center', marginTop: 'auto' }}>
-                <button type="button" style={s.btnPrimary} onClick={() => naviguer(g.slug)}>Ouvrir le guide</button>
-                <span style={s.muted}>MAJ {new Date(g.updated_at).toLocaleDateString('fr-FR')}</span>
-              </div>
-              {gestion && (
-                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', borderTop: `1px solid ${tc('rgba(255,255,255,0.08)')}`, paddingTop: 10 }}>
-                  <button type="button" style={s.btn} onClick={() => void renommer(g)}>Titre / ordre</button>
-                  <button type="button" style={s.btn} onClick={() => void basculerActif(g)}>{g.actif ? 'Masquer' : 'Publier'}</button>
-                  <button type="button" style={s.btnDanger} disabled={Boolean(busy)} onClick={() => void supprimer(g)}>Supprimer</button>
-                  <span style={{ ...s.muted, width: '100%' }}>
-                    {g.fichier_origine ?? '—'} · v{g.version} · {formatTaille(g.taille_origine)} → {formatTaille(g.taille_page)} · {g.nb_images} images
-                    {g.updated_by ? ` · ${g.updated_by}` : ''}
-                  </span>
+      {/* Fenêtre flottante : modes opératoires du chapitre */}
+      {guideOuvert && degradeOuvert && (
+        <div style={s.overlay} onClick={() => setOuvert(null)}>
+          <div style={s.modal} onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true" aria-label={guideOuvert.titre}>
+            <div style={{ ...s.modalHead, background: `linear-gradient(120deg, ${degradeOuvert[0]}, ${degradeOuvert[1]})` }}>
+              <div style={s.modalIcon}>{iconeGuide(guideOuvert.slug, guideOuvert.titre, guideOuvert.icone)}</div>
+              <div style={{ minWidth: 0 }}>
+                <h2 style={s.modalTitle}>{guideOuvert.titre}</h2>
+                <div style={{ fontSize: 13, color: 'rgba(255,255,255,0.8)' }}>
+                  {guideOuvert.sous_titre ? `${guideOuvert.sous_titre} · ` : ''}
+                  {guideOuvert.nb_modop} modes opératoires · {guideOuvert.nb_etapes} étapes · MAJ {new Date(guideOuvert.updated_at).toLocaleDateString('fr-FR')}
                 </div>
-              )}
+              </div>
+              <button type="button" style={{ ...s.btnPrimary, marginLeft: 'auto' }} onClick={() => naviguer(guideOuvert.slug)}>Ouvrir le guide complet</button>
+              <button type="button" style={{ ...s.btnClose, marginLeft: 0 }} onClick={() => setOuvert(null)} aria-label="Fermer">×</button>
             </div>
-          ))}
+            <div style={s.modalBody}>
+              {modopsOuvert.length === 0 && <div style={s.muted}>Aucun mode opératoire détecté dans ce chapitre.</div>}
+              {modopsOuvert.map((m) => (
+                <div
+                  key={m.id}
+                  style={s.modop}
+                  onClick={() => naviguer(guideOuvert.slug, m.id)}
+                  onMouseEnter={(e) => (e.currentTarget.style.borderColor = tc('#A6A181'))}
+                  onMouseLeave={(e) => (e.currentTarget.style.borderColor = tc('rgba(255,255,255,0.08)'))}
+                >
+                  <span style={s.modopNum}>{m.numero || '—'}</span>
+                  <div style={{ minWidth: 0 }}>
+                    <div style={s.modopTitle}>{m.titre}</div>
+                    {m.resume && <div style={s.modopResume}>{m.resume}</div>}
+                  </div>
+                  <span style={s.modopCount}>{m.nb_etapes} étape{m.nb_etapes > 1 ? 's' : ''} ›</span>
+                </div>
+              ))}
+            </div>
+            {gestion && (
+              <div style={s.modalFoot}>
+                <button type="button" style={s.btn} onClick={() => void modifier(guideOuvert)}>Titre / ordre / icône</button>
+                <button type="button" style={s.btn} onClick={() => void basculerActif(guideOuvert)}>{guideOuvert.actif ? 'Masquer' : 'Publier'}</button>
+                <button type="button" style={s.btnDanger} disabled={Boolean(busy)} onClick={() => void supprimer(guideOuvert)}>Supprimer</button>
+                <span style={{ ...s.muted, marginLeft: 'auto' }}>
+                  {guideOuvert.fichier_origine ?? '—'} · v{guideOuvert.version} · {formatTaille(guideOuvert.taille_origine)} → {formatTaille(guideOuvert.taille_page)} · {guideOuvert.nb_images} images
+                  {guideOuvert.updated_by ? ` · ${guideOuvert.updated_by}` : ''}
+                </span>
+              </div>
+            )}
+          </div>
         </div>
       )}
     </div>
@@ -457,7 +651,7 @@ function Lecteur({
           <button type="button" style={s.btn} onClick={onRetour}>← Tous les guides</button>
         )}
         <div style={{ fontFamily: '"Space Grotesk", system-ui, sans-serif', fontSize: 18, fontWeight: 700, color: tc('#ffffff') }}>
-          📘 {guide.titre}
+          {iconeGuide(guide.slug, guide.titre, guide.icone)} {guide.titre}
           {guide.sous_titre && <span style={{ ...s.muted, fontWeight: 400, marginLeft: 8 }}>{guide.sous_titre}</span>}
         </div>
         <div style={{ flex: 1 }} />
