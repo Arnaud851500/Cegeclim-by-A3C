@@ -351,9 +351,14 @@ export default function FicheDetail({
             </Section>
           )}
 
+          {/* Pavé « Objectifs » : retiré des fiches collaborateur et agence le
+              04/11/2026 (demandé par Arnaud) — le pavé « Contrat d’objectifs »
+              ci-dessus reprend déjà ces objectifs. Conservé pour la fiche
+              entreprise, qui n'a pas de pavé contrat. */}
+          {entity.kind === 'entreprise' && (
           <Section
             title="Objectifs"
-            hint="Objectifs issus des contrats d’objectifs : collaborateur = son contrat, agence = somme des contrats de ses collaborateurs, entreprise = somme des agences."
+            hint="Objectifs issus des contrats d’objectifs : entreprise = somme des agences, agence = somme des contrats de ses collaborateurs."
           >
             {objectifs.heritesDe && (
               <p className="-mt-1 mb-3 text-[11px] text-slate-500">
@@ -478,6 +483,7 @@ export default function FicheDetail({
               </BlocObjectifs>
             </div>
           </Section>
+          )}
 
           {/* CA par période */}
           <Section title="Chiffre d’affaires facturé" hint={`Comparaison à l’entreprise ${exclusionsLibelle}. Les périodes incomplètes sont comparées sur les mêmes mois.`}>
