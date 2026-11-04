@@ -248,6 +248,7 @@ const PAGE_ACCESS_CHECKS: Array<[string, keyof AccessRights]> = [
   ['/stock/penurie', 'can_appro'],
   ['/stock/calcul-besoin', 'can_appro'],
   ['/stock/portefeuille-cdf', 'can_appro'],
+  ['/stock/plan-expedition-fms', 'can_superuser'],
   ['/stock/reconstruction', 'can_appro'],
   ['/stock/groupes', 'can_appro'],
   ['/stocks-disponibilites2', 'can_appro'],
