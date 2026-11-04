@@ -70,15 +70,24 @@ function HotlineTickets() {
   const charger = useCallback(async () => {
     setLoading(true)
     try {
-      let query = supabase.from('hotline_tickets').select('*').order('opened_at', { ascending: false }).limit(500)
-      if (filiere !== 'TOUTES') query = query.eq('filiere', filiere)
-      if (statut === 'ACTIFS') query = query.in('statut', ['OUVERT', 'EN_COURS', 'ESCALADE'])
-      else if (statut !== 'TOUS') query = query.eq('statut', statut)
-      if (niveau) query = query.eq('niveau', niveau)
-      if (mesTickets && email) query = query.eq('assigne_a', email)
-      const { data, error } = await query
-      if (error) throw error
-      setTickets((data || []) as Ticket[])
+      // Jusqu'à 10 000 tickets, lus par pages de 1 000 (plafond de l'API).
+      const MAX = 10_000
+      const PAGE = 1_000
+      const tous: Ticket[] = []
+      for (let debut = 0; debut < MAX; debut += PAGE) {
+        let query = supabase.from('hotline_tickets').select('*').order('opened_at', { ascending: false }).order('id').range(debut, debut + PAGE - 1)
+        if (filiere !== 'TOUTES') query = query.eq('filiere', filiere)
+        if (statut === 'ACTIFS') query = query.in('statut', ['OUVERT', 'EN_COURS', 'ESCALADE'])
+        else if (statut !== 'TOUS') query = query.eq('statut', statut)
+        if (niveau) query = query.eq('niveau', niveau)
+        if (mesTickets && email) query = query.eq('assigne_a', email)
+        const { data, error } = await query
+        if (error) throw error
+        const lot = (data || []) as Ticket[]
+        tous.push(...lot)
+        if (lot.length < PAGE) break
+      }
+      setTickets(tous)
     } catch (e) {
       setErreur(messageErreur(e))
     } finally {

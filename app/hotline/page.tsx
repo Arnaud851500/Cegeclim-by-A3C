@@ -706,15 +706,18 @@ function HotlineConsole() {
       <HotlineHeader
         titre="Console d’appel"
         sousTitre={
-          ligneAppelee
-            ? `Appel reçu sur ${fmtTel(ligneAppelee)}${form.filiere ? ` · ${libelleFiliere(form.filiere)}` : ''}`
-            : 'Saisir le numéro de l’appelant, ou ouvrir la console depuis 3CX'
+          ticket
+            ? `Ticket ${ticket.numero} créé le ${fmtDateHeure(ticket.opened_at)} par ${String(ticket.ouvert_par || '').split('@')[0]}${ticket.source === 'IMPORT' ? ' (repris de l’ancien outil)' : ''}`
+            : ligneAppelee
+              ? `Appel reçu sur ${fmtTel(ligneAppelee)}${form.filiere ? ` · ${libelleFiliere(form.filiere)}` : ''}`
+              : 'Saisir le numéro de l’appelant, ou ouvrir la console depuis 3CX'
         }
         actions={
           <>
             {ticket ? (
               <span className="flex items-center gap-2 rounded-lg border border-[color:var(--cg-hdr-line)] px-3 py-1.5 text-sm font-semibold text-[color:var(--cg-hdr-ink)]">
                 {ticket.numero} · N{ticket.niveau} {statut ? <Pastille {...statut} /> : null}
+                <span className="text-[12px] font-normal text-[color:var(--cg-hdr-muted)]">créé le {fmtDateHeure(ticket.opened_at)}</span>
               </span>
             ) : null}
             <button
