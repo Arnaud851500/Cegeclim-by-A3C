@@ -172,6 +172,9 @@ function HotlineConsole() {
   // Vues éclatées : références qui en ont une, vue ouverte.
   const [refsVues, setRefsVues] = useState<Set<string>>(new Set())
   const [vueOuverte, setVueOuverte] = useState<string | null>(null)
+  // Ticket de l'historique affiché en fenêtre flottante (04/11/2026).
+  const [ticketHisto, setTicketHisto] = useState<string | null>(null)
+  const fermerTicketHisto = useCallback(() => setTicketHisto(null), [])
 
   const patch = (p: Partial<Formulaire>) => setForm((f) => ({ ...f, ...p }))
 
@@ -1025,6 +1028,25 @@ function HotlineConsole() {
 
           {/* ── Contexte et documents ────────────────────────────────── */}
           <section className="space-y-4 xl:col-span-4">
+            <PaveHistorique
+              titre="HOTLINE Historique Contact"
+              precision={form.contact_nom || (telCle(telephone) ? fmtTel(telephone) : '')}
+              tickets={contexte.ticketsContact.filter((t) => t.id !== ticket?.id)}
+              chargement={contexteLoading}
+              vide={telCle(telephone) || form.contact_nom ? 'Aucun appel précédent de ce contact.' : 'Saisir le numéro ou le contact pour afficher ses appels.'}
+              afficherClient
+              onOuvrir={setTicketHisto}
+            />
+            <PaveHistorique
+              titre="HOTLINE Historique Chantier / Machine"
+              precision={[form.chantier, form.numero_serie].filter(Boolean).join(' · ')}
+              tickets={contexte.ticketsChantier.filter((t) => t.id !== ticket?.id)}
+              chargement={contexteLoading}
+              vide={form.chantier || form.numero_serie ? 'Aucun appel précédent sur ce chantier ou cette machine.' : 'Saisir le chantier ou le n° de série pour afficher son historique.'}
+              afficherClient
+              afficherChantier
+              onOuvrir={setTicketHisto}
+            />
             <div className={carte}>
               <div className={titreCarte}>Documents à envoyer</div>
               <div className="space-y-1.5 p-4">
@@ -1091,27 +1113,11 @@ function HotlineConsole() {
             />
             )}
 
-            <PaveHistorique
-              titre="HOTLINE Historique Contact"
-              precision={form.contact_nom || (telCle(telephone) ? fmtTel(telephone) : '')}
-              tickets={contexte.ticketsContact.filter((t) => t.id !== ticket?.id)}
-              chargement={contexteLoading}
-              vide={telCle(telephone) || form.contact_nom ? 'Aucun appel précédent de ce contact.' : 'Saisir le numéro ou le contact pour afficher ses appels.'}
-              afficherClient
-            />
-            <PaveHistorique
-              titre="HOTLINE Historique Chantier / Machine"
-              precision={[form.chantier, form.numero_serie].filter(Boolean).join(' · ')}
-              tickets={contexte.ticketsChantier.filter((t) => t.id !== ticket?.id)}
-              chargement={contexteLoading}
-              vide={form.chantier || form.numero_serie ? 'Aucun appel précédent sur ce chantier ou cette machine.' : 'Saisir le chantier ou le n° de série pour afficher son historique.'}
-              afficherClient
-              afficherChantier
-            />
-
           </section>
         </div>
       </main>
+
+      {ticketHisto ? <FenetreTicket id={ticketHisto} onFermer={fermerTicketHisto} /> : null}
 
       {vueOuverte ? (
         <VueEclatee
@@ -1156,6 +1162,7 @@ function PaveHistorique({
   vide,
   afficherClient,
   afficherChantier,
+  onOuvrir,
 }: {
   titre: string
   precision?: string
@@ -1164,6 +1171,7 @@ function PaveHistorique({
   vide: string
   afficherClient?: boolean
   afficherChantier?: boolean
+  onOuvrir: (id: string) => void
 }) {
   return (
     <div className={carte}>
@@ -1174,10 +1182,16 @@ function PaveHistorique({
         </span>
         <span className="shrink-0 text-[11px] font-normal text-slate-400">{chargement ? 'mise à jour…' : tickets.length ? `${tickets.length} appel${tickets.length > 1 ? 's' : ''}` : ''}</span>
       </div>
-      <div className="max-h-[300px] space-y-1.5 overflow-y-auto p-4">
+      <div className="max-h-[260px] space-y-1.5 overflow-y-auto p-4">
         {tickets.length ? (
           tickets.map((t) => (
-            <Link key={t.id} href={`/hotline/tickets?id=${t.id}`} className="block rounded-lg border border-[#E2DFD8] px-3 py-2 text-[12px] hover:border-[#B4761A]">
+            <button
+              key={t.id}
+              type="button"
+              onClick={() => onOuvrir(t.id)}
+              title="Voir le ticket"
+              className="block w-full rounded-lg border border-[#E2DFD8] px-3 py-2 text-left text-[12px] hover:border-[#B4761A] hover:bg-[#FDF7EA]"
+            >
               <div className="flex items-center justify-between gap-2">
                 <span className="font-semibold text-slate-900">
                   {t.numero} · {fmtDateHeure(t.opened_at)}
@@ -1195,11 +1209,113 @@ function PaveHistorique({
               ) : null}
               {t.description ? <div className="truncate text-slate-500">{t.description}</div> : null}
               {t.preconisation ? <div className="truncate text-[#2F6B3A]">→ {t.preconisation}</div> : null}
-            </Link>
+            </button>
           ))
         ) : (
           <p className="text-[12px] text-slate-500">{vide}</p>
         )}
+      </div>
+    </div>
+  )
+}
+
+// ── Fenêtre flottante d'un ticket de l'historique (04/11/2026) ─────────────────
+function FenetreTicket({ id, onFermer }: { id: string; onFermer: () => void }) {
+  const [t, setT] = useState<Ticket | null>(null)
+  const [etapes, setEtapesFenetre] = useState<Etape[]>([])
+  const [erreurFenetre, setErreurFenetre] = useState<string | null>(null)
+
+  useEffect(() => {
+    let actif = true
+    void (async () => {
+      try {
+        const { data, error } = await supabase.from('hotline_tickets').select('*').eq('id', id).maybeSingle()
+        if (error) throw error
+        if (!actif) return
+        setT((data as Ticket) || null)
+        const liste = await chargerEtapes(id)
+        if (actif) setEtapesFenetre(liste)
+      } catch (e) {
+        if (actif) setErreurFenetre(messageErreur(e))
+      }
+    })()
+    const touche = (e: KeyboardEvent) => e.key === 'Escape' && onFermer()
+    window.addEventListener('keydown', touche)
+    return () => {
+      actif = false
+      window.removeEventListener('keydown', touche)
+    }
+  }, [id, onFermer])
+
+  return (
+    <div className="fixed inset-0 z-40 flex items-center justify-center bg-[rgba(6,10,18,0.45)] p-4" onClick={onFermer}>
+      <div className="flex max-h-[88vh] w-full max-w-[760px] flex-col overflow-hidden rounded-2xl bg-white shadow-2xl" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-start justify-between gap-3 border-b border-[#EFEDE8] px-5 py-3">
+          {t ? (
+            <div>
+              <div className="flex items-center gap-2 text-[17px] font-bold text-slate-900">
+                {t.numero} <Pastille {...STATUTS[t.statut]} /> <span className="text-[13px] text-slate-500">N{t.niveau}</span>
+              </div>
+              <div className="text-[12px] text-slate-500">
+                {libelleFiliere(t.filiere)}
+                {t.gamme ? ` ${libelleGamme(t.gamme)}` : ''} · {libelleMotif(t.motif)} · ouvert le {fmtDateHeure(t.opened_at)} par {t.ouvert_par.split('@')[0]}
+              </div>
+            </div>
+          ) : (
+            <div className="text-[14px] text-slate-500">{erreurFenetre || 'Chargement du ticket…'}</div>
+          )}
+          <button type="button" onClick={onFermer} className="shrink-0 text-[13px] font-semibold text-slate-500 hover:text-slate-900">
+            Fermer ✕
+          </button>
+        </div>
+        {t ? (
+          <div className="space-y-4 overflow-y-auto p-5 text-[13px]">
+            <dl className="grid grid-cols-2 gap-x-4 gap-y-2 text-[12px] md:grid-cols-3">
+              {[
+                ['Client', [t.intitule_tiers, t.numero_tiers].filter(Boolean).join(' · ')],
+                ['Contact', t.contact_nom],
+                ['Téléphone', fmtTel(t.telephone_appelant)],
+                ['Chantier', t.chantier],
+                ['Article', t.reference_article],
+                ['N° de série', t.numero_serie],
+              ].map(([k, v]) => (
+                <div key={k}>
+                  <dt className="font-semibold uppercase tracking-[0.04em] text-slate-400">{k}</dt>
+                  <dd className="text-slate-800">{v || '—'}</dd>
+                </div>
+              ))}
+            </dl>
+            {t.description ? <div className="rounded-lg bg-[#FAF9F7] p-3 text-slate-700">{t.description}</div> : null}
+            {t.preconisation ? (
+              <div className="rounded-lg border border-[#CDE5D1] bg-[#EEF7EF] p-3 text-slate-800">
+                <span className="font-semibold">Préconisation :</span> {t.preconisation}
+              </div>
+            ) : null}
+            <div>
+              <div className="mb-2 text-[12px] font-bold uppercase tracking-[0.05em] text-slate-500">Chronologie</div>
+              <ol className="space-y-1.5">
+                {etapes.map((e) => (
+                  <li key={e.id} className="text-[12px] leading-snug">
+                    <span className="font-mono text-[11px] text-slate-400">{fmtDateHeure(e.at)}</span>{' '}
+                    <span className="font-semibold text-slate-700">{ETAPE_LIBELLES[e.type]}</span> <span className="text-slate-600">{e.libelle}</span>
+                    <span className="text-[11px] text-slate-400"> · {e.auteur.split('@')[0]}</span>
+                  </li>
+                ))}
+                {!etapes.length ? <li className="text-[12px] text-slate-500">Aucune étape.</li> : null}
+              </ol>
+            </div>
+          </div>
+        ) : null}
+        {t ? (
+          <div className="flex flex-wrap justify-end gap-3 border-t border-[#EFEDE8] px-5 py-3">
+            <Link href={`/hotline/tickets?id=${t.id}`} target="_blank" className="text-[13px] font-semibold text-slate-500 underline">
+              Fiche complète (nouvel onglet)
+            </Link>
+            <Link href={`/hotline?ticket=${t.id}`} target="_blank" className="rounded-lg bg-[#B4761A] px-3 py-1.5 text-[13px] font-semibold text-white hover:bg-[#9A6414]">
+              Reprendre ce ticket (nouvel onglet)
+            </Link>
+          </div>
+        ) : null}
       </div>
     </div>
   )
