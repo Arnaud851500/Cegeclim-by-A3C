@@ -7,6 +7,8 @@
  * recherche (n°, client, chantier, n° de série), fiche détaillée à droite avec
  * la chronologie horodatée et les actions (prendre en charge, escalader,
  * résoudre, clore, rouvrir, commentaire). URL : ?id=<ticket>.
+ * Suppression définitive d'un ticket (04/11/2026) : réservée au compte
+ * valancha@gmail.com (RPC hotline_supprimer_ticket, migration 20261104b).
  */
 
 import { Suspense, useCallback, useEffect, useMemo, useState } from 'react'
@@ -231,15 +233,29 @@ function HotlineTickets() {
             </div>
           </section>
 
-          {selectedId ? <FicheTicket id={selectedId} onClose={() => ouvrir(null)} onChange={charger} /> : null}
+          {selectedId ? (
+            <FicheTicket
+              id={selectedId}
+              onClose={() => ouvrir(null)}
+              onChange={charger}
+              onSupprime={() => {
+                ouvrir(null)
+                void charger()
+              }}
+            />
+          ) : null}
         </div>
       </main>
     </div>
   )
 }
 
-function FicheTicket({ id, onClose, onChange }: { id: string; onClose: () => void; onChange: () => void }) {
+const SUPPRESSION_AUTORISEE = 'valancha@gmail.com'
+
+function FicheTicket({ id, onClose, onChange, onSupprime }: { id: string; onClose: () => void; onChange: () => void; onSupprime: () => void }) {
   const { email } = useAccess()
+  const [confirmerSuppression, setConfirmerSuppression] = useState(false)
+  const peutSupprimer = String(email || '').toLowerCase() === SUPPRESSION_AUTORISEE
   const [ticket, setTicket] = useState<Ticket | null>(null)
   const [etapes, setEtapes] = useState<Etape[]>([])
   const [commentaire, setCommentaire] = useState('')
@@ -275,6 +291,20 @@ function FicheTicket({ id, onClose, onChange }: { id: string; onClose: () => voi
     }
   }
 
+  async function supprimer() {
+    setBusy(true)
+    try {
+      const { data, error } = await supabase.rpc('hotline_supprimer_ticket', { p_ticket: id })
+      if (error) throw error
+      const chemins = ((data as { chemins?: string[] } | null)?.chemins || []).filter(Boolean)
+      if (chemins.length) await supabase.storage.from('hotline-pieces').remove(chemins)
+      onSupprime()
+    } catch (e) {
+      setErreur(messageErreur(e))
+      setBusy(false)
+    }
+  }
+
   if (!ticket) {
     return <aside className="rounded-2xl border border-[#E2DFD8] bg-white p-6 text-sm text-slate-500">{erreur || 'Chargement du ticket…'}</aside>
   }
@@ -293,9 +323,28 @@ function FicheTicket({ id, onClose, onChange }: { id: string; onClose: () => voi
             {libelleFiliere(ticket.filiere)} · {libelleMotif(ticket.motif)} · ouvert {fmtDateHeure(ticket.opened_at)} par {ticket.ouvert_par.split('@')[0]}
           </div>
         </div>
-        <button type="button" onClick={onClose} className="text-[13px] font-semibold text-slate-500 hover:text-slate-900">
-          Fermer ✕
-        </button>
+        <div className="flex shrink-0 items-center gap-3">
+          {peutSupprimer ? (
+            confirmerSuppression ? (
+              <span className="flex items-center gap-2 text-[12px]">
+                <span className="font-semibold text-[#A32C2C]">Supprimer définitivement ?</span>
+                <button type="button" disabled={busy} onClick={supprimer} className="rounded-md bg-[#A32C2C] px-2 py-1 font-semibold text-white disabled:opacity-50">
+                  {busy ? '…' : 'Oui, supprimer'}
+                </button>
+                <button type="button" onClick={() => setConfirmerSuppression(false)} className="font-semibold text-slate-500 underline">
+                  Non
+                </button>
+              </span>
+            ) : (
+              <button type="button" onClick={() => setConfirmerSuppression(true)} className="text-[13px] font-semibold text-[#A32C2C] hover:underline">
+                Supprimer
+              </button>
+            )
+          ) : null}
+          <button type="button" onClick={onClose} className="text-[13px] font-semibold text-slate-500 hover:text-slate-900">
+            Fermer ✕
+          </button>
+        </div>
       </div>
 
       <div className="space-y-4 p-4">
