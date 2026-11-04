@@ -239,6 +239,7 @@ const LANDING_PAGES = [
   { value: '/suivi-agences', label: 'Suivi agences – commerciaux' },
   { value: '/financement', label: 'Aides financières (CEE)' },
   { value: '/hotline', label: 'Hotline technique' },
+  { value: '/hotline/escalades', label: 'Hotline – synthèse N2 / N3' },
   { value: '/autorisation', label: 'Autorisations' },
   { value: '/admin/planification', label: 'Job scheduling' },
   { value: '/clients', label: 'MAJ base clients' },

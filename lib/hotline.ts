@@ -30,6 +30,18 @@ export type TypeEtape =
   | 'CLOTURE'
   | 'REOUVERTURE'
   | 'PIECE_JOINTE'
+  | 'DEMANDE_PIECE'
+
+/** Gamme thermique (04/11/2026) : gainable, R/R (air/air), R/O (air/eau). */
+export type Gamme = 'GAINABLE' | 'RR' | 'RO'
+export const GAMMES: Array<{ value: Gamme; label: string; titre: string }> = [
+  { value: 'GAINABLE', label: 'Gainable', titre: 'Climatisation gainable' },
+  { value: 'RR', label: 'R/R', titre: 'Air / air (split, multi-split, muraux)' },
+  { value: 'RO', label: 'R/O', titre: 'Air / eau (PAC)' },
+]
+export function libelleGamme(value: string | null | undefined) {
+  return GAMMES.find((g) => g.value === value)?.label || ''
+}
 
 export const FILIERES: Array<{ value: Filiere; label: string; court: string; icon: string }> = [
   { value: 'PV', label: 'Photovoltaïque', court: 'Photo', icon: '☀️' },
@@ -61,9 +73,16 @@ export const ETAPE_LIBELLES: Record<TypeEtape, string> = {
   CLOTURE: 'Clôture',
   REOUVERTURE: 'Réouverture',
   PIECE_JOINTE: 'Pièce jointe',
+  DEMANDE_PIECE: 'Demande de pièce',
 }
 
-export type DocumentLien = { titre: string; type?: string; url?: string }
+export type DocumentLien = {
+  titre: string
+  type?: string
+  url?: string
+  /** Texte du mail proposé à la place du message standard (fiche pièce d'une vue éclatée). */
+  message?: string
+}
 
 export type Choix = {
   libelle: string
@@ -80,6 +99,8 @@ export type Arbre = {
   code?: string | null
   filiere: Filiere
   motif: Motif
+  /** Thermique uniquement : GAINABLE, RR, RO ; vide = toutes gammes. */
+  gamme?: Gamme | null
   nom: string
   famille: string | null
   actif: boolean
@@ -106,6 +127,7 @@ export type Ticket = {
   numero: string
   filiere: Filiere
   motif: Motif | null
+  gamme?: Gamme | null
   statut: Statut
   niveau: number
   source: string
@@ -826,4 +848,151 @@ export async function liensPieces(chemins: string[], telechargement = false): Pr
     if (d.path && d.signedUrl) res[d.path] = d.signedUrl
   })
   return res
+}
+
+
+// ----------------------------------------------------------------------------
+// Vues éclatées interactives et demandes de pièces (04/11/2026)
+// Migration 20261104_hotline_gamme_vues_eclatees.sql. Un document de parcours
+// de type VUE_ECLATEE (url « vue:<référence> ») ouvre la vue de la référence.
+// ----------------------------------------------------------------------------
+export type PieceVue = {
+  id: string
+  repere: string
+  libelle: string
+  reference_piece: string | null
+  label_x: number
+  label_y: number
+  cible_x: number
+  cible_y: number
+  prix_ht: number | null
+  stock_fms: number | null
+  stock_agence: number | null
+  delai_reappro: string | null
+  ordre: number
+}
+
+export type VueEclatee = {
+  id: string
+  reference_article: string
+  titre: string
+  image_url: string
+  largeur: number
+  hauteur: number
+  simulation: boolean
+  pieces: PieceVue[]
+}
+
+export type DemandePiece = {
+  id: string
+  ticket_id: string | null
+  reference_article: string | null
+  repere: string | null
+  libelle: string
+  reference_piece: string | null
+  quantite: number
+  numero_tiers: string | null
+  intitule_tiers: string | null
+  chantier: string | null
+  destinataire: string | null
+  commentaire: string | null
+  statut: 'DEMANDEE' | 'EXPEDIEE' | 'ANNULEE'
+  simulation: boolean
+  demande_par: string
+  demande_le: string
+}
+
+/** Référence article visée par un document « vue éclatée », sinon null. */
+export function referenceVue(doc: DocumentLien | null | undefined): string | null {
+  if (!doc) return null
+  const url = String(doc.url || '')
+  if (/^vue:/i.test(url)) return url.slice(4).trim().toUpperCase() || null
+  if (String(doc.type || '').toUpperCase() === 'VUE_ECLATEE') return (url || doc.titre.replace(/^vue éclatée\s*/i, '')).trim().toUpperCase() || null
+  return null
+}
+
+/** Références article ayant une vue éclatée (en majuscules). */
+export async function chargerReferencesVues(): Promise<string[]> {
+  const { data, error } = await supabase.from('hotline_vues_eclatees').select('reference_article')
+  if (error) throw error
+  return ((data || []) as Array<{ reference_article: string }>).map((r) => r.reference_article.toUpperCase())
+}
+
+export async function chargerVue(reference: string): Promise<VueEclatee | null> {
+  const { data, error } = await supabase
+    .from('hotline_vues_eclatees')
+    .select('*, pieces:hotline_vue_pieces(*)')
+    .ilike('reference_article', reference.trim())
+    .maybeSingle()
+  if (error) throw error
+  if (!data) return null
+  const v = data as VueEclatee
+  const num = (x: unknown) => (x === null || x === undefined ? null : Number(x))
+  return {
+    ...v,
+    pieces: (v.pieces || [])
+      .map((p) => ({ ...p, label_x: Number(p.label_x), label_y: Number(p.label_y), cible_x: Number(p.cible_x), cible_y: Number(p.cible_y), prix_ht: num(p.prix_ht) }))
+      .sort((a, b) => a.ordre - b.ordre),
+  }
+}
+
+export async function demanderPiece(d: {
+  ticketId: string
+  vue: VueEclatee
+  piece: PieceVue
+  quantite: number
+  numeroTiers?: string | null
+  intituleTiers?: string | null
+  chantier?: string | null
+  destinataire?: string | null
+  commentaire?: string | null
+}): Promise<DemandePiece> {
+  const { data, error } = await supabase
+    .from('hotline_demandes_pieces')
+    .insert({
+      ticket_id: d.ticketId,
+      reference_article: d.vue.reference_article,
+      repere: d.piece.repere,
+      libelle: d.piece.libelle,
+      reference_piece: d.piece.reference_piece,
+      quantite: d.quantite,
+      numero_tiers: d.numeroTiers || null,
+      intitule_tiers: d.intituleTiers || null,
+      chantier: d.chantier || null,
+      destinataire: d.destinataire || null,
+      commentaire: d.commentaire || null,
+      simulation: d.vue.simulation,
+    })
+    .select('*')
+    .single()
+  if (error) throw error
+  const demande = data as DemandePiece
+  await ajouterEtape(
+    d.ticketId,
+    'DEMANDE_PIECE',
+    `Envoi demandé au SAV : ${d.quantite} × ${d.piece.libelle} (repère ${d.piece.repere}${d.piece.reference_piece ? `, ${d.piece.reference_piece}` : ''}) pour ${d.intituleTiers || 'le client'}${d.chantier ? ` — chantier ${d.chantier}` : ''}${d.vue.simulation ? ' [simulation]' : ''}`,
+    { details: { demande_id: demande.id, reference_article: d.vue.reference_article } },
+  )
+  return demande
+}
+
+export async function chargerDemandesPieces(ticketId?: string): Promise<DemandePiece[]> {
+  let q = supabase.from('hotline_demandes_pieces').select('*').order('demande_le', { ascending: false }).limit(200)
+  if (ticketId) q = q.eq('ticket_id', ticketId)
+  const { data, error } = await q
+  if (error) throw error
+  return (data || []) as DemandePiece[]
+}
+
+export async function majDemandePiece(demande: DemandePiece, statut: DemandePiece['statut']) {
+  const { error } = await supabase.from('hotline_demandes_pieces').update({ statut }).eq('id', demande.id)
+  if (error) throw error
+  if (demande.ticket_id) {
+    await ajouterEtape(
+      demande.ticket_id,
+      'DEMANDE_PIECE',
+      `${statut === 'EXPEDIEE' ? 'Pièce expédiée par le SAV' : statut === 'ANNULEE' ? 'Demande de pièce annulée' : 'Demande de pièce remise en attente'} : ${demande.quantite} × ${demande.libelle}${demande.simulation ? ' [simulation]' : ''}`,
+      { details: { demande_id: demande.id } },
+    )
+  }
 }

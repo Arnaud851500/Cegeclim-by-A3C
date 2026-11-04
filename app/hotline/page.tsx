@@ -19,6 +19,12 @@
  *   ses documents de vente, ses historiques et le diagnostic là où il s'était
  *   arrêté (réponses rejouées depuis la chronologie) ; on peut renvoyer des
  *   documents, poursuivre ou recommencer le parcours.
+ * - Gamme thermique (04/11/2026) : après « Thermie », choix Gainable / R/R / R/O
+ *   qui filtre les parcours (un parcours sans gamme vaut pour toutes).
+ * - Vues éclatées (04/11/2026) : une référence ayant une vue (ligne d'un dossier
+ *   de vente, champ « Modèle », document VUE_ECLATEE d'un parcours) ouvre la vue
+ *   interactive (components/hotline/VueEclatee.tsx) : repères cliquables, stock,
+ *   demande d'envoi au SAV enregistrée dans le ticket, mail au pro.
  * Tables / RPC : migration 20261102_hotline_technique.sql.
  */
 
@@ -29,9 +35,11 @@ import { supabase } from '@/lib/supabaseClient'
 import { useAccess } from '@/components/AccessContext'
 import HotlineHeader, { HotlineErreur, Pastille } from '@/components/hotline/HotlineHeader'
 import PiecesJointes from '@/components/hotline/PiecesJointes'
+import VueEclatee from '@/components/hotline/VueEclatee'
 import {
   ETAPE_LIBELLES,
   FILIERES,
+  GAMMES,
   MOTIFS,
   STATUTS,
   ajouterEtape,
@@ -43,6 +51,9 @@ import {
   chargerEtapes,
   chargerLignes,
   chargerNoeuds,
+  chargerReferencesVues,
+  libelleGamme,
+  referenceVue,
   escalader,
   fmtDate,
   fmtDateHeure,
@@ -69,6 +80,7 @@ import {
   type DocumentLien,
   type Etape,
   type Filiere,
+  type Gamme,
   type Ligne,
   type Dossier,
   type Livraison,
@@ -81,6 +93,7 @@ import {
 
 type Formulaire = {
   filiere: Filiere | null
+  gamme: Gamme | null
   motif: Motif | null
   numero_tiers: string
   intitule_tiers: string
@@ -94,6 +107,7 @@ type Formulaire = {
 
 const FORM_VIDE: Formulaire = {
   filiere: null,
+  gamme: null,
   motif: null,
   numero_tiers: '',
   intitule_tiers: '',
@@ -155,6 +169,9 @@ function HotlineConsole() {
   const [fin, setFin] = useState<Choix | null>(null)
   const [docsDiagnostic, setDocsDiagnostic] = useState<DocumentLien[]>([])
   const [commentaire, setCommentaire] = useState('')
+  // Vues éclatées : références qui en ont une, vue ouverte.
+  const [refsVues, setRefsVues] = useState<Set<string>>(new Set())
+  const [vueOuverte, setVueOuverte] = useState<string | null>(null)
 
   const patch = (p: Partial<Formulaire>) => setForm((f) => ({ ...f, ...p }))
 
@@ -167,6 +184,9 @@ function HotlineConsole() {
         setArbresCharges(true)
       })
       .catch((e) => setErreur(messageErreur(e)))
+    chargerReferencesVues()
+      .then((refs) => setRefsVues(new Set(refs)))
+      .catch(() => undefined)
   }, [])
 
   // Filière déduite de la ligne 3CX appelée.
@@ -227,6 +247,7 @@ function HotlineConsole() {
         setTelephone(t.telephone_appelant || '')
         setForm({
           filiere: t.filiere,
+          gamme: t.gamme || arbres.find((a) => a.id === t.arbre_id)?.gamme || null,
           motif: t.motif,
           numero_tiers: t.numero_tiers || '',
           intitule_tiers: t.intitule_tiers || '',
@@ -254,6 +275,7 @@ function HotlineConsole() {
         setErreur(messageErreur(e))
       }
     })()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [arbresCharges, email])
 
   const telInitial = useRef(params.get('tel') || '')
@@ -356,14 +378,25 @@ function HotlineConsole() {
 
   // Arbre de diagnostic ------------------------------------------------------
   const arbresPossibles = useMemo(
-    () => arbres.filter((a) => a.filiere === form.filiere && (!form.motif || a.motif === form.motif)),
-    [arbres, form.filiere, form.motif],
+    () =>
+      arbres.filter(
+        (a) =>
+          a.filiere === form.filiere &&
+          (!form.motif || a.motif === form.motif) &&
+          (form.filiere !== 'THERMIQUE' || !form.gamme || !a.gamme || a.gamme === form.gamme),
+      ),
+    [arbres, form.filiere, form.motif, form.gamme],
   )
 
   useEffect(() => {
     if (arbresPossibles.some((a) => a.id === arbreId)) return
+    // Thermie sans gamme choisie : on attend la gamme avant de proposer un parcours.
+    if (form.filiere === 'THERMIQUE' && !form.gamme) {
+      if (!aRejouer.current) setArbreId('')
+      return
+    }
     setArbreId(arbresPossibles.length === 1 ? arbresPossibles[0].id : '')
-  }, [arbresPossibles, arbreId])
+  }, [arbresPossibles, arbreId, form.filiere, form.gamme])
 
   useEffect(() => {
     setNoeuds([])
@@ -440,6 +473,7 @@ function HotlineConsole() {
         .insert({
           filiere: form.filiere,
           motif: form.motif,
+          gamme: form.filiere === 'THERMIQUE' ? form.gamme : null,
           source: telephone ? 'TELEPHONE' : 'MANUEL',
           telephone_appelant: telephone || null,
           ligne_appelee: ligneAppelee || null,
@@ -458,7 +492,7 @@ function HotlineConsole() {
         .single()
       if (error) throw error
       const t = data as Ticket
-      await ajouterEtape(t.id, 'OUVERTURE', `Ticket ${t.numero} ouvert · ${libelleFiliere(t.filiere)} · ${libelleMotif(t.motif)}`, {
+      await ajouterEtape(t.id, 'OUVERTURE', `Ticket ${t.numero} ouvert · ${libelleFiliere(t.filiere)}${t.gamme ? ` ${libelleGamme(t.gamme)}` : ''} · ${libelleMotif(t.motif)}`, {
         details: { telephone: telephone || null, ligne: ligneAppelee || null },
       })
       if (form.numero_tiers) {
@@ -479,6 +513,7 @@ function HotlineConsole() {
     try {
       await majTicket(ticket.id, {
         filiere: form.filiere || ticket.filiere,
+        gamme: (form.filiere || ticket.filiere) === 'THERMIQUE' ? form.gamme : null,
         motif: form.motif,
         numero_tiers: form.numero_tiers || null,
         intitule_tiers: form.intitule_tiers || null,
@@ -576,6 +611,14 @@ function HotlineConsole() {
     setDocAEnvoyer(doc)
   }
 
+  function ouvrirVue(reference: string) {
+    const ref = reference.trim().toUpperCase()
+    if (!ref) return
+    setVueOuverte(ref)
+    if (!form.reference_article.trim()) patch({ reference_article: ref })
+    if (ticket) void ajouterEtape(ticket.id, 'COMMENTAIRE', `Vue éclatée consultée : ${ref}`).then(() => rafraichirEtapes(ticket.id))
+  }
+
   async function preparerMessage(v: { to: string; subject: string; text: string; mode: 'auto' | 'eml' }) {
     if (!docAEnvoyer) return
     const doc = docAEnvoyer
@@ -621,6 +664,7 @@ function HotlineConsole() {
     setArbreId('')
     setCommentaire('')
     setErreur(null)
+    setVueOuverte(null)
     window.history.replaceState(null, '', '/hotline')
   }
 
@@ -704,13 +748,28 @@ function HotlineConsole() {
                   <button
                     key={f.value}
                     type="button"
-                    onClick={() => patch({ filiere: f.value })}
+                    onClick={() => patch({ filiere: f.value, gamme: f.value === 'THERMIQUE' ? form.gamme : null })}
                     className={`flex-1 rounded-md px-2 py-1.5 font-semibold ${form.filiere === f.value ? 'bg-[#0B1220] text-white' : 'text-slate-600'}`}
                   >
                     {f.icon} {f.court}
                   </button>
                 ))}
               </div>
+              {form.filiere === 'THERMIQUE' ? (
+                <div className="flex rounded-lg border border-[#D8D3C8] bg-white p-0.5 text-[12px]">
+                  {GAMMES.map((g) => (
+                    <button
+                      key={g.value}
+                      type="button"
+                      title={g.titre}
+                      onClick={() => patch({ gamme: form.gamme === g.value ? null : g.value })}
+                      className={`flex-1 rounded-md px-2 py-1.5 font-semibold ${form.gamme === g.value ? 'bg-[#1E4E8C] text-white' : 'text-slate-600'}`}
+                    >
+                      {g.label}
+                    </button>
+                  ))}
+                </div>
+              ) : null}
               <div className="flex rounded-lg border border-[#D8D3C8] bg-white p-0.5 text-[12px]">
                 {MOTIFS.map((m) => (
                   <button
@@ -769,7 +828,14 @@ function HotlineConsole() {
                 </label>
               </div>
               <label className="block text-[11px] font-semibold text-slate-500">
-                Modèle / référence article
+                <span className="flex items-center justify-between">
+                  Modèle / référence article
+                  {refsVues.has(form.reference_article.trim().toUpperCase()) ? (
+                    <button type="button" onClick={() => ouvrirVue(form.reference_article)} className="text-[11px] font-bold text-[#B4761A] underline">
+                      🔍 Vue éclatée
+                    </button>
+                  ) : null}
+                </span>
                 <input value={form.reference_article} onChange={(e) => patch({ reference_article: e.target.value })} className={champ} />
               </label>
               <label className="block text-[11px] font-semibold text-slate-500">
@@ -830,6 +896,7 @@ function HotlineConsole() {
                     <option key={a.id} value={a.id}>
                       {a.nom}
                       {a.famille ? ` · ${a.famille}` : ''}
+                      {a.gamme ? ` · ${libelleGamme(a.gamme)}` : ''}
                     </option>
                   ))}
                 </select>
@@ -840,9 +907,28 @@ function HotlineConsole() {
             <div className="p-5">
               {!form.filiere ? (
                 <p className="text-[13px] text-slate-500">Choisir la filière pour afficher le parcours de diagnostic.</p>
+              ) : form.filiere === 'THERMIQUE' && !form.gamme && !arbreId ? (
+                <div>
+                  <div className="text-[18px] font-bold text-slate-900">Quelle gamme ?</div>
+                  <div className="mt-1 text-[13px] text-slate-500">Le choix de la gamme oriente vers les parcours de diagnostic correspondants.</div>
+                  <div className="mt-4 flex flex-wrap gap-2">
+                    {GAMMES.map((g) => (
+                      <button
+                        key={g.value}
+                        type="button"
+                        onClick={() => patch({ gamme: g.value })}
+                        className="rounded-lg bg-[#0B1220] px-4 py-2.5 text-left text-[14px] font-semibold text-white hover:bg-[#1C2A44]"
+                      >
+                        {g.label}
+                        <span className="block text-[11px] font-normal text-slate-300">{g.titre}</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
               ) : !arbresPossibles.length ? (
                 <p className="text-[13px] text-slate-500">
                   Aucun parcours actif pour {libelleFiliere(form.filiere)}
+                  {form.gamme ? ` ${libelleGamme(form.gamme)}` : ''}
                   {form.motif ? ` · ${libelleMotif(form.motif)}` : ''}. Un expert peut le créer dans l’éditeur de diagnostic.
                 </p>
               ) : !noeud ? (
@@ -943,7 +1029,18 @@ function HotlineConsole() {
               <div className={titreCarte}>Documents à envoyer</div>
               <div className="space-y-1.5 p-4">
                 {docsDiagnostic.length ? (
-                  docsDiagnostic.map((d, i) => (
+                  docsDiagnostic.map((d, i) =>
+                    referenceVue(d) ? (
+                      <div key={`${d.titre}-${i}`} className="flex items-center justify-between gap-2 rounded-lg border border-[#EBD8AE] bg-[#FDF7EA] px-3 py-2 text-[13px]">
+                        <span className="min-w-0 truncate">
+                          <span className="mr-1.5 rounded bg-[#B4761A] px-1.5 py-0.5 text-[10px] font-bold text-white">VUE</span>
+                          {d.titre}
+                        </span>
+                        <button type="button" onClick={() => ouvrirVue(referenceVue(d) || '')} className="shrink-0 text-[12px] font-bold text-[#B4761A] underline">
+                          Ouvrir la vue interactive
+                        </button>
+                      </div>
+                    ) : (
                     <div key={`${d.titre}-${i}`} className="flex items-center justify-between gap-2 rounded-lg border border-[#E2DFD8] px-3 py-2 text-[13px]">
                       <span className="min-w-0 truncate">
                         <span className="mr-1.5 rounded bg-[#EEEDEA] px-1.5 py-0.5 text-[10px] font-bold text-slate-600">{d.type || 'DOC'}</span>
@@ -966,7 +1063,8 @@ function HotlineConsole() {
                         </button>
                       </span>
                     </div>
-                  ))
+                    ),
+                  )
                 ) : (
                   <p className="text-[12px] text-slate-500">Les documents (procédures, schémas, firmwares) apparaissent au fil du diagnostic.</p>
                 )}
@@ -981,6 +1079,8 @@ function HotlineConsole() {
                 recherche={rechercheDossier}
                 choisi={dossierChoisi}
                 onChoisir={choisirDossier}
+                refsVues={refsVues}
+                onVue={ouvrirVue}
               />
             ) : (
             <PaveLivraisons
@@ -1013,12 +1113,30 @@ function HotlineConsole() {
         </div>
       </main>
 
+      {vueOuverte ? (
+        <VueEclatee
+          reference={vueOuverte}
+          ticketId={ticket?.id || null}
+          ticketNumero={ticket?.numero}
+          client={{
+            numeroTiers: form.numero_tiers,
+            intitule: form.intitule_tiers,
+            contact: form.contact_nom,
+            email: form.contact_email,
+            chantier: dossiers.liste.find((d) => d.cle === dossierChoisi)?.reference || form.chantier,
+          }}
+          onFermer={() => setVueOuverte(null)}
+          onMail={(doc) => setDocAEnvoyer(doc)}
+          onDemande={() => ticket && void rafraichirEtapes(ticket.id)}
+        />
+      ) : null}
+
       {docAEnvoyer ? (
         <FenetreEnvoi
           doc={docAEnvoyer}
           destinataire={form.contact_email}
           objetParDefaut={`${ticket ? `[${ticket.numero}] ` : ''}${docAEnvoyer.titre}`}
-          messageParDefaut={messageEnvoiDocument(docAEnvoyer, form.contact_nom)}
+          messageParDefaut={docAEnvoyer.message || messageEnvoiDocument(docAEnvoyer, form.contact_nom)}
           envoiEnCours={envoiEnCours !== null}
           windows={posteWindows()}
           onPreparer={preparerMessage}
@@ -1514,6 +1632,8 @@ function PaveDossiers({
   recherche,
   choisi,
   onChoisir,
+  refsVues,
+  onVue,
 }: {
   total: number
   dossiers: Dossier[]
@@ -1521,6 +1641,8 @@ function PaveDossiers({
   recherche: string
   choisi: string | null
   onChoisir: (d: Dossier | null) => void
+  refsVues: Set<string>
+  onVue: (reference: string) => void
 }) {
   const dossier = choisi ? dossiers.find((d) => d.cle === choisi) || null : null
   return (
@@ -1536,7 +1658,7 @@ function PaveDossiers({
       </div>
       <div className="max-h-[620px] overflow-y-auto p-4">
         {dossier ? (
-          <DetailDossier d={dossier} retour={dossiers.length > 1 ? () => onChoisir(null) : null} nbDossiers={dossiers.length} />
+          <DetailDossier d={dossier} retour={dossiers.length > 1 ? () => onChoisir(null) : null} nbDossiers={dossiers.length} refsVues={refsVues} onVue={onVue} />
         ) : dossiers.length ? (
           <div className="space-y-1.5">
             <div className="text-[11px] font-semibold text-slate-500">
@@ -1575,7 +1697,9 @@ function PaveDossiers({
   )
 }
 
-function ListeProduits({ lignes, statut }: { lignes: ProduitDossierUI[]; statut?: boolean }) {
+type VuesProps = { refsVues: Set<string>; onVue: (reference: string) => void }
+
+function ListeProduits({ lignes, statut, refsVues, onVue }: { lignes: ProduitDossierUI[]; statut?: boolean } & VuesProps) {
   return (
     <ul className="divide-y divide-[#F1EFEA]">
       {lignes.map((p, i) => (
@@ -1586,6 +1710,16 @@ function ListeProduits({ lignes, statut }: { lignes: ProduitDossierUI[]; statut?
           </span>
           {statut && p.statut ? <span className="shrink-0 text-[10px] font-semibold text-[#8A5A11]">{p.statut}</span> : null}
           {p.correspond ? <span className="shrink-0 text-[10px] font-bold uppercase text-[#B4761A]">recherché</span> : null}
+          {p.reference_article && refsVues.has(p.reference_article.toUpperCase()) ? (
+            <button
+              type="button"
+              onClick={() => onVue(p.reference_article || '')}
+              title="Ouvrir la vue éclatée interactive de ce produit"
+              className="shrink-0 rounded-md border border-[#B4761A] px-1.5 py-0.5 text-[10px] font-bold text-[#B4761A] hover:bg-[#B4761A] hover:text-white"
+            >
+              🔍 Vue éclatée
+            </button>
+          ) : null}
         </li>
       ))}
     </ul>
@@ -1594,7 +1728,7 @@ function ListeProduits({ lignes, statut }: { lignes: ProduitDossierUI[]; statut?
 
 type ProduitDossierUI = Dossier['reste_a_livrer'][number]
 
-function DetailDossier({ d, retour, nbDossiers }: { d: Dossier; retour: (() => void) | null; nbDossiers: number }) {
+function DetailDossier({ d, retour, nbDossiers, refsVues, onVue }: { d: Dossier; retour: (() => void) | null; nbDossiers: number } & VuesProps) {
   return (
     <div className="space-y-3 text-[12px]">
       {retour ? (
@@ -1649,21 +1783,21 @@ function DetailDossier({ d, retour, nbDossiers }: { d: Dossier; retour: (() => v
             </span>
             <span className="text-slate-500">{b.factures?.length ? `facture ${b.factures.join(', ')}` : b.facture ? 'facturé' : 'non facturé'}</span>
           </div>
-          {b.lignes?.length ? <ListeProduits lignes={b.lignes} /> : <div className="px-3 py-2 text-slate-400">Aucune ligne produit.</div>}
+          {b.lignes?.length ? <ListeProduits lignes={b.lignes} refsVues={refsVues} onVue={onVue} /> : <div className="px-3 py-2 text-slate-400">Aucune ligne produit.</div>}
         </div>
       ))}
 
       {d.reste_a_livrer.length ? (
         <div className="rounded-lg border border-[#EBD8AE]">
           <div className="border-b border-[#EFEDE8] bg-[#FDF7EA] px-3 py-2 font-semibold text-[#8A5A11]">Reste à livrer sur la commande</div>
-          <ListeProduits lignes={d.reste_a_livrer} statut />
+          <ListeProduits lignes={d.reste_a_livrer} statut refsVues={refsVues} onVue={onVue} />
         </div>
       ) : null}
 
       {d.devis_lignes.length ? (
         <div className="rounded-lg border border-[#E2DFD8]">
           <div className="border-b border-[#EFEDE8] bg-[#FAF9F7] px-3 py-2 font-semibold text-slate-700">Contenu du devis (pas encore commandé)</div>
-          <ListeProduits lignes={d.devis_lignes} />
+          <ListeProduits lignes={d.devis_lignes} refsVues={refsVues} onVue={onVue} />
         </div>
       ) : null}
 

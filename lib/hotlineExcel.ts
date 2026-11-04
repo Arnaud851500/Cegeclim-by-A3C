@@ -41,6 +41,8 @@ export type ParcoursImport = {
   famille: string
   actif: boolean
   publie_extranet: boolean
+  /** Thermique : GAINABLE, RR, RO ou vide (toutes gammes). */
+  gamme?: string
   questions: QuestionImport[]
 }
 
@@ -85,14 +87,14 @@ function telecharger(buffer: ArrayBuffer, nom: string) {
 // ----------------------------------------------------------------------------
 const ONGLET_UNIQUE = 'Parcours de diagnostic'
 const COLONNES_UNIQUE = [
-  'Code parcours', 'Filière', 'Motif', 'Nom du parcours', 'Famille produit', 'Actif', 'Publié extranet',
+  'Code parcours', 'Filière', 'Motif', 'Gamme', 'Nom du parcours', 'Famille produit', 'Actif', 'Publié extranet',
   'Code question', 'Ordre', 'Départ', 'Question', 'Consigne niveau 1', 'Documents (Titre | Type | Lien)',
   'Réponse', 'Question suivante', 'Rappel : question suivante', 'Préconisation (fin de parcours)', 'Proposer escalade',
 ] as const
-const LARGEURS_UNIQUE = [14, 12, 17, 30, 14, 8, 10, 11, 7, 8, 48, 40, 40, 26, 12, 40, 48, 11]
+const LARGEURS_UNIQUE = [14, 12, 17, 10, 30, 14, 8, 10, 11, 7, 8, 48, 40, 40, 26, 12, 40, 48, 11]
 // Colonnes (1-based) : blocs parcours / question / réponse
-const BLOC_PARCOURS = [1, 7]
-const BLOC_QUESTION = [8, 13]
+const BLOC_PARCOURS = [1, 8]
+const BLOC_QUESTION = [9, 14]
 
 const MODE_EMPLOI_UNIQUE = [
   'PARCOURS DE DIAGNOSTIC — HOTLINE TECHNIQUE CEGECLIM',
@@ -112,10 +114,11 @@ const MODE_EMPLOI_UNIQUE = [
   '• Un parcours présent dans le fichier est REMPLACÉ par son contenu : ses questions absentes du fichier sont supprimées.',
   '• Les parcours absents du fichier ne sont pas modifiés. Pour ne retoucher qu’un parcours, ne laissez que ses lignes.',
   '• Chaque question a un CODE unique dans son parcours (ex. Q1, Q2…). Une seule question « Départ » = OUI par parcours.',
+  '• Gamme (thermique) = GAINABLE, RR (air/air) ou RO (air/eau) ; vide = toutes gammes. Elle oriente la console après « Thermie ».',
   '• Filière = PV ou THERMIQUE. Motif = MISE_EN_SERVICE ou EXPLOITATION. Actif, Publié extranet, Départ, Proposer escalade = OUI ou NON.',
   '• « Question suivante » vide = fin du parcours : renseigner alors la Préconisation donnée à l’appelant.',
   '• Documents : un document par ligne dans la cellule (Alt+Entrée), sous la forme  Titre | Type | Lien.',
-  '  Types : PDF, SCHEMA, FIRMWARE, VIDEO, XLS, LIEN.',
+  '  Types : PDF, SCHEMA, FIRMWARE, VIDEO, XLS, LIEN, VUE_ECLATEE (lien = vue:RÉFÉRENCE, ex. vue:RAK-DJ35RHAE).',
   '• Pour ajouter une réponse à une question : insérer une ligne sous ses réponses et ne remplir que les colonnes orange.',
   '',
   'À l’import, tout le fichier est contrôlé avant d’être appliqué : en cas d’erreur, rien n’est modifié et la liste des erreurs s’affiche.',
@@ -162,8 +165,8 @@ export async function exporterParcoursExcel(arbres: Arbre[]) {
   const lignes: Array<{ v: LigneUnique; debutParcours: boolean; debutQuestion: boolean; rangQuestion: number }> = []
   const tries = [...arbres].sort((a, b) => String(a.code || '').localeCompare(String(b.code || '')))
   if (!tries.length) {
-    const P: LigneUnique = ['TH-MES-1', 'THERMIQUE', 'MISE_EN_SERVICE', 'Mise en service PAC air/eau', 'PAC', 'OUI', 'NON']
-    const vide7: LigneUnique = ['', '', '', '', '', '', '']
+    const P: LigneUnique = ['TH-MES-1', 'THERMIQUE', 'MISE_EN_SERVICE', 'RO', 'Mise en service PAC air/eau', 'PAC', 'OUI', 'NON']
+    const vide7: LigneUnique = ['', '', '', '', '', '', '', '']
     const vide6: LigneUnique = ['', '', '', '', '', '']
     const q1: LigneUnique = ['Q1', 1, 'OUI', 'La PAC affiche-t-elle un code défaut ?', 'Faire lire l’afficheur de la télécommande.', 'Procédure de mise en service | PDF | https://…']
     const q2: LigneUnique = ['Q2', 2, 'NON', 'Quel code défaut ?', '', '']
@@ -173,7 +176,7 @@ export async function exporterParcoursExcel(arbres: Arbre[]) {
   }
   for (const a of tries) {
     const ns = noeuds.filter((n) => n.arbre_id === a.id).sort((x, y) => x.ordre - y.ordre)
-    const P: LigneUnique = [a.code || '', a.filiere, a.motif, a.nom, a.famille || '', ouiNon(a.actif), ouiNon(a.publie_extranet)]
+    const P: LigneUnique = [a.code || '', a.filiere, a.motif, a.gamme || '', a.nom, a.famille || '', ouiNon(a.actif), ouiNon(a.publie_extranet)]
     if (!ns.length) {
       lignes.push({ v: [...P], debutParcours: true, debutQuestion: true, rangQuestion: 0 })
       continue
@@ -211,14 +214,14 @@ export async function exporterParcoursExcel(arbres: Arbre[]) {
       else if (col <= BLOC_QUESTION[1] && l.rangQuestion % 2 === 0) c.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: FONDS.question } }
       if (l.debutParcours) c.border = { top: forte }
       else if (l.debutQuestion) c.border = { top: bordure }
-      if (col === 16) c.font = { italic: true, color: { argb: 'FF64748B' } }
+      if (col === 17) c.font = { italic: true, color: { argb: 'FF64748B' } }
     }
     if (l.debutParcours) {
       for (let col = 1; col <= 4; col++) row.getCell(col).font = { bold: true }
     }
     if (l.debutQuestion) {
-      row.getCell(8).font = { bold: true }
-      row.getCell(11).font = { bold: true }
+      row.getCell(9).font = { bold: true }
+      row.getCell(12).font = { bold: true }
     }
   })
 
@@ -232,7 +235,8 @@ export async function exporterParcoursExcel(arbres: Arbre[]) {
   }
   liste('B', ['PV', 'THERMIQUE'])
   liste('C', ['MISE_EN_SERVICE', 'EXPLOITATION'])
-  ;['F', 'G', 'J', 'R'].forEach((c) => liste(c, ['OUI', 'NON']))
+  liste('D', ['GAINABLE', 'RR', 'RO'])
+  ;['G', 'H', 'K', 'S'].forEach((c) => liste(c, ['OUI', 'NON']))
   ws.autoFilter = { from: { row: 1, column: 1 }, to: { row: 1, column: COLONNES_UNIQUE.length } }
 
   const date = new Date().toISOString().slice(0, 10)
@@ -274,6 +278,15 @@ function filiere(v: string) {
   const k = cle(v)
   if (['pv', 'photo', 'photovoltaique', 'photovoltaique pv'].includes(k)) return 'PV'
   if (['th', 'thermie', 'thermique'].includes(k)) return 'THERMIQUE'
+  return v.trim().toUpperCase()
+}
+
+function gamme(v: string) {
+  const k = cle(v)
+  if (!k) return ''
+  if (['gainable', 'gainables', 'g'].includes(k)) return 'GAINABLE'
+  if (['rr', 'r r', 'air air', 'split', 'mural', 'muraux'].includes(k)) return 'RR'
+  if (['ro', 'r o', 'air eau', 'pac', 'pac air eau'].includes(k)) return 'RO'
   return v.trim().toUpperCase()
 }
 
@@ -329,7 +342,7 @@ export async function lireExcelParcours(fichier: File): Promise<Resultat> {
 
 /** Documents d'une cellule : un par ligne, « Titre | Type | Lien ». */
 function lireDocuments(texte: string, ou: string, erreurs: string[]): DocumentImport[] {
-  const TYPES = ['PDF', 'SCHEMA', 'FIRMWARE', 'VIDEO', 'XLS', 'LIEN']
+  const TYPES = ['PDF', 'SCHEMA', 'FIRMWARE', 'VIDEO', 'XLS', 'LIEN', 'VUE_ECLATEE']
   return texte
     .split(/\r?\n/)
     .map((l) => l.trim())
@@ -378,6 +391,7 @@ function lireUnOnglet(wb: ExcelJS.Workbook, ws: ExcelJS.Worksheet | undefined): 
           code: codeP,
           filiere: filiere(r['Filière'] || ''),
           motif: motif(r['Motif'] || ''),
+          gamme: gamme(r['Gamme'] || ''),
           nom: (r['Nom du parcours'] || '').trim(),
           famille: (r['Famille produit'] || '').trim(),
           actif: oui(r['Actif'] || '', true),

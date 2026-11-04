@@ -12,6 +12,7 @@ import { useAccess } from '@/components/AccessContext'
 const ONGLETS: Array<{ href: string; label: string; expert?: boolean }> = [
   { href: '/hotline', label: 'Console d’appel' },
   { href: '/hotline/tickets', label: 'Tickets' },
+  { href: '/hotline/escalades', label: 'Synthèse N2 / N3', expert: true },
   { href: '/hotline/diagnostic', label: 'Éditeur de diagnostic', expert: true },
   { href: '/hotline/stats', label: 'Statistiques', expert: true },
 ]

@@ -26,13 +26,16 @@ import {
   chargerArbres,
   chargerLignes,
   chargerNoeuds,
+  GAMMES,
   libelleFiliere,
+  libelleGamme,
   libelleMotif,
   messageErreur,
   type Arbre,
   type Choix,
   type DocumentLien,
   type Filiere,
+  type Gamme,
   type Ligne,
   type Motif,
   type Noeud,
@@ -54,9 +57,10 @@ export default function HotlineDiagnosticPage() {
   const [info, setInfo] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [importEnCours, setImportEnCours] = useState<{ fichier: string; parcours: ParcoursImport[]; bilan: BilanImport | null; erreurs: string[] } | null>(null)
-  const [nouveau, setNouveau] = useState<{ filiere: Filiere; motif: Motif; nom: string; famille: string }>({
+  const [nouveau, setNouveau] = useState<{ filiere: Filiere; motif: Motif; gamme: Gamme | ''; nom: string; famille: string }>({
     filiere: 'THERMIQUE',
     motif: 'MISE_EN_SERVICE',
+    gamme: '',
     nom: '',
     famille: '',
   })
@@ -124,7 +128,14 @@ export default function HotlineDiagnosticPage() {
     await run(async () => {
       const { data, error } = await supabase
         .from('hotline_arbres')
-        .insert({ filiere: nouveau.filiere, motif: nouveau.motif, nom: nouveau.nom.trim(), famille: nouveau.famille.trim() || null, updated_by: email })
+        .insert({
+          filiere: nouveau.filiere,
+          motif: nouveau.motif,
+          gamme: nouveau.filiere === 'THERMIQUE' ? nouveau.gamme || null : null,
+          nom: nouveau.nom.trim(),
+          famille: nouveau.famille.trim() || null,
+          updated_by: email,
+        })
         .select('*')
         .single()
       if (error) throw error
@@ -150,6 +161,7 @@ export default function HotlineDiagnosticPage() {
         .update({
           nom: arbre.nom,
           famille: arbre.famille || null,
+          gamme: arbre.filiere === 'THERMIQUE' ? arbre.gamme || null : null,
           motif: arbre.motif,
           filiere: arbre.filiere,
           actif: arbre.actif,
@@ -321,6 +333,7 @@ export default function HotlineDiagnosticPage() {
                         <div className="text-[11px] text-slate-500">
                           {a.code ? <span className="mr-1 font-mono text-slate-400">{a.code}</span> : null}
                           {libelleMotif(a.motif)}
+                          {a.gamme ? ` · ${libelleGamme(a.gamme)}` : ''}
                           {a.famille ? ` · ${a.famille}` : ''}
                           {a.publie_extranet ? ' · extranet' : ''}
                         </div>
@@ -347,6 +360,16 @@ export default function HotlineDiagnosticPage() {
                   ))}
                 </select>
               </div>
+              {nouveau.filiere === 'THERMIQUE' ? (
+                <select value={nouveau.gamme} onChange={(e) => setNouveau((v) => ({ ...v, gamme: e.target.value as Gamme | '' }))} className={champ}>
+                  <option value="">Toutes gammes</option>
+                  {GAMMES.map((g) => (
+                    <option key={g.value} value={g.value}>
+                      {g.label} — {g.titre}
+                    </option>
+                  ))}
+                </select>
+              ) : null}
               <input value={nouveau.nom} onChange={(e) => setNouveau((v) => ({ ...v, nom: e.target.value }))} placeholder="Nom du parcours" className={champ} />
               <input value={nouveau.famille} onChange={(e) => setNouveau((v) => ({ ...v, famille: e.target.value }))} placeholder="Famille de produit (PAC, onduleur…)" className={champ} />
               <button type="button" disabled={busy || !nouveau.nom.trim()} onClick={creerArbre} className="h-9 w-full rounded-lg bg-[#0B1220] text-[13px] font-semibold text-white disabled:opacity-40">
@@ -447,6 +470,19 @@ export default function HotlineDiagnosticPage() {
                       ))}
                     </select>
                   </label>
+                  {arbre.filiere === 'THERMIQUE' ? (
+                    <label className="text-[11px] font-semibold text-slate-500">
+                      Gamme
+                      <select value={arbre.gamme || ''} onChange={(e) => patchArbre({ gamme: (e.target.value || null) as Gamme | null })} className={champ}>
+                        <option value="">Toutes gammes</option>
+                        {GAMMES.map((g) => (
+                          <option key={g.value} value={g.value}>
+                            {g.label} — {g.titre}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  ) : null}
                   <label className="text-[11px] font-semibold text-slate-500 md:col-span-2">
                     Question de départ
                     <select value={arbre.noeud_racine || ''} onChange={(e) => patchArbre({ noeud_racine: e.target.value || null })} className={champ}>
@@ -552,7 +588,7 @@ export default function HotlineDiagnosticPage() {
                             <div className="flex gap-1">
                               <input value={d.titre} onChange={(e) => patchDoc(n, i, { titre: e.target.value })} placeholder="Titre" className={champ} />
                               <select value={d.type || 'PDF'} onChange={(e) => patchDoc(n, i, { type: e.target.value })} className={`${champ} w-[110px]`}>
-                                {['PDF', 'SCHEMA', 'FIRMWARE', 'VIDEO', 'XLS', 'LIEN'].map((t) => (
+                                {['PDF', 'SCHEMA', 'FIRMWARE', 'VIDEO', 'XLS', 'LIEN', 'VUE_ECLATEE'].map((t) => (
                                   <option key={t} value={t}>
                                     {t}
                                   </option>
@@ -566,7 +602,7 @@ export default function HotlineDiagnosticPage() {
                                 ✕
                               </button>
                             </div>
-                            <input value={d.url || ''} onChange={(e) => patchDoc(n, i, { url: e.target.value })} placeholder="Lien (Documents, SharePoint, site fabricant…)" className={champ} />
+                            <input value={d.url || ''} onChange={(e) => patchDoc(n, i, { url: e.target.value })} placeholder={d.type === 'VUE_ECLATEE' ? 'vue:RÉFÉRENCE (ex. vue:RAK-DJ35RHAE)' : 'Lien (Documents, SharePoint, site fabricant…)'} className={champ} />
                           </div>
                         ))}
                         <button type="button" onClick={() => patchNoeud(n.id, { documents: [...n.documents, { titre: '', type: 'PDF', url: '' }] })} className={petitBouton}>
