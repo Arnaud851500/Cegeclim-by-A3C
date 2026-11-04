@@ -322,3 +322,17 @@ revoke all on function public.hotline_importer_historique(jsonb, boolean) from p
 grant execute on function public.hotline_importer_historique(jsonb, boolean) to authenticated;
 
 notify pgrst, 'reload schema';
+
+-- Correctif (04/11/2026) : modèles saisis avec un espace (« RAM 90 QH5 », « TAW 270 RHD »).
+create or replace function public.hotline_gamme_depuis_modeles(p_ge text, p_ui text)
+returns text
+language sql
+immutable
+as $function$
+  select case
+    when m ~ '(^|[^A-Z])(RPI|RAD|RPIM)[- ]?[0-9]' or m ~ 'GAINABLE' then 'GAINABLE'
+    when m ~ '(^|[^A-Z])(RWH|RWD|RWM|TAW|HWD|RASM|RAW)[- ]?[0-9]' or m ~ '(YUTAKI|YUTAMPO)' or m ~ 'RAS[- ]?[0-9.,]+ ?W?H(V)?N' then 'RO'
+    when m ~ '(^|[^A-Z])(RAK|RAC|RAM|RCI|RCIM|RAI|RAF|RPK|RPC|RCD)[- ]?[0-9]' or m ~ 'RAS[- ]?[0-9.,]+ ?H' then 'RR'
+  end
+  from (select upper(coalesce(p_ui, '') || ' ' || coalesce(p_ge, '')) m) s;
+$function$;
