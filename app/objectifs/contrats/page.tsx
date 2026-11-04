@@ -272,7 +272,7 @@ function Liste({ annee, droits, onOuvrir }: { annee: number; droits: Droits; onO
   const [refs, setRefs] = useState<CollabRef[] | null>(null)
   const [nouveau, setNouveau] = useState('')
   // Primes annuelles max / probables par contrat, calculées comme sur la fiche (etatPrime)
-  const [primes, setPrimes] = useState<Map<string, { max: number; probable: number }> | null>(null)
+  const [primes, setPrimes] = useState<Map<string, { max: number; probable: number; regul: number | null }> | null>(null)
 
   useEffect(() => {
     setData(null)
@@ -283,11 +283,15 @@ function Liste({ annee, droits, onOuvrir }: { annee: number; droits: Droits; onO
         setData(d)
         setPrimes(null)
         chargerFiches(annee, d.rows.map((r) => r.code)).then(({ fiches }) => {
-          const m = new Map<string, { max: number; probable: number }>()
+          const m = new Map<string, { max: number; probable: number; regul: number | null }>()
           for (const f of fiches) {
             const calc = calculerContrat(f)
             const etats = (f.primes || []).map((p) => etatPrime(p, f, calc))
-            m.set(f.code, { max: etats.reduce((s, e) => s + e.montantMax, 0), probable: etats.reduce((s, e) => s + e.montantProjete, 0) })
+            m.set(f.code, {
+              max: etats.reduce((s, e) => s + e.montantMax, 0),
+              probable: etats.reduce((s, e) => s + e.montantProjete, 0),
+              regul: calc.soldeProjete ?? null,
+            })
           }
           setPrimes(m)
         })
@@ -310,9 +314,10 @@ function Liste({ annee, droits, onOuvrir }: { annee: number; droits: Droits; onO
       s.av += r.avance_mensuelle * (r.mois_calc ?? mc)
       s.pmax += primes?.get(r.code)?.max || 0
       s.pprob += primes?.get(r.code)?.probable || 0
+      s.regul += primes?.get(r.code)?.regul || 0
       return s
     },
-    { obj: 0, ca: 0, com: 0, av: 0, pmax: 0, pprob: 0 },
+    { obj: 0, ca: 0, com: 0, av: 0, pmax: 0, pprob: 0, regul: 0 },
   )
 
   return (
@@ -343,7 +348,7 @@ function Liste({ annee, droits, onOuvrir }: { annee: number; droits: Droits; onO
         <Alerte ton="info" texte={`Aucun contrat d’objectifs ${annee} dans votre périmètre.`} />
       ) : (
         <div className="overflow-x-auto rounded-xl border border-[#E2DFD8] bg-white">
-          <table className="w-full min-w-[1200px] text-[13px]">
+          <table className="w-full min-w-[1320px] text-[13px] [&_tbody_td]:whitespace-nowrap [&_tfoot_td]:whitespace-nowrap">
             <thead className="bg-[#111820] text-left text-[11px] uppercase tracking-[0.08em] text-[#C9C4B8]">
               <tr>
                 <th className="px-3 py-2.5">Collaborateur</th>
@@ -356,6 +361,7 @@ function Liste({ annee, droits, onOuvrir }: { annee: number; droits: Droits; onO
                 <th className="px-3 py-2.5 text-right">Commission acquise</th>
                 <th className="px-3 py-2.5 text-right">Avances versées</th>
                 <th className="px-3 py-2.5 text-right">Solde</th>
+                <th className="px-3 py-2.5 text-right" title="Commission projetée sur l’année (ou jusqu’à la fin du contrat) − avances du contrat : régularisation de décembre, comme sur la fiche">Régul projetée</th>
                 <th className="px-3 py-2.5 text-right" title="Somme des primes annuelles individuelles au plafond du contrat">Prime indiv. max</th>
                 <th className="px-3 py-2.5 text-right" title="Prime annuelle probable en fin d’année : paliers sur la projection, indicateurs automatiques à date, primes évaluées au montant retenu, primes à évaluer au maximum">Prime indiv. probable</th>
                 <th className="px-3 py-2.5 text-center">Primes à évaluer</th>
@@ -378,8 +384,10 @@ function Liste({ annee, droits, onOuvrir }: { annee: number; droits: Droits; onO
                     </td>
                     <td className="px-3 py-2 text-slate-600">{r.agence || '—'}</td>
                     <td className="px-3 py-2 text-right tabular-nums">
+                      {r.perimetre_objectif === 'agence' && (
+                        <span className="mr-1.5 rounded bg-[#E3EEF2] px-1 py-0.5 text-[9px] font-bold uppercase text-[#2D6F86]" title="Objectif porté sur le CA de l’agence">Agence</span>
+                      )}
                       {fmtK(r.objectif_caht)}
-                      {r.perimetre_objectif === 'agence' && <div className="text-[10px] font-semibold uppercase text-[#2D6F86]">CA agence</div>}
                     </td>
                     <td className="px-3 py-2 text-right tabular-nums">{fmtK(r.ca_objectif)}</td>
                     <td className={`px-3 py-2 text-right tabular-nums ${evol == null ? '' : evol >= 0 ? 'text-[#2F7A4A]' : 'text-[#C1683C]'}`}>
@@ -392,12 +400,19 @@ function Liste({ annee, droits, onOuvrir }: { annee: number; droits: Droits; onO
                     <td className="px-3 py-2 text-right tabular-nums">{fmtE(com)}</td>
                     <td className="px-3 py-2 text-right tabular-nums text-slate-500">{fmtE(av)}</td>
                     <td className={`px-3 py-2 text-right font-semibold tabular-nums ${com - av >= 0 ? 'text-[#2F7A4A]' : 'text-[#C1683C]'}`}>{fmtE(com - av)}</td>
+                    <td
+                      className={`px-3 py-2 text-right font-semibold tabular-nums ${
+                        !primes || primes.get(r.code)?.regul == null ? 'text-slate-400' : (primes.get(r.code)?.regul ?? 0) >= 0 ? 'text-[#1F5A35]' : 'text-[#C1683C]'
+                      }`}
+                    >
+                      {primes ? (primes.get(r.code)?.regul == null ? '—' : fmtE(primes.get(r.code)?.regul ?? 0)) : '…'}
+                    </td>
                     <td className="px-3 py-2 text-right tabular-nums text-slate-500">{primes ? fmtE(primes.get(r.code)?.max ?? 0) : '…'}</td>
                     <td className="px-3 py-2 text-right font-semibold tabular-nums text-[#0B1220]">
-                      {primes ? fmtE(primes.get(r.code)?.probable ?? 0) : '…'}
                       {primes && (primes.get(r.code)?.max ?? 0) > 0 && (
-                        <div className="text-[10px] font-normal text-slate-500">{fmtPct((primes.get(r.code)?.probable ?? 0) / (primes.get(r.code)?.max ?? 1), 0)} du max</div>
+                        <span className="mr-1.5 text-[10px] font-normal text-slate-500">{fmtPct((primes.get(r.code)?.probable ?? 0) / (primes.get(r.code)?.max ?? 1), 0)}</span>
                       )}
+                      {primes ? fmtE(primes.get(r.code)?.probable ?? 0) : '…'}
                     </td>
                     <td className="px-3 py-2 text-center">
                       {r.nb_a_evaluer > 0 ? (
@@ -425,6 +440,7 @@ function Liste({ annee, droits, onOuvrir }: { annee: number; droits: Droits; onO
                 <td className="px-3 py-2 text-right tabular-nums">{fmtE(tot.com)}</td>
                 <td className="px-3 py-2 text-right tabular-nums">{fmtE(tot.av)}</td>
                 <td className="px-3 py-2 text-right tabular-nums">{fmtE(tot.com - tot.av)}</td>
+                <td className="px-3 py-2 text-right tabular-nums">{primes ? fmtE(tot.regul) : '…'}</td>
                 <td className="px-3 py-2 text-right tabular-nums">{primes ? fmtE(tot.pmax) : '…'}</td>
                 <td className="px-3 py-2 text-right tabular-nums">{primes ? fmtE(tot.pprob) : '…'}</td>
                 <td />
@@ -434,7 +450,7 @@ function Liste({ annee, droits, onOuvrir }: { annee: number; droits: Droits; onO
         </div>
       )}
       <p className="text-[11px] text-slate-500">
-        Les contrats avec une date de fin sont calculés jusqu’au mois de cette date inclus. CA à date = CA perso, ou CA de l’agence quand l’objectif du contrat porte sur l’agence. Avances versées = avance mensuelle × mois clos (hors versements saisis sur la fiche). Commission acquise = marge perso des mois clos × taux de commission. Prime indiv. max = somme des primes annuelles au plafond du contrat ; prime indiv. probable = estimation de fin d’année (paliers CA sur la projection, indicateurs automatiques à date, primes évaluées au montant retenu, primes qualitatives non encore évaluées comptées au maximum), comme sur la fiche.
+        Les contrats avec une date de fin sont calculés jusqu’au mois de cette date inclus. CA à date = CA perso, ou CA de l’agence quand l’objectif du contrat porte sur l’agence. Avances versées = avance mensuelle × mois clos (hors versements saisis sur la fiche). Commission acquise = marge perso des mois clos × taux de commission. Régul projetée = commission projetée sur l’année (ou jusqu’à la fin du contrat) − avances du contrat, comme sur la fiche. Prime indiv. max = somme des primes annuelles au plafond du contrat ; prime indiv. probable = estimation de fin d’année (paliers CA sur la projection, indicateurs automatiques à date, primes évaluées au montant retenu, primes qualitatives non encore évaluées comptées au maximum), comme sur la fiche.
       </p>
     </div>
   )
