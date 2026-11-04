@@ -700,6 +700,7 @@ function HotlineConsole() {
   }
 
   const statut = ticket ? STATUTS[ticket.statut] : null
+  const diagnosticsRepris = etapes.filter(estDiagnosticRepris)
 
   return (
     <div className="min-h-screen bg-[#F4F3F0] pb-16">
@@ -934,7 +935,15 @@ function HotlineConsole() {
                     <li key={e.id} className="text-[12px] leading-snug">
                       <span className="font-mono text-[11px] text-slate-400">{fmtHeure(e.at)}</span>{' '}
                       <span className="font-semibold text-slate-700">{ETAPE_LIBELLES[e.type]}</span>{' '}
-                      <span className="text-slate-600">{e.libelle}</span>
+                      {estDiagnosticRepris(e) ? (
+                        <span className="text-slate-600">
+                          Diagnostic de l’ancien outil <span className="text-slate-400">— affiché en entier au centre</span>
+                        </span>
+                      ) : (
+                        <span className="text-slate-600" title={e.libelle.length > 220 ? e.libelle : undefined}>
+                          {e.libelle.length > 220 ? `${e.libelle.slice(0, 200)}…` : e.libelle}
+                        </span>
+                      )}
                     </li>
                   ))}
                 </ol>
@@ -962,6 +971,29 @@ function HotlineConsole() {
               ) : null}
             </div>
             <div className="p-5">
+              {diagnosticsRepris.length || (ticket?.source === 'IMPORT' && ticket.description) ? (
+                <div className="mb-5 rounded-xl border border-[#E2DFD8] bg-[#FAF9F7]">
+                  <div className="border-b border-[#EFEDE8] px-4 py-2 text-[12px] font-bold uppercase tracking-[0.05em] text-slate-500">
+                    Ticket repris de l’ancien outil
+                  </div>
+                  <div className="max-h-[420px] space-y-3 overflow-y-auto px-4 py-3 text-[13px] leading-relaxed text-slate-800">
+                    {ticket?.source === 'IMPORT' && ticket.description ? (
+                      <div>
+                        <div className="text-[11px] font-semibold uppercase tracking-[0.04em] text-slate-400">Notes rapides</div>
+                        <div className="whitespace-pre-wrap">{ticket.description}</div>
+                      </div>
+                    ) : null}
+                    {diagnosticsRepris.map((e) => (
+                      <div key={e.id}>
+                        <div className="text-[11px] font-semibold uppercase tracking-[0.04em] text-slate-400">
+                          Diagnostic · {fmtDateHeure(e.at)} · {e.auteur.split('@')[0]}
+                        </div>
+                        <div className="whitespace-pre-wrap">{e.libelle.replace(/^Diagnostic : /, '')}</div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
               {!form.filiere ? (
                 <p className="text-[13px] text-slate-500">Choisir la filière pour afficher le parcours de diagnostic.</p>
               ) : form.filiere === 'THERMIQUE' && !form.gamme && !arbreId ? (
@@ -1277,6 +1309,11 @@ function PaveHistorique({
   )
 }
 
+/** Diagnostic repris de l'ancien outil (étape d'import) : affiché au centre, pas dans la chronologie. */
+function estDiagnosticRepris(e: Etape) {
+  return e.type === 'COMMENTAIRE' && Boolean(e.details && (e.details as Record<string, unknown>).import) && e.libelle.startsWith('Diagnostic : ')
+}
+
 // ── Fenêtre flottante d'un ticket de l'historique (04/11/2026) ─────────────────
 function FenetreTicket({ id, onFermer }: { id: string; onFermer: () => void }) {
   const [t, setT] = useState<Ticket | null>(null)
@@ -1352,10 +1389,16 @@ function FenetreTicket({ id, onFermer }: { id: string; onFermer: () => void }) {
                 <span className="font-semibold">Préconisation :</span> {t.preconisation}
               </div>
             ) : null}
+            {etapes.filter(estDiagnosticRepris).map((e) => (
+              <div key={e.id} className="rounded-lg border border-[#E2DFD8] bg-[#FAF9F7] p-3">
+                <div className="text-[11px] font-semibold uppercase tracking-[0.04em] text-slate-400">Diagnostic (ancien outil)</div>
+                <div className="max-h-[300px] overflow-y-auto whitespace-pre-wrap text-slate-800">{e.libelle.replace(/^Diagnostic : /, '')}</div>
+              </div>
+            ))}
             <div>
               <div className="mb-2 text-[12px] font-bold uppercase tracking-[0.05em] text-slate-500">Chronologie</div>
               <ol className="space-y-1.5">
-                {etapes.map((e) => (
+                {etapes.filter((e) => !estDiagnosticRepris(e)).map((e) => (
                   <li key={e.id} className="text-[12px] leading-snug">
                     <span className="font-mono text-[11px] text-slate-400">{fmtDateHeure(e.at)}</span>{' '}
                     <span className="font-semibold text-slate-700">{ETAPE_LIBELLES[e.type]}</span> <span className="text-slate-600">{e.libelle}</span>
