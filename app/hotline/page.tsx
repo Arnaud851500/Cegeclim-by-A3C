@@ -1,0 +1,1989 @@
+'use client'
+
+/**
+ * Console d'appel — Hotline technique / SAV (/hotline). Créé le 02/11/2026.
+ *
+ * - Ouverte par 3CX sur appel entrant : /hotline?tel=<appelant>&ligne=<numéro appelé>
+ *   (voir lib/hotline.ts). Le numéro est recherché dans SAGE (fiche tiers,
+ *   contacts) et BLG (contacts) — RPC hotline_identifier_appelant.
+ * - La ligne appelée choisit la filière (hotline_lignes) : PV ou thermique.
+ * - Colonne gauche : appelant, filière / motif, champs du ticket, chronologie.
+ * - Colonne centrale : diagnostic guidé (arbre de questions-réponses de la
+ *   filière et du motif) ; chaque réponse est horodatée dans le ticket.
+ * - Colonne droite : contexte en temps réel — trois historiques hotline
+ *   (client, contact, chantier / machine), documents de vente filtrés par
+ *   chantier / n° de série — et
+ *   documents proposés par le diagnostic, envoyables à l'appelant.
+ * - Reprise d'un ticket non résolu (02/11/2026) : /hotline?ticket=<id> (bouton
+ *   « Reprendre dans la console » de la liste des tickets) recharge le ticket,
+ *   ses documents de vente, ses historiques et le diagnostic là où il s'était
+ *   arrêté (réponses rejouées depuis la chronologie) ; on peut renvoyer des
+ *   documents, poursuivre ou recommencer le parcours.
+ * - Gamme thermique (04/11/2026) : après « Thermie », choix Gainable / R/R / R/O
+ *   qui filtre les parcours (un parcours sans gamme vaut pour toutes).
+ * - Vues éclatées (04/11/2026) : une référence ayant une vue (ligne d'un dossier
+ *   de vente, champ « Modèle », document VUE_ECLATEE d'un parcours) ouvre la vue
+ *   interactive (components/hotline/VueEclatee.tsx) : repères cliquables, stock,
+ *   demande d'envoi au SAV enregistrée dans le ticket, mail au pro.
+ * Tables / RPC : migration 20261102_hotline_technique.sql.
+ */
+
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import Link from 'next/link'
+import { useSearchParams } from 'next/navigation'
+import { supabase } from '@/lib/supabaseClient'
+import { useAccess } from '@/components/AccessContext'
+import HotlineHeader, { HotlineErreur, Pastille } from '@/components/hotline/HotlineHeader'
+import PiecesJointes from '@/components/hotline/PiecesJointes'
+import VueEclatee from '@/components/hotline/VueEclatee'
+import {
+  ETAPE_LIBELLES,
+  FILIERES,
+  GAMMES,
+  MOTIFS,
+  NATURES,
+  libelleNature,
+  STATUTS,
+  ajouterEtape,
+  chargerArbres,
+  CONTEXTE_VIDE,
+  chargerContexte,
+  chargerDossiers,
+  chargerLivraisons,
+  chargerEtapes,
+  chargerLignes,
+  chargerNoeuds,
+  chargerReferencesVues,
+  libelleGamme,
+  referenceVue,
+  escalader,
+  fmtDate,
+  fmtDateHeure,
+  fmtEuro,
+  fmtHeure,
+  fmtTel,
+  identifierAppelant,
+  libelleFiliere,
+  libelleMotif,
+  creerBrouillonEmail,
+  ouvrirMessagerie,
+  posteWindows,
+  telechargerPieceJointe,
+  messageEnvoiDocument,
+  majTicket,
+  messageErreur,
+  rechercherTiers,
+  resoudre,
+  telCle,
+  type Appelant,
+  type Arbre,
+  type Choix,
+  type Contexte,
+  type DocumentLien,
+  type Etape,
+  type Filiere,
+  type Gamme,
+  type Ligne,
+  type Nature,
+  type Dossier,
+  type Livraison,
+  type Motif,
+  type Noeud,
+  type Ticket,
+  type TicketHistorique,
+  type TiersTrouve,
+} from '@/lib/hotline'
+
+type Formulaire = {
+  filiere: Filiere | null
+  gamme: Gamme | null
+  motif: Motif | null
+  numero_tiers: string
+  intitule_tiers: string
+  contact_nom: string
+  contact_email: string
+  chantier: string
+  numero_serie: string
+  reference_article: string
+  modele_ge: string
+  serie_ge: string
+  nature: Nature | ''
+  code_defaut: string
+  date_mes: string
+  description: string
+}
+
+const FORM_VIDE: Formulaire = {
+  filiere: null,
+  gamme: null,
+  motif: null,
+  numero_tiers: '',
+  intitule_tiers: '',
+  contact_nom: '',
+  contact_email: '',
+  chantier: '',
+  numero_serie: '',
+  reference_article: '',
+  modele_ge: '',
+  serie_ge: '',
+  nature: '',
+  code_defaut: '',
+  date_mes: '',
+  description: '',
+}
+
+const champ =
+  'h-9 w-full rounded-lg border border-[#D8D3C8] bg-white px-2.5 text-[13px] text-slate-900 outline-none focus:border-[#B4761A]'
+const carte = 'rounded-2xl border border-[#E2DFD8] bg-white'
+const titreCarte = 'border-b border-[#EFEDE8] px-4 py-3 text-[14px] font-bold text-slate-900'
+
+export default function HotlineConsoleWrapper() {
+  return (
+    <Suspense fallback={<div className="p-10 text-sm text-slate-500">Chargement…</div>}>
+      <HotlineConsole />
+    </Suspense>
+  )
+}
+
+function HotlineConsole() {
+  const params = useSearchParams()
+  const { email } = useAccess()
+
+  const [telephone, setTelephone] = useState(params.get('tel') || '')
+  const [ligneAppelee] = useState(params.get('ligne') || '')
+  const [lignes, setLignes] = useState<Ligne[]>([])
+  const [arbres, setArbres] = useState<Arbre[]>([])
+  const [appelants, setAppelants] = useState<AppelantGroupe[] | null>(null)
+  // Liste des propositions repliée dès qu'un appelant est retenu (auto ou clic).
+  const [listeOuverte, setListeOuverte] = useState(false)
+  const [voirTout, setVoirTout] = useState(false)
+  const [recherche, setRecherche] = useState(false)
+  const [form, setForm] = useState<Formulaire>(FORM_VIDE)
+  const [ticket, setTicket] = useState<Ticket | null>(null)
+  const [etapes, setEtapes] = useState<Etape[]>([])
+  const [contexte, setContexte] = useState<Contexte>(CONTEXTE_VIDE)
+  const [contexteLoading, setContexteLoading] = useState(false)
+  const [livraisons, setLivraisons] = useState<Livraison[]>([])
+  const [livraisonsLoading, setLivraisonsLoading] = useState(false)
+  const [dossiers, setDossiers] = useState<{ total: number; liste: Dossier[] }>({ total: 0, liste: [] })
+  const [dossiersLoading, setDossiersLoading] = useState(false)
+  const [dossierChoisi, setDossierChoisi] = useState<string | null>(null)
+  const [erreur, setErreur] = useState<string | null>(null)
+  const [info, setInfo] = useState<string | null>(null)
+  const [envoiEnCours, setEnvoiEnCours] = useState<string | null>(null)
+  const [docAEnvoyer, setDocAEnvoyer] = useState<DocumentLien | null>(null)
+  const [busy, setBusy] = useState(false)
+
+  // Diagnostic guidé
+  const [arbreId, setArbreId] = useState<string>('')
+  const [noeuds, setNoeuds] = useState<Noeud[]>([])
+  const [noeudCourant, setNoeudCourant] = useState<string | null>(null)
+  const [parcours, setParcours] = useState<Array<{ noeud: string; choix: string }>>([])
+  const [fin, setFin] = useState<Choix | null>(null)
+  const [docsDiagnostic, setDocsDiagnostic] = useState<DocumentLien[]>([])
+  const [commentaire, setCommentaire] = useState('')
+  // Vues éclatées : références qui en ont une, vue ouverte.
+  const [refsVues, setRefsVues] = useState<Set<string>>(new Set())
+  const [vueOuverte, setVueOuverte] = useState<string | null>(null)
+  // Ticket de l'historique affiché en fenêtre flottante (04/11/2026).
+  const [ticketHisto, setTicketHisto] = useState<string | null>(null)
+  const fermerTicketHisto = useCallback(() => setTicketHisto(null), [])
+
+  const patch = (p: Partial<Formulaire>) => setForm((f) => ({ ...f, ...p }))
+
+  // Référentiels -------------------------------------------------------------
+  useEffect(() => {
+    Promise.all([chargerLignes(), chargerArbres({ actifsSeulement: true })])
+      .then(([l, a]) => {
+        setLignes(l)
+        setArbres(a)
+        setArbresCharges(true)
+      })
+      .catch((e) => setErreur(messageErreur(e)))
+    chargerReferencesVues()
+      .then((refs) => setRefsVues(new Set(refs)))
+      .catch(() => undefined)
+  }, [])
+
+  // Filière déduite de la ligne 3CX appelée.
+  useEffect(() => {
+    if (!ligneAppelee || !lignes.length || form.filiere) return
+    const cle = telCle(ligneAppelee)
+    const ligne = lignes.find((l) => l.actif && (l.numero === ligneAppelee || (cle && telCle(l.numero) === cle)))
+    if (ligne) patch({ filiere: ligne.filiere })
+  }, [ligneAppelee, lignes, form.filiere])
+
+  // Identification de l'appelant ---------------------------------------------
+  const identifier = useCallback(async (tel: string) => {
+    if (telCle(tel).length < 9) return
+    setRecherche(true)
+    try {
+      const liste = regrouperAppelants(await identifierAppelant(tel))
+      setAppelants(liste)
+      setVoirTout(false)
+      // Contact déjà enregistré par la hotline (appel précédent) : pré-saisie
+      // directe, il fait foi. Sinon, pré-saisie si un seul client correspond.
+      const tiers = Array.from(new Set(liste.map((a) => a.numero_tiers).filter(Boolean)))
+      const memorise = liste.find((a) => a.sources.includes('Hotline'))
+      const a = memorise || (liste.length && tiers.length === 1 ? liste[0] : null)
+      setListeOuverte(!a)
+      if (a) {
+        setForm((f) => ({
+          ...f,
+          numero_tiers: a.numero_tiers || f.numero_tiers,
+          intitule_tiers: a.intitule || f.intitule_tiers,
+          contact_nom: f.contact_nom || (a.source !== 'SAGE fiche tiers' ? a.contact || '' : ''),
+          contact_email: f.contact_email || a.email || '',
+        }))
+      }
+    } catch (e) {
+      setErreur(messageErreur(e))
+    } finally {
+      setRecherche(false)
+    }
+  }, [])
+
+  // Reprise d'un ticket existant -------------------------------------------
+  const ticketAReprendre = useRef(params.get('ticket') || '')
+  // Réponses à rejouer quand les questions de l'arbre du ticket sont chargées.
+  const aRejouer = useRef<{ arbreId: string; reponses: Etape[] } | null>(null)
+  const [arbresCharges, setArbresCharges] = useState(false)
+
+  useEffect(() => {
+    const id = ticketAReprendre.current
+    if (!id || !arbresCharges) return
+    ticketAReprendre.current = ''
+    void (async () => {
+      try {
+        const { data, error } = await supabase.from('hotline_tickets').select('*').eq('id', id).maybeSingle()
+        if (error) throw error
+        if (!data) throw new Error('Ticket introuvable.')
+        const t = data as Ticket
+        const liste = await chargerEtapes(t.id)
+        setTelephone(t.telephone_appelant || '')
+        setForm({
+          filiere: t.filiere,
+          gamme: t.gamme || arbres.find((a) => a.id === t.arbre_id)?.gamme || null,
+          motif: t.motif,
+          numero_tiers: t.numero_tiers || '',
+          intitule_tiers: t.intitule_tiers || '',
+          contact_nom: t.contact_nom || '',
+          contact_email: t.contact_email || '',
+          chantier: t.chantier || '',
+          numero_serie: t.numero_serie || '',
+          reference_article: t.reference_article || '',
+          modele_ge: t.modele_ge || '',
+          serie_ge: t.serie_ge || '',
+          nature: t.nature || '',
+          code_defaut: t.code_defaut || '',
+          date_mes: t.date_mes || '',
+          description: t.description || '',
+        })
+        if (t.arbre_id) {
+          aRejouer.current = { arbreId: t.arbre_id, reponses: liste.filter((e) => e.type === 'QUESTION' && e.noeud_id) }
+          setArbreId(t.arbre_id)
+        }
+        // Reprise = prise en charge par la personne qui rouvre la console.
+        // Un ticket résolu ou clos rouvert depuis la liste repart « en cours ».
+        const statut = 'EN_COURS' as const
+        const qui = String(email || '').split('@')[0]
+        await majTicket(t.id, { assigne_a: email || t.assigne_a, statut })
+        if (t.statut === 'RESOLU' || t.statut === 'CLOS') await ajouterEtape(t.id, 'REOUVERTURE', `Ticket rouvert dans la console par ${qui} (niveau ${t.niveau})`)
+        else await ajouterEtape(t.id, 'COMMENTAIRE', `Repris dans la console par ${qui} (niveau ${t.niveau})`)
+        setTicket({ ...t, assigne_a: email || t.assigne_a, statut })
+        setEtapes(await chargerEtapes(t.id))
+      } catch (e) {
+        setErreur(messageErreur(e))
+      }
+    })()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [arbresCharges, email])
+
+  const telInitial = useRef(params.get('tel') || '')
+  useEffect(() => {
+    if (telInitial.current) void identifier(telInitial.current)
+  }, [identifier])
+
+  function choisirAppelant(a: AppelantGroupe) {
+    patch({ numero_tiers: a.numero_tiers || '', intitule_tiers: a.intitule || '', contact_nom: a.contact || '', contact_email: a.email || '' })
+    setListeOuverte(false)
+  }
+
+  // Contexte temps réel (debounce 400 ms) -----------------------------------
+  useEffect(() => {
+    const handle = window.setTimeout(async () => {
+      if (!form.numero_tiers && !form.numero_serie && !form.serie_ge && !form.chantier && telCle(telephone).length < 9) {
+        setContexte(CONTEXTE_VIDE)
+        return
+      }
+      setContexteLoading(true)
+      try {
+        setContexte(
+          await chargerContexte({
+            numeroTiers: form.numero_tiers,
+            telephone,
+            chantier: form.chantier,
+            numeroSerie: form.numero_serie || form.serie_ge,
+            contactNom: form.contact_nom,
+          }),
+        )
+      } catch (e) {
+        setErreur(messageErreur(e))
+      } finally {
+        setContexteLoading(false)
+      }
+    }, 400)
+    return () => window.clearTimeout(handle)
+  }, [form.numero_tiers, form.chantier, form.numero_serie, form.serie_ge, form.contact_nom, telephone, ticket?.id])
+
+  // Dossiers de vente du client (02/11/2026) : référence chantier, n° de pièce
+  // ou produit saisi dans « Chantier » (sinon « Modèle »). Sans recherche : les
+  // dossiers les plus récents. Un seul dossier trouvé = ouvert directement.
+  const rechercheDossier = (form.chantier.trim() || form.reference_article.trim())
+  useEffect(() => {
+    const tiers = form.numero_tiers.trim()
+    const q = rechercheDossier
+    const handle = window.setTimeout(async () => {
+      if (!tiers) {
+        setDossiers({ total: 0, liste: [] })
+        return
+      }
+      setDossiersLoading(true)
+      try {
+        const r = await chargerDossiers(tiers, q.length >= 2 ? q : null)
+        setDossiers({ total: r.total, liste: r.dossiers })
+        setDossierChoisi((actuel) => {
+          if (actuel && r.dossiers.some((d) => d.cle === actuel)) return actuel
+          return q.length >= 2 && r.dossiers.length === 1 ? r.dossiers[0].cle : null
+        })
+      } catch (e) {
+        setErreur(messageErreur(e))
+      } finally {
+        setDossiersLoading(false)
+      }
+    }, 500)
+    return () => window.clearTimeout(handle)
+  }, [form.numero_tiers, rechercheDossier])
+
+  function choisirDossier(d: Dossier | null) {
+    setDossierChoisi(d ? d.cle : null)
+    if (d && ticket) {
+      const pieces = [d.cdc?.piece, ...d.bls.map((b) => b.piece)].filter(Boolean).join(', ')
+      void ajouterEtape(ticket.id, 'COMMENTAIRE', `Dossier consulté : ${d.reference || d.cle}${pieces ? ` (${pieces})` : ''}`).then(() => rafraichirEtapes(ticket.id))
+    }
+  }
+
+  // Sans client identifié : livraisons par chantier / n° de série (tous clients)
+  useEffect(() => {
+    const chantier = form.chantier.trim()
+    const article = form.reference_article.trim()
+    const serie = form.numero_serie.trim()
+    const avecClient = Boolean(form.numero_tiers.trim())
+    const handle = window.setTimeout(async () => {
+      if (avecClient || (chantier.length < 3 && serie.length < 4)) {
+        setLivraisons([])
+        return
+      }
+      setLivraisonsLoading(true)
+      try {
+        setLivraisons(await chargerLivraisons({ numeroTiers: form.numero_tiers, chantier, referenceArticle: article, numeroSerie: serie }))
+      } catch (e) {
+        setErreur(messageErreur(e))
+      } finally {
+        setLivraisonsLoading(false)
+      }
+    }, 500)
+    return () => window.clearTimeout(handle)
+  }, [form.numero_tiers, form.chantier, form.reference_article, form.numero_serie])
+
+
+  // Arbre de diagnostic ------------------------------------------------------
+  const arbresPossibles = useMemo(
+    () =>
+      arbres.filter(
+        (a) =>
+          a.filiere === form.filiere &&
+          (!form.motif || a.motif === form.motif) &&
+          (form.filiere !== 'THERMIQUE' || !form.gamme || !a.gamme || a.gamme === form.gamme),
+      ),
+    [arbres, form.filiere, form.motif, form.gamme],
+  )
+
+  useEffect(() => {
+    if (arbresPossibles.some((a) => a.id === arbreId)) return
+    // Thermie sans gamme choisie : on attend la gamme avant de proposer un parcours.
+    if (form.filiere === 'THERMIQUE' && !form.gamme) {
+      if (!aRejouer.current) setArbreId('')
+      return
+    }
+    setArbreId(arbresPossibles.length === 1 ? arbresPossibles[0].id : '')
+  }, [arbresPossibles, arbreId, form.filiere, form.gamme])
+
+  useEffect(() => {
+    setNoeuds([])
+    setNoeudCourant(null)
+    setParcours([])
+    setFin(null)
+    setDocsDiagnostic([])
+    if (!arbreId) return
+    chargerNoeuds(arbreId)
+      .then((liste) => {
+        setNoeuds(liste)
+        const arbre = arbres.find((a) => a.id === arbreId)
+        const racine = liste.find((n) => n.id === arbre?.noeud_racine) || liste[0]
+        if (!racine) return
+        // Reprise : on rejoue les réponses déjà données (chronologie du ticket)
+        // pour revenir à la question où le diagnostic s'était arrêté.
+        const rejeu = aRejouer.current
+        if (rejeu && rejeu.arbreId === arbreId) {
+          aRejouer.current = null
+          const map = new Map(liste.map((n) => [n.id, n]))
+          let courant = racine.id
+          let finRejeu: Choix | null = null
+          const chemin: Array<{ noeud: string; choix: string }> = []
+          const docs = [...racine.documents]
+          for (const e of rejeu.reponses) {
+            const n = map.get(String(e.noeud_id))
+            const libelle = e.libelle.split(' → ').pop() || ''
+            const c = n?.choix.find((x) => x.libelle === libelle)
+            if (!n || !c) continue
+            chemin.push({ noeud: n.id, choix: c.libelle })
+            const suivant = c.suivant ? map.get(c.suivant) : null
+            if (suivant) {
+              courant = suivant.id
+              finRejeu = null
+              suivant.documents.forEach((d) => {
+                if (!docs.some((x) => x.titre === d.titre)) docs.push(d)
+              })
+            } else {
+              courant = n.id
+              finRejeu = c
+            }
+          }
+          setParcours(chemin)
+          setNoeudCourant(courant)
+          setFin(finRejeu)
+          setDocsDiagnostic(docs)
+          return
+        }
+        setNoeudCourant(racine.id)
+        setDocsDiagnostic(racine.documents)
+      })
+      .catch((e) => setErreur(messageErreur(e)))
+  }, [arbreId, arbres])
+
+  const noeudMap = useMemo(() => new Map(noeuds.map((n) => [n.id, n])), [noeuds])
+  const noeud = noeudCourant ? noeudMap.get(noeudCourant) || null : null
+
+  // Ticket ---------------------------------------------------------------------
+  const rafraichirEtapes = useCallback(async (id: string) => {
+    setEtapes(await chargerEtapes(id))
+    const { data } = await supabase.from('hotline_tickets').select('*').eq('id', id).maybeSingle()
+    if (data) setTicket(data as Ticket)
+  }, [])
+
+  async function ouvrirTicket() {
+    if (!form.filiere) {
+      setErreur('Choisir la filière (photovoltaïque ou thermique) avant d’ouvrir le ticket.')
+      return
+    }
+    setBusy(true)
+    try {
+      const { data, error } = await supabase
+        .from('hotline_tickets')
+        .insert({
+          filiere: form.filiere,
+          motif: form.motif,
+          gamme: form.filiere === 'THERMIQUE' ? form.gamme : null,
+          source: telephone ? 'TELEPHONE' : 'MANUEL',
+          telephone_appelant: telephone || null,
+          ligne_appelee: ligneAppelee || null,
+          numero_tiers: form.numero_tiers || null,
+          intitule_tiers: form.intitule_tiers || null,
+          contact_nom: form.contact_nom || null,
+          contact_email: form.contact_email.trim() || null,
+          chantier: form.chantier || null,
+          numero_serie: form.numero_serie || null,
+          reference_article: form.reference_article || null,
+          modele_ge: form.modele_ge.trim() || null,
+          serie_ge: form.serie_ge.trim() || null,
+          nature: form.nature || null,
+          code_defaut: form.code_defaut.trim() || null,
+          date_mes: form.date_mes || null,
+          description: form.description || null,
+          arbre_id: arbreId || null,
+          assigne_a: email || null,
+        })
+        .select('*')
+        .single()
+      if (error) throw error
+      const t = data as Ticket
+      await ajouterEtape(t.id, 'OUVERTURE', `Ticket ${t.numero} ouvert · ${libelleFiliere(t.filiere)}${t.gamme ? ` ${libelleGamme(t.gamme)}` : ''} · ${libelleMotif(t.motif)}`, {
+        details: { telephone: telephone || null, ligne: ligneAppelee || null },
+      })
+      if (form.numero_tiers) {
+        await ajouterEtape(t.id, 'IDENTIFICATION', `Appelant : ${form.intitule_tiers || form.numero_tiers}${form.contact_nom ? ` (${form.contact_nom})` : ''}`)
+      }
+      setTicket(t)
+      await rafraichirEtapes(t.id)
+    } catch (e) {
+      setErreur(messageErreur(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function enregistrerInfos() {
+    if (!ticket) return
+    setBusy(true)
+    try {
+      await majTicket(ticket.id, {
+        filiere: form.filiere || ticket.filiere,
+        gamme: (form.filiere || ticket.filiere) === 'THERMIQUE' ? form.gamme : null,
+        motif: form.motif,
+        numero_tiers: form.numero_tiers || null,
+        intitule_tiers: form.intitule_tiers || null,
+        contact_nom: form.contact_nom || null,
+        contact_email: form.contact_email.trim() || null,
+        chantier: form.chantier || null,
+        numero_serie: form.numero_serie || null,
+        reference_article: form.reference_article || null,
+        modele_ge: form.modele_ge.trim() || null,
+        serie_ge: form.serie_ge.trim() || null,
+        nature: form.nature || null,
+        code_defaut: form.code_defaut.trim() || null,
+        date_mes: form.date_mes || null,
+        description: form.description || null,
+        arbre_id: arbreId || null,
+      })
+      await ajouterEtape(ticket.id, 'COMMENTAIRE', 'Informations du ticket mises à jour')
+      await rafraichirEtapes(ticket.id)
+    } catch (e) {
+      setErreur(messageErreur(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function repondre(c: Choix) {
+    if (!noeud) return
+    if (!ticket) {
+      setErreur('Ouvrir le ticket avant de dérouler le diagnostic : chaque réponse y est horodatée.')
+      return
+    }
+    setBusy(true)
+    try {
+      await ajouterEtape(ticket.id, 'QUESTION', `${noeud.question} → ${c.libelle}`, { noeud_id: noeud.id })
+      if (ticket.statut === 'OUVERT') await majTicket(ticket.id, { statut: 'EN_COURS', arbre_id: arbreId || null })
+      setParcours((p) => [...p, { noeud: noeud.id, choix: c.libelle }])
+      const suivant = c.suivant ? noeudMap.get(c.suivant) : null
+      if (suivant) {
+        setNoeudCourant(suivant.id)
+        setDocsDiagnostic((docs) => {
+          const titres = new Set(docs.map((d) => d.titre))
+          return [...docs, ...suivant.documents.filter((d) => !titres.has(d.titre))]
+        })
+      } else {
+        setFin(c)
+        if (c.preconisation) {
+          await majTicket(ticket.id, { preconisation: c.preconisation })
+          await ajouterEtape(ticket.id, 'PRECONISATION', c.preconisation, { noeud_id: noeud.id })
+        }
+      }
+      await rafraichirEtapes(ticket.id)
+    } catch (e) {
+      setErreur(messageErreur(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  function recommencer() {
+    const arbre = arbres.find((a) => a.id === arbreId)
+    const racine = noeuds.find((n) => n.id === arbre?.noeud_racine) || noeuds[0]
+    if (!racine) return
+    setParcours([])
+    setFin(null)
+    setNoeudCourant(racine.id)
+    setDocsDiagnostic((docs) => [...docs, ...racine.documents.filter((d) => !docs.some((x) => x.titre === d.titre))])
+    if (ticket) void ajouterEtape(ticket.id, 'COMMENTAIRE', 'Diagnostic recommencé depuis la première question').then(() => rafraichirEtapes(ticket.id))
+  }
+
+  function revenir() {
+    const precedent = parcours[parcours.length - 1]
+    if (!precedent) return
+    setParcours((p) => p.slice(0, -1))
+    setNoeudCourant(precedent.noeud)
+    setFin(null)
+  }
+
+  async function action(nom: 'escalader' | 'resoudre' | 'commentaire') {
+    if (!ticket) return
+    setBusy(true)
+    try {
+      if (nom === 'escalader') await escalader(ticket, commentaire || fin?.preconisation || '')
+      if (nom === 'resoudre') await resoudre(ticket.id, fin?.preconisation || commentaire || '')
+      if (nom === 'commentaire' && commentaire.trim()) await ajouterEtape(ticket.id, 'COMMENTAIRE', commentaire.trim())
+      setCommentaire('')
+      await rafraichirEtapes(ticket.id)
+    } catch (e) {
+      setErreur(messageErreur(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  // Envoi d'un document par la messagerie du poste (02/11/2026) : fenêtre
+  // d'aperçu (destinataire, objet, message), puis
+  //  - Windows : brouillon .eml ouvert par Outlook, document joint ;
+  //  - Mac : nouveau message (mailto) + document téléchargé à glisser dedans.
+  // Rien n'est envoyé par le compagnon ; l'envoi est noté dans le ticket.
+  function envoyerDocument(doc: DocumentLien) {
+    setDocAEnvoyer(doc)
+  }
+
+  function ouvrirVue(reference: string) {
+    const ref = reference.trim().toUpperCase()
+    if (!ref) return
+    setVueOuverte(ref)
+    if (!form.reference_article.trim()) patch({ reference_article: ref })
+    if (ticket) void ajouterEtape(ticket.id, 'COMMENTAIRE', `Vue éclatée consultée : ${ref}`).then(() => rafraichirEtapes(ticket.id))
+  }
+
+  async function preparerMessage(v: { to: string; subject: string; text: string; mode: 'auto' | 'eml' }) {
+    if (!docAEnvoyer) return
+    const doc = docAEnvoyer
+    setEnvoiEnCours(doc.titre)
+    try {
+      let detail: string
+      if (v.mode === 'eml' || posteWindows()) {
+        const { joint } = await creerBrouillonEmail({ doc, destinataire: v.to, contactNom: form.contact_nom, ticketNumero: ticket?.numero, objet: v.subject, texte: v.text })
+        detail = joint ? 'brouillon Outlook, document joint' : 'brouillon Outlook, lien dans le texte'
+        setInfo(`Brouillon « ${doc.titre} » téléchargé : ouvrez-le, il s’affiche dans Outlook en nouveau message${joint ? ' avec le document joint' : ''}. Rien n’a été envoyé.`)
+      } else {
+        const fichier = await telechargerPieceJointe(doc)
+        const body = fichier || !doc.url ? v.text : `${v.text}\n\nLien vers le document « ${doc.titre} » :\n${doc.url}`
+        ouvrirMessagerie({ to: v.to, subject: v.subject, body })
+        detail = fichier ? `messagerie + fichier « ${fichier} » à joindre` : 'messagerie, lien dans le texte'
+        setInfo(
+          fichier
+            ? `Votre messagerie s’ouvre avec le message prêt. Le document « ${fichier} » vient d’être téléchargé : glissez-le dans le message, puis envoyez.`
+            : `Votre messagerie s’ouvre avec le message prêt (le document n’a pas pu être téléchargé : son lien est dans le texte).`,
+        )
+      }
+      window.setTimeout(() => setInfo(null), 12000)
+      setDocAEnvoyer(null)
+      if (ticket) {
+        await ajouterEtape(ticket.id, 'DOCUMENT', `Document préparé pour envoi${v.to ? ` à ${v.to}` : ''} (${detail}) : ${doc.titre}`, {
+          details: { ...doc, destinataire: v.to || null, mode: detail },
+        })
+        await rafraichirEtapes(ticket.id)
+      }
+    } catch (e) {
+      setErreur(messageErreur(e))
+    } finally {
+      setEnvoiEnCours(null)
+    }
+  }
+
+  function nouvelAppel() {
+    setTelephone('')
+    setAppelants(null)
+    setForm(FORM_VIDE)
+    setTicket(null)
+    setEtapes([])
+    setArbreId('')
+    setCommentaire('')
+    setErreur(null)
+    setVueOuverte(null)
+    window.history.replaceState(null, '', '/hotline')
+  }
+
+  const statut = ticket ? STATUTS[ticket.statut] : null
+
+  return (
+    <div className="min-h-screen bg-[#F4F3F0] pb-16">
+      <HotlineHeader
+        titre="Console d’appel"
+        sousTitre={
+          ticket
+            ? `Ticket ${ticket.numero} créé le ${fmtDateHeure(ticket.opened_at)} par ${String(ticket.ouvert_par || '').split('@')[0]}${ticket.source === 'IMPORT' ? ' (repris de l’ancien outil)' : ''}`
+            : ligneAppelee
+              ? `Appel reçu sur ${fmtTel(ligneAppelee)}${form.filiere ? ` · ${libelleFiliere(form.filiere)}` : ''}`
+              : 'Saisir le numéro de l’appelant, ou ouvrir la console depuis 3CX'
+        }
+        actions={
+          <>
+            {ticket ? (
+              <span className="flex items-center gap-2 rounded-lg border border-[color:var(--cg-hdr-line)] px-3 py-1.5 text-sm font-semibold text-[color:var(--cg-hdr-ink)]">
+                {ticket.numero} · N{ticket.niveau} {statut ? <Pastille {...statut} /> : null}
+                <span className="text-[12px] font-normal text-[color:var(--cg-hdr-muted)]">créé le {fmtDateHeure(ticket.opened_at)}</span>
+              </span>
+            ) : null}
+            <button
+              type="button"
+              onClick={nouvelAppel}
+              className="h-9 rounded-lg border border-[color:var(--cg-hdr-line)] px-3 text-sm font-semibold text-[color:var(--cg-hdr-ink-2)] hover:border-[#B4761A]"
+            >
+              Nouvel appel
+            </button>
+          </>
+        }
+      />
+
+      <main className="mx-auto w-full max-w-[1760px] px-4 py-5 md:px-8">
+        {erreur ? <HotlineErreur message={erreur} onClose={() => setErreur(null)} /> : null}
+        {info ? <div className="mb-4 rounded-xl border border-[#CDE5D1] bg-[#EEF7EF] px-4 py-2.5 text-[13px] text-[#2F6B3A]">{info}</div> : null}
+
+        <div className="grid grid-cols-1 gap-4 xl:grid-cols-12">
+          {/* ── Appelant et ticket ───────────────────────────────────── */}
+          <section className={`${carte} xl:col-span-3`}>
+            <div className={titreCarte}>Appelant</div>
+            <div className="space-y-3 p-4">
+              <div className="flex gap-2">
+                <input
+                  value={telephone}
+                  onChange={(e) => setTelephone(e.target.value)}
+                  onKeyDown={(e) => e.key === 'Enter' && identifier(telephone)}
+                  placeholder="N° de téléphone"
+                  className={champ}
+                />
+                <button
+                  type="button"
+                  onClick={() => identifier(telephone)}
+                  className="h-9 shrink-0 rounded-lg bg-[#0B1220] px-3 text-[13px] font-semibold text-white disabled:opacity-50"
+                  disabled={recherche}
+                >
+                  {recherche ? '…' : 'Identifier'}
+                </button>
+              </div>
+
+              {appelants !== null ? (
+                appelants.length ? (
+                  <PropositionsAppelant
+                    appelants={appelants}
+                    numeroTiers={form.numero_tiers}
+                    contactNom={form.contact_nom}
+                    ouverte={listeOuverte}
+                    voirTout={voirTout}
+                    onOuvrir={() => setListeOuverte(true)}
+                    onVoirTout={() => setVoirTout(true)}
+                    onChoisir={choisirAppelant}
+                  />
+                ) : (
+                  <div className="rounded-lg border border-[#EBD8AE] bg-[#FDF7EA] px-3 py-2 text-[12px] text-[#6B470E]">
+                    Numéro inconnu dans SAGE et BLG : saisir le code tiers ou le nom ci-dessous. Il sera mémorisé à l’ouverture du ticket.
+                  </div>
+                )
+              ) : null}
+
+              <div className="flex rounded-lg border border-[#D8D3C8] bg-white p-0.5 text-[13px]">
+                {FILIERES.map((f) => (
+                  <button
+                    key={f.value}
+                    type="button"
+                    onClick={() => patch({ filiere: f.value, gamme: f.value === 'THERMIQUE' ? form.gamme : null })}
+                    className={`flex-1 rounded-md px-2 py-1.5 font-semibold ${form.filiere === f.value ? 'bg-[#0B1220] text-white' : 'text-slate-600'}`}
+                  >
+                    {f.icon} {f.court}
+                  </button>
+                ))}
+              </div>
+              {form.filiere === 'THERMIQUE' ? (
+                <div className="flex rounded-lg border border-[#D8D3C8] bg-white p-0.5 text-[12px]">
+                  {GAMMES.map((g) => (
+                    <button
+                      key={g.value}
+                      type="button"
+                      title={g.titre}
+                      onClick={() => patch({ gamme: form.gamme === g.value ? null : g.value })}
+                      className={`flex-1 rounded-md px-2 py-1.5 font-semibold ${form.gamme === g.value ? 'bg-[#1E4E8C] text-white' : 'text-slate-600'}`}
+                    >
+                      {g.label}
+                    </button>
+                  ))}
+                </div>
+              ) : null}
+              <div className="flex rounded-lg border border-[#D8D3C8] bg-white p-0.5 text-[12px]">
+                {MOTIFS.map((m) => (
+                  <button
+                    key={m.value}
+                    type="button"
+                    onClick={() => patch({ motif: m.value })}
+                    className={`flex-1 rounded-md px-2 py-1.5 font-semibold ${form.motif === m.value ? 'bg-[#B4761A] text-white' : 'text-slate-600'}`}
+                  >
+                    {m.label}
+                  </button>
+                ))}
+              </div>
+
+              <div className="grid grid-cols-2 gap-2">
+                <ChampTiers
+                  label="Code tiers"
+                  mode="code"
+                  value={form.numero_tiers}
+                  onChange={(v) => patch({ numero_tiers: v.toUpperCase() })}
+                  onSelect={(t) =>
+                  setForm((f) => ({ ...f, numero_tiers: t.numero_tiers, intitule_tiers: t.intitule || '', contact_email: f.contact_email || t.email || '' }))
+                }
+                />
+                <label className="text-[11px] font-semibold text-slate-500">
+                  Contact
+                  <input value={form.contact_nom} onChange={(e) => patch({ contact_nom: e.target.value })} className={champ} />
+                </label>
+              </div>
+              <ChampTiers
+                label="Client"
+                mode="nom"
+                value={form.intitule_tiers}
+                onChange={(v) => patch({ intitule_tiers: v })}
+                onSelect={(t) =>
+                  setForm((f) => ({ ...f, numero_tiers: t.numero_tiers, intitule_tiers: t.intitule || '', contact_email: f.contact_email || t.email || '' }))
+                }
+              />
+              <label className="block text-[11px] font-semibold text-slate-500">
+                E-mail du contact
+                <input
+                  type="email"
+                  value={form.contact_email}
+                  onChange={(e) => patch({ contact_email: e.target.value })}
+                  placeholder="Pré-rempli depuis la fiche contact"
+                  className={champ}
+                />
+              </label>
+              <label className="block text-[11px] font-semibold text-slate-500">
+                Chantier / référence
+                <input value={form.chantier} onChange={(e) => patch({ chantier: e.target.value })} placeholder="Chantier ou produit" title="Référence chantier SAGE, ou nom / référence de produit (client identifié)" className={champ} />
+              </label>
+              <div className="grid grid-cols-2 gap-2">
+                <label className="text-[11px] font-semibold text-slate-500">
+                  Nature de l’appel
+                  <select value={form.nature} onChange={(e) => patch({ nature: e.target.value as Nature | '' })} className={champ}>
+                    <option value="">—</option>
+                    {NATURES.map((n) => (
+                      <option key={n.value} value={n.value}>
+                        {n.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="text-[11px] font-semibold text-slate-500">
+                  Code défaut
+                  <input value={form.code_defaut} onChange={(e) => patch({ code_defaut: e.target.value })} className={champ} />
+                </label>
+              </div>
+              <div className="rounded-lg border border-[#EFEDE8] bg-[#FAF9F7] p-2">
+                <div className="mb-1 text-[10px] font-bold uppercase tracking-[0.06em] text-slate-500">Groupe extérieur (GE)</div>
+                <div className="grid grid-cols-2 gap-2">
+                  <input value={form.modele_ge} onChange={(e) => patch({ modele_ge: e.target.value })} placeholder="Modèle GE" className={champ} />
+                  <input value={form.serie_ge} onChange={(e) => patch({ serie_ge: e.target.value })} placeholder="N° de série GE" className={champ} />
+                </div>
+                <div className="mb-1 mt-2 flex items-center justify-between text-[10px] font-bold uppercase tracking-[0.06em] text-slate-500">
+                  Unité intérieure (UI)
+                  {refsVues.has(form.reference_article.trim().toUpperCase()) ? (
+                    <button type="button" onClick={() => ouvrirVue(form.reference_article)} className="text-[11px] font-bold normal-case tracking-normal text-[#B4761A] underline">
+                      🔍 Vue éclatée
+                    </button>
+                  ) : null}
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  <input value={form.reference_article} onChange={(e) => patch({ reference_article: e.target.value })} placeholder="Modèle UI / référence" className={champ} />
+                  <input value={form.numero_serie} onChange={(e) => patch({ numero_serie: e.target.value })} placeholder="N° de série UI" className={champ} />
+                </div>
+                <label className="mt-2 flex items-center gap-2 text-[11px] font-semibold text-slate-500">
+                  Mise en service le
+                  <input type="date" value={form.date_mes} onChange={(e) => patch({ date_mes: e.target.value })} className="h-8 rounded-lg border border-[#D8D3C8] bg-white px-2 text-[12px] text-slate-900" />
+                </label>
+              </div>
+              <label className="block text-[11px] font-semibold text-slate-500">
+                Motif de l’appel
+                <textarea
+                  value={form.description}
+                  onChange={(e) => patch({ description: e.target.value })}
+                  rows={3}
+                  className="w-full rounded-lg border border-[#D8D3C8] bg-white px-2.5 py-2 text-[13px] text-slate-900 outline-none focus:border-[#B4761A]"
+                />
+              </label>
+
+              {ticket ? (
+                <button
+                  type="button"
+                  onClick={enregistrerInfos}
+                  disabled={busy}
+                  className="h-9 w-full rounded-lg border border-[#D8D3C8] text-[13px] font-semibold text-slate-700 hover:border-[#B4761A] disabled:opacity-50"
+                >
+                  Mettre à jour le ticket
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={ouvrirTicket}
+                  disabled={busy || !form.filiere}
+                  className="h-10 w-full rounded-lg bg-[#B4761A] text-[14px] font-bold text-white hover:bg-[#9A6414] disabled:opacity-50"
+                >
+                  Ouvrir le ticket
+                </button>
+              )}
+            </div>
+
+            {ticket ? (
+              <div className="border-t border-[#EFEDE8] p-4">
+                <div className="mb-2 text-[12px] font-bold uppercase tracking-[0.05em] text-slate-500">Chronologie</div>
+                <ol className="space-y-1.5">
+                  {etapes.map((e) => (
+                    <li key={e.id} className="text-[12px] leading-snug">
+                      <span className="font-mono text-[11px] text-slate-400">{fmtHeure(e.at)}</span>{' '}
+                      <span className="font-semibold text-slate-700">{ETAPE_LIBELLES[e.type]}</span>{' '}
+                      <span className="text-slate-600">{e.libelle}</span>
+                    </li>
+                  ))}
+                </ol>
+              </div>
+            ) : null}
+          </section>
+
+          {/* ── Diagnostic guidé ─────────────────────────────────────── */}
+          <section className={`${carte} xl:col-span-5`}>
+            <div className={`${titreCarte} flex flex-wrap items-center justify-between gap-2`}>
+              <span>Diagnostic guidé</span>
+              {arbresPossibles.length > 1 ? (
+                <select value={arbreId} onChange={(e) => setArbreId(e.target.value)} className="h-8 rounded-lg border border-[#D8D3C8] px-2 text-[12px] font-normal">
+                  <option value="">Choisir le parcours…</option>
+                  {arbresPossibles.map((a) => (
+                    <option key={a.id} value={a.id}>
+                      {a.nom}
+                      {a.famille ? ` · ${a.famille}` : ''}
+                      {a.gamme ? ` · ${libelleGamme(a.gamme)}` : ''}
+                    </option>
+                  ))}
+                </select>
+              ) : arbresPossibles[0] ? (
+                <span className="text-[12px] font-normal text-slate-500">{arbresPossibles[0].nom}</span>
+              ) : null}
+            </div>
+            <div className="p-5">
+              {!form.filiere ? (
+                <p className="text-[13px] text-slate-500">Choisir la filière pour afficher le parcours de diagnostic.</p>
+              ) : form.filiere === 'THERMIQUE' && !form.gamme && !arbreId ? (
+                <div>
+                  <div className="text-[18px] font-bold text-slate-900">Quelle gamme ?</div>
+                  <div className="mt-1 text-[13px] text-slate-500">Le choix de la gamme oriente vers les parcours de diagnostic correspondants.</div>
+                  <div className="mt-4 flex flex-wrap gap-2">
+                    {GAMMES.map((g) => (
+                      <button
+                        key={g.value}
+                        type="button"
+                        onClick={() => patch({ gamme: g.value })}
+                        className="rounded-lg bg-[#0B1220] px-4 py-2.5 text-left text-[14px] font-semibold text-white hover:bg-[#1C2A44]"
+                      >
+                        {g.label}
+                        <span className="block text-[11px] font-normal text-slate-300">{g.titre}</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              ) : !arbresPossibles.length ? (
+                <p className="text-[13px] text-slate-500">
+                  Aucun parcours actif pour {libelleFiliere(form.filiere)}
+                  {form.gamme ? ` ${libelleGamme(form.gamme)}` : ''}
+                  {form.motif ? ` · ${libelleMotif(form.motif)}` : ''}. Un expert peut le créer dans l’éditeur de diagnostic.
+                </p>
+              ) : !noeud ? (
+                <p className="text-[13px] text-slate-500">{arbreId ? 'Chargement du parcours…' : 'Choisir le parcours ci-dessus.'}</p>
+              ) : (
+                <div className="space-y-4">
+                  {parcours.length ? (
+                    <ol className="space-y-1 border-l-2 border-[#EBD8AE] pl-3 text-[12px] text-slate-500">
+                      {parcours.map((p, i) => (
+                        <li key={`${p.noeud}-${i}`}>
+                          {noeudMap.get(p.noeud)?.question} <span className="font-semibold text-slate-700">→ {p.choix}</span>
+                        </li>
+                      ))}
+                    </ol>
+                  ) : null}
+
+                  {fin ? (
+                    <div className={`rounded-xl border p-4 ${fin.escalade ? 'border-[#F0C5BE] bg-[#FCEFEC]' : 'border-[#CDE5D1] bg-[#EEF7EF]'}`}>
+                      <div className="text-[12px] font-bold uppercase tracking-[0.05em] text-slate-500">Préconisation</div>
+                      <div className="mt-1 text-[15px] font-semibold text-slate-900">{fin.preconisation || 'Fin du parcours'}</div>
+                      {fin.escalade ? <div className="mt-1 text-[12px] text-[#7F1D1D]">Ce cas relève du niveau supérieur : escalader le ticket.</div> : null}
+                    </div>
+                  ) : (
+                    <div>
+                      <div className="text-[18px] font-bold text-slate-900">{noeud.question}</div>
+                      {noeud.aide ? <div className="mt-1 text-[13px] text-slate-500">{noeud.aide}</div> : null}
+                      <div className="mt-4 flex flex-wrap gap-2">
+                        {noeud.choix.map((c, i) => (
+                          <button
+                            key={`${c.libelle}-${i}`}
+                            type="button"
+                            onClick={() => repondre(c)}
+                            disabled={busy}
+                            className="rounded-lg bg-[#0B1220] px-4 py-2.5 text-[14px] font-semibold text-white hover:bg-[#1C2A44] disabled:opacity-50"
+                          >
+                            {c.libelle}
+                          </button>
+                        ))}
+                        {!noeud.choix.length ? <span className="text-[13px] text-slate-500">Question sans réponse paramétrée.</span> : null}
+                      </div>
+                      {!ticket ? <div className="mt-3 text-[12px] text-[#8A5A11]">Ouvrir le ticket pour enregistrer les réponses.</div> : null}
+                    </div>
+                  )}
+
+                  {parcours.length ? (
+                    <div className="flex flex-wrap gap-4">
+                      <button type="button" onClick={revenir} className="text-[12px] font-semibold text-slate-500 hover:text-slate-800">
+                        ← Revenir à la question précédente
+                      </button>
+                      <button type="button" onClick={recommencer} className="text-[12px] font-semibold text-slate-500 hover:text-slate-800">
+                        ↺ Recommencer le diagnostic
+                      </button>
+                    </div>
+                  ) : null}
+                </div>
+              )}
+
+              {ticket ? (
+                <div className="mt-6 space-y-2 border-t border-[#EFEDE8] pt-4">
+                  <textarea
+                    value={commentaire}
+                    onChange={(e) => setCommentaire(e.target.value)}
+                    rows={2}
+                    placeholder="Commentaire, code défaut relevé, motif d’escalade…"
+                    className="w-full rounded-lg border border-[#D8D3C8] bg-white px-2.5 py-2 text-[13px] outline-none focus:border-[#B4761A]"
+                  />
+                  <div className="flex flex-wrap gap-2">
+                    <button type="button" onClick={() => action('commentaire')} disabled={busy || !commentaire.trim()} className="rounded-lg border border-[#D8D3C8] px-3 py-2 text-[13px] font-semibold text-slate-700 disabled:opacity-40">
+                      Ajouter le commentaire
+                    </button>
+                    <button type="button" onClick={() => action('escalader')} disabled={busy || ticket.niveau >= 3} className="rounded-lg bg-[#C1683C] px-3 py-2 text-[13px] font-semibold text-white disabled:opacity-40">
+                      Escalader au niveau {Math.min(3, ticket.niveau + 1)}
+                    </button>
+                    <button type="button" onClick={() => action('resoudre')} disabled={busy || ticket.statut === 'RESOLU' || ticket.statut === 'CLOS'} className="rounded-lg bg-[#2F6B3A] px-3 py-2 text-[13px] font-semibold text-white disabled:opacity-40">
+                      Marquer résolu
+                    </button>
+                    <Link href={`/hotline/tickets?id=${ticket.id}`} className="ml-auto self-center text-[12px] font-semibold text-slate-500 underline">
+                      Ouvrir dans la liste des tickets
+                    </Link>
+                  </div>
+                </div>
+              ) : null}
+
+              <div className="mt-6 border-t border-[#EFEDE8] pt-4">
+                <div className="mb-2 text-[12px] font-bold uppercase tracking-[0.05em] text-slate-500">Pièces jointes</div>
+                {ticket ? (
+                  <PiecesJointes ticketId={ticket.id} onChange={() => void rafraichirEtapes(ticket.id)} />
+                ) : (
+                  <p className="text-[12px] text-slate-500">Ouvrir le ticket pour y joindre photos, mails et fichiers.</p>
+                )}
+              </div>
+            </div>
+          </section>
+
+          {/* ── Contexte et documents ────────────────────────────────── */}
+          <section className="space-y-4 xl:col-span-4">
+            <PaveHistorique
+              titre="HOTLINE Historique Contact"
+              precision={form.contact_nom || (telCle(telephone) ? fmtTel(telephone) : '')}
+              tickets={contexte.ticketsContact.filter((t) => t.id !== ticket?.id)}
+              chargement={contexteLoading}
+              vide={telCle(telephone) || form.contact_nom ? 'Aucun appel précédent de ce contact.' : 'Saisir le numéro ou le contact pour afficher ses appels.'}
+              afficherClient
+              onOuvrir={setTicketHisto}
+            />
+            <PaveHistorique
+              titre="HOTLINE Historique Chantier / Machine"
+              precision={[form.chantier, form.serie_ge, form.numero_serie].filter(Boolean).join(' · ')}
+              tickets={contexte.ticketsChantier.filter((t) => t.id !== ticket?.id)}
+              chargement={contexteLoading}
+              vide={form.chantier || form.numero_serie || form.serie_ge ? 'Aucun appel précédent sur ce chantier ou cette machine.' : 'Saisir le chantier ou le n° de série pour afficher son historique.'}
+              afficherClient
+              afficherChantier
+              onOuvrir={setTicketHisto}
+            />
+            <div className={carte}>
+              <div className={titreCarte}>Documents à envoyer</div>
+              <div className="space-y-1.5 p-4">
+                {docsDiagnostic.length ? (
+                  docsDiagnostic.map((d, i) =>
+                    referenceVue(d) ? (
+                      <div key={`${d.titre}-${i}`} className="flex items-center justify-between gap-2 rounded-lg border border-[#EBD8AE] bg-[#FDF7EA] px-3 py-2 text-[13px]">
+                        <span className="min-w-0 truncate">
+                          <span className="mr-1.5 rounded bg-[#B4761A] px-1.5 py-0.5 text-[10px] font-bold text-white">VUE</span>
+                          {d.titre}
+                        </span>
+                        <button type="button" onClick={() => ouvrirVue(referenceVue(d) || '')} className="shrink-0 text-[12px] font-bold text-[#B4761A] underline">
+                          Ouvrir la vue interactive
+                        </button>
+                      </div>
+                    ) : (
+                    <div key={`${d.titre}-${i}`} className="flex items-center justify-between gap-2 rounded-lg border border-[#E2DFD8] px-3 py-2 text-[13px]">
+                      <span className="min-w-0 truncate">
+                        <span className="mr-1.5 rounded bg-[#EEEDEA] px-1.5 py-0.5 text-[10px] font-bold text-slate-600">{d.type || 'DOC'}</span>
+                        {d.titre}
+                      </span>
+                      <span className="flex shrink-0 gap-2">
+                        {d.url ? (
+                          <a href={d.url} target="_blank" rel="noreferrer" className="text-[12px] font-semibold text-slate-500 underline">
+                            Ouvrir
+                          </a>
+                        ) : null}
+                        <button
+                          type="button"
+                          onClick={() => envoyerDocument(d)}
+                          disabled={envoiEnCours !== null}
+                          title={form.contact_email ? `Préparer un e-mail à ${form.contact_email} dans votre messagerie` : 'Préparer un e-mail dans votre messagerie'}
+                          className="text-[12px] font-semibold text-[#B4761A] underline disabled:opacity-50"
+                        >
+                          {envoiEnCours === d.titre ? 'Préparation…' : 'Envoyer'}
+                        </button>
+                      </span>
+                    </div>
+                    ),
+                  )
+                ) : (
+                  <p className="text-[12px] text-slate-500">Les documents (procédures, schémas, firmwares) apparaissent au fil du diagnostic.</p>
+                )}
+              </div>
+            </div>
+
+            {form.numero_tiers.trim() ? (
+              <PaveDossiers
+                total={dossiers.total}
+                dossiers={dossiers.liste}
+                chargement={dossiersLoading}
+                recherche={rechercheDossier}
+                choisi={dossierChoisi}
+                onChoisir={choisirDossier}
+                refsVues={refsVues}
+                onVue={ouvrirVue}
+              />
+            ) : (
+            <PaveLivraisons
+              livraisons={livraisons}
+              chargement={livraisonsLoading}
+              criteres={[form.chantier, form.reference_article, form.numero_serie].filter((v) => v.trim()).join(' · ')}
+              articleSansClient={Boolean(form.reference_article.trim()) && !form.numero_tiers && !form.chantier.trim() && !form.numero_serie.trim()}
+            />
+            )}
+
+          </section>
+        </div>
+      </main>
+
+      {ticketHisto ? <FenetreTicket id={ticketHisto} onFermer={fermerTicketHisto} /> : null}
+
+      {vueOuverte ? (
+        <VueEclatee
+          reference={vueOuverte}
+          ticketId={ticket?.id || null}
+          ticketNumero={ticket?.numero}
+          client={{
+            numeroTiers: form.numero_tiers,
+            intitule: form.intitule_tiers,
+            contact: form.contact_nom,
+            email: form.contact_email,
+            chantier: dossiers.liste.find((d) => d.cle === dossierChoisi)?.reference || form.chantier,
+          }}
+          onFermer={() => setVueOuverte(null)}
+          onMail={(doc) => setDocAEnvoyer(doc)}
+          onDemande={() => ticket && void rafraichirEtapes(ticket.id)}
+        />
+      ) : null}
+
+      {docAEnvoyer ? (
+        <FenetreEnvoi
+          doc={docAEnvoyer}
+          destinataire={form.contact_email}
+          objetParDefaut={`${ticket ? `[${ticket.numero}] ` : ''}${docAEnvoyer.titre}`}
+          messageParDefaut={docAEnvoyer.message || messageEnvoiDocument(docAEnvoyer, form.contact_nom)}
+          envoiEnCours={envoiEnCours !== null}
+          windows={posteWindows()}
+          onPreparer={preparerMessage}
+          onFermer={() => setDocAEnvoyer(null)}
+        />
+      ) : null}
+    </div>
+  )
+}
+
+// ── Historique (client / contact / chantier-machine) ─────────────────────────
+function PaveHistorique({
+  titre,
+  precision,
+  tickets,
+  chargement,
+  vide,
+  afficherClient,
+  afficherChantier,
+  onOuvrir,
+}: {
+  titre: string
+  precision?: string
+  tickets: TicketHistorique[]
+  chargement: boolean
+  vide: string
+  afficherClient?: boolean
+  afficherChantier?: boolean
+  onOuvrir: (id: string) => void
+}) {
+  return (
+    <div className={carte}>
+      <div className={`${titreCarte} flex items-center justify-between gap-2`}>
+        <span className="min-w-0 truncate">
+          {titre}
+          {precision ? <span className="ml-2 text-[12px] font-normal text-slate-500">{precision}</span> : null}
+        </span>
+        <span className="shrink-0 text-[11px] font-normal text-slate-400">{chargement ? 'mise à jour…' : tickets.length ? `${tickets.length} appel${tickets.length > 1 ? 's' : ''}` : ''}</span>
+      </div>
+      <div className="max-h-[260px] space-y-1.5 overflow-y-auto p-4">
+        {tickets.length ? (
+          tickets.map((t) => (
+            <button
+              key={t.id}
+              type="button"
+              onClick={() => onOuvrir(t.id)}
+              title="Voir le ticket"
+              className="block w-full rounded-lg border border-[#E2DFD8] px-3 py-2 text-left text-[12px] hover:border-[#B4761A] hover:bg-[#FDF7EA]"
+            >
+              <div className="flex items-center justify-between gap-2">
+                <span className="font-semibold text-slate-900">
+                  {t.numero} · {fmtDateHeure(t.opened_at)}
+                </span>
+                <Pastille {...STATUTS[t.statut]} />
+              </div>
+              <div className="text-slate-600">
+                {t.nature ? `${libelleNature(t.nature)} · ` : ''}
+                {libelleFiliere(t.filiere)} · {libelleMotif(t.motif)} · N{t.niveau}
+                {t.source === 'IMPORT' ? <span className="ml-1 text-[10px] font-bold text-slate-400">HISTORIQUE</span> : null}
+              </div>
+              {afficherClient && (t.intitule_tiers || t.contact_nom) ? (
+                <div className="truncate text-slate-600">{[t.intitule_tiers || t.numero_tiers, t.contact_nom].filter(Boolean).join(' · ')}</div>
+              ) : null}
+              {afficherChantier && (t.chantier || t.numero_serie || t.serie_ge) ? (
+                <div className="truncate text-slate-600">
+                  {[t.chantier, t.serie_ge ? `GE ${t.serie_ge}` : '', t.numero_serie ? `UI ${t.numero_serie}` : ''].filter(Boolean).join(' · ')}
+                </div>
+              ) : null}
+              {t.description ? <div className="truncate text-slate-500">{t.description}</div> : null}
+              {t.preconisation ? <div className="truncate text-[#2F6B3A]">→ {t.preconisation}</div> : null}
+            </button>
+          ))
+        ) : (
+          <p className="text-[12px] text-slate-500">{vide}</p>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// ── Fenêtre flottante d'un ticket de l'historique (04/11/2026) ─────────────────
+function FenetreTicket({ id, onFermer }: { id: string; onFermer: () => void }) {
+  const [t, setT] = useState<Ticket | null>(null)
+  const [etapes, setEtapesFenetre] = useState<Etape[]>([])
+  const [erreurFenetre, setErreurFenetre] = useState<string | null>(null)
+
+  useEffect(() => {
+    let actif = true
+    void (async () => {
+      try {
+        const { data, error } = await supabase.from('hotline_tickets').select('*').eq('id', id).maybeSingle()
+        if (error) throw error
+        if (!actif) return
+        setT((data as Ticket) || null)
+        const liste = await chargerEtapes(id)
+        if (actif) setEtapesFenetre(liste)
+      } catch (e) {
+        if (actif) setErreurFenetre(messageErreur(e))
+      }
+    })()
+    const touche = (e: KeyboardEvent) => e.key === 'Escape' && onFermer()
+    window.addEventListener('keydown', touche)
+    return () => {
+      actif = false
+      window.removeEventListener('keydown', touche)
+    }
+  }, [id, onFermer])
+
+  return (
+    <div className="fixed inset-0 z-40 flex items-center justify-center bg-[rgba(6,10,18,0.45)] p-4" onClick={onFermer}>
+      <div className="flex max-h-[88vh] w-full max-w-[760px] flex-col overflow-hidden rounded-2xl bg-white shadow-2xl" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-start justify-between gap-3 border-b border-[#EFEDE8] px-5 py-3">
+          {t ? (
+            <div>
+              <div className="flex items-center gap-2 text-[17px] font-bold text-slate-900">
+                {t.numero} <Pastille {...STATUTS[t.statut]} /> <span className="text-[13px] text-slate-500">N{t.niveau}</span>
+              </div>
+              <div className="text-[12px] text-slate-500">
+                {libelleFiliere(t.filiere)}
+                {t.gamme ? ` ${libelleGamme(t.gamme)}` : ''} · {libelleMotif(t.motif)} · ouvert le {fmtDateHeure(t.opened_at)} par {t.ouvert_par.split('@')[0]}
+              </div>
+            </div>
+          ) : (
+            <div className="text-[14px] text-slate-500">{erreurFenetre || 'Chargement du ticket…'}</div>
+          )}
+          <button type="button" onClick={onFermer} className="shrink-0 text-[13px] font-semibold text-slate-500 hover:text-slate-900">
+            Fermer ✕
+          </button>
+        </div>
+        {t ? (
+          <div className="space-y-4 overflow-y-auto p-5 text-[13px]">
+            <dl className="grid grid-cols-2 gap-x-4 gap-y-2 text-[12px] md:grid-cols-3">
+              {[
+                ['Client', [t.intitule_tiers, t.numero_tiers].filter(Boolean).join(' · ')],
+                ['Contact', t.contact_nom],
+                ['Téléphone', fmtTel(t.telephone_appelant)],
+                ['Chantier', t.chantier],
+                ['Nature', libelleNature(t.nature)],
+                ['Code défaut', t.code_defaut],
+                ['Mise en service', t.date_mes ? fmtDate(t.date_mes) : ''],
+                ['GE', [t.modele_ge, t.serie_ge && `n° ${t.serie_ge}`].filter(Boolean).join(' · ')],
+                ['UI', [t.reference_article, t.numero_serie && `n° ${t.numero_serie}`].filter(Boolean).join(' · ')],
+              ].map(([k, v]) => (
+                <div key={k}>
+                  <dt className="font-semibold uppercase tracking-[0.04em] text-slate-400">{k}</dt>
+                  <dd className="text-slate-800">{v || '—'}</dd>
+                </div>
+              ))}
+            </dl>
+            {t.description ? <div className="rounded-lg bg-[#FAF9F7] p-3 text-slate-700">{t.description}</div> : null}
+            {t.preconisation ? (
+              <div className="rounded-lg border border-[#CDE5D1] bg-[#EEF7EF] p-3 text-slate-800">
+                <span className="font-semibold">Préconisation :</span> {t.preconisation}
+              </div>
+            ) : null}
+            <div>
+              <div className="mb-2 text-[12px] font-bold uppercase tracking-[0.05em] text-slate-500">Chronologie</div>
+              <ol className="space-y-1.5">
+                {etapes.map((e) => (
+                  <li key={e.id} className="text-[12px] leading-snug">
+                    <span className="font-mono text-[11px] text-slate-400">{fmtDateHeure(e.at)}</span>{' '}
+                    <span className="font-semibold text-slate-700">{ETAPE_LIBELLES[e.type]}</span> <span className="text-slate-600">{e.libelle}</span>
+                    <span className="text-[11px] text-slate-400"> · {e.auteur.split('@')[0]}</span>
+                  </li>
+                ))}
+                {!etapes.length ? <li className="text-[12px] text-slate-500">Aucune étape.</li> : null}
+              </ol>
+            </div>
+          </div>
+        ) : null}
+        {t ? (
+          <div className="flex flex-wrap justify-end gap-3 border-t border-[#EFEDE8] px-5 py-3">
+            <Link href={`/hotline/tickets?id=${t.id}`} target="_blank" className="text-[13px] font-semibold text-slate-500 underline">
+              Fiche complète (nouvel onglet)
+            </Link>
+            <Link href={`/hotline?ticket=${t.id}`} target="_blank" className="rounded-lg bg-[#B4761A] px-3 py-1.5 text-[13px] font-semibold text-white hover:bg-[#9A6414]">
+              Reprendre ce ticket (nouvel onglet)
+            </Link>
+          </div>
+        ) : null}
+      </div>
+    </div>
+  )
+}
+
+// ── Aide à la saisie du client (code tiers ou nom) ───────────────────────────
+// Liste SAGE (ref_tiers) dès 2 caractères ; choisir une ligne remplit le code
+// ET le nom. Code saisi en entier puis sortie du champ : le nom se remplit seul.
+function ChampTiers({
+  label,
+  mode,
+  value,
+  onChange,
+  onSelect,
+}: {
+  label: string
+  mode: 'code' | 'nom'
+  value: string
+  onChange: (value: string) => void
+  onSelect: (tiers: TiersTrouve) => void
+}) {
+  const [saisie, setSaisie] = useState<string | null>(null)
+  const [resultats, setResultats] = useState<TiersTrouve[]>([])
+  const [ouvert, setOuvert] = useState(false)
+  const [actif, setActif] = useState(0)
+
+  // Recherche seulement sur une frappe de l'utilisateur (pas quand le champ est
+  // rempli par l'identification ou par l'autre champ).
+  useEffect(() => {
+    if (saisie === null) return
+    const q = saisie.trim()
+    const handle = window.setTimeout(async () => {
+      if (q.length < 2) {
+        setResultats([])
+        return
+      }
+      try {
+        const liste = await rechercherTiers(q)
+        setResultats(liste)
+        setActif(0)
+        setOuvert(liste.length > 0)
+      } catch {
+        setResultats([])
+      }
+    }, 250)
+    return () => window.clearTimeout(handle)
+  }, [saisie])
+
+  function choisir(t: TiersTrouve) {
+    onSelect(t)
+    setSaisie(null)
+    setResultats([])
+    setOuvert(false)
+  }
+
+  function quitter() {
+    window.setTimeout(() => setOuvert(false), 150)
+    if (mode === 'code' && value.trim()) {
+      const exact = resultats.find((t) => t.numero_tiers.toUpperCase() === value.trim().toUpperCase())
+      if (exact) choisir(exact)
+    }
+  }
+
+  return (
+    <label className="relative block text-[11px] font-semibold text-slate-500">
+      {label}
+      <input
+        value={value}
+        onChange={(e) => {
+          onChange(e.target.value)
+          setSaisie(e.target.value)
+        }}
+        onFocus={() => resultats.length && setOuvert(true)}
+        onBlur={quitter}
+        onKeyDown={(e) => {
+          if (!ouvert || !resultats.length) return
+          if (e.key === 'ArrowDown') {
+            e.preventDefault()
+            setActif((i) => Math.min(resultats.length - 1, i + 1))
+          } else if (e.key === 'ArrowUp') {
+            e.preventDefault()
+            setActif((i) => Math.max(0, i - 1))
+          } else if (e.key === 'Enter') {
+            e.preventDefault()
+            choisir(resultats[actif])
+          } else if (e.key === 'Escape') {
+            setOuvert(false)
+          }
+        }}
+        placeholder={mode === 'code' ? 'Code SAGE…' : 'Nom du client…'}
+        autoComplete="off"
+        className={champ}
+      />
+      {ouvert && resultats.length ? (
+        <div
+          className={`absolute left-0 top-full z-30 mt-1 max-h-[280px] overflow-y-auto rounded-lg border border-[#D8D3C8] bg-white py-1 font-normal shadow-lg ${
+            mode === 'code' ? 'w-[340px]' : 'w-full min-w-[340px]'
+          }`}
+        >
+          {resultats.map((t, i) => (
+            <button
+              key={t.numero_tiers}
+              type="button"
+              onMouseDown={(e) => {
+                e.preventDefault()
+                choisir(t)
+              }}
+              onMouseEnter={() => setActif(i)}
+              className={`block w-full px-3 py-1.5 text-left text-[12px] ${i === actif ? 'bg-[#FDF7EA]' : ''}`}
+            >
+              <div className="text-slate-900">
+                <span className="font-semibold">{t.numero_tiers}</span> · {t.intitule || '—'}
+              </div>
+              <div className="text-[11px] text-slate-500">{[t.code_postal, t.ville, t.agence].filter(Boolean).join(' · ')}</div>
+            </button>
+          ))}
+        </div>
+      ) : null}
+    </label>
+  )
+}
+
+// ── Propositions d'appelant ──────────────────────────────────────────────────
+// Un même client / contact remonte souvent plusieurs fois (fiche SAGE, contact
+// SAGE, contact BLG, carnet hotline) : on regroupe par client + contact (nom
+// normalisé, « Jean MORA » = « MORA Jean »), on écarte les codes tiers
+// inconnus quand le même contact existe sur un client connu, et on n'affiche
+// que les 3 premières propositions (carnet hotline d'abord).
+type AppelantGroupe = Appelant & { sources: string[] }
+
+const PROPOSITIONS_VISIBLES = 3
+
+function normaliserNom(value: string | null | undefined) {
+  return String(value || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter(Boolean)
+    .sort()
+    .join(' ')
+}
+
+function regrouperAppelants(liste: Appelant[]): AppelantGroupe[] {
+  const groupes = new Map<string, AppelantGroupe>()
+  for (const a of liste) {
+    const contact = normaliserNom(a.contact)
+    // Contact = raison sociale (fiche tiers) : pas un vrai contact.
+    const contactUtile = contact && contact !== normaliserNom(a.intitule) ? contact : ''
+    const cle = `${a.numero_tiers || ''}|${contactUtile}`
+    const existant = groupes.get(cle)
+    if (existant) {
+      if (!existant.sources.includes(a.source)) existant.sources.push(a.source)
+      existant.intitule = existant.intitule || a.intitule
+      existant.ville = existant.ville || a.ville
+      existant.agence = existant.agence || a.agence
+      existant.contact = existant.contact || (contactUtile ? a.contact : null)
+      existant.email = existant.email || a.email || null
+    } else {
+      groupes.set(cle, { ...a, contact: contactUtile ? a.contact : null, sources: [a.source] })
+    }
+  }
+  const tous = Array.from(groupes.values())
+  const contactsConnus = new Set(tous.filter((g) => g.intitule && g.contact).map((g) => normaliserNom(g.contact)))
+  const rang = (g: AppelantGroupe) => (g.sources.includes('Hotline') ? 0 : g.intitule ? (g.contact ? 1 : 2) : 3)
+  return tous
+    .filter((g) => g.intitule || !g.contact || !contactsConnus.has(normaliserNom(g.contact)))
+    .sort((a, b) => rang(a) - rang(b))
+}
+
+function PropositionsAppelant({
+  appelants,
+  numeroTiers,
+  contactNom,
+  ouverte,
+  voirTout,
+  onOuvrir,
+  onVoirTout,
+  onChoisir,
+}: {
+  appelants: AppelantGroupe[]
+  numeroTiers: string
+  contactNom: string
+  ouverte: boolean
+  voirTout: boolean
+  onOuvrir: () => void
+  onVoirTout: () => void
+  onChoisir: (a: AppelantGroupe) => void
+}) {
+  const estChoisi = (a: AppelantGroupe) => a.numero_tiers === numeroTiers && normaliserNom(a.contact) === normaliserNom(contactNom)
+  const choisi = appelants.find(estChoisi) || appelants.find((a) => a.numero_tiers === numeroTiers) || null
+
+  if (!ouverte && choisi) {
+    return (
+      <div className="flex items-center justify-between gap-2 rounded-lg border border-[#CDE5D1] bg-[#EEF7EF] px-3 py-2 text-[12px]">
+        <span className="min-w-0 truncate text-[#2F6B3A]">
+          ✓ Reconnu : <span className="font-semibold">{choisi.intitule || choisi.numero_tiers}</span>
+          {choisi.contact ? ` · ${choisi.contact}` : ''}
+          <span className="text-[11px] text-[#5E8A66]"> ({choisi.sources.join(', ')})</span>
+        </span>
+        {appelants.length > 1 ? (
+          <button type="button" onClick={onOuvrir} className="shrink-0 font-semibold text-slate-600 underline">
+            Changer ({appelants.length})
+          </button>
+        ) : null}
+      </div>
+    )
+  }
+
+  const visibles = voirTout ? appelants : appelants.slice(0, PROPOSITIONS_VISIBLES)
+  return (
+    <div className="space-y-1">
+      <div className="text-[11px] font-semibold text-slate-500">
+        {appelants.length > 1 ? `${appelants.length} correspondances : choisir l’appelant` : 'Correspondance trouvée'}
+      </div>
+      {visibles.map((a, i) => (
+        <button
+          key={`${a.numero_tiers}-${a.contact}-${i}`}
+          type="button"
+          onClick={() => onChoisir(a)}
+          className={`block w-full rounded-lg border px-3 py-1.5 text-left text-[12px] ${
+            estChoisi(a) ? 'border-[#B4761A] bg-[#FDF7EA]' : 'border-[#E2DFD8] hover:border-[#B4761A]'
+          }`}
+        >
+          <div className="truncate text-slate-900">
+            <span className="font-semibold">{a.intitule || 'Code non trouvé dans SAGE'}</span>
+            <span className="text-slate-500"> · {a.numero_tiers || '—'}</span>
+            {a.contact ? <span className="text-slate-600"> · {a.contact}</span> : null}
+          </div>
+          <div className="truncate text-[11px] text-slate-400">
+            {[a.ville, a.agence].filter(Boolean).join(' · ')}
+            {a.ville || a.agence ? ' — ' : ''}
+            {a.sources.join(', ')}
+          </div>
+        </button>
+      ))}
+      {!voirTout && appelants.length > PROPOSITIONS_VISIBLES ? (
+        <button type="button" onClick={onVoirTout} className="text-[12px] font-semibold text-slate-500 underline">
+          Voir les {appelants.length - PROPOSITIONS_VISIBLES} autres
+        </button>
+      ) : null}
+    </div>
+  )
+}
+
+// ── Fenêtre d'envoi d'un document (messagerie du poste) ─────────────────────
+function FenetreEnvoi({
+  doc,
+  destinataire,
+  objetParDefaut,
+  messageParDefaut,
+  envoiEnCours,
+  windows,
+  onPreparer,
+  onFermer,
+}: {
+  doc: DocumentLien
+  destinataire: string
+  objetParDefaut: string
+  messageParDefaut: string
+  envoiEnCours: boolean
+  windows: boolean
+  onPreparer: (v: { to: string; subject: string; text: string; mode: 'auto' | 'eml' }) => void
+  onFermer: () => void
+}) {
+  const [to, setTo] = useState(destinataire)
+  const [subject, setSubject] = useState(objetParDefaut)
+  const [text, setText] = useState(messageParDefaut)
+  const adresseOk = !to.trim() || /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(to.trim())
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-[rgba(6,10,18,0.55)] p-4" onClick={onFermer}>
+      <div className="w-full max-w-[620px] rounded-2xl bg-white shadow-2xl" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between border-b border-[#EFEDE8] px-5 py-3">
+          <div className="text-[15px] font-bold text-slate-900">Envoyer un document par e-mail</div>
+          <button type="button" onClick={onFermer} className="text-[13px] font-semibold text-slate-500 hover:text-slate-900">
+            Fermer ✕
+          </button>
+        </div>
+        <div className="space-y-3 p-5">
+          <label className="block text-[11px] font-semibold text-slate-500">
+            À
+            <input type="email" value={to} onChange={(e) => setTo(e.target.value)} placeholder="adresse@client.fr" className={champ} autoFocus={!destinataire} />
+          </label>
+          <label className="block text-[11px] font-semibold text-slate-500">
+            Objet
+            <input value={subject} onChange={(e) => setSubject(e.target.value)} className={champ} />
+          </label>
+          <label className="block text-[11px] font-semibold text-slate-500">
+            Message
+            <textarea
+              value={text}
+              onChange={(e) => setText(e.target.value)}
+              rows={6}
+              className="w-full rounded-lg border border-[#D8D3C8] bg-white px-2.5 py-2 text-[13px] text-slate-900 outline-none focus:border-[#B4761A]"
+            />
+          </label>
+          <div className="flex items-center gap-2 rounded-lg bg-[#FAF9F7] px-3 py-2 text-[12px] text-slate-700">
+            <span className="rounded bg-[#EEEDEA] px-1.5 py-0.5 text-[10px] font-bold text-slate-600">{doc.type || 'DOC'}</span>
+            <span className="min-w-0 truncate">📎 {doc.titre}</span>
+            {!doc.url ? <span className="ml-auto shrink-0 text-[#A32C2C]">aucun lien : rien à joindre</span> : null}
+          </div>
+          <p className="text-[12px] leading-snug text-slate-500">
+            {windows
+              ? 'Le message s’ouvre dans Outlook comme un nouveau message, document déjà joint. Vous relisez et cliquez sur Envoyer dans Outlook.'
+              : 'Votre messagerie s’ouvre avec le message prêt, et le document est téléchargé en même temps : glissez-le dans le message, puis cliquez sur Envoyer dans votre messagerie.'}{' '}
+            Le compagnon n’envoie rien lui-même.
+          </p>
+        </div>
+        <div className="flex flex-wrap items-center justify-between gap-2 border-t border-[#EFEDE8] px-5 py-3">
+          {!windows ? (
+            <button
+              type="button"
+              onClick={() => onPreparer({ to: to.trim(), subject: subject.trim(), text, mode: 'eml' })}
+              disabled={envoiEnCours}
+              className="text-[12px] font-semibold text-slate-500 underline disabled:opacity-40"
+              title="Fichier .eml avec le document joint (s'ouvre en nouveau message dans Outlook pour Windows ; en lecture seule sur Mac)"
+            >
+              Télécharger en .eml
+            </button>
+          ) : (
+            <span />
+          )}
+          <div className="flex gap-2">
+            <button type="button" onClick={onFermer} className="rounded-lg border border-[#D8D3C8] px-4 py-2 text-[13px] font-semibold text-slate-700">
+              Annuler
+            </button>
+            <button
+              type="button"
+              onClick={() => onPreparer({ to: to.trim(), subject: subject.trim(), text, mode: 'auto' })}
+              disabled={envoiEnCours || !adresseOk || !subject.trim()}
+              className="rounded-lg bg-[#B4761A] px-4 py-2 text-[13px] font-bold text-white hover:bg-[#9A6414] disabled:opacity-40"
+            >
+              {envoiEnCours ? 'Préparation…' : 'Ouvrir dans ma messagerie'}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ── Commande initiale & livraison ────────────────────────────────────────────
+function PaveLivraisons({
+  livraisons,
+  chargement,
+  criteres,
+  articleSansClient,
+}: {
+  livraisons: Livraison[]
+  chargement: boolean
+  criteres: string
+  articleSansClient: boolean
+}) {
+  return (
+    <div className={carte}>
+      <div className={`${titreCarte} flex items-center justify-between gap-2`}>
+        <span className="min-w-0 truncate">
+          Commande initiale &amp; livraison
+          {criteres ? <span className="ml-2 text-[12px] font-normal text-slate-500">{criteres}</span> : null}
+        </span>
+        <span className="shrink-0 text-[11px] font-normal text-slate-400">
+          {chargement ? 'recherche…' : livraisons.length ? `${livraisons.length} expédition${livraisons.length > 1 ? 's' : ''}` : ''}
+        </span>
+      </div>
+      <div className="max-h-[460px] space-y-2 overflow-y-auto p-4">
+        {livraisons.length ? (
+          livraisons.map((l) => (
+            <div key={l.numero_bl} className="rounded-lg border border-[#E2DFD8] text-[12px]">
+              <div className="space-y-0.5 border-b border-[#EFEDE8] bg-[#FAF9F7] px-3 py-2">
+                <div className="flex flex-wrap items-baseline justify-between gap-x-3">
+                  <span className="font-semibold text-slate-900">
+                    Commande {l.numero_cdc || '—'}
+                    {l.date_cdc ? <span className="font-normal text-slate-500"> du {fmtDate(l.date_cdc)}</span> : null}
+                  </span>
+                  <span className="font-semibold text-[#2F6B3A]">
+                    Expédiée le {fmtDate(l.date_bl)}
+                    <span className="font-normal text-slate-500"> · {l.numero_bl}</span>
+                  </span>
+                </div>
+                <div className="truncate text-slate-600">
+                  {[l.intitule || l.numero_tiers, l.chantier, l.projet, l.depot ? `dépôt ${l.depot}` : '', l.factures?.length ? `facture ${l.factures.join(', ')}` : '']
+                    .filter(Boolean)
+                    .join(' · ')}
+                </div>
+              </div>
+              <ul className="divide-y divide-[#F1EFEA]">
+                {l.lignes.map((p, i) => (
+                  <li key={`${p.reference_article}-${i}`} className={`flex items-baseline gap-2 px-3 py-1.5 ${p.correspond ? 'bg-[#FDF7EA]' : ''}`}>
+                    <span className="w-10 shrink-0 text-right font-semibold tabular-nums text-slate-900">{p.quantite ?? ''}</span>
+                    <span className="min-w-0 flex-1">
+                      <span className="font-semibold text-slate-800">{p.reference_article || '—'}</span>{' '}
+                      <span className="text-slate-600">{p.designation}</span>
+                      {p.series?.length ? <span className="block text-[11px] text-slate-500">N° série : {p.series.join(', ')}</span> : null}
+                    </span>
+                    {p.correspond ? <span className="shrink-0 text-[10px] font-bold uppercase text-[#B4761A]">recherché</span> : null}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ))
+        ) : (
+          <p className="text-[12px] text-slate-500">
+            {chargement
+              ? 'Recherche des livraisons…'
+              : articleSansClient
+                ? 'Identifier le client (ou saisir le chantier) pour retrouver la livraison de cette référence.'
+                : criteres
+                  ? 'Aucune livraison facturée trouvée sur 5 ans pour ces critères.'
+                  : 'Saisir un chantier, une référence produit ou un n° de série pour retrouver la commande initiale, la date d’expédition et les produits livrés ensemble.'}
+          </p>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// ── Dossiers de vente (devis → commande → BL → facture) ─────────────────────
+const ETAPE_STYLE: Record<Dossier['etape'], { tone: string; bg: string }> = {
+  Devis: { tone: '#4B5563', bg: '#EEEDEA' },
+  Commandé: { tone: '#8A5A11', bg: '#FDF2DD' },
+  Livré: { tone: '#1E4E8C', bg: '#E6EEF9' },
+  Facturé: { tone: '#2F6B3A', bg: '#E5F2E7' },
+}
+
+function PaveDossiers({
+  total,
+  dossiers,
+  chargement,
+  recherche,
+  choisi,
+  onChoisir,
+  refsVues,
+  onVue,
+}: {
+  total: number
+  dossiers: Dossier[]
+  chargement: boolean
+  recherche: string
+  choisi: string | null
+  onChoisir: (d: Dossier | null) => void
+  refsVues: Set<string>
+  onVue: (reference: string) => void
+}) {
+  const dossier = choisi ? dossiers.find((d) => d.cle === choisi) || null : null
+  return (
+    <div className={carte}>
+      <div className={`${titreCarte} flex items-center justify-between gap-2`}>
+        <span className="min-w-0 truncate">
+          Dossiers de vente
+          {recherche ? <span className="ml-2 text-[12px] font-normal text-slate-500">« {recherche} »</span> : null}
+        </span>
+        <span className="shrink-0 text-[11px] font-normal text-slate-400">
+          {chargement ? 'recherche…' : total ? `${total} dossier${total > 1 ? 's' : ''}${total > dossiers.length ? ` (${dossiers.length} affichés)` : ''}` : ''}
+        </span>
+      </div>
+      <div className="max-h-[620px] overflow-y-auto p-4">
+        {dossier ? (
+          <DetailDossier d={dossier} retour={dossiers.length > 1 ? () => onChoisir(null) : null} nbDossiers={dossiers.length} refsVues={refsVues} onVue={onVue} />
+        ) : dossiers.length ? (
+          <div className="space-y-1.5">
+            <div className="text-[11px] font-semibold text-slate-500">
+              {recherche ? 'Choisir le dossier :' : 'Dossiers récents — saisir le chantier, un n° de pièce ou un produit pour filtrer :'}
+            </div>
+            {dossiers.map((d) => (
+              <button
+                key={d.cle}
+                type="button"
+                onClick={() => onChoisir(d)}
+                className="block w-full rounded-lg border border-[#E2DFD8] px-3 py-2 text-left text-[12px] hover:border-[#B4761A] hover:bg-[#FDF7EA]"
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <span className="min-w-0 truncate font-semibold text-slate-900">{d.reference || 'Sans référence chantier'}</span>
+                  <span className="shrink-0 rounded-full px-2 py-0.5 text-[10px] font-bold" style={{ color: ETAPE_STYLE[d.etape].tone, background: ETAPE_STYLE[d.etape].bg }}>
+                    {d.etape}
+                  </span>
+                </div>
+                <div className="truncate text-slate-600">
+                  {[d.devis[0]?.piece, d.cdc?.piece, ...d.bls.map((b) => b.piece), ...d.factures.map((f) => f.piece)].filter(Boolean).join(' · ')}
+                </div>
+                <div className="text-[11px] text-slate-400">
+                  {fmtDate(d.date_debut)}
+                  {d.date_fin && d.date_fin !== d.date_debut ? ` → ${fmtDate(d.date_fin)}` : ''}
+                </div>
+              </button>
+            ))}
+          </div>
+        ) : (
+          <p className="text-[12px] text-slate-500">
+            {chargement ? 'Recherche des dossiers…' : recherche ? `Aucun dossier de ce client ne correspond à « ${recherche} » (3 dernières années).` : 'Aucun dossier de vente sur les 3 dernières années.'}
+          </p>
+        )}
+      </div>
+    </div>
+  )
+}
+
+type VuesProps = { refsVues: Set<string>; onVue: (reference: string) => void }
+
+function ListeProduits({ lignes, statut, refsVues, onVue }: { lignes: ProduitDossierUI[]; statut?: boolean } & VuesProps) {
+  return (
+    <ul className="divide-y divide-[#F1EFEA]">
+      {lignes.map((p, i) => (
+        <li key={`${p.reference_article}-${i}`} className={`flex items-baseline gap-2 px-3 py-1.5 ${p.correspond ? 'bg-[#FDF7EA]' : ''}`}>
+          <span className="w-9 shrink-0 text-right font-semibold tabular-nums text-slate-900">{p.quantite ?? ''}</span>
+          <span className="min-w-0 flex-1">
+            <span className="font-semibold text-slate-800">{p.reference_article || '—'}</span> <span className="text-slate-600">{p.designation}</span>
+          </span>
+          {statut && p.statut ? <span className="shrink-0 text-[10px] font-semibold text-[#8A5A11]">{p.statut}</span> : null}
+          {p.correspond ? <span className="shrink-0 text-[10px] font-bold uppercase text-[#B4761A]">recherché</span> : null}
+          {p.reference_article && refsVues.has(p.reference_article.toUpperCase()) ? (
+            <button
+              type="button"
+              onClick={() => onVue(p.reference_article || '')}
+              title="Ouvrir la vue éclatée interactive de ce produit"
+              className="shrink-0 rounded-md border border-[#B4761A] px-1.5 py-0.5 text-[10px] font-bold text-[#B4761A] hover:bg-[#B4761A] hover:text-white"
+            >
+              🔍 Vue éclatée
+            </button>
+          ) : null}
+        </li>
+      ))}
+    </ul>
+  )
+}
+
+type ProduitDossierUI = Dossier['reste_a_livrer'][number]
+
+function DetailDossier({ d, retour, nbDossiers, refsVues, onVue }: { d: Dossier; retour: (() => void) | null; nbDossiers: number } & VuesProps) {
+  return (
+    <div className="space-y-3 text-[12px]">
+      {retour ? (
+        <button type="button" onClick={retour} className="text-[12px] font-semibold text-slate-500 hover:text-slate-900">
+          ← Tous les dossiers ({nbDossiers})
+        </button>
+      ) : null}
+      <div className="flex items-start justify-between gap-2">
+        <div>
+          <div className="text-[15px] font-bold text-slate-900">{d.reference || 'Sans référence chantier'}</div>
+          <div className="text-slate-500">
+            {fmtDate(d.date_debut)}
+            {d.date_fin && d.date_fin !== d.date_debut ? ` → ${fmtDate(d.date_fin)}` : ''}
+          </div>
+        </div>
+        <span className="shrink-0 rounded-full px-2 py-0.5 text-[11px] font-bold" style={{ color: ETAPE_STYLE[d.etape].tone, background: ETAPE_STYLE[d.etape].bg }}>
+          {d.etape}
+        </span>
+      </div>
+
+      <div className="grid grid-cols-2 gap-2">
+        <div className="rounded-lg bg-[#FAF9F7] px-3 py-2">
+          <div className="text-[10px] font-semibold uppercase tracking-[0.05em] text-slate-400">Devis</div>
+          {d.devis.length ? (
+            d.devis.map((x) => (
+              <div key={x.piece} className="text-slate-800">
+                <span className="font-semibold">{x.piece}</span> · {fmtDate(x.date)} · {fmtEuro(x.ht)}
+              </div>
+            ))
+          ) : (
+            <div className="text-slate-400">—</div>
+          )}
+        </div>
+        <div className="rounded-lg bg-[#FAF9F7] px-3 py-2">
+          <div className="text-[10px] font-semibold uppercase tracking-[0.05em] text-slate-400">Commande initiale</div>
+          {d.cdc?.piece ? (
+            <div className="text-slate-800">
+              <span className="font-semibold">{d.cdc.piece}</span> · {fmtDate(d.cdc.date)}
+              {d.cdc.en_cours ? <span className="ml-1 text-[10px] font-bold text-[#8A5A11]">EN COURS</span> : null}
+            </div>
+          ) : (
+            <div className="text-slate-400">—</div>
+          )}
+        </div>
+      </div>
+
+      {d.bls.map((b) => (
+        <div key={b.piece} className="rounded-lg border border-[#E2DFD8]">
+          <div className="flex flex-wrap items-baseline justify-between gap-x-3 border-b border-[#EFEDE8] bg-[#FAF9F7] px-3 py-2">
+            <span className="font-semibold text-[#2F6B3A]">
+              Expédié le {fmtDate(b.date)} <span className="font-normal text-slate-500">· {b.piece}</span>
+            </span>
+            <span className="text-slate-500">{b.factures?.length ? `facture ${b.factures.join(', ')}` : b.facture ? 'facturé' : 'non facturé'}</span>
+          </div>
+          {b.lignes?.length ? <ListeProduits lignes={b.lignes} refsVues={refsVues} onVue={onVue} /> : <div className="px-3 py-2 text-slate-400">Aucune ligne produit.</div>}
+        </div>
+      ))}
+
+      {d.reste_a_livrer.length ? (
+        <div className="rounded-lg border border-[#EBD8AE]">
+          <div className="border-b border-[#EFEDE8] bg-[#FDF7EA] px-3 py-2 font-semibold text-[#8A5A11]">Reste à livrer sur la commande</div>
+          <ListeProduits lignes={d.reste_a_livrer} statut refsVues={refsVues} onVue={onVue} />
+        </div>
+      ) : null}
+
+      {d.devis_lignes.length ? (
+        <div className="rounded-lg border border-[#E2DFD8]">
+          <div className="border-b border-[#EFEDE8] bg-[#FAF9F7] px-3 py-2 font-semibold text-slate-700">Contenu du devis (pas encore commandé)</div>
+          <ListeProduits lignes={d.devis_lignes} refsVues={refsVues} onVue={onVue} />
+        </div>
+      ) : null}
+
+      {d.factures.length ? (
+        <div className="text-slate-600">
+          <span className="font-semibold text-slate-700">Factures : </span>
+          {d.factures.map((f) => `${f.piece} du ${fmtDate(f.date)} (${fmtEuro(f.ht)})`).join(' · ')}
+        </div>
+      ) : null}
+    </div>
+  )
+}

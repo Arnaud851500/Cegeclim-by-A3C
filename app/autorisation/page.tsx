@@ -28,6 +28,8 @@ type PermissionKey =
   | 'can_superuser'
   | 'can_projetblg'
   | 'can_paiement'
+  | 'can_hotline'
+  | 'can_hotline_expert'
   | 'can_guides_blg'
 
 type AlertKey =
@@ -166,6 +168,14 @@ const PERMISSION_GROUPS: Array<{
     ],
   },
   {
+    family: 'Hotline technique',
+    hint: 'SAV photovoltaïque et thermique (bloc « Hotline technique »)',
+    items: [
+      { key: 'can_hotline', label: 'Hotline – niveau 1', description: 'Console d’appel (3CX), ouverture et suivi des tickets, diagnostic guidé.' },
+      { key: 'can_hotline_expert', label: 'Hotline – expert', description: 'Niveaux 2 / 3, éditeur des parcours de diagnostic et des lignes 3CX, statistiques. Donne aussi la console et les tickets.' },
+    ],
+  },
+  {
     family: 'Projet BLG',
     hint: 'Cohérence SAGE ↔ BLG',
     items: [
@@ -228,6 +238,8 @@ const LANDING_PAGES = [
   { value: '/documents', label: 'Documents' },
   { value: '/suivi-agences', label: 'Suivi agences – commerciaux' },
   { value: '/financement', label: 'Aides financières (CEE)' },
+  { value: '/hotline', label: 'Hotline technique' },
+  { value: '/hotline/escalades', label: 'Hotline – synthèse N2 / N3' },
   { value: '/autorisation', label: 'Autorisations' },
   { value: '/admin/planification', label: 'Job scheduling' },
   { value: '/clients', label: 'MAJ base clients' },
@@ -266,6 +278,8 @@ const EMPTY_PROFILE: AccessProfile = {
   can_superuser: false,
   can_projetblg: false,
   can_paiement: false,
+  can_hotline: false,
+  can_hotline_expert: false,
   can_guides_blg: false,
   show_alert_cerfa_ko: false,
   show_alert_cdc_liv_avant_2026: false,
