@@ -36,6 +36,11 @@
  * Impression (03/11/2026, demandé par Arnaud) : document A4 dédié (ImpressionFiche),
  * rendu hors du shell de l'application via un portail ; seul ce document est
  * imprimé (bandeau, menus et écran masqués).
+ * Classeur normé (04/11/2026, demandé par Arnaud — lib/contratsObjectifsExcel.ts) :
+ * export Excel des contrats de l'année avec leur situation à date (liste et fiche),
+ * copie de préparation N+1 pour la direction, réimport strict des onglets normés
+ * (code collaborateur, primes par identifiant → évaluations conservées) ; les
+ * anciens classeurs libres restent lus par lireOnglet.
  * Marge PV ignorée pour l'instant. Réalisé = indicateur_factures_mensuel
  * (hors statistique exclus), commission calculée sur les mois clos.
  */
@@ -65,7 +70,7 @@ import {
   fmtPts,
   libelleFamilles,
   fmtPct,
-  lireClasseur,
+  lireOnglet,
   montantMax,
   type CollabRef,
   type FamilleRef,
@@ -78,6 +83,7 @@ import {
   type Section,
   type Tranche,
 } from '@/lib/contratsObjectifs'
+import { construireClasseur, lireClasseurAuto, telecharger, type ModeExport, type OngletAuto } from '@/lib/contratsObjectifsExcel'
 
 type Droits = { modifier: boolean; mon_code: string | null; suivi: boolean }
 
@@ -198,17 +204,94 @@ function Alerte({ texte, ton = 'rouge' }: { texte: string; ton?: 'rouge' | 'info
 // ============================================================================
 // Liste des contrats
 // ============================================================================
+/** Charge les fiches complètes (get_obj_contrat) par paquets de 4 ; les fiches refusées sont signalées, pas bloquantes. */
+async function chargerFiches(annee: number, codes: string[], onProgress?: (n: number) => void) {
+  const fiches: FicheContrat[] = []
+  const erreurs: string[] = []
+  let fait = 0
+  for (let i = 0; i < codes.length; i += 4) {
+    const lot = codes.slice(i, i + 4)
+    const res = await Promise.all(lot.map((c) => supabase.rpc('get_obj_contrat', { p_annee: annee, p_code: c })))
+    res.forEach(({ data, error }, k) => {
+      if (error) erreurs.push(`${lot[k]} : ${error.message}`)
+      else if ((data as FicheContrat)?.contrat) fiches.push(data as FicheContrat)
+    })
+    fait += lot.length
+    onProgress?.(fait)
+  }
+  return { fiches, erreurs }
+}
+
+async function exporterExcel(annee: number, fiches: FicheContrat[], mode: ModeExport) {
+  const { data: familles } = await supabase.rpc('get_obj_familles')
+  const blob = await construireClasseur(fiches, { mode, annee, familles: (familles as FamilleRef[]) || [] })
+  const jour = new Date().toISOString().slice(0, 10)
+  const suffixe = fiches.length === 1 ? `_${fiches[0].code}` : ''
+  telecharger(blob, mode === 'preparation' ? `Contrats_objectifs_${annee + 1}_preparation${suffixe}_${jour}.xlsx` : `Contrats_objectifs_${annee}${suffixe}_situation_${jour}.xlsx`)
+}
+
+function BarreExport({ annee, codes, droits }: { annee: number; codes: string[]; droits: Droits }) {
+  const [etat, setEtat] = useState<string | null>(null)
+  const [err, setErr] = useState<string | null>(null)
+  const lancer = async (mode: ModeExport) => {
+    setErr(null)
+    setEtat(`Préparation du classeur… 0 / ${codes.length}`)
+    try {
+      const { fiches, erreurs } = await chargerFiches(annee, codes, (n) => setEtat(`Préparation du classeur… ${n} / ${codes.length}`))
+      if (!fiches.length) throw new Error(erreurs[0] || 'Aucun contrat à exporter')
+      await exporterExcel(annee, fiches, mode)
+      if (erreurs.length) setErr(`${erreurs.length} contrat(s) non exporté(s) : ${erreurs.join(' · ')}`)
+    } catch (e) {
+      setErr((e as Error).message)
+    }
+    setEtat(null)
+  }
+  return (
+    <div className="flex flex-wrap items-center gap-2 rounded-xl border border-[#E2DFD8] bg-white px-4 py-3">
+      <span className="text-[13px] font-semibold text-[#0B1220]">Excel :</span>
+      <button className={btn} disabled={!!etat || !codes.length} onClick={() => lancer('situation')}>
+        ⬇ Exporter les contrats {annee} et la situation à date
+      </button>
+      {droits.modifier && (
+        <button className={btn} disabled={!!etat || !codes.length} onClick={() => lancer('preparation')}>
+          ⬇ Préparer les contrats {annee + 1}
+        </button>
+      )}
+      {etat && <span className="text-[12px] text-slate-500">{etat}</span>}
+      <span className="ml-auto text-[12px] text-slate-500">
+        Classeur normé : un onglet par commercial, modifiable par la direction puis réimportable (avenants, année suivante).
+      </span>
+      {err && <div className="w-full text-[12px] text-[#C1683C]">{err}</div>}
+    </div>
+  )
+}
+
 function Liste({ annee, droits, onOuvrir }: { annee: number; droits: Droits; onOuvrir: (code: string) => void }) {
   const [data, setData] = useState<{ mois_clos: number; rows: LigneListe[] } | null>(null)
   const [err, setErr] = useState<string | null>(null)
   const [refs, setRefs] = useState<CollabRef[] | null>(null)
   const [nouveau, setNouveau] = useState('')
+  // Primes annuelles max / probables par contrat, calculées comme sur la fiche (etatPrime)
+  const [primes, setPrimes] = useState<Map<string, { max: number; probable: number }> | null>(null)
 
   useEffect(() => {
     setData(null)
     supabase.rpc('get_obj_contrats_liste', { p_annee: annee }).then(({ data, error }) => {
       if (error) setErr(error.message)
-      else setData(data as { mois_clos: number; rows: LigneListe[] })
+      else {
+        const d = data as { mois_clos: number; rows: LigneListe[] }
+        setData(d)
+        setPrimes(null)
+        chargerFiches(annee, d.rows.map((r) => r.code)).then(({ fiches }) => {
+          const m = new Map<string, { max: number; probable: number }>()
+          for (const f of fiches) {
+            const calc = calculerContrat(f)
+            const etats = (f.primes || []).map((p) => etatPrime(p, f, calc))
+            m.set(f.code, { max: etats.reduce((s, e) => s + e.montantMax, 0), probable: etats.reduce((s, e) => s + e.montantProjete, 0) })
+          }
+          setPrimes(m)
+        })
+      }
     })
     if (droits.modifier)
       supabase.rpc('get_obj_import_reference', { p_annee: annee }).then(({ data }) => {
@@ -225,9 +308,11 @@ function Liste({ annee, droits, onOuvrir }: { annee: number; droits: Droits; onO
       s.ca += r.ca_objectif
       s.com += r.marge * r.taux_commission
       s.av += r.avance_mensuelle * (r.mois_calc ?? mc)
+      s.pmax += primes?.get(r.code)?.max || 0
+      s.pprob += primes?.get(r.code)?.probable || 0
       return s
     },
-    { obj: 0, ca: 0, com: 0, av: 0 },
+    { obj: 0, ca: 0, com: 0, av: 0, pmax: 0, pprob: 0 },
   )
 
   return (
@@ -252,11 +337,13 @@ function Liste({ annee, droits, onOuvrir }: { annee: number; droits: Droits; onO
         </div>
       )}
 
+      {data.rows.length > 0 && <BarreExport annee={annee} codes={data.rows.map((r) => r.code)} droits={droits} />}
+
       {data.rows.length === 0 ? (
         <Alerte ton="info" texte={`Aucun contrat d’objectifs ${annee} dans votre périmètre.`} />
       ) : (
         <div className="overflow-x-auto rounded-xl border border-[#E2DFD8] bg-white">
-          <table className="w-full min-w-[1000px] text-[13px]">
+          <table className="w-full min-w-[1200px] text-[13px]">
             <thead className="bg-[#111820] text-left text-[11px] uppercase tracking-[0.08em] text-[#C9C4B8]">
               <tr>
                 <th className="px-3 py-2.5">Collaborateur</th>
@@ -269,6 +356,8 @@ function Liste({ annee, droits, onOuvrir }: { annee: number; droits: Droits; onO
                 <th className="px-3 py-2.5 text-right">Commission acquise</th>
                 <th className="px-3 py-2.5 text-right">Avances versées</th>
                 <th className="px-3 py-2.5 text-right">Solde</th>
+                <th className="px-3 py-2.5 text-right" title="Somme des primes annuelles individuelles au plafond du contrat">Prime indiv. max</th>
+                <th className="px-3 py-2.5 text-right" title="Prime annuelle probable en fin d’année : paliers sur la projection, indicateurs automatiques à date, primes évaluées au montant retenu, primes à évaluer au maximum">Prime indiv. probable</th>
                 <th className="px-3 py-2.5 text-center">Primes à évaluer</th>
               </tr>
             </thead>
@@ -303,6 +392,13 @@ function Liste({ annee, droits, onOuvrir }: { annee: number; droits: Droits; onO
                     <td className="px-3 py-2 text-right tabular-nums">{fmtE(com)}</td>
                     <td className="px-3 py-2 text-right tabular-nums text-slate-500">{fmtE(av)}</td>
                     <td className={`px-3 py-2 text-right font-semibold tabular-nums ${com - av >= 0 ? 'text-[#2F7A4A]' : 'text-[#C1683C]'}`}>{fmtE(com - av)}</td>
+                    <td className="px-3 py-2 text-right tabular-nums text-slate-500">{primes ? fmtE(primes.get(r.code)?.max ?? 0) : '…'}</td>
+                    <td className="px-3 py-2 text-right font-semibold tabular-nums text-[#0B1220]">
+                      {primes ? fmtE(primes.get(r.code)?.probable ?? 0) : '…'}
+                      {primes && (primes.get(r.code)?.max ?? 0) > 0 && (
+                        <div className="text-[10px] font-normal text-slate-500">{fmtPct((primes.get(r.code)?.probable ?? 0) / (primes.get(r.code)?.max ?? 1), 0)} du max</div>
+                      )}
+                    </td>
                     <td className="px-3 py-2 text-center">
                       {r.nb_a_evaluer > 0 ? (
                         <span className="rounded-full bg-[#F2E3C7] px-2 py-0.5 text-[11px] font-bold text-[#8A5A12]">{r.nb_a_evaluer}</span>
@@ -329,6 +425,8 @@ function Liste({ annee, droits, onOuvrir }: { annee: number; droits: Droits; onO
                 <td className="px-3 py-2 text-right tabular-nums">{fmtE(tot.com)}</td>
                 <td className="px-3 py-2 text-right tabular-nums">{fmtE(tot.av)}</td>
                 <td className="px-3 py-2 text-right tabular-nums">{fmtE(tot.com - tot.av)}</td>
+                <td className="px-3 py-2 text-right tabular-nums">{primes ? fmtE(tot.pmax) : '…'}</td>
+                <td className="px-3 py-2 text-right tabular-nums">{primes ? fmtE(tot.pprob) : '…'}</td>
                 <td />
               </tr>
             </tfoot>
@@ -336,7 +434,7 @@ function Liste({ annee, droits, onOuvrir }: { annee: number; droits: Droits; onO
         </div>
       )}
       <p className="text-[11px] text-slate-500">
-        Les contrats avec une date de fin sont calculés jusqu’au mois de cette date inclus. CA à date = CA perso, ou CA de l’agence quand l’objectif du contrat porte sur l’agence. Avances versées = avance mensuelle × mois clos (hors versements saisis sur la fiche). Commission acquise = marge perso des mois clos × taux de commission.
+        Les contrats avec une date de fin sont calculés jusqu’au mois de cette date inclus. CA à date = CA perso, ou CA de l’agence quand l’objectif du contrat porte sur l’agence. Avances versées = avance mensuelle × mois clos (hors versements saisis sur la fiche). Commission acquise = marge perso des mois clos × taux de commission. Prime indiv. max = somme des primes annuelles au plafond du contrat ; prime indiv. probable = estimation de fin d’année (paliers CA sur la projection, indicateurs automatiques à date, primes évaluées au montant retenu, primes qualitatives non encore évaluées comptées au maximum), comme sur la fiche.
       </p>
     </div>
   )
@@ -410,6 +508,14 @@ function Fiche({ annee, code, droits }: { annee: number; code: string; droits: D
           <button onClick={() => window.print()} className="rounded-lg border border-white/20 px-3 py-1.5 text-[13px] font-semibold hover:border-[#B4761A]">
             🖨 Imprimer
           </button>
+          {c && (
+            <button
+              onClick={() => exporterExcel(annee, [f], 'situation').catch((e) => alert((e as Error).message))}
+              className="rounded-lg border border-white/20 px-3 py-1.5 text-[13px] font-semibold hover:border-[#B4761A]"
+            >
+              ⬇ Excel
+            </button>
+          )}
           {modifier && (
             <button onClick={() => setEdition((v) => !v)} className="rounded-lg bg-[#B4761A] px-3 py-1.5 text-[13px] font-semibold hover:bg-[#C98A2A]">
               {edition ? 'Fermer l’édition' : '✎ Modifier le contrat'}
@@ -1424,7 +1530,7 @@ function Champ({ libelle, children }: { libelle: string; children: React.ReactNo
 // ============================================================================
 // Import du classeur
 // ============================================================================
-type OngletImport = OngletLu & {
+type OngletImport = OngletAuto & {
   inclure: boolean
   etat: 'a_publier' | 'publie' | 'erreur'
   message?: string
@@ -1449,14 +1555,26 @@ function ImportClasseur({ annee, onOuvrir }: { annee: number; onOuvrir: (code: s
     })
   }, [annee])
 
+  const refParCode = useMemo(() => new Map(refs.map((r) => [r.code, r])), [refs])
+  const anneesFichier = useMemo(() => [...new Set(onglets.filter((o) => o.format === 'norme' && o.annee != null && o.annee !== annee).map((o) => o.annee!))], [onglets, annee])
+
   const charger = async (file: File) => {
     setErr(null)
     setBusy(true)
     try {
-      const lus = await lireClasseur(file)
+      const lus = await lireClasseurAuto(file, lireOnglet)
       setFichier(file.name)
       setOnglets(
         lus.map((o) => {
+          if (o.format === 'norme') {
+            // Classeur normé : le code collaborateur fait foi, l'année doit être celle de l'écran
+            const ref = o.code_lu ? refParCode.get(o.code_lu) : undefined
+            const avert = [...o.avertissements]
+            if (o.code_lu && !ref) avert.push(`Code collaborateur inconnu : ${o.code_lu}`)
+            if (o.annee != null && o.annee !== annee) avert.push(`Onglet ${o.annee} : passez l’écran sur ${o.annee} pour l’importer`)
+            const ok = !!ref && o.annee === annee
+            return { ...o, avertissements: avert, collaborateur_code: ref ? ref.code : null, appariement: ref ? 'Code collaborateur du classeur' : null, inclure: ok, etat: 'a_publier' }
+          }
           const a = apparier(o, refs)
           return { ...o, collaborateur_code: a.code, appariement: a.methode, inclure: !!a.code, etat: 'a_publier' }
         }),
@@ -1467,7 +1585,6 @@ function ImportClasseur({ annee, onOuvrir }: { annee: number; onOuvrir: (code: s
     setBusy(false)
   }
 
-  const refParCode = useMemo(() => new Map(refs.map((r) => [r.code, r])), [refs])
   const doublons = useMemo(() => {
     const n = new Map<string, number>()
     onglets.filter((o) => o.inclure && o.collaborateur_code).forEach((o) => n.set(o.collaborateur_code!, (n.get(o.collaborateur_code!) || 0) + 1))
@@ -1477,7 +1594,7 @@ function ImportClasseur({ annee, onOuvrir }: { annee: number; onOuvrir: (code: s
   const maj = (onglet: string, patch: Partial<OngletImport>) => setOnglets((l) => l.map((o) => (o.onglet === onglet ? { ...o, ...patch } : o)))
 
   const publier = async () => {
-    const sel = onglets.filter((o) => o.inclure && o.collaborateur_code && o.etat !== 'publie')
+    const sel = onglets.filter((o) => o.inclure && o.collaborateur_code && o.etat !== 'publie' && (o.format !== 'norme' || o.annee === annee))
     if (!sel.length) return
     if (doublons.size) return setErr(`Plusieurs onglets rattachés au même collaborateur : ${[...doublons].join(', ')}`)
     setBusy(true)
@@ -1496,6 +1613,7 @@ function ImportClasseur({ annee, onOuvrir }: { annee: number; onOuvrir: (code: s
     const stagingParOnglet = new Map(((st as Array<{ onglet: string; staging_id: string }>) || []).map((x) => [x.onglet, x.staging_id]))
     for (const o of sel) {
       const calc = avanceTheorique(o.marge_n1, o.taux_base ?? 0.08, o.taux_commission ?? 0.01)
+      const norme = o.format === 'norme'
       const payload = {
         annee,
         collaborateur_code: o.collaborateur_code,
@@ -1504,11 +1622,19 @@ function ImportClasseur({ annee, onOuvrir }: { annee: number; onOuvrir: (code: s
         marge_n1: o.marge_n1,
         taux_base: o.taux_base ?? 0.08,
         taux_commission: o.taux_commission ?? 0.01,
-        avance_mensuelle_saisie: o.avance_excel != null && Math.abs(Math.round(o.avance_excel) - calc) > 1 ? Math.round(o.avance_excel) : null,
-        statut: 'valide',
+        avance_mensuelle_saisie: norme
+          ? o.avance_saisie != null
+            ? Math.round(o.avance_saisie)
+            : null
+          : o.avance_excel != null && Math.abs(Math.round(o.avance_excel) - calc) > 1
+            ? Math.round(o.avance_excel)
+            : null,
+        statut: norme ? o.statut || 'valide' : 'valide',
         source_fichier: fichier,
         source_onglet: o.onglet,
         primes: o.primes,
+        // Classeur normé : date de fin et commentaire font partie du contrat (vides = effacés)
+        ...(norme ? { date_fin: o.date_fin ?? null, commentaire: o.commentaire ?? null } : {}),
       }
       const { data: id, error } = await supabase.rpc('save_obj_contrat', { p: payload })
       if (error) {
@@ -1542,6 +1668,10 @@ function ImportClasseur({ annee, onOuvrir }: { annee: number; onOuvrir: (code: s
         className={`rounded-xl border-2 border-dashed px-6 py-8 text-center ${glisse ? 'border-[#B4761A] bg-[#FBF3E4]' : 'border-[#D5D1C7] bg-white'}`}
       >
         <div className="text-[14px] font-bold text-[#0B1220]">Classeur des objectifs commerciaux {annee} (un onglet par commercial)</div>
+        <div className="mx-auto mt-1 max-w-[720px] text-[12px] text-slate-500">
+          Classeur normé (exporté depuis la liste des contrats, « Exporter » ou « Préparer {annee + 1} ») : chaque onglet est rattaché par son code collaborateur et remplace le
+          contrat {annee} — avenant compris ; les primes gardent leur évaluation. Les anciens classeurs libres restent acceptés (rapprochement automatique).
+        </div>
         <div className="mt-1 text-[12px] text-slate-500">Glissez le fichier .xlsx ici ou</div>
         <label className={`${btnPrim} mt-3 inline-block cursor-pointer`}>
           Choisir le fichier
@@ -1553,6 +1683,12 @@ function ImportClasseur({ annee, onOuvrir }: { annee: number; onOuvrir: (code: s
       </div>
 
       {err && <Alerte texte={err} />}
+      {anneesFichier.length > 0 && (
+        <Alerte
+          ton="info"
+          texte={`Ce classeur contient des contrats ${anneesFichier.join(', ')} : ils ne seront pas importés sur l’écran ${annee}. Choisissez l’année ${anneesFichier[0]} dans le bandeau puis rechargez le fichier.`}
+        />
+      )}
 
       {onglets.length > 0 && (
         <>
@@ -1593,12 +1729,22 @@ function ImportClasseur({ annee, onOuvrir }: { annee: number; onOuvrir: (code: s
                     <FragmentOnglet key={o.onglet}>
                       <tr className="border-t border-[#EEEBE4] align-top">
                         <td className="px-3 py-2">
-                          <input type="checkbox" checked={o.inclure} disabled={o.etat === 'publie'} onChange={(e) => maj(o.onglet, { inclure: e.target.checked })} />
+                          <input type="checkbox" checked={o.inclure} disabled={o.etat === 'publie' || (o.format === 'norme' && o.annee !== annee)} onChange={(e) => maj(o.onglet, { inclure: e.target.checked })} />
                         </td>
                         <td className="px-3 py-2 font-semibold">
                           <button className="text-left hover:underline" onClick={() => setOuvert(ouvert === o.onglet ? null : o.onglet)}>
                             {ouvert === o.onglet ? '▾' : '▸'} {o.onglet}
                           </button>
+                          <span className={`ml-1.5 rounded px-1 py-0.5 text-[10px] font-bold ${o.format === 'norme' ? 'bg-[#E3EFE6] text-[#2F7A4A]' : 'bg-[#F2E3C7] text-[#8A5A12]'}`}>
+                            {o.format === 'norme' ? `NORMÉ ${o.annee ?? ''}` : 'LIBRE'}
+                          </span>
+                          {o.format === 'norme' && (o.date_fin || o.statut === 'brouillon' || o.commentaire) && (
+                            <div className="mt-0.5 text-[11px] font-normal text-slate-500">
+                              {[o.statut === 'brouillon' ? 'brouillon' : o.statut === 'signe' ? 'signé' : null, o.date_fin ? `fin ${new Date(o.date_fin).toLocaleDateString('fr-FR')}` : null, o.commentaire]
+                                .filter(Boolean)
+                                .join(' · ')}
+                            </div>
+                          )}
                           {o.avertissements.length > 0 && <div className="mt-0.5 text-[11px] font-normal text-[#C1683C]">⚠ {o.avertissements.join(' · ')}</div>}
                         </td>
                         <td className="px-3 py-2">
@@ -1633,7 +1779,7 @@ function ImportClasseur({ annee, onOuvrir }: { annee: number; onOuvrir: (code: s
                           {o.annee_marge_n1 && o.annee_marge_n1 !== annee - 1 && <div className="text-[11px] text-[#C1683C]">marge {o.annee_marge_n1} ≠ {annee - 1}</div>}
                         </td>
                         <td className="px-3 py-2 text-right tabular-nums">
-                          {fmt0(o.avance_excel)} / {fmt0(calc)}
+                          {o.format === 'norme' ? (o.avance_saisie != null ? `${fmt0(o.avance_saisie)} saisie` : `${fmt0(calc)} calc.`) : `${fmt0(o.avance_excel)} / ${fmt0(calc)}`}
                         </td>
                         <td className={`px-3 py-2 text-right tabular-nums ${ecartCa > 1 ? 'text-[#C1683C]' : 'text-[#2F7A4A]'}`}>
                           {!ref ? '—' : ecarts.length === 0 ? 'pas de mois' : ecartCa <= 1 ? `✓ ${ecarts.length} mois` : fmtE(ecartCa)}
@@ -1666,6 +1812,7 @@ function ImportClasseur({ annee, onOuvrir }: { annee: number; onOuvrir: (code: s
                                       {p.description ? ` : ${p.description}` : ''} ·{' '}
                                       {p.mode === 'paliers' ? p.paliers.map((x) => `${fmtK(x.seuil)} → ${fmtE(x.montant)}`).join(' ; ') : fmtE(p.montant)}
                                       <span className="text-slate-500"> ({INDICATEUR_LIBELLES[p.indicateur]})</span>
+                                      {o.format === 'norme' && <span className={p.id ? 'text-slate-400' : 'text-[#2F7A4A]'}> · {p.id ? 'existante' : 'nouvelle'}</span>}
                                     </li>
                                   ))}
                                 </ul>
