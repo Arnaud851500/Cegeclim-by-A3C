@@ -8,7 +8,7 @@
  * la chronologie horodatée et les actions (prendre en charge, escalader,
  * résoudre, clore, rouvrir, commentaire). URL : ?id=<ticket>.
  * Suppression définitive d'un ticket (04/11/2026) : réservée au compte
- * valancha@gmail.com (RPC hotline_supprimer_ticket, migration 20261104b).
+ * valancha@gmail.com et a.valanchauskas@cegeclim-energies.com (RPC hotline_supprimer_ticket, migration 20261104b).
  */
 
 import { Suspense, useCallback, useEffect, useMemo, useState } from 'react'
@@ -250,12 +250,12 @@ function HotlineTickets() {
   )
 }
 
-const SUPPRESSION_AUTORISEE = 'valancha@gmail.com'
+const SUPPRESSION_AUTORISEE = ['valancha@gmail.com', 'a.valanchauskas@cegeclim-energies.com']
 
 function FicheTicket({ id, onClose, onChange, onSupprime }: { id: string; onClose: () => void; onChange: () => void; onSupprime: () => void }) {
   const { email } = useAccess()
   const [confirmerSuppression, setConfirmerSuppression] = useState(false)
-  const peutSupprimer = String(email || '').toLowerCase() === SUPPRESSION_AUTORISEE
+  const peutSupprimer = SUPPRESSION_AUTORISEE.includes(String(email || '').toLowerCase())
   const [ticket, setTicket] = useState<Ticket | null>(null)
   const [etapes, setEtapes] = useState<Etape[]>([])
   const [commentaire, setCommentaire] = useState('')

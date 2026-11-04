@@ -1,7 +1,7 @@
 -- ============================================================================
 -- 20261104b_hotline_suppression_ticket.sql — Hotline technique (04/11/2026)
 -- Suppression définitive d'un ticket (tests), réservée au compte d'Arnaud
--- (valancha@gmail.com). Supprime le ticket, sa chronologie et ses pièces
+-- (valancha@gmail.com, a.valanchauskas@cegeclim-energies.com). Supprime le ticket, sa chronologie et ses pièces
 -- jointes (cascade) et les demandes de pièces rattachées. Renvoie les chemins
 -- des fichiers du bucket hotline-pieces, que l'écran retire ensuite du stockage.
 -- ============================================================================
@@ -16,7 +16,7 @@ declare
   v_numero text;
   v_chemins jsonb;
 begin
-  if lower(coalesce(public.current_user_email(), '')) <> 'valancha@gmail.com' then
+  if lower(coalesce(public.current_user_email(), '')) not in ('valancha@gmail.com', 'a.valanchauskas@cegeclim-energies.com') then
     raise exception 'Suppression de ticket réservée à l''administrateur de la hotline.';
   end if;
   select numero into v_numero from public.hotline_tickets where id = p_ticket;
