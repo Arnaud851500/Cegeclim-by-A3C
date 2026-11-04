@@ -12,6 +12,7 @@
  */
 
 import { Suspense, useCallback, useEffect, useMemo, useState } from 'react'
+import Link from 'next/link'
 import { useRouter, useSearchParams } from 'next/navigation'
 import { supabase } from '@/lib/supabaseClient'
 import { useAccess } from '@/components/AccessContext'
@@ -30,6 +31,7 @@ import {
   fmtTel,
   libelleFiliere,
   libelleMotif,
+  libelleNature,
   majTicket,
   messageErreur,
   resoudre,
@@ -92,7 +94,7 @@ function HotlineTickets() {
     const q = recherche.trim().toLowerCase()
     if (!q) return tickets
     return tickets.filter((t) =>
-      [t.numero, t.intitule_tiers, t.numero_tiers, t.contact_nom, t.chantier, t.numero_serie, t.telephone_appelant, t.description]
+      [t.numero, t.intitule_tiers, t.numero_tiers, t.contact_nom, t.chantier, t.numero_serie, t.serie_ge, t.modele_ge, t.reference_article, t.code_defaut, t.telephone_appelant, t.description]
         .filter(Boolean)
         .some((v) => String(v).toLowerCase().includes(q)),
     )
@@ -115,7 +117,17 @@ function HotlineTickets() {
 
   return (
     <div className="min-h-screen bg-[#F4F3F0] pb-16">
-      <HotlineHeader titre="Tickets" sousTitre="Suivi des tickets ouverts, escalades niveau 2 / niveau 3 et historique" />
+      <HotlineHeader
+        titre="Tickets"
+        sousTitre="Suivi des tickets ouverts, escalades niveau 2 / niveau 3 et historique"
+        actions={
+          ['valancha@gmail.com', 'a.valanchauskas@cegeclim-energies.com'].includes(String(email || '').toLowerCase()) ? (
+            <Link href="/hotline/import" className="h-9 rounded-lg border border-[color:var(--cg-hdr-line)] px-3 py-1.5 text-sm font-semibold text-[color:var(--cg-hdr-ink-2)] hover:border-[#B4761A]">
+              Reprendre l’historique
+            </Link>
+          ) : null
+        }
+      />
 
       <div className="border-b border-[#E2DFD8] bg-[#F4F3F0]">
         <div className="mx-auto flex w-full max-w-[1760px] flex-wrap items-center gap-2 px-4 py-2 md:px-8">
@@ -356,8 +368,11 @@ function FicheTicket({ id, onClose, onChange, onSupprime }: { id: string; onClos
             ['Contact', ticket.contact_nom],
             ['Téléphone', fmtTel(ticket.telephone_appelant)],
             ['Chantier', ticket.chantier],
-            ['N° de série', ticket.numero_serie],
-            ['Article', ticket.reference_article],
+            ['Nature', libelleNature(ticket.nature)],
+            ['Code défaut', ticket.code_defaut],
+            ['GE', [ticket.modele_ge, ticket.serie_ge && `n° ${ticket.serie_ge}`].filter(Boolean).join(' · ')],
+            ['UI', [ticket.reference_article, ticket.numero_serie && `n° ${ticket.numero_serie}`].filter(Boolean).join(' · ')],
+            ['Mise en service', ticket.date_mes ? new Date(ticket.date_mes).toLocaleDateString('fr-FR') : ''],
             ['Assigné à', ticket.assigne_a],
             ['1re action', fmtDuree(ticket.opened_at, ticket.first_action_at)],
             ['Résolution', fmtDuree(ticket.opened_at, ticket.resolved_at)],

@@ -39,6 +39,21 @@ export const GAMMES: Array<{ value: Gamme; label: string; titre: string }> = [
   { value: 'RR', label: 'R/R', titre: 'Air / air (split, multi-split, muraux)' },
   { value: 'RO', label: 'R/O', titre: 'Air / eau (PAC)' },
 ]
+/** Nature de l'appel (04/11/2026, reprise de l'ancien outil de ticketing). */
+export type Nature = 'DEPANNAGE' | 'QUESTION_TECHNIQUE' | 'ASSISTANCE' | 'DEMANDE_GARANTIE' | 'DEMANDE_DEVIS' | 'LIVRAISON_PIECE' | 'AUTRE'
+export const NATURES: Array<{ value: Nature; label: string }> = [
+  { value: 'DEPANNAGE', label: 'Dépannage' },
+  { value: 'QUESTION_TECHNIQUE', label: 'Question technique' },
+  { value: 'ASSISTANCE', label: 'Assistance / réglage' },
+  { value: 'DEMANDE_GARANTIE', label: 'Demande de garantie' },
+  { value: 'DEMANDE_DEVIS', label: 'Demande de devis' },
+  { value: 'LIVRAISON_PIECE', label: 'Livraison de pièce' },
+  { value: 'AUTRE', label: 'Autre' },
+]
+export function libelleNature(value: string | null | undefined) {
+  return NATURES.find((n) => n.value === value)?.label || ''
+}
+
 export function libelleGamme(value: string | null | undefined) {
   return GAMMES.find((g) => g.value === value)?.label || ''
 }
@@ -138,8 +153,15 @@ export type Ticket = {
   contact_nom: string | null
   contact_email: string | null
   chantier: string | null
+  /** Unité intérieure : n° de série et modèle. */
   numero_serie: string | null
   reference_article: string | null
+  /** Groupe extérieur (04/11/2026). */
+  modele_ge?: string | null
+  serie_ge?: string | null
+  nature?: Nature | null
+  code_defaut?: string | null
+  date_mes?: string | null
   description: string | null
   preconisation: string | null
   arbre_id: string | null
@@ -193,6 +215,12 @@ export type TicketHistorique = Pick<
   | 'contact_nom'
   | 'intitule_tiers'
   | 'numero_tiers'
+  | 'nature'
+  | 'modele_ge'
+  | 'serie_ge'
+  | 'reference_article'
+  | 'code_defaut'
+  | 'source'
 >
 
 export type DocumentVente = {

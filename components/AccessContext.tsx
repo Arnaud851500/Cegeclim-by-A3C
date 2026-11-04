@@ -259,6 +259,7 @@ const PAGE_ACCESS_CHECKS: Array<[string, keyof AccessRights]> = [
   ['/hotline/diagnostic', 'can_hotline_expert'],
   ['/hotline/stats', 'can_hotline_expert'],
   ['/hotline/escalades', 'can_hotline_expert'],
+  ['/hotline/import', 'can_hotline_expert'],
   ['/hotline', 'can_hotline'],
   ['/guides-blg', 'can_guides_blg'],
 ]

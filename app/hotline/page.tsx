@@ -41,6 +41,8 @@ import {
   FILIERES,
   GAMMES,
   MOTIFS,
+  NATURES,
+  libelleNature,
   STATUTS,
   ajouterEtape,
   chargerArbres,
@@ -82,6 +84,7 @@ import {
   type Filiere,
   type Gamme,
   type Ligne,
+  type Nature,
   type Dossier,
   type Livraison,
   type Motif,
@@ -102,6 +105,11 @@ type Formulaire = {
   chantier: string
   numero_serie: string
   reference_article: string
+  modele_ge: string
+  serie_ge: string
+  nature: Nature | ''
+  code_defaut: string
+  date_mes: string
   description: string
 }
 
@@ -116,6 +124,11 @@ const FORM_VIDE: Formulaire = {
   chantier: '',
   numero_serie: '',
   reference_article: '',
+  modele_ge: '',
+  serie_ge: '',
+  nature: '',
+  code_defaut: '',
+  date_mes: '',
   description: '',
 }
 
@@ -259,6 +272,11 @@ function HotlineConsole() {
           chantier: t.chantier || '',
           numero_serie: t.numero_serie || '',
           reference_article: t.reference_article || '',
+          modele_ge: t.modele_ge || '',
+          serie_ge: t.serie_ge || '',
+          nature: t.nature || '',
+          code_defaut: t.code_defaut || '',
+          date_mes: t.date_mes || '',
           description: t.description || '',
         })
         if (t.arbre_id) {
@@ -294,7 +312,7 @@ function HotlineConsole() {
   // Contexte temps réel (debounce 400 ms) -----------------------------------
   useEffect(() => {
     const handle = window.setTimeout(async () => {
-      if (!form.numero_tiers && !form.numero_serie && !form.chantier && telCle(telephone).length < 9) {
+      if (!form.numero_tiers && !form.numero_serie && !form.serie_ge && !form.chantier && telCle(telephone).length < 9) {
         setContexte(CONTEXTE_VIDE)
         return
       }
@@ -305,7 +323,7 @@ function HotlineConsole() {
             numeroTiers: form.numero_tiers,
             telephone,
             chantier: form.chantier,
-            numeroSerie: form.numero_serie,
+            numeroSerie: form.numero_serie || form.serie_ge,
             contactNom: form.contact_nom,
           }),
         )
@@ -316,7 +334,7 @@ function HotlineConsole() {
       }
     }, 400)
     return () => window.clearTimeout(handle)
-  }, [form.numero_tiers, form.chantier, form.numero_serie, form.contact_nom, telephone, ticket?.id])
+  }, [form.numero_tiers, form.chantier, form.numero_serie, form.serie_ge, form.contact_nom, telephone, ticket?.id])
 
   // Dossiers de vente du client (02/11/2026) : référence chantier, n° de pièce
   // ou produit saisi dans « Chantier » (sinon « Modèle »). Sans recherche : les
@@ -487,6 +505,11 @@ function HotlineConsole() {
           chantier: form.chantier || null,
           numero_serie: form.numero_serie || null,
           reference_article: form.reference_article || null,
+          modele_ge: form.modele_ge.trim() || null,
+          serie_ge: form.serie_ge.trim() || null,
+          nature: form.nature || null,
+          code_defaut: form.code_defaut.trim() || null,
+          date_mes: form.date_mes || null,
           description: form.description || null,
           arbre_id: arbreId || null,
           assigne_a: email || null,
@@ -525,6 +548,11 @@ function HotlineConsole() {
         chantier: form.chantier || null,
         numero_serie: form.numero_serie || null,
         reference_article: form.reference_article || null,
+        modele_ge: form.modele_ge.trim() || null,
+        serie_ge: form.serie_ge.trim() || null,
+        nature: form.nature || null,
+        code_defaut: form.code_defaut.trim() || null,
+        date_mes: form.date_mes || null,
         description: form.description || null,
         arbre_id: arbreId || null,
       })
@@ -820,27 +848,50 @@ function HotlineConsole() {
                   className={champ}
                 />
               </label>
+              <label className="block text-[11px] font-semibold text-slate-500">
+                Chantier / référence
+                <input value={form.chantier} onChange={(e) => patch({ chantier: e.target.value })} placeholder="Chantier ou produit" title="Référence chantier SAGE, ou nom / référence de produit (client identifié)" className={champ} />
+              </label>
               <div className="grid grid-cols-2 gap-2">
                 <label className="text-[11px] font-semibold text-slate-500">
-                  Chantier / référence
-                  <input value={form.chantier} onChange={(e) => patch({ chantier: e.target.value })} placeholder="Chantier ou produit" title="Référence chantier SAGE, ou nom / référence de produit (client identifié)" className={champ} />
+                  Nature de l’appel
+                  <select value={form.nature} onChange={(e) => patch({ nature: e.target.value as Nature | '' })} className={champ}>
+                    <option value="">—</option>
+                    {NATURES.map((n) => (
+                      <option key={n.value} value={n.value}>
+                        {n.label}
+                      </option>
+                    ))}
+                  </select>
                 </label>
                 <label className="text-[11px] font-semibold text-slate-500">
-                  N° de série
-                  <input value={form.numero_serie} onChange={(e) => patch({ numero_serie: e.target.value })} className={champ} />
+                  Code défaut
+                  <input value={form.code_defaut} onChange={(e) => patch({ code_defaut: e.target.value })} className={champ} />
                 </label>
               </div>
-              <label className="block text-[11px] font-semibold text-slate-500">
-                <span className="flex items-center justify-between">
-                  Modèle / référence article
+              <div className="rounded-lg border border-[#EFEDE8] bg-[#FAF9F7] p-2">
+                <div className="mb-1 text-[10px] font-bold uppercase tracking-[0.06em] text-slate-500">Groupe extérieur (GE)</div>
+                <div className="grid grid-cols-2 gap-2">
+                  <input value={form.modele_ge} onChange={(e) => patch({ modele_ge: e.target.value })} placeholder="Modèle GE" className={champ} />
+                  <input value={form.serie_ge} onChange={(e) => patch({ serie_ge: e.target.value })} placeholder="N° de série GE" className={champ} />
+                </div>
+                <div className="mb-1 mt-2 flex items-center justify-between text-[10px] font-bold uppercase tracking-[0.06em] text-slate-500">
+                  Unité intérieure (UI)
                   {refsVues.has(form.reference_article.trim().toUpperCase()) ? (
-                    <button type="button" onClick={() => ouvrirVue(form.reference_article)} className="text-[11px] font-bold text-[#B4761A] underline">
+                    <button type="button" onClick={() => ouvrirVue(form.reference_article)} className="text-[11px] font-bold normal-case tracking-normal text-[#B4761A] underline">
                       🔍 Vue éclatée
                     </button>
                   ) : null}
-                </span>
-                <input value={form.reference_article} onChange={(e) => patch({ reference_article: e.target.value })} className={champ} />
-              </label>
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  <input value={form.reference_article} onChange={(e) => patch({ reference_article: e.target.value })} placeholder="Modèle UI / référence" className={champ} />
+                  <input value={form.numero_serie} onChange={(e) => patch({ numero_serie: e.target.value })} placeholder="N° de série UI" className={champ} />
+                </div>
+                <label className="mt-2 flex items-center gap-2 text-[11px] font-semibold text-slate-500">
+                  Mise en service le
+                  <input type="date" value={form.date_mes} onChange={(e) => patch({ date_mes: e.target.value })} className="h-8 rounded-lg border border-[#D8D3C8] bg-white px-2 text-[12px] text-slate-900" />
+                </label>
+              </div>
               <label className="block text-[11px] font-semibold text-slate-500">
                 Motif de l’appel
                 <textarea
@@ -1039,10 +1090,10 @@ function HotlineConsole() {
             />
             <PaveHistorique
               titre="HOTLINE Historique Chantier / Machine"
-              precision={[form.chantier, form.numero_serie].filter(Boolean).join(' · ')}
+              precision={[form.chantier, form.serie_ge, form.numero_serie].filter(Boolean).join(' · ')}
               tickets={contexte.ticketsChantier.filter((t) => t.id !== ticket?.id)}
               chargement={contexteLoading}
-              vide={form.chantier || form.numero_serie ? 'Aucun appel précédent sur ce chantier ou cette machine.' : 'Saisir le chantier ou le n° de série pour afficher son historique.'}
+              vide={form.chantier || form.numero_serie || form.serie_ge ? 'Aucun appel précédent sur ce chantier ou cette machine.' : 'Saisir le chantier ou le n° de série pour afficher son historique.'}
               afficherClient
               afficherChantier
               onOuvrir={setTicketHisto}
@@ -1199,13 +1250,17 @@ function PaveHistorique({
                 <Pastille {...STATUTS[t.statut]} />
               </div>
               <div className="text-slate-600">
+                {t.nature ? `${libelleNature(t.nature)} · ` : ''}
                 {libelleFiliere(t.filiere)} · {libelleMotif(t.motif)} · N{t.niveau}
+                {t.source === 'IMPORT' ? <span className="ml-1 text-[10px] font-bold text-slate-400">HISTORIQUE</span> : null}
               </div>
               {afficherClient && (t.intitule_tiers || t.contact_nom) ? (
                 <div className="truncate text-slate-600">{[t.intitule_tiers || t.numero_tiers, t.contact_nom].filter(Boolean).join(' · ')}</div>
               ) : null}
-              {afficherChantier && (t.chantier || t.numero_serie) ? (
-                <div className="truncate text-slate-600">{[t.chantier, t.numero_serie ? `n° ${t.numero_serie}` : ''].filter(Boolean).join(' · ')}</div>
+              {afficherChantier && (t.chantier || t.numero_serie || t.serie_ge) ? (
+                <div className="truncate text-slate-600">
+                  {[t.chantier, t.serie_ge ? `GE ${t.serie_ge}` : '', t.numero_serie ? `UI ${t.numero_serie}` : ''].filter(Boolean).join(' · ')}
+                </div>
               ) : null}
               {t.description ? <div className="truncate text-slate-500">{t.description}</div> : null}
               {t.preconisation ? <div className="truncate text-[#2F6B3A]">→ {t.preconisation}</div> : null}
@@ -1276,8 +1331,11 @@ function FenetreTicket({ id, onFermer }: { id: string; onFermer: () => void }) {
                 ['Contact', t.contact_nom],
                 ['Téléphone', fmtTel(t.telephone_appelant)],
                 ['Chantier', t.chantier],
-                ['Article', t.reference_article],
-                ['N° de série', t.numero_serie],
+                ['Nature', libelleNature(t.nature)],
+                ['Code défaut', t.code_defaut],
+                ['Mise en service', t.date_mes ? fmtDate(t.date_mes) : ''],
+                ['GE', [t.modele_ge, t.serie_ge && `n° ${t.serie_ge}`].filter(Boolean).join(' · ')],
+                ['UI', [t.reference_article, t.numero_serie && `n° ${t.numero_serie}`].filter(Boolean).join(' · ')],
               ].map(([k, v]) => (
                 <div key={k}>
                   <dt className="font-semibold uppercase tracking-[0.04em] text-slate-400">{k}</dt>
