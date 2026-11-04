@@ -129,10 +129,14 @@ function ContratsObjectifsPage() {
     if (!droits.modifier && !droits.suivi && droits.mon_code) go({ code: droits.mon_code })
   }, [droits, code, vueImport, go])
 
+  // La liste occupe toute la largeur de l'écran (tableau large, sans défilement horizontal) ;
+  // la fiche et l'import gardent une largeur de lecture.
+  const largeur = !code && !vueImport ? 'max-w-none' : 'max-w-[1400px]'
+
   return (
     <div className="min-h-screen bg-[#F4F3F0] pb-16 print:bg-white">
       <header className="border-b border-[color:var(--cg-hdr-border)] bg-[color:var(--cg-hdr-bg)] print:hidden">
-        <div className="mx-auto flex w-full max-w-[1400px] flex-wrap items-end justify-between gap-4 px-4 py-4 md:px-8">
+        <div className={`mx-auto flex w-full ${largeur} flex-wrap items-end justify-between gap-4 px-4 py-4 md:px-8`}>
           <div>
             <div className="text-[11px] font-semibold uppercase tracking-[0.24em] text-[#B4761A]">Mes agences / Mes commerciaux</div>
             <h1 className="mt-1 text-[24px] font-bold leading-tight text-[color:var(--cg-hdr-ink)] md:text-[28px]">Contrats d’objectifs {annee}</h1>
@@ -167,7 +171,7 @@ function ContratsObjectifsPage() {
         </div>
       </header>
 
-      <main className="mx-auto w-full max-w-[1400px] px-4 py-5 md:px-8">
+      <main className={`mx-auto w-full ${largeur} px-4 py-5 md:px-8`}>
         {erreur && <Alerte texte={erreur} />}
         {!droits && !erreur && <div className="p-6 text-sm text-slate-500">Chargement…</div>}
         {droits && code && <Fiche annee={annee} code={code} droits={droits} />}
