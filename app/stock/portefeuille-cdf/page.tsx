@@ -63,6 +63,12 @@
  *  stationnement), réception d'hier pas encore vue dans SAGE, heure hors 6h–18h, pas de n° de container.
  *  Migration : supabase/sql/20261102b_portefeuille_cdf_rdv_fms.sql.
  *
+ * 05/11/2026 — RDV FMS lu dans SAGE : quand la CDF porte un RDV confirmé en commentaire (« Livraison le 13.11 à 13h »,
+ *  « Hitachi propose de livrer 17.11 … ⇒ OK FMS », « Livraison décalée au 18.11 ») et qu'aucun RDV n'est saisi, la colonne
+ *  RDV FMS l'affiche en vert avec la mention SAGE (v_appro_cdf_rdv_fms_sage) ; une saisie dans le compagnon prime.
+ *  Colonne CDC : rattachement FIFO (une ligne de CDC dépend de la seule réception qui comble son manque — avant, toutes
+ *  les réceptions antérieures à sa date étaient comptées). Migration : supabase/sql/20261105b_rdv_fms_sage_lieu_livraison.sql.
+ *
  * Sources : RPC get_appro_portefeuille_cdf / get_appro_cdf_detail ; tables appro_container_releves,
  * appro_cdf_actions, appro_armateurs, appro_cdf_statuts ; sage.cdf_statut et sage.bdcf_commentaires
  * (export TSE à compléter, voir supabase/sql/20261023_export_sage_cdf_complements.sql).
@@ -106,7 +112,9 @@ type Ligne = {
   date_premiere: string | null; date_derniere: string | null; nb_dates: number; blocs: Bloc[]
   nb_blocs_depasses: number; montant_depasse: number; nb_cdc_horizon: number
   rdv?: RdvFms | null   // RDV de déchargement FMS en vigueur (chargé à part, v_appro_cdf_rdv_fms_actuel)
+  rdvSage?: RdvSage | null  // RDV confirmé lu dans les commentaires de la CDF SAGE (v_appro_cdf_rdv_fms_sage)
 }
+type RdvSage = { cdf_numero: string; rdv_date: string; rdv_heure: string | null; texte: string | null }
 type RdvFms = {
   id: number; cdf_numero: string; container_numero: string | null
   rdv_date: string | null; rdv_heure: string | null; commentaire: string | null
@@ -317,11 +325,12 @@ function RdvCellule({ r, auj, onChange }: { r: Ligne; auj: string; onChange: (nu
   const [saving, setSaving] = useState(false)
   const [err, setErr] = useState<string | null>(null)
   const rdv = r.rdv || null
-  const ctrl = controleRdv(edit ? date : rdv?.rdv_date || null, edit ? heure : rdv?.rdv_heure || null, r, auj)
+  const sage = !rdv?.rdv_date ? r.rdvSage || null : null
+  const ctrl = controleRdv(edit ? date : rdv?.rdv_date || sage?.rdv_date || null, edit ? heure : rdv?.rdv_heure || sage?.rdv_heure || null, r, auj)
 
   function ouvrir(e: React.MouseEvent) {
     e.stopPropagation()
-    setDate(rdv?.rdv_date || ''); setHeure(rdv?.rdv_heure?.slice(0, 5) || ''); setErr(null); setEdit(true)
+    setDate(rdv?.rdv_date || sage?.rdv_date || ''); setHeure((rdv?.rdv_heure || sage?.rdv_heure)?.slice(0, 5) || ''); setErr(null); setEdit(true)
   }
   async function valider(retirer = false) {
     setSaving(true); setErr(null)
@@ -358,6 +367,15 @@ function RdvCellule({ r, auj, onChange }: { r: Ligne; auj: string; onChange: (nu
     return (
       <button type="button" onClick={ouvrir} title={titre}>
         <Badge cls={ctrl.niveau ? RDV_CLS[ctrl.niveau] : RDV_CLS.ok}>{ctrl.niveau === 'rouge' ? '⚠ ' : ''}{fmtRdv(rdv)}</Badge>
+      </button>
+    )
+  }
+  if (sage?.rdv_date) {
+    const titre = [`RDV déchargement FMS confirmé dans SAGE : ${fmtRdv(sage)}`, sage.texte ? `« ${sage.texte} »` : null, ...ctrl.motifs.map((m) => `⚠ ${m.texte}`),
+      'Lu dans les commentaires de la CDF — cliquer pour saisir un autre RDV (la saisie prime sur SAGE)'].filter(Boolean).join('\n')
+    return (
+      <button type="button" onClick={ouvrir} title={titre}>
+        <Badge cls={ctrl.niveau === 'rouge' ? RDV_CLS.rouge : 'bg-emerald-50 text-emerald-800 ring-1 ring-emerald-200'}>{ctrl.niveau === 'rouge' ? '⚠ ' : ''}{fmtRdv(sage)} <span className="opacity-70">SAGE</span></Badge>
       </button>
     )
   }
@@ -963,12 +981,20 @@ function PortefeuilleCdf() {
 
   // RDV de déchargement FMS en vigueur, par CDF (chargés à part du portefeuille)
   const [rdvs, setRdvs] = useState<Record<string, RdvFms>>({})
+  const [rdvsSage, setRdvsSage] = useState<Record<string, RdvSage>>({})
   const chargerRdvs = useCallback(async () => {
-    const { data, error } = await supabase.from('v_appro_cdf_rdv_fms_actuel').select('*')
+    const [{ data, error }, sage] = await Promise.all([
+      supabase.from('v_appro_cdf_rdv_fms_actuel').select('*'),
+      supabase.from('v_appro_cdf_rdv_fms_sage').select('cdf_numero, rdv_date, rdv_heure, texte'),
+    ])
     if (error) { setErreur('RDV FMS : ' + messageErreur(error)); return }
     const m: Record<string, RdvFms> = {}
     ;((data || []) as RdvFms[]).forEach((x) => { m[x.cdf_numero] = x })
     setRdvs(m)
+    // RDV confirmés dans les commentaires SAGE (05/11/2026) : la saisie du compagnon prime
+    const ms: Record<string, RdvSage> = {}
+    if (!sage.error) ((sage.data || []) as RdvSage[]).forEach((x) => { ms[x.cdf_numero] = x })
+    setRdvsSage(ms)
   }, [])
   const majRdv = useCallback((numero: string, rdv: RdvFms | null) => {
     setRdvs((prev) => { const n = { ...prev }; if (rdv) n[numero] = rdv; else delete n[numero]; return n })
@@ -1048,7 +1074,7 @@ function PortefeuilleCdf() {
     router.replace(qs ? `/stock/portefeuille-cdf?${qs}` : '/stock/portefeuille-cdf', { scroll: false })
   }
 
-  const rows = useMemo(() => (rep?.rows || []).map((r) => ({ ...r, rdv: rdvs[r.numero] || null })), [rep, rdvs])
+  const rows = useMemo(() => (rep?.rows || []).map((r) => ({ ...r, rdv: rdvs[r.numero] || null, rdvSage: rdvsSage[r.numero] || null })), [rep, rdvs, rdvsSage])
   const armateurs = rep?.armateurs || []
   const auj = isoAujourdhui()
 
@@ -1155,7 +1181,9 @@ function PortefeuilleCdf() {
         { h: 'Armateur', f: (r) => r.armateur }, { h: 'Navire', f: (r) => r.navire, w: 20 }, { h: 'ETA port', f: (r) => fmtDate(r.eta_port) },
         { h: 'Statut suivi', f: (r) => (r.statut_suivi ? STATUT_SUIVI[r.statut_suivi] : '') }, { h: 'Relevé le', f: (r) => fmtDateHeure(r.releve_le) },
         { h: 'Marge (j)', f: (r) => r.marge_jours }, { h: 'Verdict', f: (r) => (r.verdict ? VERDICT[r.verdict].label : '') },
-        { h: 'RDV FMS', f: (r) => (r.rdv?.rdv_date ? fmtDate(r.rdv.rdv_date) : '') }, { h: 'Heure RDV', f: (r) => r.rdv?.rdv_heure?.slice(0, 5) || '' },
+        { h: 'RDV FMS', f: (r) => (r.rdv?.rdv_date ? fmtDate(r.rdv.rdv_date) : r.rdvSage?.rdv_date ? fmtDate(r.rdvSage.rdv_date) : '') },
+        { h: 'Heure RDV', f: (r) => (r.rdv?.rdv_date ? r.rdv.rdv_heure : r.rdvSage?.rdv_heure)?.slice(0, 5) || '' },
+        { h: 'Source RDV', f: (r) => (r.rdv?.rdv_date ? 'Saisi compagnon' : r.rdvSage?.rdv_date ? 'Commentaire SAGE' : '') },
         { h: 'Commentaire RDV', f: (r) => r.rdv?.commentaire || '', w: 30 },
         { h: 'Contrôle RDV', f: (r) => controleRdv(r.rdv?.rdv_date || null, r.rdv?.rdv_heure || null, r, auj).motifs.map((m) => m.texte).join(' | '), w: 50 },
         { h: 'CDC en attente', f: (r) => r.nb_cdc }, { h: '1re livraison CDC', f: (r) => fmtDate(r.premiere_livraison_cdc) },

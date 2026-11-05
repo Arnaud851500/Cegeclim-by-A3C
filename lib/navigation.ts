@@ -27,6 +27,9 @@
 // droit nominatif can_allocation_ro (lib/allocationRo.ts + table stock_alloc_ro_acces).
 // ÉVOLUTION (2026-10-26) : entrée de menu « Allocation AirH2O 600 / 800 »
 // rattachée au droit can_dashboard (au lieu de can_allocation_ro).
+// ÉVOLUTION (2026-11-04) : « Plan d’expédition FMS » (/stock/plan-expedition-fms) ajouté sous
+// Portefeuille commandes fournisseurs (droit can_superuser ; page et RPC réservées à Arnaud).
+// ÉVOLUTION (2026-11-05) : « Plan d’expédition – vue agence » (/stock/plan-expedition-fms/agences), même droit.
 // ÉVOLUTION (2026-10-23) : « Portefeuille commandes fournisseurs » (/stock/portefeuille-cdf)
 // ajouté sous Calcul de besoin - Appro (droit can_stocks).
 // ÉVOLUTION (2026-10-21) : « Pénuries – vue mensuelle » (/stock/penurie/mensuel)
@@ -212,6 +215,8 @@ export const NAV_BLOCS: NavBloc[] = [
       { label: 'Calcul de besoin - Appro', path: '/stock/calcul-besoin', activeLabel: 'Calcul de besoin - Appro', accessKey: 'can_appro', description: 'Propositions de commande fournisseur par article, paramètres d’appro, conso retenue et écrêtage des ventes exceptionnelles.' },
       { label: 'Allocation AirH2O 600 / 800', path: '/stock/allocation-airh2o', activeLabel: 'Allocation AirH2O 600 / 800', accessKey: 'can_stocks', description: 'Groupes AirH2O 600 / 800 T3,5 à 6 : dispo, arrivages, CDC et BL par agence, reste à attribuer et allocations par agence (vue complète réservée ; droit de profil « Allocation AirH2O » = vue de son agence, en lecture).' },
       { label: 'Portefeuille commandes fournisseurs', path: '/stock/portefeuille-cdf', activeLabel: 'Portefeuille commandes fournisseurs', accessKey: 'can_appro', description: 'CDF ouvertes : alertes containers (n°, suivi bateau, marge), sans AR, CDF attendues par des CDC à faire confirmer, dates dépassées.' },
+      { label: 'Plan d’expédition FMS', path: '/stock/plan-expedition-fms', activeLabel: 'Plan d’expédition FMS', accessKey: 'can_superuser', description: 'Arrivages containers : ce qui peut partir de FMS dès maintenant (groupes extérieurs, cuivre, volumineux), ce qui attend les réceptions, préconisations par agence et planning de charge FMS (accès réservé).' },
+      { label: 'Plan d’expédition – vue agence', path: '/stock/plan-expedition-fms/agences', activeLabel: 'Plan d’expédition – vue agence', accessKey: 'can_superuser', description: 'Par agence (commercial) : commandes rangées par dépôt de départ, frise des livraisons avec GE / UI / palettes, manques et complétude, glisser-déposer date ou dépôt, scission des envois (accès réservé).' },
       { label: 'Projection stock', path: '/stocks-disponibilites2', accessKey: 'can_appro', description: 'Stock projeté par référence, hypothèses mensuelles et substitutions.' },
       { label: 'Reconstitution Stock', path: '/stock/reconstruction', accessKey: 'can_appro', description: 'Reconstruction du stock projeté et vérification des promesses.' },
       { label: 'Vision dispo par groupe d article', path: '/stock/groupes', accessKey: 'can_appro', description: 'Visibilité de la dispo à venir et des livraisons possibles.' },
