@@ -18,6 +18,11 @@
  *  - Glisser-déposer une pastille : vers une autre date (nouvelle date de livraison) et/ou vers un
  *    autre dépôt (changement de dépôt de départ). ✂ Scinder : envoi 1 du dispo (depuis l'agence ou
  *    FMS), envoi 2 du reliquat à complétude.
+ *  - 05/11/2026 (suite) : tri des clients (1re livraison, A → Z, nb de commandes ↓) ; commandes dépliées en
+ *    retrait sur fond teinté ; clic sur une pastille ou un client = fiche commande (dispo / attendu / transfert
+ *    FMS → agence, changement de date et de dépôt, scission) ; pendant un glisser, barre des dépôts en bas d'écran
+ *    pour changer de dépôt sans faire défiler ; vue « Transferts FMS → agence » (dès maintenant / après réception,
+ *    par dépôt, après les décisions) avec export Excel.
  *  - Ces décisions ne modifient pas SAGE : elles sont enregistrées (appro_plan_exp_actions), simulées
  *    dans la frise et listées « à reporter dans SAGE » jusqu'à ce qu'on les marque reportées.
  *
@@ -211,18 +216,19 @@ function echelle(auj: string, fin: string, px: number): Echelle {
 
 type Glisse = { docs: string[]; depot: string; libelle: string }
 
-function Pastille({ m, titre, manque, transfert, fantome, split, couleur, onDragStart, petit }: {
+function Pastille({ m, titre, manque, transfert, fantome, split, couleur, onDragStart, onClick, petit }: {
   m: Metriques; titre: string; manque?: boolean; transfert?: boolean; fantome?: boolean; split?: 1 | 2
-  couleur: string; onDragStart?: (e: React.DragEvent) => void; petit?: boolean
+  couleur: string; onDragStart?: (e: React.DragEvent) => void; onClick?: () => void; petit?: boolean
 }) {
   const macro = m.macros[0]
   return (
     <div
       draggable={!!onDragStart && !fantome}
       onDragStart={onDragStart}
-      title={titre}
+      onClick={onClick}
+      title={`${titre}${onClick ? '\n— clic : détail de la commande' : ''}`}
       className={`relative select-none whitespace-nowrap rounded-full px-2 py-[3px] leading-[1.05] shadow-sm transition-transform hover:z-20 hover:scale-110
-        ${fantome ? 'border-2 border-dashed bg-white/80 opacity-80' : 'border bg-white'} ${onDragStart && !fantome ? 'cursor-grab active:cursor-grabbing' : ''}`}
+        ${fantome ? 'border-2 border-dashed bg-white/80 opacity-80' : 'border bg-white'} ${onDragStart && !fantome ? 'cursor-grab active:cursor-grabbing' : onClick ? 'cursor-pointer' : ''}`}
       style={{ borderColor: fantome ? '#8A8474' : couleur, fontSize: petit ? 9.5 : 10.5 }}
     >
       {manque && !fantome && <span className="absolute -right-1.5 -top-2 text-[13px] text-[#C1683C]" title="Il manque de la marchandise à cette date">★</span>}
@@ -236,10 +242,11 @@ function Pastille({ m, titre, manque, transfert, fantome, split, couleur, onDrag
 }
 
 /** Pastille (+ pointillés jusqu'à la date de complétude, ou deux envois si scindé) placée sur la frise. */
-function Jalon({ e, liv, complete, completeInconnue, m, mDispo, mReliquat, split, manque, transfert, titre, couleur, glisse, onDragStart, petit }: {
+function Jalon({ e, liv, complete, completeInconnue, m, mDispo, mReliquat, split, manque, transfert, titre, couleur, glisse, onDragStart, onOpen, petit }: {
   e: Echelle; liv: string | null; complete: string | null; completeInconnue: boolean
   m: Metriques; mDispo: Metriques; mReliquat: Metriques; split: Action | null
-  manque: boolean; transfert: boolean; titre: string; couleur: string; glisse: Glisse; onDragStart: (g: Glisse, e: React.DragEvent) => void; petit?: boolean
+  manque: boolean; transfert: boolean; titre: string; couleur: string; glisse: Glisse; onDragStart: (g: Glisse, e: React.DragEvent) => void
+  onOpen: () => void; petit?: boolean
 }) {
   const drag = (ev: React.DragEvent) => onDragStart(glisse, ev)
   if (split?.split_date_1) {
@@ -248,10 +255,10 @@ function Jalon({ e, liv, complete, completeInconnue, m, mDispo, mReliquat, split
       <>
         <div className="pointer-events-none absolute top-1/2 h-0 border-t-2 border-dotted border-[#8A8474]" style={{ left: Math.min(x1, x2), width: Math.abs(x2 - x1) }} />
         <div className="absolute top-1/2 -translate-x-1/2 -translate-y-1/2" style={{ left: x1 }}>
-          <Pastille m={mDispo} split={1} couleur={couleur} titre={`${titre}\nEnvoi 1 (dispo) le ${fmtD(split.split_date_1)} depuis ${libDepot(split.split_depot || '')}`} onDragStart={drag} petit={petit} />
+          <Pastille m={mDispo} split={1} couleur={couleur} titre={`${titre}\nEnvoi 1 (dispo) le ${fmtD(split.split_date_1)} depuis ${libDepot(split.split_depot || '')}`} onDragStart={drag} onClick={onOpen} petit={petit} />
         </div>
         <div className="absolute top-1/2 -translate-x-1/2 -translate-y-1/2" style={{ left: x2 }}>
-          <Pastille m={mReliquat} split={2} fantome couleur={couleur} titre={`Envoi 2 (reliquat) le ${fmtD(split.split_date_2)}`} petit={petit} />
+          <Pastille m={mReliquat} split={2} fantome couleur={couleur} titre={`Envoi 2 (reliquat) le ${fmtD(split.split_date_2)}`} onClick={onOpen} petit={petit} />
         </div>
       </>
     )
@@ -265,15 +272,15 @@ function Jalon({ e, liv, complete, completeInconnue, m, mDispo, mReliquat, split
         <>
           <div className="pointer-events-none absolute top-1/2 h-0 border-t-2 border-dotted border-[#C1683C]/70" style={{ left: x, width: Math.max(xc - x, 0) }} />
           <div className="absolute top-1/2 -translate-x-1/2 -translate-y-1/2" style={{ left: xc }}>
-            <div title={completeInconnue ? 'Date de complétude inconnue (RDV container à saisir ou aucune commande fournisseur)' : `Complète le ${fmtD(complete)}`}
-              className="whitespace-nowrap rounded-full border-2 border-dashed border-[#C1683C]/70 bg-white/80 px-2 py-[2px] text-[10px] font-bold text-[#8A3F1E]">
+            <div onClick={onOpen} title={completeInconnue ? 'Date de complétude inconnue (RDV container à saisir ou aucune commande fournisseur)' : `Complète le ${fmtD(complete)}`}
+              className="cursor-pointer whitespace-nowrap rounded-full border-2 border-dashed border-[#C1683C]/70 bg-white/80 px-2 py-[2px] text-[10px] font-bold text-[#8A3F1E]">
               {completeInconnue ? 'complète ?' : `complète ${fmtJ(complete)}`}
             </div>
           </div>
         </>
       )}
       <div className="absolute top-1/2 -translate-x-1/2 -translate-y-1/2" style={{ left: x }}>
-        <Pastille m={m} manque={manque} transfert={transfert} couleur={couleur} titre={titre} onDragStart={drag} petit={petit} />
+        <Pastille m={m} manque={manque} transfert={transfert} couleur={couleur} titre={titre} onDragStart={drag} onClick={onOpen} petit={petit} />
       </div>
     </>
   )
@@ -388,6 +395,229 @@ function FenetreSplit({ cmds, depotAgence, auj, onAnnule, onValide }: {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
+// Fiche commande (clic sur une pastille) : dispo / pas dispo / transferts, date et dépôt
+// ─────────────────────────────────────────────────────────────────────────
+
+function statutLigne(c: Commande, l: Ligne): { icone: string; texte: string; cls: string; ordre: number } {
+  const agence = c.depot !== 'FMS'
+  if (l.q_att > 0) {
+    const ou = l.sans_rec ? 'aucune commande fournisseur' : `${l.cont || l.cdf || '—'} · dispo FMS ${l.dispo ? fmtD(l.dispo) : '?'}${l.sim ? ' (RDV simulé)' : ''}`
+    return { icone: '⏳', texte: `${fmtN(l.q_att)} attendu(s) — ${ou}${agence ? ', puis transfert FMS → ' + libDepot(c.depot) : ''}`, cls: 'text-[#8A3F1E]', ordre: 0 }
+  }
+  if (agence && l.q_fms > 0) return { icone: '🚚', texte: `${fmtN(l.q_fms)} en stock FMS : transfert FMS → ${libDepot(c.depot)}`, cls: 'text-[#1D5C86]', ordre: 1 }
+  if (!agence && c.depotOrigine !== 'FMS' && l.q_ag > 0) return { icone: '⚠', texte: `${fmtN(l.q_ag)} en stock à ${libDepot(c.depotOrigine)} : à vérifier à FMS (départ basculé sur FMS)`, cls: 'text-[#B4761A]', ordre: 1 }
+  if (agence) return { icone: '✓', texte: `En stock à ${libDepot(c.depot)}`, cls: 'text-emerald-700', ordre: 2 }
+  return { icone: '✓', texte: 'En stock à FMS', cls: 'text-emerald-700', ordre: 2 }
+}
+
+function BlocCommande({ c, depots, onEnregistre, onSplit }: {
+  c: Commande; depots: string[]
+  onEnregistre: (c: Commande, depot: string, date: string | null, comm: string) => Promise<void>; onSplit: (c: Commande) => void
+}) {
+  const [date, setDate] = useState(c.liv || '')
+  const [depot, setDepot] = useState(c.depot)
+  const [comm, setComm] = useState('')
+  const [saving, setSaving] = useState(false)
+  const change = depot !== c.depot || (!!date && date !== c.liv)
+  const lignes = c.lignes.slice().sort((a, b) => statutLigne(c, a).ordre - statutLigne(c, b).ordre || a.ref.localeCompare(b.ref))
+  const nbTransfert = c.lignes.filter((l) => c.depot !== 'FMS' && (l.q_fms > 0 || l.q_att > 0)).length
+  return (
+    <div className="rounded-xl border border-[#E5E1D8] bg-white">
+      <div className="flex flex-wrap items-start justify-between gap-2 border-b border-[#E5E1D8] px-3 py-2">
+        <div>
+          <div className="text-[14px] font-bold">{c.doc} <span className="font-semibold text-[#5E5A44]">· {c.client}</span></div>
+          <div className="text-[11.5px] text-[#5E5A44]">
+            {c.rep} · {fmtN(c.montant)} € HT · livraison {fmtD(c.liv)}{c.modifDate && <span className="text-[#5B4385]"> (SAGE {fmtD(c.livOrigine)})</span>}
+            {' '}· départ {libDepot(c.depot)}{c.modifDepot && <span className="text-[#5B4385]"> (SAGE {libDepot(c.depotOrigine)})</span>}
+          </div>
+          <div className="mt-1 flex flex-wrap gap-1.5 text-[11px]">
+            {c.manque ? <span className="rounded-full bg-[#C1683C]/15 px-2 font-bold text-[#8A3F1E]">★ incomplète à la date — complète {c.completeInconnue ? 'à une date inconnue' : fmtD(c.complete)}</span>
+              : <span className="rounded-full bg-emerald-100 px-2 font-bold text-emerald-800">✓ complète pour la date</span>}
+            {nbTransfert > 0 && <span className="rounded-full bg-[#1D5C86]/10 px-2 font-bold text-[#1D5C86]">🚚 {nbTransfert} ligne(s) à transférer de FMS</span>}
+            {c.split && <span className="rounded-full bg-[#111820] px-2 font-bold text-white">✂ scindée : {fmtD(c.split.split_date_1)} / {fmtD(c.split.split_date_2)}</span>}
+          </div>
+        </div>
+        <button type="button" onClick={() => onSplit(c)} className={`h-8 rounded-lg px-3 text-[12px] font-bold ${c.splitInteressant && !c.split ? 'bg-[#7A5EA8] text-white' : 'border border-[#E5E1D8]'}`}>✂ Scinder</button>
+      </div>
+      <table className="w-full text-[11.5px]">
+        <thead className="bg-[#FAF9F6] text-left text-[10px] uppercase text-[#8A8474]">
+          <tr><th className="px-2 py-1">Référence</th><th className="px-2 py-1">Désignation</th><th className="px-2 py-1 text-right">Qté</th><th className="px-2 py-1">Disponibilité</th></tr>
+        </thead>
+        <tbody>
+          {lignes.map((l) => {
+            const st = statutLigne(c, l)
+            return (
+              <tr key={l.id} className="border-t border-[#F0EDE6]">
+                <td className="whitespace-nowrap px-2 py-1 font-mono">
+                  {l.ref}
+                  {l.role === 'GROUPE_EXT' && <span className="ml-1 rounded bg-[#7A5EA8]/15 px-1 text-[9px] font-bold text-[#5B4385]">GE</span>}
+                  {estUI(l) && <span className="ml-1 rounded bg-[#2F7D5B]/15 px-1 text-[9px] font-bold text-[#2F7D5B]">UI</span>}
+                </td>
+                <td className="max-w-[260px] truncate px-2 py-1" title={l.des || ''}>{l.des}</td>
+                <td className="px-2 py-1 text-right font-semibold">{fmtN(l.qte)}</td>
+                <td className={`px-2 py-1 ${st.cls}`}>{st.icone} {st.texte}</td>
+              </tr>
+            )
+          })}
+        </tbody>
+      </table>
+      <div className="flex flex-wrap items-end gap-2 border-t border-[#E5E1D8] bg-[#FAF9F6] px-3 py-2 text-[12px]">
+        <label className="flex flex-col font-semibold text-[#5E5A44]">Date de livraison
+          <input type="date" value={date} onChange={(ev) => setDate(ev.target.value)} className="h-8 rounded border border-[#E5E1D8] bg-white px-1" />
+        </label>
+        <label className="flex flex-col font-semibold text-[#5E5A44]">Dépôt de départ
+          <select value={depot} onChange={(ev) => setDepot(ev.target.value)} className="h-8 rounded border border-[#E5E1D8] bg-white px-1">
+            {depots.map((d) => <option key={d} value={d}>{libDepot(d)}</option>)}
+          </select>
+        </label>
+        <input value={comm} onChange={(ev) => setComm(ev.target.value)} placeholder="Commentaire" className="h-8 min-w-[160px] flex-1 rounded border border-[#E5E1D8] bg-white px-2" />
+        <button type="button" disabled={!change || saving} onClick={async () => { setSaving(true); await onEnregistre(c, depot, date || null, comm); setSaving(false) }}
+          className="h-8 rounded-lg bg-[#7A5EA8] px-3 font-bold text-white disabled:opacity-40">{saving ? '…' : 'Enregistrer'}</button>
+      </div>
+    </div>
+  )
+}
+
+function FicheCommandes({ cmds, depots, onClose, onEnregistre, onSplit }: {
+  cmds: Commande[]; depots: string[]; onClose: () => void
+  onEnregistre: (c: Commande, depot: string, date: string | null, comm: string) => Promise<void>; onSplit: (c: Commande) => void
+}) {
+  return (
+    <div className="fixed inset-0 z-50 flex justify-end bg-black/30" onClick={onClose}>
+      <div className="h-full w-full max-w-[900px] overflow-y-auto bg-[#F4F3F0] p-4 shadow-2xl" onClick={(ev) => ev.stopPropagation()}>
+        <div className="flex items-start justify-between gap-2">
+          <div>
+            <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-[#B4761A]">Détail {cmds.length > 1 ? `de ${cmds.length} commandes` : 'de la commande'}</p>
+            <h2 className="text-[18px] font-bold">{cmds[0]?.client} <span className="text-[13px] font-semibold text-[#8A8474]">{cmds[0]?.tiers}</span></h2>
+            <p className="text-[11.5px] text-[#5E5A44]">Les changements de date ou de dépôt sont simulés ici et ajoutés à la liste « à reporter dans SAGE ».</p>
+          </div>
+          <button type="button" onClick={onClose} className="rounded-lg border border-[#E5E1D8] bg-white px-3 py-1.5 text-[14px] font-bold">×</button>
+        </div>
+        <div className="mt-3 space-y-3">
+          {cmds.map((c) => <BlocCommande key={`${c.cle}|${c.depot}|${c.liv}`} c={c} depots={depots} onEnregistre={onEnregistre} onSplit={onSplit} />)}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Transferts FMS → agence (après les décisions de la frise)
+// ─────────────────────────────────────────────────────────────────────────
+
+type LigneTransfert = { c: Commande; l: Ligne; qte: number; quand: string | null; maintenant: boolean; inconnu: boolean }
+
+function transferts(commandes: Commande[]): LigneTransfert[] {
+  const r: LigneTransfert[] = []
+  for (const c of commandes) {
+    if (c.depot === 'FMS') continue
+    const dispoDirectFms = c.split?.split_depot === 'FMS' // envoi 1 parti en direct de FMS : pas de transfert pour le dispo
+    for (const l of c.lignes) {
+      if (l.q_fms > 0 && !dispoDirectFms) r.push({ c, l, qte: l.q_fms, quand: null, maintenant: true, inconnu: false })
+      if (l.q_att > 0) r.push({ c, l, qte: l.q_att, quand: l.dispo, maintenant: false, inconnu: !l.dispo || l.sans_rec })
+    }
+  }
+  return r
+}
+
+function VueTransferts({ commandes, agence, onOpen }: { commandes: Commande[]; agence: string; onOpen: (c: Commande) => void }) {
+  const lignes = useMemo(() => transferts(commandes), [commandes])
+  const [ouverts, setOuverts] = useState<Set<string>>(new Set())
+  const depots = useMemo(() => {
+    const m = new Map<string, Map<string, LigneTransfert[]>>()
+    for (const t of lignes) {
+      const d = m.get(t.c.depot) || new Map<string, LigneTransfert[]>()
+      const k = t.maintenant ? '0' : t.inconnu ? '9' : `1${t.quand}`
+      const a = d.get(k); if (a) a.push(t); else d.set(k, [t])
+      m.set(t.c.depot, d)
+    }
+    return Array.from(m.entries()).sort((a, b) => a[0].localeCompare(b[0])).map(([depot, groupes]) => ({
+      depot, groupes: Array.from(groupes.entries()).sort((a, b) => a[0].localeCompare(b[0])).map(([k, ts]) => ({ k, ts })),
+    }))
+  }, [lignes])
+
+  async function exporter() {
+    const wb = new ExcelJS.Workbook()
+    const ws = wb.addWorksheet('Transferts FMS → agence')
+    ws.addRow(['Dépôt destination', 'Départ FMS possible', 'CDC', 'Client', 'Livraison client', 'Commande complète à la date', 'Référence', 'Désignation', 'Qté à transférer', 'Container / CDF attendu', 'GE', 'UI']).font = { bold: true }
+    for (const { depot, groupes } of depots) for (const { ts } of groupes) for (const t of ts) {
+      ws.addRow([libDepot(depot), t.maintenant ? 'Dès maintenant (stock FMS)' : t.inconnu ? 'Date inconnue' : fmtD(t.quand), t.c.doc, t.c.client, fmtD(t.c.liv),
+        t.c.manque ? 'Non' : 'Oui', t.l.ref, t.l.des, t.qte, t.maintenant ? '' : (t.l.cont || t.l.cdf || ''), t.l.role === 'GROUPE_EXT' ? t.qte : '', estUI(t.l) ? t.qte : ''])
+    }
+    ws.columns.forEach((c, i) => { c.width = [16, 22, 12, 30, 14, 12, 18, 40, 10, 16, 6, 6][i] })
+    const buf = await wb.xlsx.writeBuffer()
+    const url = URL.createObjectURL(new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }))
+    const a = document.createElement('a'); a.href = url; a.download = `transferts_fms_${agence.toLowerCase()}_${iso(new Date())}.xlsx`; a.click(); URL.revokeObjectURL(url)
+  }
+
+  if (!lignes.length) return <div className="rounded-xl border border-[#E5E1D8] bg-white px-4 py-6 text-center text-[13px] text-[#8A8474]">Aucun transfert FMS → agence : toutes les commandes départ agence sont servies par le stock de l’agence.</div>
+  return (
+    <section className="space-y-3">
+      <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-[#E5E1D8] bg-white px-3 py-2">
+        <p className="text-[12px] text-[#5E5A44]">Ce que FMS doit envoyer aux dépôts agence pour les commandes de {agence}, <b>après vos décisions</b> (dépôts basculés, dates, envois scindés). « Dès maintenant » = déjà en stock à FMS : transfert à anticiper ; les autres partent après réception des containers.</p>
+        <button type="button" onClick={() => void exporter()} className="h-9 rounded-lg bg-[#111820] px-3 text-[12.5px] font-bold text-white">⬇ Excel</button>
+      </div>
+      {depots.map(({ depot, groupes }) => {
+        const tout = groupes.flatMap((g) => g.ts)
+        return (
+          <div key={depot} className="overflow-hidden rounded-xl border border-[#E5E1D8] bg-white">
+            <div className="flex items-center justify-between bg-[#EFEDE3] px-3 py-2">
+              <span className="text-[14px] font-bold text-[#5E5A44]">🚚 FMS → {libDepot(depot)}</span>
+              <span className="text-[12px] text-[#5E5A44]">{new Set(tout.map((t) => t.c.doc)).size} CDC · {fmtN(tout.reduce((s, t) => s + (t.l.role === 'GROUPE_EXT' ? t.qte : 0), 0))} GE · {fmtN(tout.reduce((s, t) => s + (estUI(t.l) ? t.qte : 0), 0))} UI · {fmtN(tout.reduce((s, t) => s + ((t.l.vol || 0) * t.qte) / VOL_PALETTE, 0), 1)} pal.</span>
+            </div>
+            <table className="w-full text-[12px]">
+              <thead className="bg-[#FAF9F6] text-left text-[10px] uppercase text-[#8A8474]">
+                <tr><th className="px-3 py-1">Départ FMS possible</th><th className="px-2 py-1 text-right">CDC</th><th className="px-2 py-1 text-right">Lignes</th><th className="px-2 py-1 text-right">GE</th><th className="px-2 py-1 text-right">UI</th><th className="px-2 py-1 text-right">Palettes</th><th className="px-2 py-1">1re livraison client</th><th className="px-2 py-1">Commandes complètes</th></tr>
+              </thead>
+              <tbody>
+                {groupes.map(({ k, ts }) => {
+                  const cle = `${depot}|${k}`
+                  const ouvert = ouverts.has(cle)
+                  const docs = Array.from(new Set(ts.map((t) => t.c.doc)))
+                  const completes = new Set(ts.filter((t) => !t.c.manque).map((t) => t.c.doc)).size
+                  const premiere = ts.map((t) => t.c.liv || '9999').sort()[0]
+                  const t0 = ts[0]
+                  return (
+                    <React.Fragment key={k}>
+                      <tr className="cursor-pointer border-t border-[#F0EDE6] hover:bg-[#FAF9F6]" onClick={() => setOuverts((s) => { const n = new Set(s); if (n.has(cle)) n.delete(cle); else n.add(cle); return n })}>
+                        <td className="px-3 py-1.5 font-bold">
+                          <span className="mr-1 text-[10px] text-[#8A8474]">{ouvert ? '▾' : '▸'}</span>
+                          {t0.maintenant ? <span className="text-[#1D5C86]">Dès maintenant — stock FMS</span> : t0.inconnu ? <span className="text-[#C1683C]">Date inconnue (RDV / CDF)</span> : <>Après réception, dispo FMS {fmtJ(t0.quand)}</>}
+                        </td>
+                        <td className="px-2 py-1.5 text-right">{docs.length}</td>
+                        <td className="px-2 py-1.5 text-right">{ts.length}</td>
+                        <td className="px-2 py-1.5 text-right">{fmtN(ts.reduce((s, t) => s + (t.l.role === 'GROUPE_EXT' ? t.qte : 0), 0))}</td>
+                        <td className="px-2 py-1.5 text-right">{fmtN(ts.reduce((s, t) => s + (estUI(t.l) ? t.qte : 0), 0))}</td>
+                        <td className="px-2 py-1.5 text-right">{fmtN(ts.reduce((s, t) => s + ((t.l.vol || 0) * t.qte) / VOL_PALETTE, 0), 1)}</td>
+                        <td className="px-2 py-1.5">{fmtD(premiere === '9999' ? null : premiere)}</td>
+                        <td className="px-2 py-1.5">{completes} / {docs.length}{t0.maintenant && completes < docs.length ? <span className="ml-1 text-[11px] text-[#8A8474]">(anticipation)</span> : null}</td>
+                      </tr>
+                      {ouvert && docs.map((doc) => {
+                        const tl = ts.filter((t) => t.c.doc === doc)
+                        const c = tl[0].c
+                        return (
+                          <tr key={doc} className="bg-[#F7F5EE] text-[11.5px]">
+                            <td colSpan={8} className="py-1 pl-10 pr-3">
+                              <button type="button" onClick={() => onOpen(c)} className="font-bold text-[#1D5C86] hover:underline">{doc}</button>
+                              <span className="text-[#5E5A44]"> · {c.client} · liv. {fmtD(c.liv)}{c.manque ? ' · ★ incomplète' : ''} — </span>
+                              {tl.map((t) => `${t.l.ref} × ${fmtN(t.qte)}`).join(', ')}
+                            </td>
+                          </tr>
+                        )
+                      })}
+                    </React.Fragment>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
+        )
+      })}
+    </section>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────────
 // Choix de l'agence (tuiles)
 // ─────────────────────────────────────────────────────────────────────────
 
@@ -447,6 +677,10 @@ function VueAgence() {
   const [deplacement, setDeplacement] = useState<Deplacement | null>(null)
   const [splitCmds, setSplitCmds] = useState<Commande[] | null>(null)
   const [panneau, setPanneau] = useState(false)
+  const [tri, setTri] = useState<'date' | 'client' | 'cdc'>('date')
+  const [vue, setVue] = useState<'frise' | 'transferts'>('frise')
+  const [ficheCles, setFicheCles] = useState<string[] | null>(null)
+  const [enGlisse, setEnGlisse] = useState<Glisse | null>(null)
   const [survol, setSurvol] = useState<{ depot: string; date: string | null } | null>(null)
   const glisseRef = useRef<Glisse | null>(null)
 
@@ -523,10 +757,12 @@ function VueAgence() {
       const clients = Array.from((m.get(depot) || new Map<string, Commande[]>()).entries()).map(([tiers, cmds]) => ({
         tiers, client: cmds[0].client, cmds: cmds.sort((a, b) => String(a.liv).localeCompare(String(b.liv))),
         premiere: cmds.map((c) => c.split?.split_date_1 || c.liv || '9999').sort()[0],
-      })).sort((a, b) => a.premiere.localeCompare(b.premiere) || a.client.localeCompare(b.client))
+      })).sort((a, b) => tri === 'client' ? a.client.localeCompare(b.client)
+        : tri === 'cdc' ? b.cmds.length - a.cmds.length || a.client.localeCompare(b.client)
+        : a.premiere.localeCompare(b.premiere) || a.client.localeCompare(b.client))
       return { depot, clients }
     })
-  }, [filtrees, depotAgence, commandes.length])
+  }, [filtrees, depotAgence, commandes.length, tri])
 
   const fin = useMemo(() => {
     let f = ajoute(auj, 35)
@@ -547,6 +783,7 @@ function VueAgence() {
   // ── Glisser-déposer ────────────────────────────────────────────────────
   const debutGlisse = (g: Glisse, ev: React.DragEvent) => {
     glisseRef.current = g
+    window.setTimeout(() => setEnGlisse(g), 0)
     ev.dataTransfer.effectAllowed = 'move'
     try { ev.dataTransfer.setData('text/plain', g.docs.join(',')) } catch { /* certains navigateurs refusent */ }
   }
@@ -559,7 +796,7 @@ function VueAgence() {
   }
   const deposerFrise = (depot: string) => (ev: React.DragEvent<HTMLDivElement>) => {
     ev.preventDefault()
-    const g = glisseRef.current; glisseRef.current = null; setSurvol(null)
+    const g = glisseRef.current; glisseRef.current = null; setSurvol(null); setEnGlisse(null)
     if (!g) return
     const date = dateSous(ev, ev.currentTarget)
     const cmds = commandes.filter((c) => g.docs.includes(c.doc))
@@ -569,7 +806,7 @@ function VueAgence() {
   }
   const deposerEntete = (depot: string) => (ev: React.DragEvent<HTMLDivElement>) => {
     ev.preventDefault()
-    const g = glisseRef.current; glisseRef.current = null; setSurvol(null)
+    const g = glisseRef.current; glisseRef.current = null; setSurvol(null); setEnGlisse(null)
     if (!g || depot === g.depot) return
     setDeplacement({ glisse: g, depot, date: null })
   }
@@ -595,6 +832,17 @@ function VueAgence() {
     }
     if (rows.length && (await enregistrer(rows))) setDeplacement(null)
     else if (!rows.length) setDeplacement(null)
+  }
+
+  const depotsChoix = useMemo(() => Array.from(new Set([...(depotAgence ? [depotAgence] : []), ...commandes.flatMap((c) => [c.depot, c.depotOrigine]), 'FMS'])), [commandes, depotAgence])
+  const ficheCmds = useMemo(() => (ficheCles ? commandes.filter((c) => ficheCles.includes(c.cle)) : []), [ficheCles, commandes])
+
+  async function enregistrerFiche(c: Commande, depot: string, date: string | null, comm: string) {
+    const base = { numero_document: c.doc, numero_tiers: c.tiers, nom_tiers: c.client, agence, commentaire: comm || null }
+    const rows: Partial<Action>[] = []
+    if (depot !== c.depot) rows.push({ ...base, type_action: 'DEPOT', depot_avant: c.depot, depot_apres: depot })
+    if (date && date !== c.liv) rows.push({ ...base, type_action: 'DATE', date_avant: c.liv, date_apres: date })
+    if (rows.length) await enregistrer(rows)
   }
 
   async function validerSplit(p: { depot: string; d1: string; d2: string; comm: string; docs: string[] }) {
@@ -646,11 +894,12 @@ function VueAgence() {
   const choisir = (a: string | null) => router.replace(a ? `/stock/plan-expedition-fms/agences?agence=${encodeURIComponent(a)}` : '/stock/plan-expedition-fms/agences', { scroll: false })
   const nbManque = commandes.filter((c) => c.manque).length
   const nbSplit = commandes.filter((c) => c.splitInteressant && !c.split).length
+  const nbCdcTransfert = new Set(transferts(commandes).map((t) => t.c.doc)).size
   const nbModifs = commandes.filter((c) => c.split || c.modifDate || c.modifDepot).length
 
   return (
     <main className="min-h-screen bg-[#F4F3F0] px-4 py-3 text-[#111820]" style={{ fontFeatureSettings: '"tnum"' }}
-      onDragEnd={() => { glisseRef.current = null; setSurvol(null) }}>
+      onDragEnd={() => { glisseRef.current = null; setSurvol(null); setEnGlisse(null) }}>
       <div className="mx-auto max-w-[1900px] space-y-2.5">
         <section className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-[#E5E1D8] bg-white px-4 py-2.5">
           <div className="min-w-0">
@@ -694,21 +943,33 @@ function VueAgence() {
           <>
             {/* Filtres & légende */}
             <section className="flex flex-wrap items-center gap-2 rounded-xl border border-[#E5E1D8] bg-white px-3 py-2">
+              <div className="flex rounded-lg border border-[#E5E1D8] bg-[#F4F3F0] p-0.5 text-[12px] font-bold">
+                {([['frise', '🗓 Frise'], ['transferts', `🚚 Transferts FMS → agence (${nbCdcTransfert} CDC)`]] as ['frise' | 'transferts', string][]).map(([k, l]) => (
+                  <button key={k} type="button" onClick={() => setVue(k)} className={`rounded-md px-3 py-1 ${vue === k ? 'bg-white text-[#111820] shadow-sm' : 'text-[#8A8474]'}`}>{l}</button>
+                ))}
+              </div>
               {([['tous', `Toutes (${commandes.length})`], ['manque', `★ Il manque (${nbManque})`], ['split', `✂ À scinder (${nbSplit})`], ['modifs', `Modifiées (${nbModifs})`]] as ['tous' | 'manque' | 'split' | 'modifs', string][]).map(([k, l]) => (
                 <button key={k} type="button" onClick={() => setFiltre(k)} className={`rounded-full px-3 py-1 text-[12px] font-bold ${filtre === k ? 'bg-[#111820] text-white' : 'bg-[#F4F3F0] text-[#5E5A44]'}`}>{l}</button>
               ))}
-              <input value={recherche} onChange={(ev) => setRecherche(ev.target.value)} placeholder="Client, n° tiers, CDC, commercial…" className="h-8 w-[240px] rounded-md border border-[#E5E1D8] px-2 text-[12px]" />
+              <input value={recherche} onChange={(ev) => setRecherche(ev.target.value)} placeholder="Client, n° tiers, CDC, commercial…" className="h-8 w-[220px] rounded-md border border-[#E5E1D8] px-2 text-[12px]" />
+              <select value={tri} onChange={(ev) => setTri(ev.target.value as 'date' | 'client' | 'cdc')} className="h-8 rounded-md border border-[#E5E1D8] bg-white px-2 text-[12px] font-semibold">
+                <option value="date">Tri : 1re livraison</option>
+                <option value="client">Tri : client (A → Z)</option>
+                <option value="cdc">Tri : nb de commandes ↓</option>
+              </select>
               <span className="ml-auto flex flex-wrap items-center gap-3 text-[11px] text-[#5E5A44]">
                 <span><b>GE</b> groupes ext. · <b>UI</b> unités int. · <b>p</b> palettes</span>
                 <span className="text-[#C1683C]">★ manque à la date</span>
                 <span>🚚 besoin de stock FMS</span>
                 <span className="rounded-full border-2 border-dashed border-[#C1683C]/70 px-1.5">complète le</span>
-                <span>glisser une pastille : date / dépôt</span>
+                <span>clic : détail · glisser : date / dépôt</span>
               </span>
             </section>
 
+            {vue === 'transferts' && <VueTransferts commandes={filtrees} agence={agence} onOpen={(c) => setFicheCles([c.cle])} />}
+
             {/* Frise */}
-            <section className="overflow-auto rounded-xl border border-[#E5E1D8] bg-white" style={{ maxHeight: 'calc(100vh - 230px)' }}>
+            {vue === 'frise' && <section className="overflow-auto rounded-xl border border-[#E5E1D8] bg-white" style={{ maxHeight: 'calc(100vh - 230px)' }}>
               <div style={{ width: LARGEUR_GAUCHE + e.largeur }} className="relative">
                 {/* En-tête des dates */}
                 <div className="sticky top-0 z-30 flex border-b border-[#E5E1D8] bg-[#FAF9F6]">
@@ -760,11 +1021,11 @@ function VueAgence() {
                         return (
                           <div key={cl.tiers}>
                             {/* Ligne client */}
-                            <div className="flex border-b border-[#F0EDE6] hover:bg-[#FCFBF8]" style={{ background: fms ? '#FBFAFD' : undefined }}>
-                              <div className="sticky left-0 z-10 flex shrink-0 items-center gap-1.5 border-r border-[#E5E1D8] px-2 py-1" style={{ width: LARGEUR_GAUCHE, background: fms ? '#FBFAFD' : '#FFFFFF' }}>
+                            <div className={`flex border-b ${ouvert ? 'border-transparent' : 'border-[#F0EDE6]'} hover:brightness-[0.98]`} style={{ background: ouvert ? (fms ? '#E9E2F5' : '#E8E5D6') : fms ? '#FBFAFD' : '#FFFFFF' }}>
+                              <div className="sticky left-0 z-10 flex shrink-0 items-center gap-1.5 border-r border-[#E5E1D8] px-2 py-1" style={{ width: LARGEUR_GAUCHE, background: ouvert ? (fms ? '#E9E2F5' : '#E8E5D6') : fms ? '#FBFAFD' : '#FFFFFF', boxShadow: ouvert ? `inset 4px 0 0 ${couleur}` : undefined }}>
                                 <button type="button" onClick={() => setOuverts((s) => { const n = new Set(s); const k = `${depot}|${cl.tiers}`; if (n.has(k)) n.delete(k); else n.add(k); return n })} className="w-4 text-[11px] text-[#8A8474]">{ouvert ? '▾' : '▸'}</button>
                                 <div className="min-w-0 flex-1">
-                                  <div className="truncate text-[12.5px] font-bold" title={cl.client}>{cl.client}</div>
+                                  <button type="button" onClick={() => setFicheCles(cl.cmds.map((c) => c.cle))} className="block max-w-full truncate text-left text-[12.5px] font-bold hover:underline" title={`${cl.client} — détail des commandes`}>{cl.client}</button>
                                   <div className="text-[10.5px] text-[#8A8474]">{cl.tiers} · {cl.cmds.length} CDC{modif ? ' · ✎ modifié' : ''}</div>
                                 </div>
                                 <button type="button" onClick={() => setSplitCmds(cl.cmds)} title={interessant ? 'Scinder : le dispo vaut un envoi (groupe extérieur ou ≥ 1 palette)' : 'Scinder l’expédition'}
@@ -780,23 +1041,24 @@ function VueAgence() {
                                       m={somme(cmds.map((c) => c.tout))} mDispo={somme(cmds.map((c) => c.dispo))} mReliquat={somme(cmds.map((c) => c.reliquat))} split={null}
                                       manque={cmds.some((c) => c.manque)} transfert={cmds.some((c) => c.transfert)} couleur={couleur}
                                       titre={`${cl.client} — livraison ${fmtD(d)}\n${cmds.map((c) => `${c.doc}${c.manque ? ' ★' : ''}`).join(', ')}`}
-                                      glisse={{ docs: cmds.map((c) => c.doc), depot, libelle: `${cmds.length} CDC de ${cl.client}` }} onDragStart={debutGlisse} />
+                                      glisse={{ docs: cmds.map((c) => c.doc), depot, libelle: `${cmds.length} CDC de ${cl.client}` }} onDragStart={debutGlisse} onOpen={() => setFicheCles(cmds.map((c) => c.cle))} />
                                   )
                                 })}
                                 {scindees.map((c) => (
                                   <Jalon key={c.cle} e={e} liv={c.liv} complete={c.complete} completeInconnue={c.completeInconnue} m={c.tout} mDispo={c.dispo} mReliquat={c.reliquat}
                                     split={c.split} manque={c.manque} transfert={c.transfert} couleur={couleur} titre={`${c.doc} — scindée`}
-                                    glisse={{ docs: [c.doc], depot, libelle: `${c.doc} (${cl.client})` }} onDragStart={debutGlisse} />
+                                    glisse={{ docs: [c.doc], depot, libelle: `${c.doc} (${cl.client})` }} onDragStart={debutGlisse} onOpen={() => setFicheCles([c.cle])} />
                                 ))}
                               </div>
                             </div>
 
                             {/* Lignes commandes */}
-                            {ouvert && cl.cmds.map((c) => (
-                              <div key={c.cle} className="flex border-b border-[#F7F5F0] bg-[#FDFCFA]">
-                                <div className="sticky left-0 z-10 flex shrink-0 items-center gap-1.5 border-r border-[#E5E1D8] bg-[#FDFCFA] py-0.5 pl-7 pr-2" style={{ width: LARGEUR_GAUCHE }}>
+                            {ouvert && cl.cmds.map((c, i) => (
+                              <div key={c.cle} className={`flex ${i === cl.cmds.length - 1 ? 'border-b-2' : 'border-b'}`} style={{ background: fms ? '#F5F1FB' : '#F6F4EC', borderColor: fms ? '#E3DAF2' : '#E4E0D0' }}>
+                                <div className="sticky left-0 z-10 flex shrink-0 items-center gap-1.5 border-r border-[#E5E1D8] py-0.5 pl-11 pr-2" style={{ width: LARGEUR_GAUCHE, background: fms ? '#F5F1FB' : '#F6F4EC', boxShadow: `inset 4px 0 0 ${couleur}` }}>
+                                  <span className="-ml-5 w-4 text-[11px] text-[#8A8474]">└</span>
                                   <div className="min-w-0 flex-1">
-                                    <div className="text-[11.5px] font-semibold">{c.doc}{c.depotOrigine !== c.depot && <span className="ml-1 text-[10px] text-[#5B4385]" title={`Dépôt SAGE : ${libDepot(c.depotOrigine)}`}>(↺ {libDepot(c.depotOrigine)})</span>}</div>
+                                    <button type="button" onClick={() => setFicheCles([c.cle])} className="text-[11.5px] font-semibold hover:underline">{c.doc}</button><span>{c.depotOrigine !== c.depot && <span className="ml-1 text-[10px] text-[#5B4385]" title={`Dépôt SAGE : ${libDepot(c.depotOrigine)}`}>(↺ {libDepot(c.depotOrigine)})</span>}</span>
                                     <div className="truncate text-[10px] text-[#8A8474]" title={c.rep || ''}>
                                       liv. {fmtD(c.liv)}{c.modifDate && <span className="text-[#5B4385]"> (SAGE {fmtD(c.livOrigine)})</span>} · {fmtN(c.montant)} € · {c.rep}
                                     </div>
@@ -808,7 +1070,7 @@ function VueAgence() {
                                   <Jalon e={e} liv={c.liv} complete={c.complete} completeInconnue={c.completeInconnue} m={c.tout} mDispo={c.dispo} mReliquat={c.reliquat}
                                     split={c.split} manque={c.manque} transfert={c.transfert} couleur={couleur} petit
                                     titre={`${c.doc} — ${c.client}\nLivraison ${fmtD(c.liv)}${c.manque ? `\n★ Manque : ${c.reliquat.lignes} ligne(s), complète ${c.completeInconnue ? 'à une date inconnue' : 'le ' + fmtD(c.complete)}` : ''}\n${c.lignes.slice(0, 12).map((l) => `${l.ref} × ${l.qte}${l.q_att > 0 ? ` (attend ${l.cont || l.cdf || '—'} ${fmtD(l.dispo)})` : ''}`).join('\n')}${c.lignes.length > 12 ? '\n…' : ''}`}
-                                    glisse={{ docs: [c.doc], depot, libelle: `${c.doc} (${c.client})` }} onDragStart={debutGlisse} />
+                                    glisse={{ docs: [c.doc], depot, libelle: `${c.doc} (${c.client})` }} onDragStart={debutGlisse} onOpen={() => setFicheCles([c.cle])} />
                                 </div>
                               </div>
                             ))}
@@ -819,12 +1081,33 @@ function VueAgence() {
                   )
                 })}
               </div>
-            </section>
+            </section>}
           </>
         )}
       </div>
 
       {deplacement && <FenetreDeplacement d={deplacement} commandes={commandes} onAnnule={() => setDeplacement(null)} onValide={validerDeplacement} />}
+      {ficheCmds.length > 0 && <FicheCommandes cmds={ficheCmds} depots={depotsChoix} onClose={() => setFicheCles(null)} onEnregistre={enregistrerFiche} onSplit={(c) => setSplitCmds([c])} />}
+
+      {/* Barre de dépôts pendant un glisser : déposer sur un dépôt = changer le dépôt de départ */}
+      {enGlisse && (
+        <div className="pointer-events-none fixed inset-x-0 bottom-4 z-[60] flex justify-center">
+          <div className="pointer-events-auto flex flex-wrap items-center gap-2 rounded-2xl border border-[#E5E1D8] bg-white/95 px-3 py-2 shadow-2xl backdrop-blur">
+            <span className="text-[12px] font-bold text-[#5E5A44]">Changer le dépôt de départ de {enGlisse.libelle} :</span>
+            {depotsChoix.filter((d) => d !== enGlisse.depot).map((d) => (
+              <div key={d}
+                onDragOver={(ev) => { ev.preventDefault(); if (survol?.depot !== d || survol.date !== null) setSurvol({ depot: d, date: null }) }}
+                onDragLeave={() => setSurvol(null)}
+                onDrop={(ev) => { ev.preventDefault(); const g = glisseRef.current; glisseRef.current = null; setSurvol(null); setEnGlisse(null); if (g) setDeplacement({ glisse: g, depot: d, date: null }) }}
+                className={`flex h-14 min-w-[130px] items-center justify-center rounded-xl border-2 border-dashed px-4 text-[13px] font-bold transition ${survol?.depot === d && !survol.date ? 'scale-105 border-[#7A5EA8] bg-[#7A5EA8] text-white' : d === 'FMS' ? 'border-[#7A5EA8]/60 bg-[#EEE9F6] text-[#5B4385]' : 'border-[#8B8767]/60 bg-[#EFEDE3] text-[#5E5A44]'}`}>
+                {d === 'FMS' ? '🏭 FMS' : `🏪 ${libDepot(d)}`}
+              </div>
+            ))}
+            <span className="text-[11px] text-[#8A8474]">… ou lâcher sur la frise pour changer la date</span>
+          </div>
+        </div>
+      )}
+
       {splitCmds && <FenetreSplit cmds={splitCmds} depotAgence={depotAgence} auj={auj} onAnnule={() => setSplitCmds(null)} onValide={validerSplit} />}
 
       {panneau && (
