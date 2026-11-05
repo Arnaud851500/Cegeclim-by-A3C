@@ -95,7 +95,7 @@ begin
     'meta', (select to_jsonb(m) from appro_plan_exp_meta m where id = 1),
     'lignes', coalesce((
       select jsonb_agg(jsonb_build_object(
-        'id', l.ligne_id, 'doc', l.numero_document, 'tiers', l.numero_tiers, 'client', l.nom_tiers, 'rep', l.representant,
+        'id', l.ligne_id, 'doc', l.numero_document, 'chantier', nullif(btrim(e.reference), ''), 'tiers', l.numero_tiers, 'client', l.nom_tiers, 'rep', l.representant,
         'depot', upper(btrim(l.depot_expedition)), 'liv', l.date_livraison, 'crea', l.date_creation,
         'ref', l.reference_article, 'des', l.designation, 'fam', l.famille, 'macro', l.famille_macro, 'role', l.role_famille,
         'qte', l.quantite, 'mt', l.montant_ht, 'q_ag', l.qte_agence, 'q_fms', l.qte_fms_dispo, 'q_att', l.qte_attente,
@@ -103,6 +103,7 @@ begin
         'vol', l.vol_unitaire, 'p_d', round(l.palettes_dispo, 3), 'p_a', round(l.palettes_attente, 3), 'statut', l.statut
       ) order by l.nom_tiers, l.numero_document, l.reference_article)
       from appro_plan_exp_lignes l
+      left join activite_entete e on e.numero_piece = l.numero_document   -- référence de la pièce = nom du chantier
       where coalesce(l.agence_commerciale, 'NON AFFECTE') = p_agence), '[]'::jsonb),
     'actions', coalesce((
       select jsonb_agg(to_jsonb(a) order by a.created_at)

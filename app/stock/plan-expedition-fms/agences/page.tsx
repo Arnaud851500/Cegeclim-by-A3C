@@ -49,7 +49,7 @@ const LARGEUR_PLUS_TARD = 120    // colonne « plus tard »
 // ─────────────────────────────────────────────────────────────────────────
 
 type Ligne = {
-  id: string; doc: string; tiers: string | null; client: string | null; rep: string | null
+  id: string; doc: string; chantier: string | null; tiers: string | null; client: string | null; rep: string | null
   depot: string; liv: string | null; crea: string | null
   ref: string; des: string | null; fam: string | null; macro: string | null; role: string | null
   qte: number; mt: number | null; q_ag: number; q_fms: number; q_att: number
@@ -71,7 +71,7 @@ type Metriques = { ge: number; ui: number; pal: number; macros: string[]; lignes
 
 /** Une commande (CDC × dépôt d'origine) avec ses valeurs effectives (après décisions). */
 type Commande = {
-  cle: string; doc: string; tiers: string; client: string; rep: string | null
+  cle: string; doc: string; chantier: string | null; tiers: string; client: string; rep: string | null
   depotOrigine: string; depot: string; livOrigine: string | null; liv: string | null
   lignes: Ligne[]
   complete: string | null          // date de complétude (aujourd'hui si complet)
@@ -174,7 +174,7 @@ function construireCommandes(lignes: Ligne[], actions: Action[], auj: string): C
     const reliquat = metriques(ls, (l) => l.qte - qDispo(l))
     const manque = attente.length > 0 && (inconnue || (!!liv && !!complete && complete > liv))
     res.push({
-      cle, doc: l0.doc, tiers: l0.tiers || '?', client: l0.client || l0.tiers || '?', rep: l0.rep,
+      cle, doc: l0.doc, chantier: ls.find((l) => l.chantier)?.chantier || null, tiers: l0.tiers || '?', client: l0.client || l0.tiers || '?', rep: l0.rep,
       depotOrigine: l0.depot, depot, livOrigine, liv, lignes: ls,
       complete, completeInconnue: attente.length > 0 && inconnue, manque,
       transfert: depot !== 'FMS' && ls.some((l) => l.q_fms > 0 || l.q_att > 0),
@@ -310,7 +310,7 @@ function FenetreDeplacement({ d, commandes, onAnnule, onValide }: {
         <div className="mt-2 max-h-[160px] overflow-auto rounded border border-[#E5E1D8] text-[12px]">
           {cmds.map((c) => (
             <div key={c.cle} className="flex justify-between border-b border-[#F0EDE6] px-2 py-1 last:border-0">
-              <span><b>{c.doc}</b> · {c.client}</span>
+              <span><b>{c.doc}</b>{c.chantier ? ` · ${c.chantier}` : ''} · {c.client}</span>
               <span className="text-[#8A8474]">liv. {fmtD(c.liv)}{c.complete && c.manque ? ` · complète ${fmtD(c.complete)}` : ''}</span>
             </div>
           ))}
@@ -356,7 +356,7 @@ function FenetreSplit({ cmds, depotAgence, auj, onAnnule, onValide }: {
               {candidates.map((c) => (
                 <label key={c.cle} className="flex items-center gap-2 border-b border-[#F0EDE6] px-2 py-1 last:border-0">
                   <input type="checkbox" checked={docs.includes(c.doc)} onChange={(e) => setDocs((v) => (e.target.checked ? [...v, c.doc] : v.filter((x) => x !== c.doc)))} />
-                  <b>{c.doc}</b> <span className="text-[#8A8474]">liv. {fmtD(c.liv)} · dispo {fmtN(c.dispo.ge)} GE / {fmtN(c.dispo.pal, 1)} p · reliquat {fmtN(c.reliquat.ge)} GE / {fmtN(c.reliquat.pal, 1)} p</span>
+                  <b>{c.doc}</b>{c.chantier && <span className="text-[#B4761A]"> {c.chantier}</span>} <span className="text-[#8A8474]">liv. {fmtD(c.liv)} · dispo {fmtN(c.dispo.ge)} GE / {fmtN(c.dispo.pal, 1)} p · reliquat {fmtN(c.reliquat.ge)} GE / {fmtN(c.reliquat.pal, 1)} p</span>
                 </label>
               ))}
             </div>
@@ -425,7 +425,7 @@ function BlocCommande({ c, depots, onEnregistre, onSplit }: {
     <div className="rounded-xl border border-[#E5E1D8] bg-white">
       <div className="flex flex-wrap items-start justify-between gap-2 border-b border-[#E5E1D8] px-3 py-2">
         <div>
-          <div className="text-[14px] font-bold">{c.doc} <span className="font-semibold text-[#5E5A44]">· {c.client}</span></div>
+          <div className="text-[14px] font-bold">{c.doc}{c.chantier && <span className="text-[#B4761A]"> · chantier {c.chantier}</span>} <span className="font-semibold text-[#5E5A44]">· {c.client}</span></div>
           <div className="text-[11.5px] text-[#5E5A44]">
             {c.rep} · {fmtN(c.montant)} € HT · livraison {fmtD(c.liv)}{c.modifDate && <span className="text-[#5B4385]"> (SAGE {fmtD(c.livOrigine)})</span>}
             {' '}· départ {libDepot(c.depot)}{c.modifDepot && <span className="text-[#5B4385]"> (SAGE {libDepot(c.depotOrigine)})</span>}
@@ -539,12 +539,12 @@ function VueTransferts({ commandes, agence, onOpen }: { commandes: Commande[]; a
   async function exporter() {
     const wb = new ExcelJS.Workbook()
     const ws = wb.addWorksheet('Transferts FMS → agence')
-    ws.addRow(['Dépôt destination', 'Départ FMS possible', 'CDC', 'Client', 'Livraison client', 'Commande complète à la date', 'Référence', 'Désignation', 'Qté à transférer', 'Container / CDF attendu', 'GE', 'UI']).font = { bold: true }
+    ws.addRow(['Dépôt destination', 'Départ FMS possible', 'CDC', 'Chantier', 'Client', 'Livraison client', 'Commande complète à la date', 'Référence', 'Désignation', 'Qté à transférer', 'Container / CDF attendu', 'GE', 'UI']).font = { bold: true }
     for (const { depot, groupes } of depots) for (const { ts } of groupes) for (const t of ts) {
-      ws.addRow([libDepot(depot), t.maintenant ? 'Dès maintenant (stock FMS)' : t.inconnu ? 'Date inconnue' : fmtD(t.quand), t.c.doc, t.c.client, fmtD(t.c.liv),
+      ws.addRow([libDepot(depot), t.maintenant ? 'Dès maintenant (stock FMS)' : t.inconnu ? 'Date inconnue' : fmtD(t.quand), t.c.doc, t.c.chantier || '', t.c.client, fmtD(t.c.liv),
         t.c.manque ? 'Non' : 'Oui', t.l.ref, t.l.des, t.qte, t.maintenant ? '' : (t.l.cont || t.l.cdf || ''), t.l.role === 'GROUPE_EXT' ? t.qte : '', estUI(t.l) ? t.qte : ''])
     }
-    ws.columns.forEach((c, i) => { c.width = [16, 22, 12, 30, 14, 12, 18, 40, 10, 16, 6, 6][i] })
+    ws.columns.forEach((c, i) => { c.width = [16, 22, 12, 20, 30, 14, 12, 18, 40, 10, 16, 6, 6][i] })
     const buf = await wb.xlsx.writeBuffer()
     const url = URL.createObjectURL(new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }))
     const a = document.createElement('a'); a.href = url; a.download = `transferts_fms_${agence.toLowerCase()}_${iso(new Date())}.xlsx`; a.click(); URL.revokeObjectURL(url)
@@ -599,7 +599,7 @@ function VueTransferts({ commandes, agence, onOpen }: { commandes: Commande[]; a
                           <tr key={doc} className="bg-[#F7F5EE] text-[11.5px]">
                             <td colSpan={8} className="py-1 pl-10 pr-3">
                               <button type="button" onClick={() => onOpen(c)} className="font-bold text-[#1D5C86] hover:underline">{doc}</button>
-                              <span className="text-[#5E5A44]"> · {c.client} · liv. {fmtD(c.liv)}{c.manque ? ' · ★ incomplète' : ''} — </span>
+                              <span className="text-[#5E5A44]">{c.chantier ? ` · ${c.chantier}` : ''} · {c.client} · liv. {fmtD(c.liv)}{c.manque ? ' · ★ incomplète' : ''} — </span>
                               {tl.map((t) => `${t.l.ref} × ${fmtN(t.qte)}`).join(', ')}
                             </td>
                           </tr>
@@ -733,7 +733,7 @@ function VueAgence() {
       if (filtre === 'manque' && !c.manque) return false
       if (filtre === 'split' && !(c.splitInteressant || c.split)) return false
       if (filtre === 'modifs' && !(c.split || c.modifDate || c.modifDepot)) return false
-      if (q && !`${c.client} ${c.tiers} ${c.doc} ${c.rep || ''}`.toUpperCase().includes(q)) return false
+      if (q && !`${c.client} ${c.tiers} ${c.doc} ${c.chantier || ''} ${c.rep || ''}`.toUpperCase().includes(q)) return false
       return true
     })
   }, [commandes, filtre, recherche])
@@ -951,7 +951,7 @@ function VueAgence() {
               {([['tous', `Toutes (${commandes.length})`], ['manque', `★ Il manque (${nbManque})`], ['split', `✂ À scinder (${nbSplit})`], ['modifs', `Modifiées (${nbModifs})`]] as ['tous' | 'manque' | 'split' | 'modifs', string][]).map(([k, l]) => (
                 <button key={k} type="button" onClick={() => setFiltre(k)} className={`rounded-full px-3 py-1 text-[12px] font-bold ${filtre === k ? 'bg-[#111820] text-white' : 'bg-[#F4F3F0] text-[#5E5A44]'}`}>{l}</button>
               ))}
-              <input value={recherche} onChange={(ev) => setRecherche(ev.target.value)} placeholder="Client, n° tiers, CDC, commercial…" className="h-8 w-[220px] rounded-md border border-[#E5E1D8] px-2 text-[12px]" />
+              <input value={recherche} onChange={(ev) => setRecherche(ev.target.value)} placeholder="Client, chantier, n° tiers, CDC, commercial…" className="h-8 w-[240px] rounded-md border border-[#E5E1D8] px-2 text-[12px]" />
               <select value={tri} onChange={(ev) => setTri(ev.target.value as 'date' | 'client' | 'cdc')} className="h-8 rounded-md border border-[#E5E1D8] bg-white px-2 text-[12px] font-semibold">
                 <option value="date">Tri : 1re livraison</option>
                 <option value="client">Tri : client (A → Z)</option>
@@ -1040,7 +1040,7 @@ function VueAgence() {
                                     <Jalon key={d} e={e} liv={d || null} complete={comp} completeInconnue={cmds.some((c) => c.completeInconnue)}
                                       m={somme(cmds.map((c) => c.tout))} mDispo={somme(cmds.map((c) => c.dispo))} mReliquat={somme(cmds.map((c) => c.reliquat))} split={null}
                                       manque={cmds.some((c) => c.manque)} transfert={cmds.some((c) => c.transfert)} couleur={couleur}
-                                      titre={`${cl.client} — livraison ${fmtD(d)}\n${cmds.map((c) => `${c.doc}${c.manque ? ' ★' : ''}`).join(', ')}`}
+                                      titre={`${cl.client} — livraison ${fmtD(d)}\n${cmds.map((c) => `${c.doc}${c.chantier ? ` (${c.chantier})` : ''}${c.manque ? ' ★' : ''}`).join(', ')}`}
                                       glisse={{ docs: cmds.map((c) => c.doc), depot, libelle: `${cmds.length} CDC de ${cl.client}` }} onDragStart={debutGlisse} onOpen={() => setFicheCles(cmds.map((c) => c.cle))} />
                                   )
                                 })}
@@ -1058,7 +1058,11 @@ function VueAgence() {
                                 <div className="sticky left-0 z-10 flex shrink-0 items-center gap-1.5 border-r border-[#E5E1D8] py-0.5 pl-11 pr-2" style={{ width: LARGEUR_GAUCHE, background: fms ? '#F5F1FB' : '#F6F4EC', boxShadow: `inset 4px 0 0 ${couleur}` }}>
                                   <span className="-ml-5 w-4 text-[11px] text-[#8A8474]">└</span>
                                   <div className="min-w-0 flex-1">
-                                    <button type="button" onClick={() => setFicheCles([c.cle])} className="text-[11.5px] font-semibold hover:underline">{c.doc}</button><span>{c.depotOrigine !== c.depot && <span className="ml-1 text-[10px] text-[#5B4385]" title={`Dépôt SAGE : ${libDepot(c.depotOrigine)}`}>(↺ {libDepot(c.depotOrigine)})</span>}</span>
+                                    <div className="flex min-w-0 items-baseline">
+                                      <button type="button" onClick={() => setFicheCles([c.cle])} className="shrink-0 text-[11.5px] font-semibold hover:underline">{c.doc}</button>
+                                      {c.chantier && <span className="ml-1 min-w-0 truncate text-[11px] font-semibold text-[#B4761A]" title={`Chantier : ${c.chantier}`}>· {c.chantier}</span>}
+                                      {c.depotOrigine !== c.depot && <span className="ml-1 shrink-0 text-[10px] text-[#5B4385]" title={`Dépôt SAGE : ${libDepot(c.depotOrigine)}`}>(↺ {libDepot(c.depotOrigine)})</span>}
+                                    </div>
                                     <div className="truncate text-[10px] text-[#8A8474]" title={c.rep || ''}>
                                       liv. {fmtD(c.liv)}{c.modifDate && <span className="text-[#5B4385]"> (SAGE {fmtD(c.livOrigine)})</span>} · {fmtN(c.montant)} € · {c.rep}
                                     </div>
@@ -1069,7 +1073,7 @@ function VueAgence() {
                                   <div className="pointer-events-none absolute inset-y-0 border-l-2 border-[#7A5EA8]/30" style={{ left: e.x(auj) - px / 2 }} />
                                   <Jalon e={e} liv={c.liv} complete={c.complete} completeInconnue={c.completeInconnue} m={c.tout} mDispo={c.dispo} mReliquat={c.reliquat}
                                     split={c.split} manque={c.manque} transfert={c.transfert} couleur={couleur} petit
-                                    titre={`${c.doc} — ${c.client}\nLivraison ${fmtD(c.liv)}${c.manque ? `\n★ Manque : ${c.reliquat.lignes} ligne(s), complète ${c.completeInconnue ? 'à une date inconnue' : 'le ' + fmtD(c.complete)}` : ''}\n${c.lignes.slice(0, 12).map((l) => `${l.ref} × ${l.qte}${l.q_att > 0 ? ` (attend ${l.cont || l.cdf || '—'} ${fmtD(l.dispo)})` : ''}`).join('\n')}${c.lignes.length > 12 ? '\n…' : ''}`}
+                                    titre={`${c.doc}${c.chantier ? ` · ${c.chantier}` : ''} — ${c.client}\nLivraison ${fmtD(c.liv)}${c.manque ? `\n★ Manque : ${c.reliquat.lignes} ligne(s), complète ${c.completeInconnue ? 'à une date inconnue' : 'le ' + fmtD(c.complete)}` : ''}\n${c.lignes.slice(0, 12).map((l) => `${l.ref} × ${l.qte}${l.q_att > 0 ? ` (attend ${l.cont || l.cdf || '—'} ${fmtD(l.dispo)})` : ''}`).join('\n')}${c.lignes.length > 12 ? '\n…' : ''}`}
                                     glisse={{ docs: [c.doc], depot, libelle: `${c.doc} (${c.client})` }} onDragStart={debutGlisse} onOpen={() => setFicheCles([c.cle])} />
                                 </div>
                               </div>
