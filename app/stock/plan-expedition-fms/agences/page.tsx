@@ -43,6 +43,10 @@ import { useAccess } from '@/components/AccessContext'
 
 const COMPTES_AUTORISES = ['a.valanchauskas@cegeclim-energies.com', 'valancha@gmail.com']
 const VOL_PALETTE = 1.3          // m³ utiles par palette (repère : 18 murales RAK-VJ18)
+/** Fraction de palette d'une unité : règle fixe (ECS / GE R/O = 1 par palette, GE R/R = 4) calculée par le plan, sinon volume */
+function palUnit(l: { pu?: number | null; vol: number | null }): number {
+  return l.pu != null ? Number(l.pu) : (l.vol || 0) / VOL_PALETTE
+}
 const LARGEUR_GAUCHE = 290       // colonne client
 const LARGEUR_RETARD = 120       // colonne « en retard »
 const LARGEUR_PLUS_TARD = 120    // colonne « plus tard »
@@ -57,7 +61,7 @@ type Ligne = {
   ref: string; des: string | null; fam: string | null; macro: string | null; role: string | null
   qte: number; mt: number | null; q_ag: number; q_fms: number; q_att: number
   cdf: string | null; cont: string | null; dispo: string | null; sim: boolean; sans_rec: boolean
-  vol: number | null; p_d: number; p_a: number; statut: string
+  vol: number | null; pu?: number | null; rp?: string | null; p_d: number; p_a: number; statut: string
   lieu_type: 'PRO' | 'CHANTIER' | null; lieu_sage: 'PRO' | 'CHANTIER' | null; lieu_cle: string | null; lieu_lib: string | null
 }
 type Action = {
@@ -140,7 +144,7 @@ function metriques(lignes: Ligne[], qte: (l: Ligne) => number): Metriques {
     m.lignes += 1
     if (l.role === 'GROUPE_EXT') m.ge += q
     if (estUI(l)) m.ui += q
-    m.pal += ((l.vol || 0) * q) / VOL_PALETTE
+    m.pal += palUnit(l) * q
     if (l.macro && MACROS_AFFICHEES.includes(l.macro)) mac.set(l.macro, (mac.get(l.macro) || 0) + q)
   }
   m.macros = Array.from(mac.entries()).sort((a, b) => b[1] - a[1]).map(([k]) => k)
@@ -603,7 +607,7 @@ function VueTransferts({ commandes, agence, onOpen }: { commandes: Commande[]; a
           <div key={depot} className="overflow-hidden rounded-xl border border-[#E5E1D8] bg-white">
             <div className="flex items-center justify-between bg-[#EFEDE3] px-3 py-2">
               <span className="text-[14px] font-bold text-[#5E5A44]">🚚 FMS → {libDepot(depot)}</span>
-              <span className="text-[12px] text-[#5E5A44]">{new Set(tout.map((t) => t.c.doc)).size} CDC · {fmtN(tout.reduce((s, t) => s + (t.l.role === 'GROUPE_EXT' ? t.qte : 0), 0))} GE · {fmtN(tout.reduce((s, t) => s + (estUI(t.l) ? t.qte : 0), 0))} UI · {fmtN(tout.reduce((s, t) => s + ((t.l.vol || 0) * t.qte) / VOL_PALETTE, 0), 1)} pal.</span>
+              <span className="text-[12px] text-[#5E5A44]">{new Set(tout.map((t) => t.c.doc)).size} CDC · {fmtN(tout.reduce((s, t) => s + (t.l.role === 'GROUPE_EXT' ? t.qte : 0), 0))} GE · {fmtN(tout.reduce((s, t) => s + (estUI(t.l) ? t.qte : 0), 0))} UI · {fmtN(tout.reduce((s, t) => s + palUnit(t.l) * t.qte, 0), 1)} pal.</span>
             </div>
             <table className="w-full text-[12px]">
               <thead className="bg-[#FAF9F6] text-left text-[10px] uppercase text-[#8A8474]">
@@ -628,7 +632,7 @@ function VueTransferts({ commandes, agence, onOpen }: { commandes: Commande[]; a
                         <td className="px-2 py-1.5 text-right">{ts.length}</td>
                         <td className="px-2 py-1.5 text-right">{fmtN(ts.reduce((s, t) => s + (t.l.role === 'GROUPE_EXT' ? t.qte : 0), 0))}</td>
                         <td className="px-2 py-1.5 text-right">{fmtN(ts.reduce((s, t) => s + (estUI(t.l) ? t.qte : 0), 0))}</td>
-                        <td className="px-2 py-1.5 text-right">{fmtN(ts.reduce((s, t) => s + ((t.l.vol || 0) * t.qte) / VOL_PALETTE, 0), 1)}</td>
+                        <td className="px-2 py-1.5 text-right">{fmtN(ts.reduce((s, t) => s + palUnit(t.l) * t.qte, 0), 1)}</td>
                         <td className="px-2 py-1.5">{fmtD(premiere === '9999' ? null : premiere)}</td>
                         <td className="px-2 py-1.5">{completes} / {docs.length}{t0.maintenant && completes < docs.length ? <span className="ml-1 text-[11px] text-[#8A8474]">(anticipation)</span> : null}</td>
                       </tr>
