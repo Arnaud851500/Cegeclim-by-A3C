@@ -182,7 +182,7 @@ begin
         'ref', l.reference_article, 'des', l.designation, 'fam', l.famille, 'macro', l.famille_macro, 'role', l.role_famille,
         'qte', l.quantite, 'mt', l.montant_ht, 'q_ag', l.qte_agence, 'q_fms', l.qte_fms_dispo, 'q_att', l.qte_attente,
         'cdf', l.numero_cdf, 'cont', l.container, 'dispo', l.date_dispo, 'sim', l.rdv_simule, 'sans_rec', l.sans_reception,
-        'vol', l.vol_unitaire, 'p_d', round(l.palettes_dispo, 3), 'p_a', round(l.palettes_attente, 3), 'statut', l.statut,
+        'vol', l.vol_unitaire, 'pu', round(l.palette_unitaire, 4), 'rp', l.regle_palette, 'p_d', round(l.palettes_dispo, 3), 'p_a', round(l.palettes_attente, 3), 'statut', l.statut,
         'lieu_type', l.lieu_type, 'lieu_sage', l.lieu_sage, 'lieu_cle', l.lieu_cle, 'lieu_lib', l.lieu_libelle
       ) order by l.nom_tiers, l.numero_document, l.reference_article)
       from appro_plan_exp_lignes l

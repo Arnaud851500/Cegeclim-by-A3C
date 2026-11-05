@@ -128,7 +128,10 @@ create table public.appro_plan_exp_lignes (
   dans_vague boolean,                       -- manque comblé par une réception datée dans la fenêtre planifiée
   vol_unitaire numeric, poids_unitaire numeric, dim_manquante boolean,
   palettes_dispo numeric, palettes_attente numeric,
-  statut text                               -- AGENCE | FMS_DISPO | PARTIEL | ATTENTE
+  statut text,                              -- AGENCE | FMS_DISPO | PARTIEL | ATTENTE
+  lieu_type text, lieu_sage text, lieu_cle text, lieu_libelle text, chantier text,
+  palette_unitaire numeric, regle_palette text, -- fraction de palette par unité, règle appliquée
+  cp_livraison text, ville_livraison text
 );
 create index appro_plan_exp_lignes_cle_idx on public.appro_plan_exp_lignes (cle);
 create index appro_plan_exp_lignes_cdf_idx on public.appro_plan_exp_lignes (numero_cdf);
@@ -144,7 +147,8 @@ create table public.appro_plan_exp_unites (
   date_complete_vague date, rdv_simule boolean, date_inconnue boolean, sans_reception boolean,
   containers text[], categorie text,
   anticipation_debut date, anticipation_fin date, anticipation_palettes integer,
-  reception_debut date, reception_fin date, reception_palettes integer, reception_type text
+  reception_debut date, reception_fin date, reception_palettes integer, reception_type text,
+  cp_livraison text, ville_livraison text
 );
 
 create table public.appro_plan_exp_envois (
@@ -319,7 +323,8 @@ begin
   --    (ou RDV simulé à ETA + N jours ouvrés) ; autre CDF = date retenue
   create temp table _rec on commit drop as
   with cdf as (
-    select b.al_docnum as numero_cdf, bool_or(b.al_doref ilike 'CONT%') as est_cont, max(b.al_ctnum) as fournisseur_code
+    select b.al_docnum as numero_cdf, bool_or(b.al_doref ilike 'CONT%') as est_cont, max(b.al_ctnum) as fournisseur_code,
+           max(nullif(btrim(b.al_doref), '')) as reference_cdf
     from sage.bdcf b where b.al_doctype = '12' group by 1
   ),
   rel as (
@@ -327,7 +332,7 @@ begin
     from appro_container_releves order by cdf_numero, created_at desc, id desc
   ),
   r as (
-    select v.*, coalesce(c.est_cont, false) as est_cont, coalesce(t.ti_intitule, v.nom_fournisseur) as fournisseur,
+    select v.*, c.reference_cdf, coalesce(c.est_cont, false) as est_cont, coalesce(t.ti_intitule, v.nom_fournisseur) as fournisseur,
            coalesce(rel.container_numero, rdv.container_numero) as container, rel.navire, rel.eta_port, rel.statut as statut_suivi,
            rdv.rdv_date, rdv.rdv_heure,
            (rdv.rdv_date is null and coalesce(c.est_cont, false) and p_simuler_rdv and rel.eta_port is not null) as rdv_simule,
@@ -408,8 +413,8 @@ begin
          l.numero_cdf, l.container, l.est_cont, l.date_dispo, l.rdv_simule, l.sans_reception,
          (l.qte_attente > 0 and l.date_dispo is not null and l.date_dispo <= v_fin_fenetre),
          coalesce(d.vol, f.vol), coalesce(d.poids, f.poids), (d.vol is null and d.poids is null),
-         greatest(coalesce(d.vol, f.vol, 0) * l.qte_fms_dispo / v_vol_pal, coalesce(d.poids, f.poids, 0) * l.qte_fms_dispo / v_poids_pal),
-         greatest(coalesce(d.vol, f.vol, 0) * l.qte_attente / v_vol_pal, coalesce(d.poids, f.poids, 0) * l.qte_attente / v_poids_pal),
+         pu.pu * l.qte_fms_dispo,
+         pu.pu * l.qte_attente,
          case when l.qte_agence >= l.quantite then 'AGENCE'
               when l.qte_attente <= 0 then 'FMS_DISPO'
               when l.qte_fms_dispo > 0 then 'PARTIEL'
@@ -418,10 +423,34 @@ begin
          case when coalesce(l.lieu_force, l.lieu_sage) = 'CHANTIER'
               then coalesce(case when l.lieu_sage = 'CHANTIER' then left(regexp_replace(upper(l.lieu_libelle), '[^A-Z0-9]', '', 'g'), 60) end, l.numero_document)
               else 'PRO' end,
-         l.lieu_libelle, l.chantier
+         l.lieu_libelle, l.chantier, pu.pu, pu.regle, cp.cp, cp.ville
   from _l4 l
   left join _dim d on d.cle = upper(btrim(l.reference_article))
-  left join _fam f on f.famille = l.famille and d.vol is null and d.poids is null;
+  left join _fam f on f.famille = l.famille and d.vol is null and d.poids is null
+  -- palettes par unité : règle fixe (ECS, GE R/O, GE R/R…) sinon volume / poids
+  cross join lateral (
+    select coalesce(1.0 / nullif(r.unites_par_palette, 0),
+                    greatest(coalesce(d.vol, f.vol, 0) / v_vol_pal, coalesce(d.poids, f.poids, 0) / v_poids_pal)) as pu,
+           r.libelle as regle
+    from (select 1) z
+    left join lateral (
+      select x.unites_par_palette, x.libelle from appro_plan_exp_palettisation x
+      where (x.type_regle = 'PREFIXE' and upper(btrim(l.reference_article)) like upper(x.valeur) || '%')
+         or (x.type_regle = 'FAMILLE' and x.valeur = l.famille)
+      order by (x.type_regle = 'PREFIXE') desc, length(x.valeur) desc
+      limit 1
+    ) r on true
+  ) pu
+  -- code postal / ville de livraison : chez le pro → adresse du client ; chantier → fin de l'adresse du lieu de livraison
+  left join activite_entete ee on ee.numero_piece = l.numero_document
+  cross join lateral (
+    select substring(a.v from '^(\d{5})') as cp,
+           nullif(regexp_replace(btrim(substring(a.v from '^\d{5}\s*(.*)$')), '\s+', ' ', 'g'), '') as ville
+    from (select case when coalesce(l.lieu_force, l.lieu_sage) = 'PRO'
+                      then substring(btrim(ee.cp_ville) from '^(\d{5}.*)$')
+                      else coalesce(substring(ee.lieu_livraison from '.*\m(\d{5}\s+[^,0-9]+?)\s*$'),
+                                    substring(ee.lieu_livraison from '.*\m(\d{5})\M')) end as v) a
+  ) cp;
 
   -- 7. Destinataires (seules les lignes qui passent par FMS)
   delete from appro_plan_exp_unites where true;
@@ -454,6 +483,12 @@ begin
   from appro_plan_exp_lignes l
   where l.statut <> 'AGENCE'
   group by l.cle;
+
+  -- code postal de livraison du destinataire client (le plus fréquent de ses lignes)
+  update appro_plan_exp_unites un set cp_livraison = split_part(x.k, '|', 1), ville_livraison = nullif(split_part(x.k, '|', 2), '')
+  from (select cle, mode() within group (order by cp_livraison || '|' || coalesce(ville_livraison, '')) as k
+        from appro_plan_exp_lignes where cp_livraison is not null group by cle) x
+  where un.cle = x.cle and un.type_destinataire = 'CLIENT';
 
   update appro_plan_exp_unites set categorie = case
       when nb_lignes_attente = 0 then 'COMPLET'
@@ -532,15 +567,23 @@ begin
   select r.numero_cdf, max(r.fournisseur), bool_or(r.est_cont), max(r.container), max(r.navire), max(r.eta_port), max(r.statut_suivi),
          max(r.rdv_date), max(r.rdv_heure), bool_or(r.rdv_simule), min(r.date_reception_retenue), max(r.date_dispo),
          count(distinct r.reference_article), sum(r.quantite_attendue),
-         round(sum(greatest(coalesce(d.vol, 0) * r.quantite_attendue / v_vol_pal, coalesce(d.poids, 0) * r.quantite_attendue / v_poids_pal)), 1),
+         round(sum(r.quantite_attendue * coalesce(pr.pu, greatest(coalesce(d.vol, 0) / v_vol_pal, coalesce(d.poids, 0) / v_poids_pal))), 1),
          (select count(*) from appro_plan_exp_lignes l where l.numero_cdf = r.numero_cdf and l.qte_attente > 0),
          (select count(distinct l.cle) from appro_plan_exp_lignes l where l.numero_cdf = r.numero_cdf and l.qte_attente > 0),
          (select sum(l.qte_attente) from appro_plan_exp_lignes l where l.numero_cdf = r.numero_cdf and l.qte_attente > 0),
          max(r.rdv_source),
          (select count(distinct l.numero_document) from appro_plan_exp_lignes l where l.numero_cdf = r.numero_cdf and l.qte_attente > 0),
-         max(r.rdv_retenu)
+         max(r.rdv_retenu), max(r.reference_cdf)
   from _rec r
   left join _dim d on d.cle = upper(btrim(r.reference_article))
+  left join lateral (  -- règle de palettisation (préfixe de référence, sinon famille SAGE de l'article)
+    select 1.0 / x.unites_par_palette as pu from appro_plan_exp_palettisation x
+    where (x.type_regle = 'PREFIXE' and upper(btrim(r.reference_article)) like upper(x.valeur) || '%')
+       or (x.type_regle = 'FAMILLE' and x.valeur = (select max(sa.art_facodefamille) from sage.articles sa
+                                                    where upper(btrim(sa.art_num)) = upper(btrim(r.reference_article))))
+    order by (x.type_regle = 'PREFIXE') desc, length(x.valeur) desc
+    limit 1
+  ) pr on true
   where (r.est_cont and coalesce(r.date_dispo, r.eta_port, r.date_reception_retenue) <= v_fin_fenetre + 30)
      or coalesce(r.date_dispo, r.date_reception_retenue) <= v_fin_fenetre
      or exists (select 1 from appro_plan_exp_lignes l where l.numero_cdf = r.numero_cdf)

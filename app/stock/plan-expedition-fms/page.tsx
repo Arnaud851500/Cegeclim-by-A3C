@@ -52,6 +52,7 @@ type Unite = {
   containers: string[] | null; categorie: Categorie
   anticipation_debut: string | null; anticipation_fin: string | null; anticipation_palettes: number | null
   reception_debut: string | null; reception_fin: string | null; reception_palettes: number | null; reception_type: string | null
+  cp_livraison: string | null; ville_livraison: string | null
 }
 type Envoi = { jour: string; cle: string; vague: 'ANTICIPATION' | 'RECEPTION'; type_envoi: string; palettes: number; partie: number; nb_parties: number }
 type Reception = {
@@ -60,6 +61,7 @@ type Reception = {
   date_reception_sage: string | null; date_dispo: string | null; nb_refs: number; qte: number; palettes: number | null
   nb_lignes_cdc: number; nb_destinataires: number; qte_cdc: number | null
   rdv_source: 'COMPAGNON' | 'SAGE' | null; nb_cdc: number | null; rdv_dispo: string | null
+  reference_cdf: string | null
 }
 type Meta = {
   genere_le: string; genere_par: string | null; debut: string; fin_horizon: string; fin_fenetre: string; simuler_rdv: boolean
@@ -92,6 +94,10 @@ const CATEGORIE: Record<Categorie, { label: string; court: string; cls: string; 
 }
 const ORDRE_CAT: Categorie[] = ['ANTICIPER', 'COMPLET', 'ATTENDRE', 'RECEPTION']
 const STATUT_SUIVI: Record<string, string> = { booke: 'Booké', embarque: 'Embarqué', en_mer: 'En mer', arrive: 'Arrivé au port', decharge: 'Déchargé', livre: 'Livré FMS' }
+
+function cpVille(u?: { cp_livraison?: string | null; ville_livraison?: string | null } | null): string {
+  return u?.cp_livraison ? `${u.cp_livraison}${u.ville_livraison ? ' ' + u.ville_livraison : ''}` : ''
+}
 
 function fmtNum(v: number | null | undefined, dec = 0): string {
   if (v === null || v === undefined || Number.isNaN(Number(v))) return '—'
@@ -478,12 +484,12 @@ function PlanExpeditionFms() {
       }
       const us = agenceF ? unites.filter((u) => (u.agence || '—') === agenceF) : unites
       feuille('Préconisations', [
-        { h: 'Agence' }, { h: 'Type' }, { h: 'Destinataire', w: 32 }, { h: 'N° tiers' }, { h: 'Catégorie', w: 22 }, { h: 'CDC' }, { h: 'Lignes' },
+        { h: 'Agence' }, { h: 'Type' }, { h: 'Destinataire', w: 32 }, { h: 'N° tiers' }, { h: 'CP livraison' }, { h: 'Ville livraison', w: 22 }, { h: 'Catégorie', w: 22 }, { h: 'CDC' }, { h: 'Lignes' },
         { h: '1re livraison' }, { h: 'Lignes dispo' }, { h: 'Palettes dispo' }, { h: 'Groupes ext. dispo' }, { h: 'Groupes ext. en attente' }, { h: 'Cuivre dispo' },
         { h: 'Lignes en attente' }, { h: 'dont réception datée' }, { h: 'dont reliquat' }, { h: 'Palettes en attente' },
         { h: 'Dispo complète (vague)' }, { h: 'RDV simulé' }, { h: 'Envoi anticipé du' }, { h: 'au' }, { h: 'Palettes' },
         { h: 'Envoi à réception du' }, { h: 'au' }, { h: 'Palettes' }, { h: 'Containers / CDF attendus', w: 40 }, { h: 'Préconisation', w: 90 },
-      ], us.map((u) => [u.agence, u.type_destinataire === 'AGENCE' ? 'Transfert agence' : 'Client', u.libelle, u.numero_tiers, CATEGORIE[u.categorie].label,
+      ], us.map((u) => [u.agence, u.type_destinataire === 'AGENCE' ? 'Transfert agence' : 'Client', u.libelle, u.numero_tiers, u.cp_livraison, u.ville_livraison, CATEGORIE[u.categorie].label,
         u.nb_cdc, u.nb_lignes, fmtDate(u.date_livraison_min), u.nb_lignes_dispo, u.palettes_dispo, u.nb_groupes_ext_dispo, u.nb_groupes_ext_attente, u.cuivre_dispo ? 'Oui' : '',
         u.nb_lignes_attente, u.nb_lignes_vague, u.nb_lignes_reliquat, u.palettes_attente, fmtDate(u.date_complete_vague), u.rdv_simule ? 'Oui' : '',
         fmtDate(u.anticipation_debut), fmtDate(u.anticipation_fin), u.anticipation_palettes, fmtDate(u.reception_debut), fmtDate(u.reception_fin),
@@ -497,12 +503,12 @@ function PlanExpeditionFms() {
         fmtDate(l.date_livraison), l.reference_article, l.designation, l.famille, l.role_famille, l.quantite, l.qte_agence, l.qte_fms_dispo, l.qte_attente,
         l.numero_cdf, l.container, fmtDate(l.date_dispo), l.rdv_simule ? 'Oui' : '', l.qte_attente > 0 ? (l.dans_vague ? 'Oui' : 'Reliquat') : '',
         Number(l.palettes_dispo || 0).toFixed(2), Number(l.palettes_attente || 0).toFixed(2)]))
-      feuille('Planning FMS', [{ h: 'Jour' }, { h: 'Vague' }, { h: 'Type' }, { h: 'Agence' }, { h: 'Destinataire', w: 32 }, { h: 'Palettes' }, { h: 'Partie' }],
+      feuille('Planning FMS', [{ h: 'Jour' }, { h: 'Vague' }, { h: 'Type' }, { h: 'Agence' }, { h: 'Destinataire', w: 32 }, { h: 'CP livraison' }, { h: 'Ville livraison', w: 22 }, { h: 'Palettes' }, { h: 'Partie' }],
         (plan?.envois || []).filter((e) => !agenceF || (parCle.get(e.cle)?.agence || '—') === agenceF)
-          .map((e) => [fmtDate(e.jour), e.vague === 'ANTICIPATION' ? 'Dès maintenant' : 'À réception', e.type_envoi, parCle.get(e.cle)?.agence, parCle.get(e.cle)?.libelle, e.palettes, e.nb_parties > 1 ? `${e.partie}/${e.nb_parties}` : '']))
-      feuille('Containers & RDV', [{ h: 'CDF' }, { h: 'Fournisseur', w: 26 }, { h: 'Container' }, { h: 'Navire', w: 20 }, { h: 'ETA port' }, { h: 'Statut' },
+          .map((e) => [fmtDate(e.jour), e.vague === 'ANTICIPATION' ? 'Dès maintenant' : 'À réception', e.type_envoi, parCle.get(e.cle)?.agence, parCle.get(e.cle)?.libelle, parCle.get(e.cle)?.cp_livraison, parCle.get(e.cle)?.ville_livraison, e.palettes, e.nb_parties > 1 ? `${e.partie}/${e.nb_parties}` : '']))
+      feuille('Containers & RDV', [{ h: 'CDF' }, { h: 'Commentaire CDF', w: 22 }, { h: 'Fournisseur', w: 26 }, { h: 'Container' }, { h: 'Navire', w: 20 }, { h: 'ETA port' }, { h: 'Statut' },
         { h: 'RDV FMS' }, { h: 'Dispo FMS retenue' }, { h: 'RDV simulé' }, { h: 'Réf.' }, { h: 'Pièces' }, { h: 'Palettes' }, { h: 'Lignes CDC servies' }, { h: 'Destinataires' }],
-        (plan?.receptions || []).map((r) => [r.numero_cdf, r.fournisseur, r.container, r.navire, fmtDate(r.eta_port), r.statut_suivi ? STATUT_SUIVI[r.statut_suivi] || r.statut_suivi : '',
+        (plan?.receptions || []).map((r) => [r.numero_cdf, r.reference_cdf, r.fournisseur, r.container, r.navire, fmtDate(r.eta_port), r.statut_suivi ? STATUT_SUIVI[r.statut_suivi] || r.statut_suivi : '',
           fmtDate(r.rdv_date), fmtDate(r.date_dispo), r.rdv_simule ? 'Oui' : '', r.nb_refs, r.qte, r.palettes, r.nb_lignes_cdc, r.nb_destinataires]))
       const buffer = await wb.xlsx.writeBuffer()
       const url = URL.createObjectURL(new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }))
@@ -659,7 +665,7 @@ function PlanExpeditionFms() {
                         <tr key={u.cle} onClick={() => setFiche(u)} className={`cursor-pointer border-t border-[#F0EDE6] hover:bg-[#FAF9F6] ${u.type_destinataire === 'AGENCE' ? 'bg-[#F7F5FB]' : ''}`}>
                           <td className="max-w-[260px] px-2 py-1.5">
                             <div className="truncate font-bold" title={u.libelle || ''}>{u.type_destinataire === 'AGENCE' ? '🚚 ' : ''}{u.libelle}</div>
-                            {u.numero_tiers && <div className="text-[10.5px] text-[#8A8474]">{u.numero_tiers}</div>}
+                            {(u.numero_tiers || u.cp_livraison) && <div className="truncate text-[10.5px] text-[#8A8474]">{[u.numero_tiers, cpVille(u)].filter(Boolean).join(' · ')}</div>}
                           </td>
                           <td className="px-2 py-1.5 font-semibold">{u.agence}</td>
                           <td className="px-2 py-1.5"><Badge cls={CATEGORIE[u.categorie].cls} title={CATEGORIE[u.categorie].aide}>{CATEGORIE[u.categorie].court}</Badge></td>
@@ -731,7 +737,7 @@ function PlanExpeditionFms() {
                       {ouvert && (
                         <table className="mb-2 ml-[105px] w-[calc(100%-120px)] text-[12px]">
                           <thead className="text-left text-[10.5px] uppercase text-[#8A8474]">
-                            <tr><th className="px-2 py-1">Destinataire</th><th className="px-2 py-1">Agence</th><th className="px-2 py-1">Type</th><th className="px-2 py-1 text-right">Palettes</th><th className="px-2 py-1">Partie</th></tr>
+                            <tr><th className="px-2 py-1">Destinataire</th><th className="px-2 py-1">CP livraison</th><th className="px-2 py-1">Agence</th><th className="px-2 py-1">Type</th><th className="px-2 py-1 text-right">Palettes</th><th className="px-2 py-1">Partie</th></tr>
                           </thead>
                           <tbody>
                             {j.envois.slice().sort((a, b) => b.palettes - a.palettes).map((e, i) => {
@@ -739,6 +745,7 @@ function PlanExpeditionFms() {
                               return (
                                 <tr key={`${e.cle}-${i}`} className="cursor-pointer border-t border-[#F0EDE6] hover:bg-[#FAF9F6]" onClick={() => u && setFiche(u)}>
                                   <td className="px-2 py-1 font-semibold">{u?.type_destinataire === 'AGENCE' ? '🚚 ' : ''}{u?.libelle || e.cle}</td>
+                                  <td className="whitespace-nowrap px-2 py-1">{u?.cp_livraison ? <><b>{u.cp_livraison}</b> <span className="text-[#8A8474]">{u.ville_livraison}</span></> : u?.type_destinataire === 'AGENCE' ? <span className="text-[#8A8474]">agence</span> : '—'}</td>
                                   <td className="px-2 py-1">{u?.agence}</td>
                                   <td className="px-2 py-1">{({ COMPLET: 'Complet', ANTICIPATION: 'Anticipation', COMPLEMENT: 'Complément', UNIQUE: 'Envoi unique' } as Record<string, string>)[e.type_envoi] || e.type_envoi}</td>
                                   <td className="px-2 py-1 text-right font-bold">{e.palettes}</td>
@@ -771,7 +778,7 @@ function PlanExpeditionFms() {
                   <table className="w-full min-w-[1250px] text-[12px]">
                     <thead className="bg-[#FAF9F6] text-left text-[10.5px] uppercase tracking-wide text-[#8A8474]">
                       <tr>
-                        <th className="px-2 py-2">CDF</th><th className="px-2 py-2">Fournisseur</th><th className="px-2 py-2">Container</th><th className="px-2 py-2">Navire</th>
+                        <th className="px-2 py-2">CDF</th><th className="px-2 py-2" title="Référence de la commande fournisseur dans SAGE">Commentaire CDF</th><th className="px-2 py-2">Fournisseur</th><th className="px-2 py-2">Container</th><th className="px-2 py-2">Navire</th>
                         <th className="px-2 py-2">ETA port</th><th className="px-2 py-2">Statut</th><th className="px-2 py-2">RDV déchargement FMS</th><th className="px-2 py-2" title="Réception FMS + 3 jours ouvrés de mise en stock">Dispo expédition</th>
                         <th className="px-2 py-2 text-right">Réf. · pièces</th><th className="px-2 py-2 text-right">Palettes</th><th className="px-2 py-2 text-right" title="Commandes clients (à livrer dans l’horizon du plan) dont le manque est comblé par cette réception">CDC · lignes servies</th><th className="px-2 py-2 text-right">Destinataires</th>
                       </tr>
@@ -780,6 +787,7 @@ function PlanExpeditionFms() {
                       {receptions.map((r) => (
                         <tr key={r.numero_cdf} className={`border-t border-[#F0EDE6] ${r.nb_lignes_cdc === 0 ? 'text-[#8A8474]' : ''}`}>
                           <td className="px-2 py-1.5 font-semibold">{r.numero_cdf}</td>
+                          <td className="whitespace-nowrap px-2 py-1.5 font-semibold text-[#5B4385]">{r.reference_cdf || '—'}</td>
                           <td className="max-w-[200px] truncate px-2 py-1.5" title={r.fournisseur || ''}>{r.fournisseur}</td>
                           <td className="px-2 py-1.5 font-mono">{r.container || (r.est_cont ? <span className="text-[#C1683C]">n° inconnu</span> : '—')}</td>
                           <td className="max-w-[160px] truncate px-2 py-1.5">{r.navire || '—'}</td>
@@ -793,7 +801,7 @@ function PlanExpeditionFms() {
                           <td className="px-2 py-1.5 text-right">{r.nb_destinataires || '—'}</td>
                         </tr>
                       ))}
-                      {receptions.length === 0 && <tr><td colSpan={12} className="px-3 py-6 text-center text-[#8A8474]">Aucune réception attendue.</td></tr>}
+                      {receptions.length === 0 && <tr><td colSpan={13} className="px-3 py-6 text-center text-[#8A8474]">Aucune réception attendue.</td></tr>}
                     </tbody>
                   </table>
                 </div>
@@ -809,8 +817,8 @@ function PlanExpeditionFms() {
                   <li>CDC départ agence : le stock de l’agence (et de son dépôt transit) et les CDF livrées en direct en agence servent d’abord ; le reste est demandé à FMS.</li>
                   <li>Stock FMS libre (stock − préparé) servi par date de livraison puis ancienneté ; le manque est rattaché à la réception FMS qui le comble.</li>
                   <li>RDV de déchargement = saisi dans le compagnon, sinon RDV confirmé lu dans les commentaires de la CDF SAGE (« Livraison le 13.11 à 13h », « … ⇒ OK FMS ») ; sans RDV : {meta.simuler_rdv ? `simulé à ETA + ${meta.parametres.rdv_simule_jours_apres_eta} jours ouvrés` : 'inconnue (non planifié)'}. Dispo à l’expédition (FMS → client ou agence) {meta.parametres.delai_mise_en_stock_jours} jour(s) ouvré(s) après la réception.</li>
-                  <li>Départ FMS : un destinataire par client et par lieu de livraison — les commandes « chez le pro » se regroupent, chaque chantier part à part (lieu de livraison SAGE, modifiable dans la vue agence).</li>
-                  <li>Palettes : volume BLG ÷ {fmtNum(meta.parametres.volume_utile_palette_m3, 1)} m³ utiles, ou poids ÷ {fmtNum(meta.parametres.poids_max_palette_kg)} kg, le plus grand des deux (sans dimensions BLG : médiane de la famille, signalé « dim. ? »).</li>
+                  <li>Départ FMS : un destinataire par client et par lieu de livraison — les commandes « chez le pro » se regroupent, chaque chantier part à part (lieu de livraison SAGE, modifiable dans la vue agence). Code postal : adresse du client chez le pro, fin de l’adresse du lieu de livraison pour un chantier.</li>
+                  <li>Palettes : ECS (ballons TAW…) et groupes extérieurs R/O = 1 par palette, groupes extérieurs R/R = 4 par palette ; sinon volume BLG ÷ {fmtNum(meta.parametres.volume_utile_palette_m3, 1)} m³ utiles, ou poids ÷ {fmtNum(meta.parametres.poids_max_palette_kg)} kg, le plus grand des deux (sans dimensions BLG : médiane de la famille, signalé « dim. ? »).</li>
                   <li>Anticiper si le dispo contient un groupe extérieur ou fait au moins {fmtNum(meta.parametres.seuil_palettes_anticipation, 1)} palette.</li>
                   <li>Groupes extérieurs : {(plan.familles || []).filter((f) => f.role === 'GROUPE_EXT').map((f) => f.famille).join(', ') || '—'} · Cuivre : {(plan.familles || []).filter((f) => f.role === 'CUIVRE').map((f) => f.famille).join(', ') || '—'}.</li>
                 </ul>
