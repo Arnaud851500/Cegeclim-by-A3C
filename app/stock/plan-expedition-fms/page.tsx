@@ -550,6 +550,7 @@ function PlanExpeditionFms() {
               <input type="checkbox" checked={simuler} onChange={(e) => setSimuler(e.target.checked)} />
               Simuler les RDV manquants
             </label>
+            <a href={`/stock/plan-expedition-fms/agences${agenceF ? `?agence=${encodeURIComponent(agenceF)}` : ''}`} className="flex h-10 items-center rounded-lg border border-[#7A5EA8] px-3 text-[13px] font-bold text-[#5B4385]">🗓 Vue agence (frise)</a>
             <button type="button" onClick={() => void recalculer()} disabled={calcul} className="h-10 rounded-lg bg-[#7A5EA8] px-3 text-[13px] font-bold text-white disabled:opacity-50">
               {calcul ? 'Calcul… (~15 s)' : '↻ Recalculer'}
             </button>
