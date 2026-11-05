@@ -23,6 +23,9 @@
  *    FMS → agence, changement de date et de dépôt, scission) ; pendant un glisser, barre des dépôts en bas d'écran
  *    pour changer de dépôt sans faire défiler ; vue « Transferts FMS → agence » (dès maintenant / après réception,
  *    par dépôt, après les décisions) avec export Excel.
+ *  - 05/11/2026 (suite 2) : départ FMS = un envoi par client ET par lieu de livraison ; « chez le pro » (lieu de
+ *    livraison SAGE = nom du client) se regroupe, chaque chantier part à part (🏗). Bascule pro / chantier dans la fiche
+ *    (action LIVRAISON, prise en compte au prochain recalcul du plan). Dates de dispo = réception + 3 jours ouvrés.
  *  - Ces décisions ne modifient pas SAGE : elles sont enregistrées (appro_plan_exp_actions), simulées
  *    dans la frise et listées « à reporter dans SAGE » jusqu'à ce qu'on les marque reportées.
  *
@@ -55,9 +58,10 @@ type Ligne = {
   qte: number; mt: number | null; q_ag: number; q_fms: number; q_att: number
   cdf: string | null; cont: string | null; dispo: string | null; sim: boolean; sans_rec: boolean
   vol: number | null; p_d: number; p_a: number; statut: string
+  lieu_type: 'PRO' | 'CHANTIER' | null; lieu_sage: 'PRO' | 'CHANTIER' | null; lieu_cle: string | null; lieu_lib: string | null
 }
 type Action = {
-  id: number; type_action: 'DEPOT' | 'DATE' | 'SPLIT'; numero_document: string; numero_tiers: string | null; nom_tiers: string | null
+  id: number; type_action: 'DEPOT' | 'DATE' | 'SPLIT' | 'LIVRAISON'; livraison_type?: 'PRO' | 'CHANTIER' | null; numero_document: string; numero_tiers: string | null; nom_tiers: string | null
   agence: string | null; depot_avant: string | null; depot_apres: string | null; date_avant: string | null; date_apres: string | null
   split_depot: string | null; split_date_1: string | null; split_date_2: string | null; commentaire: string | null
   statut: string; created_at: string; created_by: string | null
@@ -82,6 +86,11 @@ type Commande = {
   split: Action | null
   modifDepot: Action | null
   modifDate: Action | null
+  modifLieu: Action | null
+  lieuType: 'PRO' | 'CHANTIER'     // livraison chez le pro ou sur chantier (départ FMS)
+  lieuSage: 'PRO' | 'CHANTIER'
+  lieuCle: string                  // les envois FMS ne se regroupent que pour un même lieu
+  lieuLib: string | null
   tout: Metriques; dispo: Metriques; reliquat: Metriques
   montant: number
 }
@@ -161,6 +170,11 @@ function construireCommandes(lignes: Ligne[], actions: Action[], auj: string): C
     const livs = ls.map((l) => l.liv).filter(Boolean) as string[]
     const livOrigine = livs.length ? livs.sort()[0] : null
     const modifDepot = derniere(l0.doc, 'DEPOT'); const modifDate = derniere(l0.doc, 'DATE'); const split = derniere(l0.doc, 'SPLIT')
+    const modifLieu = derniere(l0.doc, 'LIVRAISON')
+    const lieuSage = (l0.lieu_sage || 'PRO') as 'PRO' | 'CHANTIER'
+    const lieuType = (modifLieu?.livraison_type || l0.lieu_type || lieuSage) as 'PRO' | 'CHANTIER'
+    const lieuLib = ls.find((l) => l.lieu_lib)?.lieu_lib || null
+    const lieuCle = lieuType === 'PRO' ? 'PRO' : lieuSage === 'CHANTIER' && lieuLib ? lieuLib.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 60) : `DOC:${l0.doc}`
     const depot = modifDepot?.depot_apres || l0.depot
     const liv = modifDate?.date_apres || livOrigine
     const attente = ls.filter((l) => l.q_att > 0)
@@ -179,7 +193,7 @@ function construireCommandes(lignes: Ligne[], actions: Action[], auj: string): C
       complete, completeInconnue: attente.length > 0 && inconnue, manque,
       transfert: depot !== 'FMS' && ls.some((l) => l.q_fms > 0 || l.q_att > 0),
       splitInteressant: attente.length > 0 && dispo.lignes > 0 && (dispo.ge > 0 || dispo.pal >= 1),
-      split, modifDepot, modifDate, tout, dispo, reliquat,
+      split, modifDepot, modifDate, modifLieu, lieuType, lieuSage, lieuCle, lieuLib, tout, dispo, reliquat,
       montant: ls.reduce((s, l) => s + (l.mt || 0), 0),
     })
   })
@@ -216,9 +230,9 @@ function echelle(auj: string, fin: string, px: number): Echelle {
 
 type Glisse = { docs: string[]; depot: string; libelle: string }
 
-function Pastille({ m, titre, manque, transfert, fantome, split, couleur, onDragStart, onClick, petit }: {
+function Pastille({ m, titre, manque, transfert, fantome, split, couleur, onDragStart, onClick, petit, chantier }: {
   m: Metriques; titre: string; manque?: boolean; transfert?: boolean; fantome?: boolean; split?: 1 | 2
-  couleur: string; onDragStart?: (e: React.DragEvent) => void; onClick?: () => void; petit?: boolean
+  couleur: string; onDragStart?: (e: React.DragEvent) => void; onClick?: () => void; petit?: boolean; chantier?: boolean
 }) {
   const macro = m.macros[0]
   return (
@@ -233,6 +247,7 @@ function Pastille({ m, titre, manque, transfert, fantome, split, couleur, onDrag
     >
       {manque && !fantome && <span className="absolute -right-1.5 -top-2 text-[13px] text-[#C1683C]" title="Il manque de la marchandise à cette date">★</span>}
       {transfert && !fantome && <span className="absolute -left-2 -top-2 text-[11px]" title="Départ agence : besoin de stock FMS (transfert)">🚚</span>}
+      {chantier && <span className="mr-1" title="Livraison sur chantier : envoi séparé">🏗</span>}
       {split && <span className="mr-1 rounded bg-[#111820] px-1 text-[8.5px] font-bold text-white">{split === 1 ? 'Env. 1' : 'Env. 2'}</span>}
       <span className="font-bold text-[#111820]">{m.ge > 0 ? `${fmtN(m.ge)} GE` : ''}{m.ge > 0 && m.ui > 0 ? ' · ' : ''}{m.ui > 0 ? `${fmtN(m.ui)} UI` : ''}{m.ge === 0 && m.ui === 0 ? `${m.lignes} l.` : ''}</span>
       <span className="ml-1 text-[#5E5A44]">{fmtN(m.pal, m.pal < 10 ? 1 : 0)} p</span>
@@ -242,11 +257,11 @@ function Pastille({ m, titre, manque, transfert, fantome, split, couleur, onDrag
 }
 
 /** Pastille (+ pointillés jusqu'à la date de complétude, ou deux envois si scindé) placée sur la frise. */
-function Jalon({ e, liv, complete, completeInconnue, m, mDispo, mReliquat, split, manque, transfert, titre, couleur, glisse, onDragStart, onOpen, petit }: {
+function Jalon({ e, liv, complete, completeInconnue, m, mDispo, mReliquat, split, manque, transfert, titre, couleur, glisse, onDragStart, onOpen, petit, chantier }: {
   e: Echelle; liv: string | null; complete: string | null; completeInconnue: boolean
   m: Metriques; mDispo: Metriques; mReliquat: Metriques; split: Action | null
   manque: boolean; transfert: boolean; titre: string; couleur: string; glisse: Glisse; onDragStart: (g: Glisse, e: React.DragEvent) => void
-  onOpen: () => void; petit?: boolean
+  onOpen: () => void; petit?: boolean; chantier?: boolean
 }) {
   const drag = (ev: React.DragEvent) => onDragStart(glisse, ev)
   if (split?.split_date_1) {
@@ -280,7 +295,7 @@ function Jalon({ e, liv, complete, completeInconnue, m, mDispo, mReliquat, split
         </>
       )}
       <div className="absolute top-1/2 -translate-x-1/2 -translate-y-1/2" style={{ left: x }}>
-        <Pastille m={m} manque={manque} transfert={transfert} couleur={couleur} titre={titre} onDragStart={drag} onClick={onOpen} petit={petit} />
+        <Pastille m={m} manque={manque} transfert={transfert} couleur={couleur} titre={titre} onDragStart={drag} onClick={onOpen} petit={petit} chantier={chantier} />
       </div>
     </>
   )
@@ -401,7 +416,7 @@ function FenetreSplit({ cmds, depotAgence, auj, onAnnule, onValide }: {
 function statutLigne(c: Commande, l: Ligne): { icone: string; texte: string; cls: string; ordre: number } {
   const agence = c.depot !== 'FMS'
   if (l.q_att > 0) {
-    const ou = l.sans_rec ? 'aucune commande fournisseur' : `${l.cont || l.cdf || '—'} · dispo FMS ${l.dispo ? fmtD(l.dispo) : '?'}${l.sim ? ' (RDV simulé)' : ''}`
+    const ou = l.sans_rec ? 'aucune commande fournisseur' : `${l.cont || l.cdf || '—'} · expédiable de FMS dès le ${l.dispo ? fmtD(l.dispo) : '?'} (réception + 3 j)${l.sim ? ' · RDV simulé' : ''}`
     return { icone: '⏳', texte: `${fmtN(l.q_att)} attendu(s) — ${ou}${agence ? ', puis transfert FMS → ' + libDepot(c.depot) : ''}`, cls: 'text-[#8A3F1E]', ordre: 0 }
   }
   if (agence && l.q_fms > 0) return { icone: '🚚', texte: `${fmtN(l.q_fms)} en stock FMS : transfert FMS → ${libDepot(c.depot)}`, cls: 'text-[#1D5C86]', ordre: 1 }
@@ -410,9 +425,10 @@ function statutLigne(c: Commande, l: Ligne): { icone: string; texte: string; cls
   return { icone: '✓', texte: 'En stock à FMS', cls: 'text-emerald-700', ordre: 2 }
 }
 
-function BlocCommande({ c, depots, onEnregistre, onSplit }: {
+function BlocCommande({ c, depots, onEnregistre, onSplit, onLieu }: {
   c: Commande; depots: string[]
   onEnregistre: (c: Commande, depot: string, date: string | null, comm: string) => Promise<void>; onSplit: (c: Commande) => void
+  onLieu: (cmds: Commande[], lieu: 'PRO' | 'CHANTIER') => Promise<void>
 }) {
   const [date, setDate] = useState(c.liv || '')
   const [depot, setDepot] = useState(c.depot)
@@ -430,6 +446,21 @@ function BlocCommande({ c, depots, onEnregistre, onSplit }: {
             {c.rep} · {fmtN(c.montant)} € HT · livraison {fmtD(c.liv)}{c.modifDate && <span className="text-[#5B4385]"> (SAGE {fmtD(c.livOrigine)})</span>}
             {' '}· départ {libDepot(c.depot)}{c.modifDepot && <span className="text-[#5B4385]"> (SAGE {libDepot(c.depotOrigine)})</span>}
           </div>
+          {c.depot === 'FMS' && (
+            <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[11.5px]">
+              <span className="font-semibold text-[#5E5A44]">Livraison :</span>
+              <div className="flex rounded-md border border-[#E5E1D8] bg-[#F4F3F0] p-0.5 font-bold">
+                {(['PRO', 'CHANTIER'] as const).map((t) => (
+                  <button key={t} type="button" onClick={() => { if (t !== c.lieuType) void onLieu([c], t) }}
+                    className={`rounded px-2 py-0.5 ${c.lieuType === t ? 'bg-white text-[#111820] shadow-sm' : 'text-[#8A8474]'}`}>{t === 'PRO' ? '🏢 Chez le pro' : '🏗 Sur chantier'}</button>
+                ))}
+              </div>
+              <span className="text-[#8A8474]" title={c.lieuLib || ''}>
+                {c.lieuType === 'CHANTIER' ? (c.lieuSage === 'CHANTIER' && c.lieuLib ? c.lieuLib : 'adresse de chantier à préciser dans SAGE') : 'regroupable avec les autres envois du client chez le pro'}
+                {c.modifLieu ? ' · modifié' : ` · ${c.lieuSage === 'CHANTIER' ? 'chantier' : 'pro'} selon SAGE`}
+              </span>
+            </div>
+          )}
           <div className="mt-1 flex flex-wrap gap-1.5 text-[11px]">
             {c.manque ? <span className="rounded-full bg-[#C1683C]/15 px-2 font-bold text-[#8A3F1E]">★ incomplète à la date — complète {c.completeInconnue ? 'à une date inconnue' : fmtD(c.complete)}</span>
               : <span className="rounded-full bg-emerald-100 px-2 font-bold text-emerald-800">✓ complète pour la date</span>}
@@ -478,10 +509,12 @@ function BlocCommande({ c, depots, onEnregistre, onSplit }: {
   )
 }
 
-function FicheCommandes({ cmds, depots, onClose, onEnregistre, onSplit }: {
+function FicheCommandes({ cmds, depots, onClose, onEnregistre, onSplit, onLieu }: {
   cmds: Commande[]; depots: string[]; onClose: () => void
   onEnregistre: (c: Commande, depot: string, date: string | null, comm: string) => Promise<void>; onSplit: (c: Commande) => void
+  onLieu: (cmds: Commande[], lieu: 'PRO' | 'CHANTIER') => Promise<void>
 }) {
+  const fmsCmds = cmds.filter((c) => c.depot === 'FMS')
   return (
     <div className="fixed inset-0 z-50 flex justify-end bg-black/30" onClick={onClose}>
       <div className="h-full w-full max-w-[900px] overflow-y-auto bg-[#F4F3F0] p-4 shadow-2xl" onClick={(ev) => ev.stopPropagation()}>
@@ -489,12 +522,19 @@ function FicheCommandes({ cmds, depots, onClose, onEnregistre, onSplit }: {
           <div>
             <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-[#B4761A]">Détail {cmds.length > 1 ? `de ${cmds.length} commandes` : 'de la commande'}</p>
             <h2 className="text-[18px] font-bold">{cmds[0]?.client} <span className="text-[13px] font-semibold text-[#8A8474]">{cmds[0]?.tiers}</span></h2>
-            <p className="text-[11.5px] text-[#5E5A44]">Les changements de date ou de dépôt sont simulés ici et ajoutés à la liste « à reporter dans SAGE ».</p>
+            <p className="text-[11.5px] text-[#5E5A44]">Les changements de date ou de dépôt sont simulés ici et ajoutés à la liste « à reporter dans SAGE ». Départ FMS : les envois ne se regroupent que pour un même lieu de livraison.</p>
+            {fmsCmds.length > 1 && (
+              <div className="mt-1 flex items-center gap-1.5 text-[11.5px]">
+                <span className="font-semibold text-[#5E5A44]">Toutes les commandes départ FMS :</span>
+                <button type="button" onClick={() => void onLieu(fmsCmds, 'PRO')} className="rounded border border-[#E5E1D8] bg-white px-2 py-0.5 font-bold">🏢 chez le pro</button>
+                <button type="button" onClick={() => void onLieu(fmsCmds, 'CHANTIER')} className="rounded border border-[#E5E1D8] bg-white px-2 py-0.5 font-bold">🏗 sur chantier</button>
+              </div>
+            )}
           </div>
           <button type="button" onClick={onClose} className="rounded-lg border border-[#E5E1D8] bg-white px-3 py-1.5 text-[14px] font-bold">×</button>
         </div>
         <div className="mt-3 space-y-3">
-          {cmds.map((c) => <BlocCommande key={`${c.cle}|${c.depot}|${c.liv}`} c={c} depots={depots} onEnregistre={onEnregistre} onSplit={onSplit} />)}
+          {cmds.map((c) => <BlocCommande key={`${c.cle}|${c.depot}|${c.liv}`} c={c} depots={depots} onEnregistre={onEnregistre} onSplit={onSplit} onLieu={onLieu} />)}
         </div>
       </div>
     </div>
@@ -582,7 +622,7 @@ function VueTransferts({ commandes, agence, onOpen }: { commandes: Commande[]; a
                       <tr className="cursor-pointer border-t border-[#F0EDE6] hover:bg-[#FAF9F6]" onClick={() => setOuverts((s) => { const n = new Set(s); if (n.has(cle)) n.delete(cle); else n.add(cle); return n })}>
                         <td className="px-3 py-1.5 font-bold">
                           <span className="mr-1 text-[10px] text-[#8A8474]">{ouvert ? '▾' : '▸'}</span>
-                          {t0.maintenant ? <span className="text-[#1D5C86]">Dès maintenant — stock FMS</span> : t0.inconnu ? <span className="text-[#C1683C]">Date inconnue (RDV / CDF)</span> : <>Après réception, dispo FMS {fmtJ(t0.quand)}</>}
+                          {t0.maintenant ? <span className="text-[#1D5C86]">Dès maintenant — stock FMS</span> : t0.inconnu ? <span className="text-[#C1683C]">Date inconnue (RDV / CDF)</span> : <>Après réception — expédiable de FMS dès {fmtJ(t0.quand)}</>}
                         </td>
                         <td className="px-2 py-1.5 text-right">{docs.length}</td>
                         <td className="px-2 py-1.5 text-right">{ts.length}</td>
@@ -732,7 +772,7 @@ function VueAgence() {
     return commandes.filter((c) => {
       if (filtre === 'manque' && !c.manque) return false
       if (filtre === 'split' && !(c.splitInteressant || c.split)) return false
-      if (filtre === 'modifs' && !(c.split || c.modifDate || c.modifDepot)) return false
+      if (filtre === 'modifs' && !(c.split || c.modifDate || c.modifDepot || c.modifLieu)) return false
       if (q && !`${c.client} ${c.tiers} ${c.doc} ${c.chantier || ''} ${c.rep || ''}`.toUpperCase().includes(q)) return false
       return true
     })
@@ -837,6 +877,18 @@ function VueAgence() {
   const depotsChoix = useMemo(() => Array.from(new Set([...(depotAgence ? [depotAgence] : []), ...commandes.flatMap((c) => [c.depot, c.depotOrigine]), 'FMS'])), [commandes, depotAgence])
   const ficheCmds = useMemo(() => (ficheCles ? commandes.filter((c) => ficheCles.includes(c.cle)) : []), [ficheCles, commandes])
 
+  async function enregistrerLieu(cmds: Commande[], lieu: 'PRO' | 'CHANTIER') {
+    const docs = new Set<string>()
+    const rows: Partial<Action>[] = []
+    for (const c of cmds) {
+      if (docs.has(c.doc) || c.lieuType === lieu) continue
+      docs.add(c.doc)
+      rows.push({ type_action: 'LIVRAISON', numero_document: c.doc, numero_tiers: c.tiers, nom_tiers: c.client, agence, livraison_type: lieu,
+        commentaire: lieu === 'CHANTIER' ? `Livraison sur chantier${c.lieuLib ? ' : ' + c.lieuLib : ''}` : 'Livraison chez le pro' })
+    }
+    if (rows.length) await enregistrer(rows)
+  }
+
   async function enregistrerFiche(c: Commande, depot: string, date: string | null, comm: string) {
     const base = { numero_document: c.doc, numero_tiers: c.tiers, nom_tiers: c.client, agence, commentaire: comm || null }
     const rows: Partial<Action>[] = []
@@ -865,7 +917,7 @@ function VueAgence() {
     const ws = wb.addWorksheet('À reporter dans SAGE')
     ws.addRow(['Type', 'CDC', 'N° tiers', 'Client', 'Agence', 'Avant', 'Après', 'Envoi 1 (dispo)', 'Départ envoi 1', 'Envoi 2 (reliquat)', 'Commentaire', 'Décidé le', 'Par']).font = { bold: true }
     actions.forEach((a) => ws.addRow([
-      a.type_action === 'DEPOT' ? 'Changement de dépôt' : a.type_action === 'DATE' ? 'Nouvelle date de livraison' : 'Expédition scindée',
+      a.type_action === 'DEPOT' ? 'Changement de dépôt' : a.type_action === 'DATE' ? 'Nouvelle date de livraison' : a.type_action === 'LIVRAISON' ? `Lieu de livraison : ${a.livraison_type === 'CHANTIER' ? 'chantier' : 'chez le pro'}` : 'Expédition scindée',
       a.numero_document, a.numero_tiers, a.nom_tiers, a.agence,
       a.type_action === 'DEPOT' ? libDepot(a.depot_avant || '') : fmtD(a.date_avant),
       a.type_action === 'DEPOT' ? libDepot(a.depot_apres || '') : a.type_action === 'DATE' ? fmtD(a.date_apres) : '',
@@ -895,7 +947,7 @@ function VueAgence() {
   const nbManque = commandes.filter((c) => c.manque).length
   const nbSplit = commandes.filter((c) => c.splitInteressant && !c.split).length
   const nbCdcTransfert = new Set(transferts(commandes).map((t) => t.c.doc)).size
-  const nbModifs = commandes.filter((c) => c.split || c.modifDate || c.modifDepot).length
+  const nbModifs = commandes.filter((c) => c.split || c.modifDate || c.modifDepot || c.modifLieu).length
 
   return (
     <main className="min-h-screen bg-[#F4F3F0] px-4 py-3 text-[#111820]" style={{ fontFeatureSettings: '"tnum"' }}
@@ -961,6 +1013,7 @@ function VueAgence() {
                 <span><b>GE</b> groupes ext. · <b>UI</b> unités int. · <b>p</b> palettes</span>
                 <span className="text-[#C1683C]">★ manque à la date</span>
                 <span>🚚 besoin de stock FMS</span>
+                <span>🏗 livraison chantier</span>
                 <span className="rounded-full border-2 border-dashed border-[#C1683C]/70 px-1.5">complète le</span>
                 <span>clic : détail · glisser : date / dépôt</span>
               </span>
@@ -1015,9 +1068,9 @@ function VueAgence() {
                         const ouvert = ouverts.has(`${depot}|${cl.tiers}`)
                         const parDate = new Map<string, Commande[]>()
                         const scindees = cl.cmds.filter((c) => c.split)
-                        cl.cmds.filter((c) => !c.split).forEach((c) => { const k = c.liv || ''; const l = parDate.get(k); if (l) l.push(c); else parDate.set(k, [c]) })
+                        cl.cmds.filter((c) => !c.split).forEach((c) => { const k = `${c.liv || ''}§${fms ? c.lieuCle : ''}`; const l = parDate.get(k); if (l) l.push(c); else parDate.set(k, [c]) })
                         const interessant = cl.cmds.some((c) => c.splitInteressant && !c.split)
-                        const modif = cl.cmds.some((c) => c.split || c.modifDate || c.modifDepot)
+                        const modif = cl.cmds.some((c) => c.split || c.modifDate || c.modifDepot || c.modifLieu)
                         return (
                           <div key={cl.tiers}>
                             {/* Ligne client */}
@@ -1034,13 +1087,15 @@ function VueAgence() {
                               <div className="relative h-[40px]" style={{ width: e.largeur }} onDragOver={survolFrise(depot)} onDrop={deposerFrise(depot)} onDragLeave={() => setSurvol(null)}>
                                 {survol?.depot === depot && survol.date && <div className="pointer-events-none absolute inset-y-0 bg-[#7A5EA8]/15" style={{ left: e.x(survol.date) - px / 2, width: px }} />}
                                 <div className="pointer-events-none absolute inset-y-0 border-l-2 border-[#7A5EA8]/40" style={{ left: e.x(auj) - px / 2 }} />
-                                {Array.from(parDate.entries()).map(([d, cmds]) => {
+                                {Array.from(parDate.entries()).map(([cleGroupe, cmds]) => {
+                                  const d = cleGroupe.split('§')[0]
+                                  const chantierGroupe = fms && cmds[0].lieuType === 'CHANTIER'
                                   const comp = cmds.some((c) => c.completeInconnue) ? null : cmds.map((c) => c.complete || '').sort().slice(-1)[0] || null
                                   return (
-                                    <Jalon key={d} e={e} liv={d || null} complete={comp} completeInconnue={cmds.some((c) => c.completeInconnue)}
+                                    <Jalon key={cleGroupe} e={e} liv={d || null} complete={comp} chantier={chantierGroupe} completeInconnue={cmds.some((c) => c.completeInconnue)}
                                       m={somme(cmds.map((c) => c.tout))} mDispo={somme(cmds.map((c) => c.dispo))} mReliquat={somme(cmds.map((c) => c.reliquat))} split={null}
                                       manque={cmds.some((c) => c.manque)} transfert={cmds.some((c) => c.transfert)} couleur={couleur}
-                                      titre={`${cl.client} — livraison ${fmtD(d)}\n${cmds.map((c) => `${c.doc}${c.chantier ? ` (${c.chantier})` : ''}${c.manque ? ' ★' : ''}`).join(', ')}`}
+                                      titre={`${cl.client} — livraison ${fmtD(d)}${fms ? (chantierGroupe ? `\n🏗 Chantier : ${cmds[0].lieuLib || cmds[0].chantier || ''}` : '\n🏢 Chez le pro') : ''}\n${cmds.map((c) => `${c.doc}${c.chantier ? ` (${c.chantier})` : ''}${c.manque ? ' ★' : ''}`).join(', ')}`}
                                       glisse={{ docs: cmds.map((c) => c.doc), depot, libelle: `${cmds.length} CDC de ${cl.client}` }} onDragStart={debutGlisse} onOpen={() => setFicheCles(cmds.map((c) => c.cle))} />
                                   )
                                 })}
@@ -1072,7 +1127,7 @@ function VueAgence() {
                                 <div className="relative h-[34px]" style={{ width: e.largeur }} onDragOver={survolFrise(depot)} onDrop={deposerFrise(depot)}>
                                   <div className="pointer-events-none absolute inset-y-0 border-l-2 border-[#7A5EA8]/30" style={{ left: e.x(auj) - px / 2 }} />
                                   <Jalon e={e} liv={c.liv} complete={c.complete} completeInconnue={c.completeInconnue} m={c.tout} mDispo={c.dispo} mReliquat={c.reliquat}
-                                    split={c.split} manque={c.manque} transfert={c.transfert} couleur={couleur} petit
+                                    split={c.split} manque={c.manque} transfert={c.transfert} couleur={couleur} petit chantier={fms && c.lieuType === 'CHANTIER'}
                                     titre={`${c.doc}${c.chantier ? ` · ${c.chantier}` : ''} — ${c.client}\nLivraison ${fmtD(c.liv)}${c.manque ? `\n★ Manque : ${c.reliquat.lignes} ligne(s), complète ${c.completeInconnue ? 'à une date inconnue' : 'le ' + fmtD(c.complete)}` : ''}\n${c.lignes.slice(0, 12).map((l) => `${l.ref} × ${l.qte}${l.q_att > 0 ? ` (attend ${l.cont || l.cdf || '—'} ${fmtD(l.dispo)})` : ''}`).join('\n')}${c.lignes.length > 12 ? '\n…' : ''}`}
                                     glisse={{ docs: [c.doc], depot, libelle: `${c.doc} (${c.client})` }} onDragStart={debutGlisse} onOpen={() => setFicheCles([c.cle])} />
                                 </div>
@@ -1091,7 +1146,7 @@ function VueAgence() {
       </div>
 
       {deplacement && <FenetreDeplacement d={deplacement} commandes={commandes} onAnnule={() => setDeplacement(null)} onValide={validerDeplacement} />}
-      {ficheCmds.length > 0 && <FicheCommandes cmds={ficheCmds} depots={depotsChoix} onClose={() => setFicheCles(null)} onEnregistre={enregistrerFiche} onSplit={(c) => setSplitCmds([c])} />}
+      {ficheCmds.length > 0 && <FicheCommandes cmds={ficheCmds} depots={depotsChoix} onClose={() => setFicheCles(null)} onEnregistre={enregistrerFiche} onSplit={(c) => setSplitCmds([c])} onLieu={enregistrerLieu} />}
 
       {/* Barre de dépôts pendant un glisser : déposer sur un dépôt = changer le dépôt de départ */}
       {enGlisse && (
@@ -1135,6 +1190,7 @@ function VueAgence() {
                       <div className="mt-0.5">
                         {a.type_action === 'DEPOT' && <>📦 Dépôt : {libDepot(a.depot_avant || '')} → <b>{libDepot(a.depot_apres || '')}</b></>}
                         {a.type_action === 'DATE' && <>📅 Livraison : {fmtD(a.date_avant)} → <b>{fmtD(a.date_apres)}</b></>}
+                        {a.type_action === 'LIVRAISON' && <>{a.livraison_type === 'CHANTIER' ? '🏗 Livraison sur chantier' : '🏢 Livraison chez le pro'} <span className="text-[#8A8474]">(regroupement des envois FMS)</span></>}
                         {a.type_action === 'SPLIT' && <>✂ Scindée : envoi 1 le <b>{fmtD(a.split_date_1)}</b> depuis <b>{libDepot(a.split_depot || '')}</b>, reliquat le <b>{fmtD(a.split_date_2)}</b></>}
                       </div>
                       {a.commentaire && <div className="text-[11.5px] italic text-[#5E5A44]">« {a.commentaire} »</div>}

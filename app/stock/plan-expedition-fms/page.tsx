@@ -59,6 +59,7 @@ type Reception = {
   eta_port: string | null; statut_suivi: string | null; rdv_date: string | null; rdv_heure: string | null; rdv_simule: boolean
   date_reception_sage: string | null; date_dispo: string | null; nb_refs: number; qte: number; palettes: number | null
   nb_lignes_cdc: number; nb_destinataires: number; qte_cdc: number | null
+  rdv_source: 'COMPAGNON' | 'SAGE' | null; nb_cdc: number | null; rdv_dispo: string | null
 }
 type Meta = {
   genere_le: string; genere_par: string | null; debut: string; fin_horizon: string; fin_fenetre: string; simuler_rdv: boolean
@@ -303,7 +304,7 @@ function RdvSaisie({ r, onSaved }: { r: Reception; onSaved: () => void }) {
           onKeyDown={(e) => { if (e.key === 'Enter' && date) void valider(); if (e.key === 'Escape') setEdit(false) }} />
         <input type="time" value={heure} onChange={(e) => setHeure(e.target.value)} className="h-7 w-[80px] rounded border border-[#E5E1D8] px-1 text-[12px]" />
         <button type="button" disabled={saving || !date} onClick={() => void valider()} className="h-7 rounded bg-[#111820] px-2 text-[11.5px] font-bold text-white disabled:opacity-40">{saving ? '…' : 'OK'}</button>
-        {r.rdv_date && <button type="button" disabled={saving} onClick={() => void valider(true)} title="Retirer le RDV" className="h-7 rounded border border-[#E5E1D8] px-2 text-[11.5px] font-bold text-[#C1683C]">Retirer</button>}
+        {r.rdv_date && r.rdv_source === 'COMPAGNON' && <button type="button" disabled={saving} onClick={() => void valider(true)} title="Retirer le RDV saisi (le RDV SAGE éventuel reprend la main)" className="h-7 rounded border border-[#E5E1D8] px-2 text-[11.5px] font-bold text-[#C1683C]">Retirer</button>}
         <button type="button" onClick={() => setEdit(false)} className="h-7 px-1 text-[13px] text-[#8A8474]">×</button>
         {err && <span className="text-[11px] font-semibold text-red-700">{err}</span>}
       </div>
@@ -311,8 +312,11 @@ function RdvSaisie({ r, onSaved }: { r: Reception; onSaved: () => void }) {
   }
   if (r.rdv_date) {
     return (
-      <button type="button" onClick={() => setEdit(true)} title="Modifier le RDV" className="rounded-full bg-indigo-50 px-2 py-0.5 text-[11.5px] font-bold text-indigo-800 ring-1 ring-indigo-200">
+      <button type="button" onClick={() => setEdit(true)}
+        title={r.rdv_source === 'SAGE' ? 'RDV confirmé lu dans les commentaires de la CDF SAGE — cliquer pour le remplacer par une saisie' : 'RDV saisi dans le compagnon — cliquer pour le modifier'}
+        className={`rounded-full px-2 py-0.5 text-[11.5px] font-bold ring-1 ${r.rdv_source === 'SAGE' ? 'bg-emerald-50 text-emerald-800 ring-emerald-200' : 'bg-indigo-50 text-indigo-800 ring-indigo-200'}`}>
         {fmtJour(r.rdv_date)}{r.rdv_heure ? ` ${r.rdv_heure.slice(0, 5).replace(':', 'h')}` : ''}
+        <span className="ml-1 text-[9.5px] font-bold opacity-70">{r.rdv_source === 'SAGE' ? 'SAGE' : 'saisi'}</span>
       </button>
     )
   }
@@ -768,8 +772,8 @@ function PlanExpeditionFms() {
                     <thead className="bg-[#FAF9F6] text-left text-[10.5px] uppercase tracking-wide text-[#8A8474]">
                       <tr>
                         <th className="px-2 py-2">CDF</th><th className="px-2 py-2">Fournisseur</th><th className="px-2 py-2">Container</th><th className="px-2 py-2">Navire</th>
-                        <th className="px-2 py-2">ETA port</th><th className="px-2 py-2">Statut</th><th className="px-2 py-2">RDV déchargement FMS</th><th className="px-2 py-2">Dispo retenue</th>
-                        <th className="px-2 py-2 text-right">Réf. · pièces</th><th className="px-2 py-2 text-right">Palettes</th><th className="px-2 py-2 text-right">Lignes CDC servies</th><th className="px-2 py-2 text-right">Destinataires</th>
+                        <th className="px-2 py-2">ETA port</th><th className="px-2 py-2">Statut</th><th className="px-2 py-2">RDV déchargement FMS</th><th className="px-2 py-2" title="Réception FMS + 3 jours ouvrés de mise en stock">Dispo expédition</th>
+                        <th className="px-2 py-2 text-right">Réf. · pièces</th><th className="px-2 py-2 text-right">Palettes</th><th className="px-2 py-2 text-right" title="Commandes clients (à livrer dans l’horizon du plan) dont le manque est comblé par cette réception">CDC · lignes servies</th><th className="px-2 py-2 text-right">Destinataires</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -782,10 +786,10 @@ function PlanExpeditionFms() {
                           <td className="whitespace-nowrap px-2 py-1.5">{fmtDate(r.eta_port)}</td>
                           <td className="px-2 py-1.5">{r.statut_suivi ? STATUT_SUIVI[r.statut_suivi] || r.statut_suivi : '—'}</td>
                           <td className="px-2 py-1.5"><RdvSaisie key={`${r.numero_cdf}-${r.rdv_date}`} r={r} onSaved={() => void recalculer()} /></td>
-                          <td className="whitespace-nowrap px-2 py-1.5">{r.date_dispo ? <>{fmtJour(r.date_dispo)}{r.rdv_simule && <span className="text-[10.5px] font-bold text-[#C1683C]"> simulé</span>}{!r.est_cont && !r.rdv_date && <span className="text-[10.5px] text-[#8A8474]"> (date CDF)</span>}</> : <span className="text-[#C1683C]">inconnue</span>}</td>
+                          <td className="whitespace-nowrap px-2 py-1.5">{r.date_dispo ? <>{fmtJour(r.date_dispo)}{r.rdv_simule && <span className="text-[10.5px] font-bold text-[#C1683C]" title={`RDV simulé : ETA + ${meta?.parametres.rdv_simule_jours_apres_eta ?? 5} j ouvrés, puis + ${meta?.parametres.delai_mise_en_stock_jours ?? 3} j de mise en stock`}> simulé</span>}{!r.est_cont && !r.rdv_date && <span className="text-[10.5px] text-[#8A8474]"> (date CDF)</span>}</> : <span className="text-[#C1683C]">inconnue</span>}</td>
                           <td className="px-2 py-1.5 text-right">{r.nb_refs} · {fmtNum(r.qte)}</td>
                           <td className="px-2 py-1.5 text-right">{fmtNum(r.palettes, 1)}</td>
-                          <td className="px-2 py-1.5 text-right font-bold">{r.nb_lignes_cdc || '—'}</td>
+                          <td className="px-2 py-1.5 text-right font-bold">{r.nb_lignes_cdc ? <>{fmtNum(r.nb_cdc)} <span className="font-normal text-[#8A8474]">· {fmtNum(r.nb_lignes_cdc)} l.</span></> : '—'}</td>
                           <td className="px-2 py-1.5 text-right">{r.nb_destinataires || '—'}</td>
                         </tr>
                       ))}
@@ -804,7 +808,8 @@ function PlanExpeditionFms() {
                   <li>CDC ouvertes à livrer d’ici le {fmtDate(meta.fin_horizon)} (retards compris). Destinataire = client pour une CDC départ FMS, agence pour une CDC départ agence (palette de transfert multi-clients).</li>
                   <li>CDC départ agence : le stock de l’agence (et de son dépôt transit) et les CDF livrées en direct en agence servent d’abord ; le reste est demandé à FMS.</li>
                   <li>Stock FMS libre (stock − préparé) servi par date de livraison puis ancienneté ; le manque est rattaché à la réception FMS qui le comble.</li>
-                  <li>Date de dispo d’un container = RDV de déchargement saisi ; sans RDV : {meta.simuler_rdv ? `simulé à ETA + ${meta.parametres.rdv_simule_jours_apres_eta} jours ouvrés` : 'inconnue (non planifié)'}. Expédition possible {meta.parametres.delai_mise_en_stock_jours} jour(s) ouvré(s) après.</li>
+                  <li>RDV de déchargement = saisi dans le compagnon, sinon RDV confirmé lu dans les commentaires de la CDF SAGE (« Livraison le 13.11 à 13h », « … ⇒ OK FMS ») ; sans RDV : {meta.simuler_rdv ? `simulé à ETA + ${meta.parametres.rdv_simule_jours_apres_eta} jours ouvrés` : 'inconnue (non planifié)'}. Dispo à l’expédition (FMS → client ou agence) {meta.parametres.delai_mise_en_stock_jours} jour(s) ouvré(s) après la réception.</li>
+                  <li>Départ FMS : un destinataire par client et par lieu de livraison — les commandes « chez le pro » se regroupent, chaque chantier part à part (lieu de livraison SAGE, modifiable dans la vue agence).</li>
                   <li>Palettes : volume BLG ÷ {fmtNum(meta.parametres.volume_utile_palette_m3, 1)} m³ utiles, ou poids ÷ {fmtNum(meta.parametres.poids_max_palette_kg)} kg, le plus grand des deux (sans dimensions BLG : médiane de la famille, signalé « dim. ? »).</li>
                   <li>Anticiper si le dispo contient un groupe extérieur ou fait au moins {fmtNum(meta.parametres.seuil_palettes_anticipation, 1)} palette.</li>
                   <li>Groupes extérieurs : {(plan.familles || []).filter((f) => f.role === 'GROUPE_EXT').map((f) => f.famille).join(', ') || '—'} · Cuivre : {(plan.familles || []).filter((f) => f.role === 'CUIVRE').map((f) => f.famille).join(', ') || '—'}.</li>

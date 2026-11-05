@@ -43,6 +43,10 @@
 --     datée dans la fenêtre, à partir de la dernière date + délai de mise en stock.
 --     Le reste (réception plus tardive, inconnue ou absente) = reliquat.
 --
+-- 05/11/2026 : RDV effectif = saisi dans le compagnon sinon lu dans SAGE (v_appro_cdf_rdv_fms_effectif),
+-- buffer de 3 jours ouvrés réception → expédition inclus dans la date de dispo, destinataire FMS = client × lieu
+-- de livraison (chez le pro / chaque chantier). Prérequis : 20261105b_rdv_fms_sage_lieu_livraison.sql.
+--
 -- Calcul matérialisé par refresh_plan_expedition_fms() (bouton « Recalculer »
 -- de l'écran, rappelé après chaque saisie de RDV), lu par get_plan_expedition_fms()
 -- et get_plan_expedition_fms_detail(). Accès réservé à Arnaud (plan_exp_autorise()).
@@ -254,10 +258,19 @@ begin
          g.famille, g.famille_macro, f.role as role_famille,
          greatest(coalesce(g.quantite, 0), 0) as quantite, g.montant_ht,
          upper(btrim(coalesce(a.depot, 'FMS'))) as depot_brut,
-         plan_exp_depot_cle(coalesce(a.depot, 'FMS')) as depot_cle
+         plan_exp_depot_cle(coalesce(a.depot, 'FMS')) as depot_cle,
+         nullif(btrim(e.reference), '') as chantier,
+         nullif(btrim(e.lieu_livraison), '') as lieu_libelle,
+         -- lieu de livraison SAGE = nom du client → chez le pro, sinon → chantier
+         case when e.lieu_livraison is null or upper(btrim(e.lieu_livraison)) = upper(btrim(coalesce(e.intitule_tiers, g.nom_tiers))) then 'PRO' else 'CHANTIER' end as lieu_sage,
+         lv.livraison_type as lieu_force
   from interne.v_couverture_stock_global g
   join activite_lignes a on a.id = g.id
   left join appro_plan_exp_familles f on f.famille = g.famille
+  left join activite_entete e on e.numero_piece = g.numero_document
+  left join lateral (select x.livraison_type from appro_plan_exp_actions x
+                     where x.numero_document = g.numero_document and x.type_action = 'LIVRAISON' and x.statut <> 'ANNULE'
+                     order by x.created_at desc, x.id desc limit 1) lv on true
   where g.date_livraison <= v_fin and coalesce(g.quantite, 0) > 0;
 
   -- 2. Stock libre par dépôt (agence + son TRANSIT) et CDF livrées en direct en agence
@@ -318,15 +331,21 @@ begin
            coalesce(rel.container_numero, rdv.container_numero) as container, rel.navire, rel.eta_port, rel.statut as statut_suivi,
            rdv.rdv_date, rdv.rdv_heure,
            (rdv.rdv_date is null and coalesce(c.est_cont, false) and p_simuler_rdv and rel.eta_port is not null) as rdv_simule,
+           rdv.source as rdv_source,
            case when rdv.rdv_date is not null then rdv.rdv_date
                 when coalesce(c.est_cont, false) then
                   case when p_simuler_rdv and rel.eta_port is not null then plan_exp_jour_ouvre(greatest(rel.eta_port, v_auj), v_sim_jours) end
-                else greatest(v.date_reception_retenue, v_auj) end as date_dispo
+                else v.date_reception_retenue end as rdv_retenu,
+           -- dispo à l'expédition = réception (RDV) + buffer en jours ouvrés, jamais avant aujourd'hui
+           case when rdv.rdv_date is not null then greatest(plan_exp_jour_ouvre(rdv.rdv_date, v_delai), v_auj)
+                when coalesce(c.est_cont, false) then
+                  case when p_simuler_rdv and rel.eta_port is not null then plan_exp_jour_ouvre(plan_exp_jour_ouvre(greatest(rel.eta_port, v_auj), v_sim_jours), v_delai) end
+                else greatest(plan_exp_jour_ouvre(v.date_reception_retenue, v_delai), v_auj) end as date_dispo
     from v_couverture_stock_receptions v
     left join cdf c on c.numero_cdf = v.numero_cdf
     left join sage.tiers t on t.ti_num = c.fournisseur_code
     left join rel on rel.cdf_numero = v.numero_cdf
-    left join v_appro_cdf_rdv_fms_actuel rdv on rdv.cdf_numero = v.numero_cdf
+    left join v_appro_cdf_rdv_fms_effectif rdv on rdv.cdf_numero = v.numero_cdf
     where plan_exp_depot_cle(coalesce(v.depot_reception, 'FMS')) = 'FMS'
   )
   select r.*,
@@ -377,7 +396,12 @@ begin
   delete from appro_plan_exp_lignes where true;
   insert into appro_plan_exp_lignes
   select l.ligne_id,
-         case when l.depot_cle = 'FMS' then 'C:' || coalesce(l.numero_tiers, '?') else 'A:' || l.depot_cle end,
+         -- départ FMS : un destinataire par client ET par lieu de livraison (chez le pro, ou chaque chantier)
+         case when l.depot_cle = 'FMS' then 'C:' || coalesce(l.numero_tiers, '?')
+                || case when coalesce(l.lieu_force, l.lieu_sage) = 'CHANTIER'
+                        then '|' || coalesce(case when l.lieu_sage = 'CHANTIER' then left(regexp_replace(upper(l.lieu_libelle), '[^A-Z0-9]', '', 'g'), 60) end, l.numero_document)
+                        else '' end
+              else 'A:' || l.depot_cle end,
          l.numero_document, l.numero_tiers, l.nom_tiers, l.representant, l.agence_commerciale,
          l.depot_brut, l.date_livraison, l.date_creation, l.reference_article, l.designation, l.famille, l.famille_macro, l.role_famille,
          l.quantite, l.montant_ht, l.qte_agence, l.qte_fms_dispo, l.qte_attente,
@@ -389,7 +413,12 @@ begin
          case when l.qte_agence >= l.quantite then 'AGENCE'
               when l.qte_attente <= 0 then 'FMS_DISPO'
               when l.qte_fms_dispo > 0 then 'PARTIEL'
-              else 'ATTENTE' end
+              else 'ATTENTE' end,
+         coalesce(l.lieu_force, l.lieu_sage), l.lieu_sage,
+         case when coalesce(l.lieu_force, l.lieu_sage) = 'CHANTIER'
+              then coalesce(case when l.lieu_sage = 'CHANTIER' then left(regexp_replace(upper(l.lieu_libelle), '[^A-Z0-9]', '', 'g'), 60) end, l.numero_document)
+              else 'PRO' end,
+         l.lieu_libelle, l.chantier
   from _l4 l
   left join _dim d on d.cle = upper(btrim(l.reference_article))
   left join _fam f on f.famille = l.famille and d.vol is null and d.poids is null;
@@ -402,7 +431,8 @@ begin
     date_complete_vague, rdv_simule, date_inconnue, sans_reception, containers, categorie)
   select l.cle,
          case when l.cle like 'C:%' then 'CLIENT' else 'AGENCE' end,
-         case when l.cle like 'C:%' then max(l.nom_tiers) else 'Transfert ' || substr(l.cle, 3) end,
+         case when l.cle like 'C:%|%' then max(l.nom_tiers) || ' · chantier ' || coalesce(max(l.chantier), max(l.lieu_libelle), '')
+              when l.cle like 'C:%' then max(l.nom_tiers) else 'Transfert ' || substr(l.cle, 3) end,
          case when l.cle like 'C:%' then max(l.numero_tiers) end,
          case when l.cle like 'C:%' then max(l.agence_commerciale) else substr(l.cle, 3) end,
          count(distinct l.numero_document), count(*), sum(l.montant_ht), min(l.date_livraison),
@@ -468,7 +498,7 @@ begin
     where categorie in ('ANTICIPER', 'ATTENDRE', 'RECEPTION') and nb_lignes_vague > 0 and date_complete_vague is not null
     order by date_complete_vague, date_livraison_min nulls last
   loop
-    v_min := plan_exp_jour_ouvre(u.date_complete_vague, v_delai);
+    v_min := u.date_complete_vague;  -- buffer réception → expédition déjà inclus dans la date de dispo
     v_reste := greatest(ceil(case when u.categorie = 'ANTICIPER' then u.palettes_vague else u.palettes_dispo + u.palettes_vague end), 1);
     v_parts := '{}'; v_pals := '{}';
     for i in 1 .. v_fenetre loop
@@ -505,7 +535,10 @@ begin
          round(sum(greatest(coalesce(d.vol, 0) * r.quantite_attendue / v_vol_pal, coalesce(d.poids, 0) * r.quantite_attendue / v_poids_pal)), 1),
          (select count(*) from appro_plan_exp_lignes l where l.numero_cdf = r.numero_cdf and l.qte_attente > 0),
          (select count(distinct l.cle) from appro_plan_exp_lignes l where l.numero_cdf = r.numero_cdf and l.qte_attente > 0),
-         (select sum(l.qte_attente) from appro_plan_exp_lignes l where l.numero_cdf = r.numero_cdf and l.qte_attente > 0)
+         (select sum(l.qte_attente) from appro_plan_exp_lignes l where l.numero_cdf = r.numero_cdf and l.qte_attente > 0),
+         max(r.rdv_source),
+         (select count(distinct l.numero_document) from appro_plan_exp_lignes l where l.numero_cdf = r.numero_cdf and l.qte_attente > 0),
+         max(r.rdv_retenu)
   from _rec r
   left join _dim d on d.cle = upper(btrim(r.reference_article))
   where (r.est_cont and coalesce(r.date_dispo, r.eta_port, r.date_reception_retenue) <= v_fin_fenetre + 30)
