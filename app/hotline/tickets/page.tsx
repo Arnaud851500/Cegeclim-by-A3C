@@ -66,6 +66,9 @@ function HotlineTickets() {
   const [niveau, setNiveau] = useState<number | 0>(0)
   const [mesTickets, setMesTickets] = useState(false)
   const [recherche, setRecherche] = useState('')
+  // Filtre sur la date de création (06/11/2026) : bornes incluses, dates locales AAAA-MM-JJ.
+  const [du, setDu] = useState('')
+  const [au, setAu] = useState('')
 
   const charger = useCallback(async () => {
     setLoading(true)
@@ -81,6 +84,8 @@ function HotlineTickets() {
         else if (statut !== 'TOUS') query = query.eq('statut', statut)
         if (niveau) query = query.eq('niveau', niveau)
         if (mesTickets && email) query = query.eq('assigne_a', email)
+        if (du) query = query.gte('opened_at', new Date(`${du}T00:00:00`).toISOString())
+        if (au) query = query.lt('opened_at', new Date(new Date(`${au}T00:00:00`).getTime() + 86_400_000).toISOString())
         const { data, error } = await query
         if (error) throw error
         const lot = (data || []) as Ticket[]
@@ -93,7 +98,7 @@ function HotlineTickets() {
     } finally {
       setLoading(false)
     }
-  }, [filiere, statut, niveau, mesTickets, email])
+  }, [filiere, statut, niveau, mesTickets, email, du, au])
 
   useEffect(() => {
     void charger()
@@ -166,6 +171,59 @@ function HotlineTickets() {
             <input type="checkbox" checked={mesTickets} onChange={(e) => setMesTickets(e.target.checked)} className="h-3.5 w-3.5 accent-[#B4761A]" />
             Mes tickets
           </label>
+          <div className="flex items-center gap-1.5 text-[12px] text-slate-600">
+            <span className="font-semibold">Créés du</span>
+            <input type="date" value={du} max={au || undefined} onChange={(e) => setDu(e.target.value)} className="h-9 rounded-lg border border-[#D8D3C8] bg-white px-2 text-[12px] text-slate-900" />
+            <span className="font-semibold">au</span>
+            <input type="date" value={au} min={du || undefined} onChange={(e) => setAu(e.target.value)} className="h-9 rounded-lg border border-[#D8D3C8] bg-white px-2 text-[12px] text-slate-900" />
+            <select
+              value=""
+              onChange={(e) => {
+                const v = e.target.value
+                const iso = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+                const auj = new Date()
+                if (v === 'AUJ') {
+                  setDu(iso(auj))
+                  setAu(iso(auj))
+                } else if (v === 'HIER') {
+                  const h = new Date(auj.getTime() - 86_400_000)
+                  setDu(iso(h))
+                  setAu(iso(h))
+                } else if (v === '7J' || v === '30J') {
+                  setDu(iso(new Date(auj.getTime() - (v === '7J' ? 6 : 29) * 86_400_000)))
+                  setAu(iso(auj))
+                } else if (v === 'MOIS') {
+                  setDu(iso(new Date(auj.getFullYear(), auj.getMonth(), 1)))
+                  setAu(iso(auj))
+                } else if (v === 'MOIS_PREC') {
+                  setDu(iso(new Date(auj.getFullYear(), auj.getMonth() - 1, 1)))
+                  setAu(iso(new Date(auj.getFullYear(), auj.getMonth(), 0)))
+                } else if (v === 'ANNEE') {
+                  setDu(iso(new Date(auj.getFullYear(), 0, 1)))
+                  setAu(iso(auj))
+                } else if (v === 'TOUT') {
+                  setDu('')
+                  setAu('')
+                }
+              }}
+              className="h-9 rounded-lg border border-[#D8D3C8] bg-white px-2 text-[12px] text-slate-700"
+            >
+              <option value="">Période…</option>
+              <option value="AUJ">Aujourd’hui</option>
+              <option value="HIER">Hier</option>
+              <option value="7J">7 derniers jours</option>
+              <option value="30J">30 derniers jours</option>
+              <option value="MOIS">Ce mois-ci</option>
+              <option value="MOIS_PREC">Mois précédent</option>
+              <option value="ANNEE">Depuis le 1er janvier</option>
+              <option value="TOUT">Toutes les dates</option>
+            </select>
+            {du || au ? (
+              <button type="button" onClick={() => { setDu(''); setAu('') }} className="font-semibold text-slate-500 underline">
+                Effacer
+              </button>
+            ) : null}
+          </div>
           <input
             value={recherche}
             onChange={(e) => setRecherche(e.target.value)}
