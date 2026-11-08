@@ -18,6 +18,7 @@ import { supabase } from '@/lib/supabaseClient'
 import { useAccess } from '@/components/AccessContext'
 import HotlineHeader, { HotlineErreur, Pastille } from '@/components/hotline/HotlineHeader'
 import PiecesJointes from '@/components/hotline/PiecesJointes'
+import ClassificationTicket, { patchClassif, useClassification, valeursDepuisTicket, type ValeursClassif } from '@/components/hotline/ClassificationTicket'
 import {
   ETAPE_LIBELLES,
   FILIERES,
@@ -29,6 +30,8 @@ import {
   fmtDateHeure,
   fmtDuree,
   fmtTel,
+  issueRequise,
+  libelleClassif,
   libelleFiliere,
   libelleMotif,
   libelleNature,
@@ -66,6 +69,11 @@ function HotlineTickets() {
   const [niveau, setNiveau] = useState<number | 0>(0)
   const [mesTickets, setMesTickets] = useState(false)
   const [recherche, setRecherche] = useState('')
+  // Filtres de classification (08/11/2026) : '' = tous, '-' = non renseigné.
+  const [symptomeF, setSymptomeF] = useState('')
+  const [organeF, setOrganeF] = useState('')
+  const [issueF, setIssueF] = useState('')
+  const { classif } = useClassification()
   // Filtre sur la date de création (06/11/2026) : bornes incluses, dates locales AAAA-MM-JJ.
   const [du, setDu] = useState('')
   const [au, setAu] = useState('')
@@ -86,6 +94,10 @@ function HotlineTickets() {
         if (mesTickets && email) query = query.eq('assigne_a', email)
         if (du) query = query.gte('opened_at', new Date(`${du}T00:00:00`).toISOString())
         if (au) query = query.lt('opened_at', new Date(new Date(`${au}T00:00:00`).getTime() + 86_400_000).toISOString())
+        for (const [col, v] of [['symptome', symptomeF], ['organe', organeF], ['issue', issueF]] as const) {
+          if (v === '-') query = query.is(col, null)
+          else if (v) query = query.eq(col, v)
+        }
         const { data, error } = await query
         if (error) throw error
         const lot = (data || []) as Ticket[]
@@ -98,7 +110,7 @@ function HotlineTickets() {
     } finally {
       setLoading(false)
     }
-  }, [filiere, statut, niveau, mesTickets, email, du, au])
+  }, [filiere, statut, niveau, mesTickets, email, du, au, symptomeF, organeF, issueF])
 
   useEffect(() => {
     void charger()
@@ -171,6 +183,23 @@ function HotlineTickets() {
             <input type="checkbox" checked={mesTickets} onChange={(e) => setMesTickets(e.target.checked)} className="h-3.5 w-3.5 accent-[#B4761A]" />
             Mes tickets
           </label>
+          {(
+            [
+              ['symptome', 'Tous symptômes', symptomeF, setSymptomeF],
+              ['organe', 'Tous organes', organeF, setOrganeF],
+              ['issue', 'Toutes issues', issueF, setIssueF],
+            ] as const
+          ).map(([axe, tous, v, set]) => (
+            <select key={axe} value={v} onChange={(e) => set(e.target.value)} className={`h-8 max-w-[220px] rounded-lg border bg-white px-2 text-[13px] ${v ? 'border-[#1E4E8C] text-[#1E4E8C]' : 'border-[#D8D3C8]'}`}>
+              <option value="">{tous}</option>
+              <option value="-">Non renseigné</option>
+              {classif[axe === 'symptome' ? 'symptome' : axe === 'organe' ? 'organe' : 'issue'].map((c) => (
+                <option key={c.code} value={c.code}>
+                  {c.libelle}
+                </option>
+              ))}
+            </select>
+          ))}
           <div className="flex items-center gap-1.5 text-[12px] text-slate-600">
             <span className="font-semibold">Créés du</span>
             <input type="date" value={du} max={au || undefined} onChange={(e) => setDu(e.target.value)} className="h-9 rounded-lg border border-[#D8D3C8] bg-white px-2 text-[12px] text-slate-900" />
@@ -292,6 +321,11 @@ function HotlineTickets() {
                         <td className="px-3 py-2 text-slate-600">{fmtDateHeure(t.opened_at)}</td>
                         <td className="px-3 py-2 text-slate-700">
                           {libelleFiliere(t.filiere)} <span className="text-slate-500">· {libelleMotif(t.motif)}</span>
+                          {t.symptome || t.issue ? (
+                            <div className="text-[11px] text-[#1E4E8C]">
+                              {[libelleClassif(classif, 'symptome', t.symptome), libelleClassif(classif, 'issue', t.issue)].filter(Boolean).join(' → ')}
+                            </div>
+                          ) : null}
                         </td>
                         <td className="px-3 py-2">
                           <div className="font-medium text-slate-900">{t.intitule_tiers || t.numero_tiers || fmtTel(t.telephone_appelant) || '—'}</div>
@@ -340,12 +374,15 @@ function FicheTicket({ id, onClose, onChange, onSupprime }: { id: string; onClos
   const [commentaire, setCommentaire] = useState('')
   const [busy, setBusy] = useState(false)
   const [erreur, setErreur] = useState<string | null>(null)
+  const { classif } = useClassification()
+  const [classifForm, setClassifForm] = useState<ValeursClassif>(valeursDepuisTicket(null))
 
   const charger = useCallback(async () => {
     try {
       const { data, error } = await supabase.from('hotline_tickets').select('*').eq('id', id).maybeSingle()
       if (error) throw error
       setTicket((data as Ticket) || null)
+      setClassifForm(valeursDepuisTicket(data as Ticket | null))
       setEtapes(await chargerEtapes(id))
     } catch (e) {
       setErreur(messageErreur(e))
@@ -485,10 +522,31 @@ function FicheTicket({ id, onClose, onChange, onSupprime }: { id: string; onClos
           ) : null}
           {actif ? (
             <>
-              <button type="button" disabled={busy || ticket.niveau >= 3} onClick={() => run(() => escalader(ticket, commentaire))} className={`${bouton} bg-[#C1683C] text-white`}>
+              <button
+                type="button"
+                disabled={busy || ticket.niveau >= 3}
+                onClick={() =>
+                  run(async () => {
+                    await majTicket(ticket.id, patchClassif(classifForm))
+                    await escalader({ ...ticket, actions: classifForm.actions }, commentaire)
+                  })
+                }
+                className={`${bouton} bg-[#C1683C] text-white`}
+              >
                 Escalader N{Math.min(3, ticket.niveau + 1)}
               </button>
-              <button type="button" disabled={busy} onClick={() => run(() => resoudre(ticket.id, commentaire || ticket.preconisation || ''))} className={`${bouton} bg-[#2F6B3A] text-white`}>
+              <button
+                type="button"
+                disabled={busy || (issueRequise(ticket) && !classifForm.issue)}
+                title={issueRequise(ticket) && !classifForm.issue ? 'Choisir d’abord l’issue dans le bloc Classification' : undefined}
+                onClick={() =>
+                  run(async () => {
+                    await majTicket(ticket.id, patchClassif(classifForm))
+                    await resoudre(ticket.id, commentaire || ticket.preconisation || '')
+                  })
+                }
+                className={`${bouton} bg-[#2F6B3A] text-white`}
+              >
                 Résolu
               </button>
             </>
@@ -504,6 +562,32 @@ function FicheTicket({ id, onClose, onChange, onSupprime }: { id: string; onClos
             </button>
           ) : null}
         </div>
+
+        {ticket.filiere === 'THERMIQUE' ? (
+          <div className="space-y-1.5">
+            <ClassificationTicket
+              valeurs={classifForm}
+              onChange={setClassifForm}
+              classif={classif}
+              issueObligatoire={issueRequise(ticket) && actif}
+              source={ticket.classif_source}
+              disabled={busy}
+            />
+            <button
+              type="button"
+              disabled={busy || JSON.stringify(classifForm) === JSON.stringify(valeursDepuisTicket(ticket))}
+              onClick={() =>
+                run(async () => {
+                  await majTicket(ticket.id, patchClassif(classifForm))
+                  await ajouterEtape(ticket.id, 'COMMENTAIRE', 'Classification mise à jour')
+                })
+              }
+              className={`${bouton} border border-[#1E4E8C] text-[#1E4E8C]`}
+            >
+              Enregistrer la classification
+            </button>
+          </div>
+        ) : null}
 
         <div className="space-y-2">
           <textarea
