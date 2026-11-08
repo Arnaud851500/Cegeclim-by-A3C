@@ -19,8 +19,9 @@ import { useEffect, useMemo, useState } from 'react'
 import { supabase } from '@/lib/supabaseClient'
 import { useAccess } from '@/components/AccessContext'
 import HotlineHeader, { HotlineErreur } from '@/components/hotline/HotlineHeader'
-import { FILIERES, NATURES, STATUTS, fmtHeures, libelleClassif, libelleFiliere, libelleMotif, messageErreur, type AxeClassif, type Filiere, type Statut } from '@/lib/hotline'
+import { FILIERES, STATUTS, fmtHeures, libelleFiliere, libelleMotif, messageErreur, type Filiere, type Statut } from '@/lib/hotline'
 import { useClassification } from '@/components/hotline/ClassificationTicket'
+import StatsClassification from '@/components/hotline/StatsClassification'
 
 type Stats = {
   total: number
@@ -85,12 +86,6 @@ export default function HotlineStatsPage() {
       })
   }, [debut, fin, filiere, expert])
 
-  // Répartition d'un axe de classification, triée, « non renseigné » en dernier.
-  const repartitionAxe = (axe: AxeClassif, valeurs: Record<string, number> | undefined) =>
-    Object.entries(valeurs || {})
-      .map(([k, n]) => ({ label: k === 'NON_RENSEIGNE' ? 'Non renseigné' : libelleClassif(classif, axe, k), n, nr: k === 'NON_RENSEIGNE' }))
-      .sort((a, b) => Number(a.nr) - Number(b.nr) || b.n - a.n)
-      .map((l) => ({ label: l.label, n: l.n, couleur: l.nr ? '#C9C4BA' : undefined }))
 
   const maxSemaine = useMemo(() => Math.max(1, ...(stats?.par_semaine || []).map((s) => s.PV + s.THERMIQUE)), [stats])
 
@@ -140,6 +135,17 @@ export default function HotlineStatsPage() {
                 {label}
               </button>
             ))}
+            <button
+              type="button"
+              title="Depuis la reprise de l’ancien outil (septembre 2022)"
+              onClick={() => {
+                setDebut('2022-09-01')
+                setFin(isoJour(new Date()))
+              }}
+              className="h-8 rounded-lg border border-[color:var(--cg-hdr-line)] px-2.5 text-[12px] font-semibold text-[color:var(--cg-hdr-ink-2)] hover:border-[#B4761A]"
+            >
+              Tout l’historique
+            </button>
             <input type="date" value={debut} onChange={(e) => setDebut(e.target.value)} className="h-8 rounded-lg border border-[color:var(--cg-hdr-line)] bg-[color:var(--cg-hdr-field)] px-2 text-[12px] text-[color:var(--cg-hdr-ink)]" />
             <span className="text-[color:var(--cg-hdr-muted)]">→</span>
             <input type="date" value={fin} onChange={(e) => setFin(e.target.value)} className="h-8 rounded-lg border border-[color:var(--cg-hdr-line)] bg-[color:var(--cg-hdr-field)] px-2 text-[12px] text-[color:var(--cg-hdr-ink)]" />
@@ -237,60 +243,7 @@ export default function HotlineStatsPage() {
               </div>
             </div>
 
-            {filiere !== 'PV' && stats.par_symptome ? (
-              <>
-                <div className="mb-3 mt-8 flex flex-wrap items-baseline justify-between gap-2">
-                  <h2 className="text-[16px] font-bold text-slate-900">Classification des tickets thermie</h2>
-                  <span className="text-[12px] text-slate-500">
-                    {stats.classifies || 0} ticket(s) classé(s) sur la période
-                    {stats.classifies_auto ? `, dont ${stats.classifies_auto} déduit(s) des commentaires de l’ancien outil` : ''}
-                  </span>
-                </div>
-                <div className="grid grid-cols-1 gap-4 lg:grid-cols-2 xl:grid-cols-4">
-                  <Repartition
-                    titre="Nature de l’appel"
-                    lignes={Object.entries(stats.par_nature || {})
-                      .map(([k, n]) => ({ label: NATURES.find((x) => x.value === k)?.label || 'Non renseigné', n }))
-                      .sort((a, b) => b.n - a.n)}
-                  />
-                  <Repartition titre="Symptôme principal" lignes={repartitionAxe('symptome', stats.par_symptome)} />
-                  <Repartition titre="Organe défaillant" lignes={repartitionAxe('organe', stats.par_organe)} />
-                  <Repartition titre="Issue" lignes={repartitionAxe('issue', stats.par_issue)} />
-                </div>
-                <div className="mt-4 grid grid-cols-1 gap-4 xl:grid-cols-3">
-                  <section className="rounded-2xl border border-[#E2DFD8] bg-white xl:col-span-2">
-                    <div className="border-b border-[#EFEDE8] px-4 py-3 text-[14px] font-bold text-slate-900">Codes défaut les plus fréquents</div>
-                    <div className="overflow-x-auto p-4">
-                      {stats.top_codes?.length ? (
-                        <table className="w-full text-[12px]">
-                          <thead className="text-[11px] uppercase tracking-[0.05em] text-slate-500">
-                            <tr>
-                              <th className="pb-2 text-left">Code</th>
-                              <th className="pb-2 text-right">Tickets</th>
-                              <th className="pb-2 text-right">Fini en pièce / garantie</th>
-                              <th className="pb-2 text-right">Réglé au téléphone</th>
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {stats.top_codes.map((c) => (
-                              <tr key={c.code} className="border-t border-[#EFEDE8]">
-                                <td className="py-1.5 font-semibold text-slate-900">{c.code}</td>
-                                <td className="py-1.5 text-right tabular-nums text-slate-900">{c.n}</td>
-                                <td className="py-1.5 text-right tabular-nums text-slate-700">{c.n ? `${Math.round((100 * c.piece) / c.n)} %` : '—'}</td>
-                                <td className="py-1.5 text-right tabular-nums text-slate-700">{c.n ? `${Math.round((100 * c.tel) / c.n)} %` : '—'}</td>
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
-                      ) : (
-                        <p className="text-[13px] text-slate-500">Aucun code défaut saisi sur la période.</p>
-                      )}
-                    </div>
-                  </section>
-                  <Repartition titre="Actions menées" lignes={repartitionAxe('action', stats.par_action)} />
-                </div>
-              </>
-            ) : null}
+            {filiere !== 'PV' ? <StatsClassification debut={debut} fin={fin} classif={classif} /> : null}
           </>
         )}
       </main>
