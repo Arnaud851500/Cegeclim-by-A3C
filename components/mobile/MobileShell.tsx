@@ -11,6 +11,8 @@ import MobileAlertes from './MobileAlertes'
 import MobileProspects from './MobileProspects'
 import MobileStockArticles from './MobileStockArticles'
 import MobileAdminPanel from './MobileAdminPanel'
+// ÉVOLUTION (2026-11-08) : bloc « Hotline - Ticketing » (recherche de tickets, classification).
+import MobileHotline from './MobileHotline'
 // ÉVOLUTION (2026-10-14) : fil d'actu dans le Compagnon (écran 'actualites' :
 // liste, ou lecture quand l'entrée porte cibleActu). Ouvert depuis la carte
 // « À la une » de l'accueil et la fenêtre des nouveautés (barre du haut) via
@@ -31,7 +33,7 @@ import { logMobileView } from '@/lib/mobileActivityLog'
 import { useZoomMobile } from '@/lib/zoomMobile'
 
 
-export type MobileScreen = 'home' | 'activite' | 'clients' | 'rdv' | 'alertes' | 'prospects' | 'stock' | 'Admin' | 'actualites'
+export type MobileScreen = 'home' | 'activite' | 'clients' | 'rdv' | 'alertes' | 'prospects' | 'stock' | 'Admin' | 'actualites' | 'hotline'
 
 /**
  * Une entrée de la pile de navigation : un écran, plus la "cible" qui l'a
@@ -359,6 +361,7 @@ export default function MobileShell() {
               />
             )}
             {entree.screen === 'Admin' && <MobileAdminPanel />}
+            {entree.screen === 'hotline' && <MobileHotline />}
             {entree.screen === 'actualites' &&
               (entree.cibleActu ? (
                 <MobileActualiteLecture id={entree.cibleActu} />
@@ -393,6 +396,8 @@ function screenTitle(screen: MobileScreen) {
       return 'Admin'
     case 'actualites':
       return 'Fil d’actu'
+    case 'hotline':
+      return 'Hotline - Ticketing'
     default:
       return ''
   }
