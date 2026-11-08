@@ -32,6 +32,10 @@
  * Données : calcul matérialisé du plan d'expédition FMS (refresh_plan_expedition_fms) lu par
  * get_plan_exp_agences / get_plan_exp_agence. Migration : supabase/sql/20261105_plan_expedition_fms_vue_agence.sql.
  * Accès : réservé à Arnaud (page + plan_exp_autorise() côté base).
+ * (2026-11-08) Tronc commun Stocks & logistique : ouvert au droit can_stocks
+ * (TCI/TCS, TCS, Logistique) via plan_exp_vue_agence_autorise() ; périmètre
+ * agence / collaborateur appliqué par les RPC ; « Recalculer » et le lien vers
+ * le Plan d’expédition FMS restent réservés à Arnaud.
  */
 
 import React, { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
@@ -697,8 +701,9 @@ function ChoixAgence({ agences, onChoix }: { agences: AgenceResume[]; onChoix: (
 // ─────────────────────────────────────────────────────────────────────────
 
 function VueAgence() {
-  const { loading: accessLoading, email } = useAccess()
-  const autorise = COMPTES_AUTORISES.includes((email || '').trim().toLowerCase())
+  const { loading: accessLoading, email, rights } = useAccess()
+  const estArnaud = COMPTES_AUTORISES.includes((email || '').trim().toLowerCase())
+  const autorise = estArnaud || Boolean(rights.can_stocks)
   const router = useRouter()
   const params = useSearchParams()
   const agence = params.get('agence') || ''
@@ -755,6 +760,7 @@ function VueAgence() {
   }, [accessLoading, autorise, agence, chargerAgence, chargerAgences])
 
   async function recalculer() {
+    if (!estArnaud) return
     setCalcul(true); setErreur(null)
     const { error } = await supabase.rpc('refresh_plan_expedition_fms', { p_debut: null, p_horizon_jours: horizon, p_simuler_rdv: meta?.simuler_rdv ?? true })
     setCalcul(false)
@@ -941,7 +947,7 @@ function VueAgence() {
       <main className="flex min-h-screen items-center justify-center bg-[#F4F3F0] p-6 text-center">
         <div className="rounded-xl border border-[#E5E1D8] bg-white px-6 py-5">
           <div className="text-[17px] font-bold">Accès réservé</div>
-          <p className="mt-1 text-[13px] text-[#5E5A44]">La vue agence du plan d’expédition est en préparation.</p>
+          <p className="mt-1 text-[13px] text-[#5E5A44]">La vue agence du plan d’expédition est ouverte aux utilisateurs ayant l’accès Stocks.</p>
         </div>
       </main>
     )
@@ -960,7 +966,7 @@ function VueAgence() {
         <section className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-[#E5E1D8] bg-white px-4 py-2.5">
           <div className="min-w-0">
             <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-[#B4761A]">
-              <Link href="/stock/plan-expedition-fms" className="hover:underline">Plan d’expédition FMS</Link> · vue agence · accès réservé
+              {estArnaud ? <Link href="/stock/plan-expedition-fms" className="hover:underline">Plan d’expédition FMS</Link> : 'Plan d’expédition FMS'} · vue agence{estArnaud ? ' · accès réservé' : ''}
             </p>
             <h1 className="flex items-center gap-2 text-[20px] font-bold leading-tight tracking-tight">
               {agence ? <><button type="button" onClick={() => choisir(null)} className="rounded-md border border-[#E5E1D8] px-2 text-[14px]" title="Toutes les agences">←</button> {agence}</> : 'Choisir une agence'}
@@ -971,12 +977,16 @@ function VueAgence() {
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
-            <label className="flex items-center gap-1 text-[11.5px] font-semibold text-[#5E5A44]">CDC à livrer sous
-              <select value={horizon} onChange={(ev) => setHorizon(Number(ev.target.value))} className="h-8 rounded-md border border-[#E5E1D8] bg-white px-2 text-[12px] font-semibold">
-                {[14, 21, 30, 45, 60, 90].map((h) => <option key={h} value={h}>{h} j</option>)}
-              </select>
-            </label>
-            <button type="button" onClick={() => void recalculer()} disabled={calcul} className="h-9 rounded-lg border border-[#E5E1D8] bg-white px-3 text-[12.5px] font-bold disabled:opacity-50">{calcul ? 'Calcul… (~15 s)' : '↻ Recalculer'}</button>
+            {estArnaud && (
+              <>
+                <label className="flex items-center gap-1 text-[11.5px] font-semibold text-[#5E5A44]">CDC à livrer sous
+                  <select value={horizon} onChange={(ev) => setHorizon(Number(ev.target.value))} className="h-8 rounded-md border border-[#E5E1D8] bg-white px-2 text-[12px] font-semibold">
+                    {[14, 21, 30, 45, 60, 90].map((h) => <option key={h} value={h}>{h} j</option>)}
+                  </select>
+                </label>
+                <button type="button" onClick={() => void recalculer()} disabled={calcul} className="h-9 rounded-lg border border-[#E5E1D8] bg-white px-3 text-[12.5px] font-bold disabled:opacity-50">{calcul ? 'Calcul… (~15 s)' : '↻ Recalculer'}</button>
+              </>
+            )}
             {agence && (
               <>
                 <label className="flex items-center gap-1 text-[11.5px] font-semibold text-[#5E5A44]">Zoom
