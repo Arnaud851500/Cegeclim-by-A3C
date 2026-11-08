@@ -36,6 +36,7 @@ import { useAccess } from '@/components/AccessContext'
 import HotlineHeader, { HotlineErreur, Pastille } from '@/components/hotline/HotlineHeader'
 import PiecesJointes from '@/components/hotline/PiecesJointes'
 import VueEclatee from '@/components/hotline/VueEclatee'
+import ClassificationTicket, { CLASSIF_FORM_VIDE, patchClassif, useClassification, valeursDepuisTicket, type ValeursClassif } from '@/components/hotline/ClassificationTicket'
 import {
   ETAPE_LIBELLES,
   FILIERES,
@@ -74,6 +75,7 @@ import {
   messageErreur,
   rechercherTiers,
   resoudre,
+  issueRequise,
   telCle,
   type Appelant,
   type Arbre,
@@ -159,6 +161,9 @@ function HotlineConsole() {
   const [voirTout, setVoirTout] = useState(false)
   const [recherche, setRecherche] = useState(false)
   const [form, setForm] = useState<Formulaire>(FORM_VIDE)
+  // Classification du ticket (08/11/2026) : symptôme, organe, actions, issue.
+  const [classifForm, setClassifForm] = useState<ValeursClassif>(CLASSIF_FORM_VIDE)
+  const { classif } = useClassification()
   const [ticket, setTicket] = useState<Ticket | null>(null)
   const [etapes, setEtapes] = useState<Etape[]>([])
   const [contexte, setContexte] = useState<Contexte>(CONTEXTE_VIDE)
@@ -279,6 +284,7 @@ function HotlineConsole() {
           date_mes: t.date_mes || '',
           description: t.description || '',
         })
+        setClassifForm(valeursDepuisTicket(t))
         if (t.arbre_id) {
           aRejouer.current = { arbreId: t.arbre_id, reponses: liste.filter((e) => e.type === 'QUESTION' && e.noeud_id) }
           setArbreId(t.arbre_id)
@@ -511,6 +517,7 @@ function HotlineConsole() {
           code_defaut: form.code_defaut.trim() || null,
           date_mes: form.date_mes || null,
           description: form.description || null,
+          ...patchClassif(classifForm),
           arbre_id: arbreId || null,
           assigne_a: email || null,
         })
@@ -554,6 +561,7 @@ function HotlineConsole() {
         code_defaut: form.code_defaut.trim() || null,
         date_mes: form.date_mes || null,
         description: form.description || null,
+        ...patchClassif(classifForm),
         arbre_id: arbreId || null,
       })
       await ajouterEtape(ticket.id, 'COMMENTAIRE', 'Informations du ticket mises à jour')
@@ -621,8 +629,16 @@ function HotlineConsole() {
     if (!ticket) return
     setBusy(true)
     try {
-      if (nom === 'escalader') await escalader(ticket, commentaire || fin?.preconisation || '')
-      if (nom === 'resoudre') await resoudre(ticket.id, fin?.preconisation || commentaire || '')
+      if (nom === 'escalader') {
+        await majTicket(ticket.id, patchClassif(classifForm))
+        await escalader({ ...ticket, actions: classifForm.actions }, commentaire || fin?.preconisation || '')
+        setClassifForm((c) => ({ ...c, actions: Array.from(new Set([...c.actions, 'ESCALADE'])) }))
+      }
+      if (nom === 'resoudre') {
+        if (issueRequise(ticket) && !classifForm.issue) throw new Error('Choisir l’issue du ticket (bloc Classification) avant de le marquer résolu.')
+        await majTicket(ticket.id, patchClassif(classifForm))
+        await resoudre(ticket.id, fin?.preconisation || commentaire || '')
+      }
       if (nom === 'commentaire' && commentaire.trim()) await ajouterEtape(ticket.id, 'COMMENTAIRE', commentaire.trim())
       setCommentaire('')
       await rafraichirEtapes(ticket.id)
@@ -690,6 +706,7 @@ function HotlineConsole() {
     setTelephone('')
     setAppelants(null)
     setForm(FORM_VIDE)
+    setClassifForm(CLASSIF_FORM_VIDE)
     setTicket(null)
     setEtapes([])
     setArbreId('')
@@ -1077,6 +1094,37 @@ function HotlineConsole() {
 
               {ticket ? (
                 <div className="mt-6 space-y-2 border-t border-[#EFEDE8] pt-4">
+                  {ticket.filiere === 'THERMIQUE' ? (
+                    <div className="space-y-1.5">
+                      <ClassificationTicket
+                        valeurs={classifForm}
+                        onChange={setClassifForm}
+                        classif={classif}
+                        issueObligatoire={issueRequise(ticket)}
+                        source={ticket.classif_source}
+                        disabled={busy}
+                      />
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          setBusy(true)
+                          try {
+                            await majTicket(ticket.id, patchClassif(classifForm))
+                            await ajouterEtape(ticket.id, 'COMMENTAIRE', 'Classification mise à jour')
+                            await rafraichirEtapes(ticket.id)
+                          } catch (e) {
+                            setErreur(messageErreur(e))
+                          } finally {
+                            setBusy(false)
+                          }
+                        }}
+                        disabled={busy}
+                        className="text-[12px] font-semibold text-[#1E4E8C] underline disabled:opacity-40"
+                      >
+                        Enregistrer la classification
+                      </button>
+                    </div>
+                  ) : null}
                   <textarea
                     value={commentaire}
                     onChange={(e) => setCommentaire(e.target.value)}
@@ -1091,7 +1139,7 @@ function HotlineConsole() {
                     <button type="button" onClick={() => action('escalader')} disabled={busy || ticket.niveau >= 3} className="rounded-lg bg-[#C1683C] px-3 py-2 text-[13px] font-semibold text-white disabled:opacity-40">
                       Escalader au niveau {Math.min(3, ticket.niveau + 1)}
                     </button>
-                    <button type="button" onClick={() => action('resoudre')} disabled={busy || ticket.statut === 'RESOLU' || ticket.statut === 'CLOS'} className="rounded-lg bg-[#2F6B3A] px-3 py-2 text-[13px] font-semibold text-white disabled:opacity-40">
+                    <button type="button" onClick={() => action('resoudre')} disabled={busy || ticket.statut === 'RESOLU' || ticket.statut === 'CLOS' || (issueRequise(ticket) && !classifForm.issue)} title={issueRequise(ticket) && !classifForm.issue ? 'Choisir d’abord l’issue dans le bloc Classification' : undefined} className="rounded-lg bg-[#2F6B3A] px-3 py-2 text-[13px] font-semibold text-white disabled:opacity-40">
                       Marquer résolu
                     </button>
                     <Link href={`/hotline/tickets?id=${ticket.id}`} className="ml-auto self-center text-[12px] font-semibold text-slate-500 underline">

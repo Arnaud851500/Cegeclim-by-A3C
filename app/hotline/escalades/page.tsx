@@ -10,12 +10,17 @@
  *   depuis l'escalade, client, chantier, produit, préconisation, dernière
  *   étape ; reprise dans la console (?ticket=) ou fiche du ticket.
  * - Demandes de pièces (hotline_demandes_pieces) : marquer expédiée / annulée.
+ * - Classification (08/11/2026) : filtres symptôme / organe / action / issue
+ *   avec compteurs, colonne Classification, répartition cliquable des tickets
+ *   affichés.
  */
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import Link from 'next/link'
 import { supabase } from '@/lib/supabaseClient'
 import HotlineHeader, { HotlineErreur, Pastille } from '@/components/hotline/HotlineHeader'
+import { useClassification } from '@/components/hotline/ClassificationTicket'
+import FiltresClassification, { FILTRE_CLASSIF_VIDE, compterClassif, passeFiltres, type FiltreClassif } from '@/components/hotline/FiltresClassification'
 import {
   ETAPE_LIBELLES,
   FILIERES,
@@ -23,11 +28,13 @@ import {
   chargerDemandesPieces,
   fmtDateHeure,
   fmtHeures,
+  libelleClassif,
   libelleFiliere,
   libelleGamme,
   libelleMotif,
   majDemandePiece,
   messageErreur,
+  type AxeClassif,
   type DemandePiece,
   type Etape,
   type Filiere,
@@ -48,6 +55,8 @@ export default function HotlineEscalades() {
   const [filiere, setFiliere] = useState<Filiere | 'TOUTES'>('TOUTES')
   const [avecResolus, setAvecResolus] = useState(false)
   const [maintenant, setMaintenant] = useState(() => Date.now())
+  const [classifF, setClassifF] = useState<FiltreClassif>(FILTRE_CLASSIF_VIDE)
+  const { classif } = useClassification()
 
   const charger = useCallback(async () => {
     setChargement(true)
@@ -87,10 +96,15 @@ export default function HotlineEscalades() {
     return () => window.clearInterval(t)
   }, [charger])
 
-  const visibles = useMemo(
+  // Tickets du niveau / de la filière choisis, avant les filtres de classification :
+  // base des compteurs affichés dans les listes déroulantes et la répartition.
+  const perimetre = useMemo(
     () => tickets.filter((t) => (!niveau || t.niveau === niveau) && (filiere === 'TOUTES' || t.filiere === filiere)),
     [tickets, niveau, filiere],
   )
+  const visibles = useMemo(() => perimetre.filter((t) => passeFiltres(t, classifF)), [perimetre, classifF])
+  const compteurs = useMemo(() => compterClassif(perimetre), [perimetre])
+  const repartition = useMemo(() => compterClassif(visibles), [visibles])
 
   const kpi = useMemo(() => {
     const actifs = tickets.filter((t) => t.statut !== 'RESOLU' && t.statut !== 'CLOS')
@@ -158,8 +172,56 @@ export default function HotlineEscalades() {
           <span className="ml-auto text-[12px] text-slate-500">{visibles.length} ticket{visibles.length > 1 ? 's' : ''}</span>
         </div>
 
+        <div className="flex flex-wrap items-center gap-2 text-[13px]">
+          <span className="text-[11px] font-bold uppercase tracking-[0.06em] text-slate-500">Classification</span>
+          <FiltresClassification valeur={classifF} onChange={setClassifF} classif={classif} compteurs={compteurs} />
+        </div>
+
+        {visibles.length ? (
+          <section className={`${carte} grid grid-cols-1 gap-4 p-4 md:grid-cols-2 xl:grid-cols-4`}>
+            {(
+              [
+                ['symptome', 'Symptômes'],
+                ['organe', 'Organes défaillants'],
+                ['action', 'Actions menées'],
+                ['issue', 'Issues'],
+              ] as Array<[AxeClassif, string]>
+            ).map(([axe, titre]) => {
+              const lignes = Object.entries(repartition[axe]).sort((a, b) => Number(a[0] === '-') - Number(b[0] === '-') || b[1] - a[1])
+              const max = Math.max(1, ...lignes.map(([, n]) => n))
+              return (
+                <div key={axe}>
+                  <div className="mb-1.5 text-[11px] font-bold uppercase tracking-[0.05em] text-slate-500">{titre}</div>
+                  <div className="space-y-1">
+                    {lignes.slice(0, 6).map(([code, n]) => {
+                      const actif = classifF[axe] === code
+                      return (
+                        <button
+                          key={code}
+                          type="button"
+                          onClick={() => setClassifF({ ...classifF, [axe]: actif ? '' : code })}
+                          title={actif ? 'Retirer ce filtre' : 'Filtrer sur cette valeur'}
+                          className={`block w-full rounded-md px-1.5 py-0.5 text-left text-[12px] hover:bg-[#F4F1EA] ${actif ? 'bg-[#EEF2F8]' : ''}`}
+                        >
+                          <div className="flex items-baseline justify-between gap-2">
+                            <span className={`truncate ${code === '-' ? 'text-slate-400' : 'text-slate-700'}`}>{code === '-' ? 'Non renseigné' : libelleClassif(classif, axe, code)}</span>
+                            <span className="tabular-nums font-semibold text-slate-900">{n}</span>
+                          </div>
+                          <div className="mt-0.5 h-1.5 rounded-full bg-[#F1EFEA]">
+                            <div className="h-1.5 rounded-full" style={{ width: `${(100 * n) / max}%`, background: code === '-' ? '#C9C4BA' : '#1E4E8C' }} />
+                          </div>
+                        </button>
+                      )
+                    })}
+                  </div>
+                </div>
+              )
+            })}
+          </section>
+        ) : null}
+
         <section className={`${carte} overflow-x-auto`}>
-          <table className="w-full min-w-[1200px] text-[12px]">
+          <table className="w-full min-w-[1400px] text-[12px]">
             <thead className="bg-[#FAF9F7] text-left text-[11px] uppercase tracking-[0.05em] text-slate-500">
               <tr>
                 <th className="px-3 py-2">Ticket</th>
@@ -168,6 +230,7 @@ export default function HotlineEscalades() {
                 <th className="px-3 py-2">Filière</th>
                 <th className="px-3 py-2">Client / chantier</th>
                 <th className="px-3 py-2">Produit</th>
+                <th className="px-3 py-2">Classification</th>
                 <th className="px-3 py-2">Motif d’escalade / préconisation</th>
                 <th className="px-3 py-2">Dernière étape</th>
                 <th className="px-3 py-2" />
@@ -202,6 +265,17 @@ export default function HotlineEscalades() {
                       <div className="text-slate-500">{[t.contact_nom, t.chantier && `chantier ${t.chantier}`].filter(Boolean).join(' · ')}</div>
                     </td>
                     <td className="px-3 py-2 font-mono text-[11px] text-slate-700">{[t.reference_article, t.numero_serie].filter(Boolean).join(' · ') || '—'}</td>
+                    <td className="max-w-[240px] px-3 py-2">
+                      {t.symptome || t.organe || t.issue || t.actions?.length ? (
+                        <>
+                          <div className="text-slate-800">{[libelleClassif(classif, 'symptome', t.symptome), libelleClassif(classif, 'organe', t.organe)].filter(Boolean).join(' · ') || '—'}</div>
+                          {t.actions?.length ? <div className="text-[11px] text-slate-500">{t.actions.map((a) => libelleClassif(classif, 'action', a)).join(', ')}</div> : null}
+                          {t.issue ? <div className="font-semibold text-[#1E4E8C]">→ {libelleClassif(classif, 'issue', t.issue)}</div> : null}
+                        </>
+                      ) : (
+                        <span className="text-slate-400">À classer</span>
+                      )}
+                    </td>
                     <td className="max-w-[320px] px-3 py-2 text-slate-700">{t.preconisation || t.description || '—'}</td>
                     <td className="max-w-[280px] px-3 py-2 text-slate-600">
                       {der ? (
@@ -228,8 +302,8 @@ export default function HotlineEscalades() {
               })}
               {!visibles.length ? (
                 <tr>
-                  <td colSpan={9} className="px-3 py-8 text-center text-[13px] text-slate-500">
-                    {chargement ? 'Chargement…' : 'Aucun ticket escaladé en attente.'}
+                  <td colSpan={10} className="px-3 py-8 text-center text-[13px] text-slate-500">
+                    {chargement ? 'Chargement…' : perimetre.length ? 'Aucun ticket pour ces filtres de classification.' : 'Aucun ticket escaladé en attente.'}
                   </td>
                 </tr>
               ) : null}

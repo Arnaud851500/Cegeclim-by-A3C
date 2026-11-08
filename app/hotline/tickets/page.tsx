@@ -18,9 +18,13 @@ import { supabase } from '@/lib/supabaseClient'
 import { useAccess } from '@/components/AccessContext'
 import HotlineHeader, { HotlineErreur, Pastille } from '@/components/hotline/HotlineHeader'
 import PiecesJointes from '@/components/hotline/PiecesJointes'
+import FiltresClassification, { FILTRE_CLASSIF_VIDE, type FiltreClassif } from '@/components/hotline/FiltresClassification'
+import ClassificationTicket, { patchClassif, useClassification, valeursDepuisTicket, type ValeursClassif } from '@/components/hotline/ClassificationTicket'
 import {
   ETAPE_LIBELLES,
   FILIERES,
+  GAMMES,
+  NATURES,
   STATUTS,
   ajouterEtape,
   chargerEtapes,
@@ -29,7 +33,10 @@ import {
   fmtDateHeure,
   fmtDuree,
   fmtTel,
+  issueRequise,
+  libelleClassif,
   libelleFiliere,
+  libelleGamme,
   libelleMotif,
   libelleNature,
   majTicket,
@@ -66,6 +73,11 @@ function HotlineTickets() {
   const [niveau, setNiveau] = useState<number | 0>(0)
   const [mesTickets, setMesTickets] = useState(false)
   const [recherche, setRecherche] = useState('')
+  // Filtres de classification (08/11/2026) : '' = tous, '-' = non renseigné.
+  const [classifF, setClassifF] = useState<FiltreClassif>(FILTRE_CLASSIF_VIDE)
+  const [natureF, setNatureF] = useState('')
+  const [gammeF, setGammeF] = useState('')
+  const { classif } = useClassification()
   // Filtre sur la date de création (06/11/2026) : bornes incluses, dates locales AAAA-MM-JJ.
   const [du, setDu] = useState('')
   const [au, setAu] = useState('')
@@ -86,6 +98,12 @@ function HotlineTickets() {
         if (mesTickets && email) query = query.eq('assigne_a', email)
         if (du) query = query.gte('opened_at', new Date(`${du}T00:00:00`).toISOString())
         if (au) query = query.lt('opened_at', new Date(new Date(`${au}T00:00:00`).getTime() + 86_400_000).toISOString())
+        for (const [col, v] of [['symptome', classifF.symptome], ['organe', classifF.organe], ['issue', classifF.issue], ['nature', natureF], ['gamme', gammeF]] as const) {
+          if (v === '-') query = query.is(col, null)
+          else if (v) query = query.eq(col, v)
+        }
+        if (classifF.action === '-') query = query.is('actions', null)
+        else if (classifF.action) query = query.contains('actions', [classifF.action])
         const { data, error } = await query
         if (error) throw error
         const lot = (data || []) as Ticket[]
@@ -98,7 +116,7 @@ function HotlineTickets() {
     } finally {
       setLoading(false)
     }
-  }, [filiere, statut, niveau, mesTickets, email, du, au])
+  }, [filiere, statut, niveau, mesTickets, email, du, au, classifF, natureF, gammeF])
 
   useEffect(() => {
     void charger()
@@ -231,6 +249,28 @@ function HotlineTickets() {
             className="ml-auto h-8 w-full max-w-[320px] rounded-lg border border-[#D8D3C8] bg-white px-2.5 text-[13px] outline-none focus:border-[#B4761A]"
           />
         </div>
+        <div className="mx-auto flex w-full max-w-[1760px] flex-wrap items-center gap-2 px-4 pb-2 md:px-8">
+          <span className="text-[11px] font-bold uppercase tracking-[0.06em] text-slate-500">Classification</span>
+          <select value={natureF} onChange={(e) => setNatureF(e.target.value)} className={`h-8 rounded-lg border bg-white px-2 text-[13px] ${natureF ? 'border-[#1E4E8C] font-semibold text-[#1E4E8C]' : 'border-[#D8D3C8] text-slate-700'}`}>
+            <option value="">Toutes natures</option>
+            <option value="-">Nature non renseignée</option>
+            {NATURES.map((n) => (
+              <option key={n.value} value={n.value}>
+                {n.label}
+              </option>
+            ))}
+          </select>
+          <select value={gammeF} onChange={(e) => setGammeF(e.target.value)} className={`h-8 rounded-lg border bg-white px-2 text-[13px] ${gammeF ? 'border-[#1E4E8C] font-semibold text-[#1E4E8C]' : 'border-[#D8D3C8] text-slate-700'}`}>
+            <option value="">Toutes gammes</option>
+            <option value="-">Gamme non renseignée</option>
+            {GAMMES.map((g) => (
+              <option key={g.value} value={g.value}>
+                {g.label}
+              </option>
+            ))}
+          </select>
+          <FiltresClassification valeur={classifF} onChange={setClassifF} classif={classif} />
+        </div>
       </div>
 
       <main className="mx-auto w-full max-w-[1760px] px-4 py-5 md:px-8">
@@ -254,12 +294,13 @@ function HotlineTickets() {
         <div className={`grid grid-cols-1 gap-4 ${selectedId ? 'xl:grid-cols-[minmax(0,1fr)_520px]' : ''}`}>
           <section className="min-w-0 rounded-2xl border border-[#E2DFD8] bg-white">
             <div className="overflow-x-auto">
-              <table className="w-full min-w-[980px] text-[13px]">
+              <table className="w-full min-w-[1180px] text-[13px]">
                 <thead className="bg-[#FAF9F7] text-[11px] uppercase tracking-[0.05em] text-slate-500">
                   <tr>
                     <th className="px-3 py-2 text-left">Ticket</th>
                     <th className="px-3 py-2 text-left">Ouvert</th>
                     <th className="px-3 py-2 text-left">Filière · motif</th>
+                    <th className="px-3 py-2 text-left">Classification</th>
                     <th className="px-3 py-2 text-left">Client</th>
                     <th className="px-3 py-2 text-left">Chantier / n° série</th>
                     <th className="px-3 py-2 text-center">Niv.</th>
@@ -271,13 +312,13 @@ function HotlineTickets() {
                 <tbody>
                   {loading ? (
                     <tr>
-                      <td colSpan={9} className="px-3 py-10 text-center text-slate-500">
+                      <td colSpan={10} className="px-3 py-10 text-center text-slate-500">
                         Chargement des tickets…
                       </td>
                     </tr>
                   ) : !filtres.length ? (
                     <tr>
-                      <td colSpan={9} className="px-3 py-10 text-center text-slate-500">
+                      <td colSpan={10} className="px-3 py-10 text-center text-slate-500">
                         Aucun ticket pour ces filtres.
                       </td>
                     </tr>
@@ -292,6 +333,17 @@ function HotlineTickets() {
                         <td className="px-3 py-2 text-slate-600">{fmtDateHeure(t.opened_at)}</td>
                         <td className="px-3 py-2 text-slate-700">
                           {libelleFiliere(t.filiere)} <span className="text-slate-500">· {libelleMotif(t.motif)}</span>
+                          {t.nature || t.gamme ? <div className="text-[11px] text-slate-500">{[libelleNature(t.nature), libelleGamme(t.gamme)].filter(Boolean).join(' · ')}</div> : null}
+                        </td>
+                        <td className="max-w-[260px] px-3 py-2 text-[12px]">
+                          {t.symptome || t.organe || t.issue ? (
+                            <>
+                              <div className="text-slate-800">{[libelleClassif(classif, 'symptome', t.symptome), libelleClassif(classif, 'organe', t.organe)].filter(Boolean).join(' · ') || '—'}</div>
+                              {t.issue ? <div className="font-semibold text-[#1E4E8C]">→ {libelleClassif(classif, 'issue', t.issue)}</div> : null}
+                            </>
+                          ) : (
+                            <span className="text-slate-400">—</span>
+                          )}
                         </td>
                         <td className="px-3 py-2">
                           <div className="font-medium text-slate-900">{t.intitule_tiers || t.numero_tiers || fmtTel(t.telephone_appelant) || '—'}</div>
@@ -340,12 +392,15 @@ function FicheTicket({ id, onClose, onChange, onSupprime }: { id: string; onClos
   const [commentaire, setCommentaire] = useState('')
   const [busy, setBusy] = useState(false)
   const [erreur, setErreur] = useState<string | null>(null)
+  const { classif } = useClassification()
+  const [classifForm, setClassifForm] = useState<ValeursClassif>(valeursDepuisTicket(null))
 
   const charger = useCallback(async () => {
     try {
       const { data, error } = await supabase.from('hotline_tickets').select('*').eq('id', id).maybeSingle()
       if (error) throw error
       setTicket((data as Ticket) || null)
+      setClassifForm(valeursDepuisTicket(data as Ticket | null))
       setEtapes(await chargerEtapes(id))
     } catch (e) {
       setErreur(messageErreur(e))
@@ -485,10 +540,31 @@ function FicheTicket({ id, onClose, onChange, onSupprime }: { id: string; onClos
           ) : null}
           {actif ? (
             <>
-              <button type="button" disabled={busy || ticket.niveau >= 3} onClick={() => run(() => escalader(ticket, commentaire))} className={`${bouton} bg-[#C1683C] text-white`}>
+              <button
+                type="button"
+                disabled={busy || ticket.niveau >= 3}
+                onClick={() =>
+                  run(async () => {
+                    await majTicket(ticket.id, patchClassif(classifForm))
+                    await escalader({ ...ticket, actions: classifForm.actions }, commentaire)
+                  })
+                }
+                className={`${bouton} bg-[#C1683C] text-white`}
+              >
                 Escalader N{Math.min(3, ticket.niveau + 1)}
               </button>
-              <button type="button" disabled={busy} onClick={() => run(() => resoudre(ticket.id, commentaire || ticket.preconisation || ''))} className={`${bouton} bg-[#2F6B3A] text-white`}>
+              <button
+                type="button"
+                disabled={busy || (issueRequise(ticket) && !classifForm.issue)}
+                title={issueRequise(ticket) && !classifForm.issue ? 'Choisir d’abord l’issue dans le bloc Classification' : undefined}
+                onClick={() =>
+                  run(async () => {
+                    await majTicket(ticket.id, patchClassif(classifForm))
+                    await resoudre(ticket.id, commentaire || ticket.preconisation || '')
+                  })
+                }
+                className={`${bouton} bg-[#2F6B3A] text-white`}
+              >
                 Résolu
               </button>
             </>
@@ -504,6 +580,32 @@ function FicheTicket({ id, onClose, onChange, onSupprime }: { id: string; onClos
             </button>
           ) : null}
         </div>
+
+        {ticket.filiere === 'THERMIQUE' ? (
+          <div className="space-y-1.5">
+            <ClassificationTicket
+              valeurs={classifForm}
+              onChange={setClassifForm}
+              classif={classif}
+              issueObligatoire={issueRequise(ticket) && actif}
+              source={ticket.classif_source}
+              disabled={busy}
+            />
+            <button
+              type="button"
+              disabled={busy || JSON.stringify(classifForm) === JSON.stringify(valeursDepuisTicket(ticket))}
+              onClick={() =>
+                run(async () => {
+                  await majTicket(ticket.id, patchClassif(classifForm))
+                  await ajouterEtape(ticket.id, 'COMMENTAIRE', 'Classification mise à jour')
+                })
+              }
+              className={`${bouton} border border-[#1E4E8C] text-[#1E4E8C]`}
+            >
+              Enregistrer la classification
+            </button>
+          </div>
+        ) : null}
 
         <div className="space-y-2">
           <textarea

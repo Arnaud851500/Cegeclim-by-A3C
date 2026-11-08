@@ -162,6 +162,14 @@ export type Ticket = {
   nature?: Nature | null
   code_defaut?: string | null
   date_mes?: string | null
+  /** Classification (08/11/2026) : codes du référentiel hotline_classif_valeurs. */
+  symptome?: string | null
+  organe?: string | null
+  actions?: string[] | null
+  issue?: string | null
+  /** SAISIE = choisie par le hotliner ; AUTO_2026_11 = déduite de l'historique. */
+  classif_source?: 'SAISIE' | 'AUTO_2026_11' | null
+  classif_at?: string | null
   description: string | null
   preconisation: string | null
   arbre_id: string | null
@@ -258,6 +266,55 @@ export type TiersTrouve = {
 }
 
 export type Ligne = { numero: string; filiere: Filiere; libelle: string; actif: boolean }
+
+// ----------------------------------------------------------------------------
+// Classification des tickets (08/11/2026)
+// ----------------------------------------------------------------------------
+// Référentiel hotline_classif_valeurs (migration 20261108_hotline_classification.sql),
+// issu de l'analyse des 22 370 tickets thermie de l'ancien outil :
+//   symptome (1 valeur), organe défaillant (1), actions (plusieurs), issue (1,
+//   obligatoire pour passer un ticket thermique en Résolu / Clos — contrôlé
+//   aussi par le trigger hotline_ticket_classif_controle).
+export type AxeClassif = 'symptome' | 'organe' | 'action' | 'issue'
+export type ValeurClassif = { axe: AxeClassif; code: string; libelle: string; aide: string | null; ordre: number; actif: boolean }
+export type Classification = Record<AxeClassif, ValeurClassif[]>
+export const CLASSIF_VIDE: Classification = { symptome: [], organe: [], action: [], issue: [] }
+export const AXES_CLASSIF: Array<{ axe: AxeClassif; label: string }> = [
+  { axe: 'symptome', label: 'Symptôme' },
+  { axe: 'organe', label: 'Organe défaillant' },
+  { axe: 'action', label: 'Actions menées' },
+  { axe: 'issue', label: 'Issue' },
+]
+
+let classifCache: Promise<Classification> | null = null
+
+export function chargerClassification(): Promise<Classification> {
+  if (!classifCache) {
+    classifCache = (async () => {
+      const { data, error } = await supabase.from('hotline_classif_valeurs').select('*').order('ordre')
+      if (error) throw error
+      const res: Classification = { symptome: [], organe: [], action: [], issue: [] }
+      ;((data || []) as ValeurClassif[]).forEach((v) => {
+        if (res[v.axe]) res[v.axe].push(v)
+      })
+      return res
+    })().catch((e) => {
+      classifCache = null
+      throw e
+    })
+  }
+  return classifCache
+}
+
+export function libelleClassif(classif: Classification, axe: AxeClassif, code: string | null | undefined) {
+  if (!code) return ''
+  return classif[axe].find((v) => v.code === code)?.libelle || code
+}
+
+/** Issue obligatoire avant Résolu / Clos : tickets thermiques hors import. */
+export function issueRequise(t: Pick<Ticket, 'filiere' | 'source'>) {
+  return t.filiere === 'THERMIQUE' && t.source !== 'IMPORT'
+}
 
 // ----------------------------------------------------------------------------
 // Formatage
@@ -523,9 +580,11 @@ export async function majTicket(ticketId: string, patch: Partial<Ticket>) {
 /** Actions de cycle de vie : met à jour le ticket ET journalise l'étape (les
  * horodatages first_action / escalade / résolution / clôture sont posés par le
  * trigger hotline_etape_horodater). */
-export async function escalader(ticket: Pick<Ticket, 'id' | 'niveau'>, motif: string) {
+export async function escalader(ticket: Pick<Ticket, 'id' | 'niveau'> & { actions?: string[] | null }, motif: string) {
   const niveau = Math.min(3, (ticket.niveau || 1) + 1)
-  await majTicket(ticket.id, { niveau, statut: 'ESCALADE' })
+  // L'escalade est aussi une action de la classification (08/11/2026).
+  const actions = Array.from(new Set([...(ticket.actions || []), 'ESCALADE']))
+  await majTicket(ticket.id, { niveau, statut: 'ESCALADE', actions })
   await ajouterEtape(ticket.id, 'ESCALADE', `Escalade niveau ${niveau}${motif ? ` : ${motif}` : ''}`, { details: { niveau } })
   return niveau
 }

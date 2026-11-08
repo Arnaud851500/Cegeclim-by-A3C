@@ -33,6 +33,8 @@ const BUTTONS: ButtonConfig[] = [
   // "sauge" reprise de la charte CEGECLIM (#A6A181), pas encore utilisée
   // par les autres cartes de cet écran.
   { key: 'stock', label: 'Stock articles', sub: 'Recherche, dépôts, projection', accessKey: 'can_dashboard', icon: '📦', gradient: 'linear-gradient(160deg, #A6A181, #6E6A54)', subColor: '#EDE9D8' },
+  // ÉVOLUTION (2026-11-08) : recherche de tickets hotline (droit can_hotline ou can_hotline_expert, voir visibleButtons).
+  { key: 'hotline', label: 'Hotline - Ticketing', sub: 'Tickets, n° de série, codes défaut', icon: '🛠️', gradient: 'linear-gradient(160deg, #B4761A, #7A4F10)', subColor: '#F5DDB0' },
   { key: 'prospects', label: 'Carte Prospects & Clients', sub: '', icon: '🗺️', gradient: 'linear-gradient(160deg, #0F6E56, #085041)', subColor: '#9FE1CB' },
   // ÉVOLUTION (2026-09-02) : plus de accessKey ici -- ce bouton n'a jamais
   // été soumis à AccessRights, il était donc visible par TOUT LE MONDE
@@ -107,6 +109,7 @@ export default function MobileHome({
 
   const visibleButtons = BUTTONS.filter((b) => {
     if (b.key === 'Admin') return isAdmin
+    if (b.key === 'hotline') return Boolean(rights.can_hotline || rights.can_hotline_expert || rights.can_autorisation)
     return !b.accessKey || rights[b.accessKey]
   })
 
