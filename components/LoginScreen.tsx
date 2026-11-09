@@ -17,6 +17,56 @@ const ANNONCE_MASQUEE_PREFIX = 'cegeclim_annonce_masquee_'
 /** Dernier identifiant utilisé sur cet appareil (préremplissage du formulaire). */
 const LAST_EMAIL_KEY = 'cegeclim_last_login_email'
 
+/**
+ * CORRECTIF (09/11/2026) — boucle sur l'écran de connexion.
+ * Constat (journaux Supabase du 09/11, 10h12–11h12) : un poste rechargeait
+ * l'écran de connexion toutes les ~200 ms (2 lectures à chaque passage :
+ * app_announcements + user_page_access.default_landing_page), soit plus de
+ * 4 000 requêtes par heure. L'écran voyait encore un e-mail dans le contexte
+ * d'accès alors que la session avait disparu du navigateur : il partait vers
+ * /accueil, le shell ne trouvait pas de session et renvoyait vers /login, etc.
+ * Trois garde-fous :
+ *   1. avant toute redirection automatique, on relit la session locale
+ *      (getSession, sans appel réseau) ; absente → on rafraîchit le contexte
+ *      d'accès et on reste sur le formulaire ;
+ *   2. disjoncteur : au-delà de 3 redirections automatiques en 20 s, on coupe
+ *      la session locale, on journalise l'incident et on affiche le formulaire ;
+ *   3. les annonces sont gardées 5 min en sessionStorage (plus de relecture à
+ *      chaque affichage de l'écran).
+ */
+const REDIRECTIONS_KEY = 'cegeclim.login.redirections'
+const REDIRECTIONS_MAX = 3
+const REDIRECTIONS_FENETRE_MS = 20_000
+const ANNONCES_CACHE_KEY = 'cegeclim.login.annonces'
+const ANNONCES_CACHE_TTL_MS = 5 * 60 * 1000
+
+/** Enregistre une redirection automatique ; renvoie true si une boucle est détectée. */
+function enregistrerRedirection(): boolean {
+  try {
+    const now = Date.now()
+    const brut = window.sessionStorage.getItem(REDIRECTIONS_KEY)
+    const liste = (JSON.parse(brut || '[]') as number[]).filter((t) => now - t < REDIRECTIONS_FENETRE_MS)
+    liste.push(now)
+    if (liste.length > REDIRECTIONS_MAX) {
+      window.sessionStorage.removeItem(REDIRECTIONS_KEY)
+      return true
+    }
+    window.sessionStorage.setItem(REDIRECTIONS_KEY, JSON.stringify(liste))
+    return false
+  } catch {
+    // sessionStorage indisponible : pas de disjoncteur, comportement d'avant
+    return false
+  }
+}
+
+function oublierRedirections() {
+  try {
+    window.sessionStorage.removeItem(REDIRECTIONS_KEY)
+  } catch {
+    // rien à faire
+  }
+}
+
 type Annonce = {
   id: string
   titre: string | null
@@ -84,7 +134,21 @@ function AnnonceTemporaire() {
   useEffect(() => {
     let annule = false
 
-    async function charger() {
+    async function lireAnnonces(): Promise<Annonce[] | null> {
+      // Cache de 5 min par onglet (09/11/2026) : l'écran de connexion peut
+      // s'afficher plusieurs fois de suite, inutile de relire la table.
+      try {
+        const brut = window.sessionStorage.getItem(ANNONCES_CACHE_KEY)
+        if (brut) {
+          const cache = JSON.parse(brut) as { at: number; data: Annonce[] }
+          if (cache && Array.isArray(cache.data) && Date.now() - cache.at < ANNONCES_CACHE_TTL_MS) {
+            return cache.data
+          }
+        }
+      } catch {
+        // cache illisible : on relit la table
+      }
+
       const { data, error } = await supabase
         .from('app_announcements')
         .select('id, titre, message, date_debut, date_fin, dismissible, dismiss_after_seconds')
@@ -97,8 +161,20 @@ function AnnonceTemporaire() {
       // on trace en console et on n'affiche rien.
       if (error) {
         console.warn('[annonces] lecture impossible :', error.message)
-        return
+        return null
       }
+
+      try {
+        window.sessionStorage.setItem(ANNONCES_CACHE_KEY, JSON.stringify({ at: Date.now(), data: data || [] }))
+      } catch {
+        // stockage refusé : pas de cache
+      }
+      return (data || []) as Annonce[]
+    }
+
+    async function charger() {
+      const data = await lireAnnonces()
+      if (!data) return
       if (annule) return
 
       const aujourdhui = new Date().toISOString().slice(0, 10)
@@ -178,7 +254,7 @@ function AnnonceTemporaire() {
 
 export default function LoginScreen({ brand }: { brand: LoginBrand }) {
   const router = useRouter()
-  const { loading: accessLoading, email: sessionEmail } = useAccess()
+  const { loading: accessLoading, email: sessionEmail, refreshAccess } = useAccess()
 
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
@@ -257,14 +333,41 @@ export default function LoginScreen({ brand }: { brand: LoginBrand }) {
 
   useEffect(() => {
     if (accessLoading) return
+    if (!sessionEmail || navigationLanceeRef.current) return
 
-    if (sessionEmail && !navigationLanceeRef.current) {
-      void (async () => {
-        const landingPage = await getUserLandingPage(sessionEmail, brand.defaultLandingPage)
-        // allerVers ignore l'appel si l'écran de connexion a été quitté entre-temps.
-        allerVers(landingPage)
-      })()
-    }
+    void (async () => {
+      // Garde-fou 1 (09/11/2026) : le contexte d'accès peut encore porter un
+      // e-mail alors que la session a disparu du navigateur (déconnexion dans
+      // un autre onglet, stockage vidé…). Sans session, /accueil renverrait
+      // aussitôt ici : on rafraîchit le contexte et on reste sur le formulaire.
+      const {
+        data: { session },
+      } = await supabase.auth.getSession()
+      const emailSession = String(session?.user?.email || '').toLowerCase().trim()
+      if (!emailSession) {
+        void refreshAccess()
+        return
+      }
+
+      // Garde-fou 2 : disjoncteur anti-boucle.
+      if (enregistrerRedirection()) {
+        console.warn('[login] boucle de redirection détectée : session locale fermée')
+        await logUserEvent({
+          user_email: emailSession,
+          event_type: 'login_loop_broken',
+          pathname: window.location.pathname,
+          metadata: { user_agent: navigator.userAgent },
+        })
+        await supabase.auth.signOut({ scope: 'local' })
+        setErrorMsg('Votre session a expiré. Merci de vous reconnecter.')
+        void refreshAccess()
+        return
+      }
+
+      const landingPage = await getUserLandingPage(emailSession, brand.defaultLandingPage)
+      // allerVers ignore l'appel si l'écran de connexion a été quitté entre-temps.
+      allerVers(landingPage)
+    })()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [accessLoading, sessionEmail, allerVers])
 
@@ -312,6 +415,8 @@ export default function LoginScreen({ brand }: { brand: LoginBrand }) {
       }
 
       setLoading(false)
+      // Connexion volontaire : le disjoncteur repart de zéro.
+      oublierRedirections()
       allerVers(landingPage)
     } catch (err) {
       console.error('[login] échec inattendu :', err)
