@@ -56,9 +56,18 @@ export default function NewsTicker() {
     // Chargement asynchrone : les setState ont lieu après la réponse réseau.
     // eslint-disable-next-line react-hooks/set-state-in-effect
     void load()
-    const interval = window.setInterval(() => void load(), REFRESH_MS)
+    // 09/11/2026 (audit Supabase) : pas de relecture quand l'onglet est masqué
+    const interval = window.setInterval(() => {
+      if (document.visibilityState === 'visible') void load()
+    }, REFRESH_MS)
     const onChange = () => void load()
-    const onFocus = () => void load()
+    // Retour de focus : relecture seulement si la dernière a plus de 60 s
+    let derniere = Date.now()
+    const onFocus = () => {
+      if (Date.now() - derniere < 60_000) return
+      derniere = Date.now()
+      void load()
+    }
     window.addEventListener(ACTUALITES_CHANGED_EVENT, onChange)
     window.addEventListener('focus', onFocus)
     return () => {
