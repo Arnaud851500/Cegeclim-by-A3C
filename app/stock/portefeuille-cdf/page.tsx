@@ -484,9 +484,28 @@ function BoutonMajClaude() {
     })
     return () => { vivant = false }
   }, [version])
+  // Actualisation automatique : toutes les 30 s tant qu'une demande est en attente / en cours,
+  // toutes les 5 min sinon, et à chaque retour sur l'onglet (sans recharger la page).
+  const enAttenteId = etat?.en_attente?.id ?? null
+  useEffect(() => {
+    const rafraichir = () => { if (document.visibilityState === 'visible') setVersion((v) => v + 1) }
+    const t = window.setInterval(rafraichir, enAttenteId ? 30_000 : 300_000)
+    document.addEventListener('visibilitychange', rafraichir)
+    window.addEventListener('focus', rafraichir)
+    return () => {
+      window.clearInterval(t)
+      document.removeEventListener('visibilitychange', rafraichir)
+      window.removeEventListener('focus', rafraichir)
+    }
+  }, [enAttenteId])
+  // Quand la demande affichée est traitée, on retire le message « Demande enregistrée… ».
+  useEffect(() => { if (!enAttenteId) setMsg(null) }, [enAttenteId])
   if (!etat?.autorise) return null
   const attente = etat.en_attente
   const derniere = etat.derniere
+  // Résultat de la dernière demande, affiché sous le bouton pendant 24 h après son traitement.
+  const derniereRecente = !attente && derniere?.traitee_le
+    && Date.now() - new Date(derniere.traitee_le).getTime() < 24 * 3600 * 1000 ? derniere : null
   const titre = [
     'Demande à Claude de relever les dates des containers sur les sites MSC, CMA CGM et HMM (navire, ETA port, arrivée, déchargement) et de mettre à jour le suivi.',
     'La demande est traitée au prochain passage de la tâche Claude (chaque matin en semaine, ordinateur d’Arnaud allumé, Chrome ouvert).',
@@ -507,10 +526,17 @@ function BoutonMajClaude() {
       <button type="button" onClick={() => void demander()} disabled={envoi || Boolean(attente)} title={titre}
         className="inline-flex h-10 items-center gap-1.5 rounded-lg border border-[#1D5C86] bg-[#1D5C86]/[0.06] px-3 text-[12.5px] font-bold text-[#1D5C86] disabled:cursor-default disabled:opacity-70">
         {envoi ? 'Envoi…' : attente
-          ? `⏳ Mise à jour Claude demandée (${attente.demande_par.split('@')[0]}, ${fmtDateHeure(attente.demande_le)})`
+          ? attente.statut === 'EN_COURS'
+            ? `🔄 Relevé Claude en cours (demandé par ${attente.demande_par.split('@')[0]})`
+            : `⏳ Mise à jour Claude demandée (${attente.demande_par.split('@')[0]}, ${fmtDateHeure(attente.demande_le)})`
           : '🤖 Lancer la mise à jour Claude des dates de containers'}
       </button>
       {msg ? <span className="mt-0.5 text-[10.5px] font-semibold text-[#1D5C86]">{msg}</span>
+        : derniereRecente ? (
+          <span title={derniereRecente.resultat || undefined}
+            className={`mt-0.5 max-w-[480px] truncate text-right text-[10.5px] font-semibold ${derniereRecente.statut === 'ECHEC' ? 'text-[#B3261E]' : 'text-[#2E7D32]'}`}>
+            {derniereRecente.statut === 'ECHEC' ? '⚠️ Relevé Claude en échec' : '✅ Relevé Claude terminé'} ({fmtDateHeure(derniereRecente.traitee_le)}){derniereRecente.resultat ? ` — ${derniereRecente.resultat}` : ''}
+          </span>)
         : etat.dernier_releve_claude ? <span className="mt-0.5 text-[10.5px] text-[#8A8474]">Dernier relevé Claude : {fmtDateHeure(etat.dernier_releve_claude)}</span> : null}
     </div>
   )
