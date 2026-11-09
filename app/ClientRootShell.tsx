@@ -1038,9 +1038,17 @@ const lastAppliedScopeSignatureRef = useRef<string | null>(null)
       void refreshStatusIndicators()
     }, 5 * 60 * 1000)
 
+    // Retour sur l'onglet : rafraîchit si les compteurs ont plus de 60 s
+    // (le garde-fou de refreshStatusIndicators s'en charge).
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') void refreshStatusIndicators()
+    }
+    document.addEventListener('visibilitychange', onVisibility)
+
     return () => {
       clearTimeout(initialTimer)
       clearInterval(interval)
+      document.removeEventListener('visibilitychange', onVisibility)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionChecked, accessLoading, hasSession, email, isLoginPage, isUnauthorizedPage])
@@ -1049,8 +1057,12 @@ const lastAppliedScopeSignatureRef = useRef<string | null>(null)
     if (!sessionChecked || accessLoading || !hasSession || !email) return
     if (!pathname || isLoginPage || isUnauthorizedPage) return
 
+    // 09/11/2026 (audit Supabase) : changer de page ne force plus le
+    // rechargement des 6 à 8 compteurs d'alerte ; ils ne sont relus que s'ils
+    // ont plus de 60 s. Les actions qui modifient une alerte (validation CERFA,
+    // bouton Actualiser, changement de périmètre) forcent toujours.
     const routeTimer = setTimeout(() => {
-      void refreshStatusIndicators({ force: true })
+      void refreshStatusIndicators()
     }, 250)
 
     return () => clearTimeout(routeTimer)
@@ -1715,6 +1727,9 @@ const lastAppliedScopeSignatureRef = useRef<string | null>(null)
     if (!hasVisibleStatusLights) return
 
     const now = Date.now()
+    // 09/11/2026 (audit Supabase) : onglet masqué = aucun rafraîchissement
+    // automatique ; il reprend au retour sur l'onglet (écouteur visibilitychange).
+    if (!options?.force && typeof document !== 'undefined' && document.visibilityState === 'hidden') return
     if (!options?.force && now - lastStatusRefreshRef.current < 60_000) return
     if (options?.force && now - lastStatusRefreshRef.current < 800) return
     lastStatusRefreshRef.current = now

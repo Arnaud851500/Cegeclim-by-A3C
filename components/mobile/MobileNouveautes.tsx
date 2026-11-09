@@ -100,7 +100,10 @@ export default function MobileNouveautes() {
     // Chargement asynchrone : les setState ont lieu après la réponse réseau.
     // eslint-disable-next-line react-hooks/set-state-in-effect
     void load()
-    const interval = window.setInterval(() => void load(), REFRESH_MS)
+    // 09/11/2026 (audit Supabase) : pas de relecture quand l'onglet est masqué
+    const interval = window.setInterval(() => {
+      if (document.visibilityState === 'visible') void load()
+    }, REFRESH_MS)
     const onChange = () => void load()
     window.addEventListener(ACTUALITES_CHANGED_EVENT, onChange)
     return () => {

@@ -91,6 +91,11 @@ export function useMobileAlertsCount() {
   // tiroir de détail), pour rester cohérent avec le filtrage desktop.
   const perimetreRef = useRef<{ agences: string[]; collaborateurs: string[] }>({ agences: [], collaborateurs: [] })
   const lastLoadRef = useRef(0)
+  // 09/11/2026 (audit Supabase) : seul le tout premier chargement est forcé.
+  // Avant, chaque changement de page relançait l'effet avec load(true), donc
+  // relisait toutes les alertes à chaque navigation malgré le garde-fou.
+  const premierChargementRef = useRef(true)
+  const signatureDroitsRef = useRef('')
 
   async function resolveIdentities(): Promise<string[]> {
     if (identitiesRef.current.length > 0) return identitiesRef.current
@@ -150,7 +155,7 @@ export function useMobileAlertsCount() {
 
     async function load(force?: boolean) {
       const now = Date.now()
-      if (!force && now - lastLoadRef.current < 15_000) return
+      if (!force && now - lastLoadRef.current < 60_000) return
       lastLoadRef.current = now
 
       setLoading(true)
@@ -366,16 +371,36 @@ export function useMobileAlertsCount() {
       }
     }
 
-    // Premier chargement de la page : toujours forcé (ignore le
-    // garde-fou de 15s), sinon changer de page trop vite après le
-    // montage initial pourrait laisser des compteurs vides affichés.
-    void load(true)
+    // Premier chargement : forcé (compteurs vides sinon). Ensuite, un
+    // changement de page ne relit les alertes que si elles ont plus de 60 s.
+    // Retour sur l'application (onglet / PWA réaffichés) : même règle.
+    // Les droits d'alerte ou l'utilisateur ont changé : rechargement forcé aussi.
+    const signature = [
+      email,
+      rights.show_alert_todo,
+      rights.show_alert_cerfa_ko,
+      rights.show_alert_cdc_liv_avant_2026,
+      rights.show_alert_controle_frais_port,
+      rights.show_alert_capacite_gaz,
+      rights.show_alert_data_coherence,
+      rights.show_alert_dates_interdites,
+    ].join('|')
+    const force = premierChargementRef.current || signatureDroitsRef.current !== signature
+    premierChargementRef.current = false
+    signatureDroitsRef.current = signature
+    void load(force)
+
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') void load(false)
+    }
+    document.addEventListener('visibilitychange', onVisibility)
+
     return () => {
       cancelled = true
+      document.removeEventListener('visibilitychange', onVisibility)
     }
-    // pathname en dépendance = rafraîchit à chaque changement de page,
-    // avec le garde-fou de 15s ci-dessus pour amortir une navigation très
-    // rapide entre plusieurs écrans sans la ralentir.
+    // pathname en dépendance = rafraîchit au changement de page, avec le
+    // garde-fou de 60 s ci-dessus.
   }, [
     email,
     rights.show_alert_todo,

@@ -64,7 +64,10 @@ export default function NouveautesButton() {
 
   useEffect(() => {
     void load()
-    const interval = window.setInterval(() => void load(), REFRESH_MS)
+    // 09/11/2026 (audit Supabase) : pas de relecture quand l'onglet est masqué
+    const interval = window.setInterval(() => {
+      if (document.visibilityState === 'visible') void load()
+    }, REFRESH_MS)
     const onChange = () => void load()
     window.addEventListener(ACTUALITES_CHANGED_EVENT, onChange)
     return () => {
