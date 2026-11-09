@@ -69,6 +69,13 @@
  *  Colonne CDC : rattachement FIFO (une ligne de CDC dépend de la seule réception qui comble son manque — avant, toutes
  *  les réceptions antérieures à sa date étaient comptées). Migration : supabase/sql/20261105b_rdv_fms_sage_lieu_livraison.sql.
  *
+ * 09/11/2026 — RDV FMS repris automatiquement de SAGE : appro_rdv_fms_sync_sage() (pg_cron horaire) ajoute une ligne
+ *  « auto-sage » dans appro_cdf_rdv_fms dès que le RDV lu dans les commentaires de la CDF change (lignes « Décalée au 19.11 … »
+ *  désormais lues) ; la dernière information l'emporte (SAGE ou saisie). Badge « SAGE » sur ces RDV.
+ *  Bouton « Lancer la mise à jour Claude des dates de containers » (Arnaud, Julien, Lydia) à la place du favori
+ *  « Envoyer au compagnon » : demande traitée par la tâche planifiée Claude « Relevé containers ».
+ *  Migration : supabase/migrations/20261109_containers_rdv_auto.sql.
+ *
  * Sources : RPC get_appro_portefeuille_cdf / get_appro_cdf_detail ; tables appro_container_releves,
  * appro_cdf_actions, appro_armateurs, appro_cdf_statuts ; sage.cdf_statut et sage.bdcf_commentaires
  * (export TSE à compléter, voir supabase/sql/20261023_export_sage_cdf_complements.sql).
@@ -363,10 +370,12 @@ function RdvCellule({ r, auj, onChange }: { r: Ligne; auj: string; onChange: (nu
   }
   if (rdv?.rdv_date) {
     const titre = [`RDV déchargement FMS ${fmtRdv(rdv)}`, rdv.commentaire, ...ctrl.motifs.map((m) => `⚠ ${m.texte}`),
-      `Saisi le ${fmtDateHeure(rdv.created_at)}${rdv.created_by ? ` par ${rdv.created_by.split('@')[0]}` : ''} — cliquer pour modifier`].filter(Boolean).join('\n')
+      rdv.created_by === 'auto-sage'
+        ? `Repris automatiquement du commentaire de la CDF SAGE le ${fmtDateHeure(rdv.created_at)} — cliquer pour modifier (la saisie reste en vigueur jusqu’au prochain changement dans SAGE)`
+        : `Saisi le ${fmtDateHeure(rdv.created_at)}${rdv.created_by ? ` par ${rdv.created_by.split('@')[0]}` : ''} — cliquer pour modifier`].filter(Boolean).join('\n')
     return (
       <button type="button" onClick={ouvrir} title={titre}>
-        <Badge cls={ctrl.niveau ? RDV_CLS[ctrl.niveau] : RDV_CLS.ok}>{ctrl.niveau === 'rouge' ? '⚠ ' : ''}{fmtRdv(rdv)}</Badge>
+        <Badge cls={ctrl.niveau ? RDV_CLS[ctrl.niveau] : RDV_CLS.ok}>{ctrl.niveau === 'rouge' ? '⚠ ' : ''}{fmtRdv(rdv)}{rdv.created_by === 'auto-sage' ? <span className="opacity-70"> SAGE</span> : null}</Badge>
       </button>
     )
   }
@@ -451,24 +460,59 @@ function appliquerLecture(f: FormSuivi, r: SuiviLu): FormSuivi {
   }
 }
 
-/** Favori « Envoyer au compagnon » : envoie le texte de la page de suivi en fragment d'URL (#suivi=…),
- * jamais transmis au serveur, et ouvre l'écran dans un nouvel onglet. */
-function codeFavori(origine: string): string {
-  return `javascript:(function(){var t=(document.body.innerText||'').slice(0,20000);`
-    + `window.open('${origine}/stock/portefeuille-cdf#suivi='+encodeURIComponent(t),'_blank');})();`
+/** Bouton « Lancer la mise à jour Claude des dates de containers » (09/11/2026, remplace le favori
+ * « Envoyer au compagnon ») : réservé aux comptes de appro_container_maj_acces (Arnaud, Julien, Lydia).
+ * Le clic enregistre une demande (RPC appro_container_maj_demander) ; la tâche planifiée Claude
+ * « Relevé containers » la traite à son passage suivant (chaque matin en semaine) : relevé des sites
+ * MSC / CMA CGM / HMM dans Chrome, mise à jour de appro_container_releves, puis demande passée TERMINEE.
+ * Le favori déjà installé dans les navigateurs (#suivi=…) reste pris en charge par l'écran. */
+type EtatMajClaude = {
+  autorise: boolean
+  en_attente: { id: number; demande_par: string; demande_le: string; statut: string } | null
+  derniere: { id: number; demande_par: string; demande_le: string; statut: string; traitee_le: string | null; resultat: string | null } | null
+  dernier_releve_claude: string | null
 }
-function LienFavori() {
-  const ref = React.useRef<HTMLAnchorElement | null>(null)
+function BoutonMajClaude() {
+  const [etat, setEtat] = useState<EtatMajClaude | null>(null)
+  const [envoi, setEnvoi] = useState(false)
+  const [msg, setMsg] = useState<string | null>(null)
+  const [version, setVersion] = useState(0)
   useEffect(() => {
-    // React bloque les href « javascript: » écrits en JSX : on pose l'attribut après le rendu
-    if (ref.current) ref.current.setAttribute('href', codeFavori(window.location.origin))
-  }, [])
+    let vivant = true
+    supabase.rpc('appro_container_maj_etat').then(({ data, error }) => {
+      if (vivant && !error) setEtat(data as EtatMajClaude)
+    })
+    return () => { vivant = false }
+  }, [version])
+  if (!etat?.autorise) return null
+  const attente = etat.en_attente
+  const derniere = etat.derniere
+  const titre = [
+    'Demande à Claude de relever les dates des containers sur les sites MSC, CMA CGM et HMM (navire, ETA port, arrivée, déchargement) et de mettre à jour le suivi.',
+    'La demande est traitée au prochain passage de la tâche Claude (chaque matin en semaine, ordinateur d’Arnaud allumé, Chrome ouvert).',
+    etat.dernier_releve_claude ? `Dernier relevé Claude : ${fmtDateHeure(etat.dernier_releve_claude)}` : null,
+    derniere ? `Dernière demande traitée : ${fmtDateHeure(derniere.traitee_le || derniere.demande_le)} (${derniere.statut === 'ECHEC' ? 'échec' : 'terminée'})${derniere.resultat ? ` — ${derniere.resultat}` : ''}` : null,
+  ].filter(Boolean).join('\n')
+  async function demander() {
+    setEnvoi(true); setMsg(null)
+    const { data, error } = await supabase.rpc('appro_container_maj_demander')
+    setEnvoi(false)
+    if (error) { setMsg(messageErreur(error)); return }
+    const r = data as { deja: boolean }
+    setMsg(r.deja ? 'Une demande est déjà en attente.' : 'Demande enregistrée : Claude la traitera à son prochain passage.')
+    setVersion((v) => v + 1)
+  }
   return (
-    <a ref={ref} onClick={(e) => e.preventDefault()} draggable
-      title="Glissez ce bouton dans la barre de favoris de Chrome. Ensuite, sur la page de suivi MSC ou CMA CGM, cliquez sur le favori : la fiche de la CDF s’ouvre pré-remplie."
-      className="inline-flex h-10 cursor-grab items-center rounded-lg border border-dashed border-[#1D5C86] bg-[#1D5C86]/[0.06] px-3 text-[12.5px] font-bold text-[#1D5C86]">
-      ⭐ Envoyer au compagnon
-    </a>
+    <div className="flex flex-col items-end">
+      <button type="button" onClick={() => void demander()} disabled={envoi || Boolean(attente)} title={titre}
+        className="inline-flex h-10 items-center gap-1.5 rounded-lg border border-[#1D5C86] bg-[#1D5C86]/[0.06] px-3 text-[12.5px] font-bold text-[#1D5C86] disabled:cursor-default disabled:opacity-70">
+        {envoi ? 'Envoi…' : attente
+          ? `⏳ Mise à jour Claude demandée (${attente.demande_par.split('@')[0]}, ${fmtDateHeure(attente.demande_le)})`
+          : '🤖 Lancer la mise à jour Claude des dates de containers'}
+      </button>
+      {msg ? <span className="mt-0.5 text-[10.5px] font-semibold text-[#1D5C86]">{msg}</span>
+        : etat.dernier_releve_claude ? <span className="mt-0.5 text-[10.5px] text-[#8A8474]">Dernier relevé Claude : {fmtDateHeure(etat.dernier_releve_claude)}</span> : null}
+    </div>
   )
 }
 
@@ -1183,7 +1227,7 @@ function PortefeuilleCdf() {
         { h: 'Marge (j)', f: (r) => r.marge_jours }, { h: 'Verdict', f: (r) => (r.verdict ? VERDICT[r.verdict].label : '') },
         { h: 'RDV FMS', f: (r) => (r.rdv?.rdv_date ? fmtDate(r.rdv.rdv_date) : r.rdvSage?.rdv_date ? fmtDate(r.rdvSage.rdv_date) : '') },
         { h: 'Heure RDV', f: (r) => (r.rdv?.rdv_date ? r.rdv.rdv_heure : r.rdvSage?.rdv_heure)?.slice(0, 5) || '' },
-        { h: 'Source RDV', f: (r) => (r.rdv?.rdv_date ? 'Saisi compagnon' : r.rdvSage?.rdv_date ? 'Commentaire SAGE' : '') },
+        { h: 'Source RDV', f: (r) => (r.rdv?.rdv_date ? (r.rdv.created_by === 'auto-sage' ? 'Commentaire SAGE (repris auto)' : 'Saisi compagnon') : r.rdvSage?.rdv_date ? 'Commentaire SAGE' : '') },
         { h: 'Commentaire RDV', f: (r) => r.rdv?.commentaire || '', w: 30 },
         { h: 'Contrôle RDV', f: (r) => controleRdv(r.rdv?.rdv_date || null, r.rdv?.rdv_heure || null, r, auj).motifs.map((m) => m.texte).join(' | '), w: 50 },
         { h: 'CDC en attente', f: (r) => r.nb_cdc }, { h: '1re livraison CDC', f: (r) => fmtDate(r.premiere_livraison_cdc) },
@@ -1237,7 +1281,7 @@ function PortefeuilleCdf() {
                 <button key={k} type="button" onClick={() => setPerimetre(k)} className={`rounded-md px-3 py-1.5 ${perimetre === k ? 'bg-white text-[#111820] shadow-sm' : 'text-[#8A8474]'}`}>{l}</button>
               ))}
             </div>
-            <LienFavori />
+            <BoutonMajClaude />
             <button type="button" onClick={() => void exporterExcel()} disabled={exportEnCours || loading || filtres.length === 0} className="h-10 rounded-lg bg-[#111820] px-3 text-[13px] font-bold text-white disabled:opacity-50">
               {exportEnCours ? 'Export…' : `⬇ Excel (${fmtNum(filtres.length)})`}
             </button>
