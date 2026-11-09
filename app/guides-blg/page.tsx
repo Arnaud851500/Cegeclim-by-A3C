@@ -461,6 +461,22 @@ function GuidesBlgContent() {
     setTick((n) => n + 1)
   }
 
+  /** Échange la place d'un chapitre avec son voisin (ordre renuméroté de 10 en 10). */
+  const deplacer = async (slug: string, sens: -1 | 1) => {
+    const liste = [...visibles]
+    const i = liste.findIndex((g) => g.slug === slug)
+    const j = i + sens
+    if (i < 0 || j < 0 || j >= liste.length) return
+    ;[liste[i], liste[j]] = [liste[j], liste[i]]
+    const nouveaux = liste.map((g, k) => ({ slug: g.slug, ordre: (k + 1) * 10 }))
+    setGuides((prev) => prev.map((g) => ({ ...g, ordre: nouveaux.find((n) => n.slug === g.slug)?.ordre ?? g.ordre })).sort((a, b) => a.ordre - b.ordre))
+    const erreurs = (
+      await Promise.all(nouveaux.map((n) => supabase.from('guides_blg').update({ ordre: n.ordre }).eq('slug', n.slug)))
+    ).filter((r) => r.error)
+    if (erreurs.length) setError(`Ordre des chapitres : ${erreurs[0].error?.message}`)
+    setTick((n) => n + 1)
+  }
+
   const supprimer = async (g: GuideRow) => {
     if (!window.confirm(`Supprimer le chapitre « ${g.titre} » et tous ses fichiers ?`)) return
     setBusy(`Suppression de ${g.titre}…`)
@@ -511,7 +527,7 @@ function GuidesBlgContent() {
           <h1 style={s.title}>Guides BLG</h1>
           <p style={s.subtitle}>Modes opératoires BLG Cloud : posez votre question, ou ouvrez un chapitre pour parcourir ses modes opératoires.</p>
         </div>
-        {gestion && (
+        {gestion && guides.some((g) => g.source_url) && (
           <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
             {busy && <span style={{ ...s.muted, color: tc('#8FC7DA') }}>{busy}</span>}
             <button
@@ -604,6 +620,36 @@ function GuidesBlgContent() {
                 onMouseLeave={(e) => (e.currentTarget.style.transform = 'none')}
               >
                 {!g.actif && <span style={s.tileBadge}>Masqué</span>}
+                {gestion && (
+                  <span style={{ position: 'absolute', bottom: 10, right: 10, display: 'flex', gap: 4 }}>
+                    {(['◀', '▶'] as const).map((fl, k) => {
+                      const sens = k === 0 ? -1 : 1
+                      const bloque = (sens === -1 && i === 0) || (sens === 1 && i === visibles.length - 1)
+                      return (
+                        <span
+                          key={fl}
+                          role="button"
+                          tabIndex={0}
+                          title={sens === -1 ? 'Placer avant' : 'Placer après'}
+                          aria-disabled={bloque}
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            if (!bloque) void deplacer(g.slug, sens)
+                          }}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter' && !bloque) {
+                              e.stopPropagation()
+                              void deplacer(g.slug, sens)
+                            }
+                          }}
+                          style={{ width: 28, height: 28, borderRadius: 8, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', fontSize: 12, background: 'rgba(0,0,0,0.28)', color: '#ffffff', opacity: bloque ? 0.25 : 0.9, cursor: bloque ? 'default' : 'pointer' }}
+                        >
+                          {fl}
+                        </span>
+                      )
+                    })}
+                  </span>
+                )}
                 <div style={s.tileIcon}>{iconeGuide(g.slug, g.titre, g.icone)}</div>
                 <h2 style={s.tileTitle}>{g.titre}</h2>
                 <div style={s.tileSub}>
@@ -710,6 +756,11 @@ function GuidesBlgContent() {
                 <div style={{ flexBasis: '100%', ...s.muted }}>
                   {busy ? (
                     <span style={{ color: tc('#8FC7DA') }}>{busy}</span>
+                  ) : !guideOuvert.source_url && guideOuvert.source_verifie_at ? (
+                    <>
+                      {guideOuvert.source_message ?? 'Synchronisé'} · vérifié le{' '}
+                      {new Date(guideOuvert.source_verifie_at).toLocaleString('fr-FR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}
+                    </>
                   ) : guideOuvert.source_url ? (
                     <>
                       Source Teams :{' '}
@@ -720,7 +771,7 @@ function GuidesBlgContent() {
                       {guideOuvert.source_message ? ` — ${guideOuvert.source_message}` : ''}
                     </>
                   ) : (
-                    'Aucun lien Teams : le chapitre ne se met à jour que par dépôt manuel.'
+                    'Pas encore synchronisé depuis le dossier OneDrive : le chapitre se met à jour par dépôt manuel.'
                   )}
                 </div>
               </div>
