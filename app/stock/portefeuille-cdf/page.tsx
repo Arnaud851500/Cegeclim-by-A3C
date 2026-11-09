@@ -477,10 +477,16 @@ function BoutonMajClaude() {
   const [envoi, setEnvoi] = useState(false)
   const [msg, setMsg] = useState<string | null>(null)
   const [version, setVersion] = useState(0)
+  const [chargeLe, setChargeLe] = useState(0)
   useEffect(() => {
     let vivant = true
     supabase.rpc('appro_container_maj_etat').then(({ data, error }) => {
-      if (vivant && !error) setEtat(data as EtatMajClaude)
+      if (vivant && !error) {
+        const e = data as EtatMajClaude
+        setEtat(e); setChargeLe(Date.now())
+        // Demande traitée : on retire le message « Demande enregistrée… ».
+        if (!e.en_attente) setMsg(null)
+      }
     })
     return () => { vivant = false }
   }, [version])
@@ -498,14 +504,12 @@ function BoutonMajClaude() {
       window.removeEventListener('focus', rafraichir)
     }
   }, [enAttenteId])
-  // Quand la demande affichée est traitée, on retire le message « Demande enregistrée… ».
-  useEffect(() => { if (!enAttenteId) setMsg(null) }, [enAttenteId])
   if (!etat?.autorise) return null
   const attente = etat.en_attente
   const derniere = etat.derniere
   // Résultat de la dernière demande, affiché sous le bouton pendant 24 h après son traitement.
   const derniereRecente = !attente && derniere?.traitee_le
-    && Date.now() - new Date(derniere.traitee_le).getTime() < 24 * 3600 * 1000 ? derniere : null
+    && chargeLe - new Date(derniere.traitee_le).getTime() < 24 * 3600 * 1000 ? derniere : null
   const titre = [
     'Demande à Claude de relever les dates des containers sur les sites MSC, CMA CGM et HMM (navire, ETA port, arrivée, déchargement) et de mettre à jour le suivi.',
     'La demande est traitée au prochain passage de la tâche Claude (chaque matin en semaine, ordinateur d’Arnaud allumé, Chrome ouvert).',
