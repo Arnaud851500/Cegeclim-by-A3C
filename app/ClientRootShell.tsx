@@ -4,6 +4,8 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import type React from 'react'
 import { usePathname, useRouter } from 'next/navigation'
 import { supabase } from '@/lib/supabaseClient'
+// 09/11/2026 : ajoute le jeton de session aux appels /api (exigé par proxy.ts)
+import '@/lib/apiAuthFetch'
 import { logUserEvent } from '@/lib/audit'
 import { AccessProvider, useAccess } from '@/components/AccessContext'
 import { Analytics } from '@vercel/analytics/next'
