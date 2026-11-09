@@ -272,6 +272,7 @@ export const NAV_BLOCS: NavBloc[] = [
       { label: 'Fournisseurs SAGE – BLG', path: '/controle-sage-blg/fournisseur-sage-blg', activeLabel: 'Contrôle cohérence Fournisseur SAGE-BLG', accessKey: 'can_projetblg', description: 'Contrôle de cohérence fournisseurs et articles entre SAGE et BLG.' },
       { label: 'Rapprochement SAGE-BLG', path: '/controle-sage-blg/rapprochement-sage-blg', activeLabel: 'Rapprochement Sage-BLG, CDC, CDF, Stocks', accessKey: 'can_projetblg', description: 'Contrôle de cohérence SAGE-BLG CDC, CDF, Stock' },
       { label: 'Portefeuille BLG – SAGE', path: '/controle-sage-blg/portefeuille-blg-sage', activeLabel: 'Portefeuille BLG ↔ SAGE', accessKey: 'can_projetblg', description: 'Ventes (CDC) et achats (CDF) : commandes BLG ouvertes, terminées encore ouvertes dans SAGE et archivées × situation dans SAGE, plus les commandes SAGE absentes de BLG et les PL / BL / BR sans CDC — cases à corriger chaque jour, listes et export.' },
+      { label: 'Flux des CDC SAGE', path: '/controle-sage-blg/flux-cdc-sage', activeLabel: 'Flux des CDC SAGE (suppressions / modifications)', accessKey: 'can_projetblg', description: 'Suppressions et modifications des commandes clients SAGE, datées à chaque import, et leur répercussion dans BLG.' },
       
     ],
   },

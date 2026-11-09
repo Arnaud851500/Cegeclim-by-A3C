@@ -1,0 +1,17 @@
+-- 20261109e_cdc_flux_ajustements.sql
+-- Ajustements appliqués en production le 09/11/2026 après 20261109c / 20261109d
+-- (déjà exécutés via l'outil de migration ; fichier conservé pour l'historique du dépôt).
+--
+-- 1. cdc_flux_csv_champs : retrait du BOM UTF-8 (chr(65279)) en tête de fichier.
+-- 2. cdc_flux_hist_analyser : ANALYZE des tables cdc_flux_hist_lignes / _entetes après
+--    chargement (sans statistiques, la comparaison dépassait le délai de 170 s).
+-- 3. cdc_flux_hist_comparer : COMMANDE_SUPPRIMEE ne teste l'absence d'entête que si
+--    l'instantané suivant a des entêtes ; DATE_LIVRAISON_MODIFIEE seulement si les deux
+--    dates sont renseignées (les entêtes d'août, ancien format DP_VENTES, n'en ont pas).
+-- 4. cdc_flux_hist_tick : l'instantané le plus ancien restant est toujours demandé en premier.
+-- 5. get_cdc_flux_v2(p_depuis, p_jusqu, p_flux_normaux) : comme get_cdc_flux, mais les flux
+--    normaux (TRANSFORMATION, RETOUR_EN_COMMANDE) ne sont renvoyés que sur demande ; leur nombre
+--    est fourni dans nb_flux_normaux. L'écran /controle-sage-blg/flux-cdc-sage l'utilise.
+--
+-- Les définitions complètes à jour se lisent en base (pg_get_functiondef).
+-- Job temporaire : pg_cron « cdc-flux-historique » (chaque minute, se désactive en fin de reprise).
