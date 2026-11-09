@@ -34,6 +34,11 @@
 //   Migration 20261103_portefeuille_blg_sage_terminees_sans_cdc.sql.
 // 03/11/2026 (b) : code couleur des cases renforcé (fond plus opaque, bordure 6 px, contour et
 //   chiffre dans la couleur du verdict hors « Cohérent »).
+// 09/11/2026 : dates de livraison souhaitées (ventes) en entête et en lignes, SAGE ↔ BLG :
+//   colonne « Livr. souhaitée » (entête SAGE / entête BLG, plage des lignes à livrer, nb de lignes
+//   en écart), filtre « Écart de date de livraison », détail des lignes par CDC (▸ Lignes) via
+//   get_portefeuille_blg_sage_lignes_dates(p_reference). Écart = date présente des deux côtés et
+//   différente. Migration 20261109b_portefeuille_blg_sage_dates_souhaitees.sql.
 // URL : ?statut=S43&situation=FACTUREE&verdict=A_CORRIGER&agence=PAU
 // ============================================================================
 
@@ -105,12 +110,40 @@ type ListeRow = {
   sage_derniere_facture: string | null
   facture_recente: boolean
   lien_blg: string | null
+  blg_date_livraison_souhaitee?: string | null
+  ecart_date_entete?: boolean
+  sage_lignes_date_min?: string | null
+  sage_lignes_date_max?: string | null
+  blg_lignes_date_min?: string | null
+  blg_lignes_date_max?: string | null
+  nb_lignes_dates_comparees?: number | null
+  nb_lignes_ecart_date?: number | null
 }
+
+type LigneDate = {
+  reference_article: string | null
+  designation: string | null
+  presence: 'LES_DEUX' | 'SAGE_SEUL' | 'BLG_SEUL'
+  sage_qte: number | null
+  sage_qte_a_livrer: number | null
+  sage_etats: string | null
+  sage_date_souhaitee: string | null
+  sage_date_max: string | null
+  sage_plusieurs_dates: boolean
+  blg_qte: number | null
+  blg_qte_a_livrer: number | null
+  blg_etats: string | null
+  blg_date_souhaitee: string | null
+  blg_date_max: string | null
+  blg_plusieurs_dates: boolean
+  ecart_date: boolean
+}
+type LignesState = { loading: boolean; error: string | null; lignes: LigneDate[] }
 
 type Selection = { statut: string | null; situation: string | null; verdict: Verdict | null }
 type Domaine = 'VENTE' | 'ACHAT'
 type Metric = 'nb' | 'reste' | 'sage' | 'facture'
-type SortKey = 'reference' | 'intitule_tiers' | 'agence' | 'blg_order_date' | 'blg_reste_ht' | 'blg_montant_ht' | 'sage_montant_facture' | 'sage_derniere_facture'
+type SortKey = 'reference' | 'intitule_tiers' | 'agence' | 'blg_order_date' | 'sage_date_livraison' | 'blg_reste_ht' | 'blg_montant_ht' | 'sage_montant_facture' | 'sage_derniere_facture'
 type Agg = { nb: number; nb_recent: number; reste: number; blg: number; sage: number; facture: number; verdicts: Set<Verdict> }
 
 // ── Constantes ───────────────────────────────────────────────────────────────
@@ -184,6 +217,18 @@ function fmtDate(v: string | null | undefined): string {
   if (Number.isNaN(d.getTime()) || d.getFullYear() < 1900) return '—'
   return d.toLocaleDateString('fr-FR')
 }
+
+function fmtPlage(min: string | null | undefined, max: string | null | undefined): string {
+  if (!min && !max) return '—'
+  if (!min || !max || min === max) return fmtDate(min ?? max)
+  return `${fmtDate(min)} → ${fmtDate(max)}`
+}
+
+function hasEcartDate(r: ListeRow): boolean {
+  return !!r.ecart_date_entete || num(r.nb_lignes_ecart_date) > 0
+}
+
+const ECART_COLOR = '#E07A4E'
 
 function fmtDateTime(v: string | null | undefined): string {
   if (!v) return '—'
@@ -282,6 +327,9 @@ function PortefeuilleBlgSageContent() {
 
   const [search, setSearch] = useState('')
   const [masquerRecentes, setMasquerRecentes] = useState(false)
+  const [ecartDatesSeul, setEcartDatesSeul] = useState(false)
+  const [ouvertes, setOuvertes] = useState<Set<string>>(new Set())
+  const [lignesParCdc, setLignesParCdc] = useState<Record<string, LignesState>>({})
   const [sortKey, setSortKey] = useState<SortKey>('blg_reste_ht')
   const [sortAsc, setSortAsc] = useState(false)
   const [limit, setLimit] = useState(300)
@@ -410,6 +458,7 @@ function PortefeuilleBlgSageContent() {
       )
     }
     if (masquerRecentes) out = out.filter((r) => !r.facture_recente)
+    if (ecartDatesSeul && domaine === 'VENTE') out = out.filter(hasEcartDate)
     const dir = sortAsc ? 1 : -1
     const val = (r: ListeRow): string | number => {
       switch (sortKey) {
@@ -425,7 +474,7 @@ function PortefeuilleBlgSageContent() {
       if (typeof va === 'number' && typeof vb === 'number') return (va - vb) * dir
       return String(va).localeCompare(String(vb), 'fr') * dir
     })
-  }, [rows, search, masquerRecentes, sortKey, sortAsc])
+  }, [rows, search, masquerRecentes, ecartDatesSeul, domaine, sortKey, sortAsc])
 
   const listeTotaux = useMemo(
     () => ({
@@ -433,6 +482,7 @@ function PortefeuilleBlgSageContent() {
       reste: filtered.reduce((a, r) => a + num(r.blg_reste_ht), 0),
       blg: filtered.reduce((a, r) => a + num(r.blg_montant_ht), 0),
       recentes: rows.filter((r) => r.facture_recente).length,
+      ecartDates: rows.filter(hasEcartDate).length,
     }),
     [filtered, rows],
   )
@@ -443,6 +493,25 @@ function PortefeuilleBlgSageContent() {
       setSortKey(k)
       setSortAsc(k === 'reference' || k === 'intitule_tiers' || k === 'agence')
     }
+  }
+
+  // ── Détail des lignes (dates souhaitées) ──────────────────────────────────
+  const toggleLignes = (ref: string) => {
+    setOuvertes((prev) => {
+      const next = new Set(prev)
+      if (next.has(ref)) next.delete(ref)
+      else next.add(ref)
+      return next
+    })
+    if (lignesParCdc[ref] && !lignesParCdc[ref].error) return
+    setLignesParCdc((prev) => ({ ...prev, [ref]: { loading: true, error: null, lignes: [] } }))
+    supabase.rpc('get_portefeuille_blg_sage_lignes_dates', { p_reference: ref }).then(({ data, error: err }) => {
+      const payload = (data ?? {}) as { lignes?: LigneDate[] }
+      setLignesParCdc((prev) => ({
+        ...prev,
+        [ref]: err ? { loading: false, error: err.message, lignes: [] } : { loading: false, error: null, lignes: payload.lignes ?? [] },
+      }))
+    })
   }
 
   const select = (sel: Selection) => {
@@ -516,6 +585,17 @@ function PortefeuilleBlgSageContent() {
         ['Facturation BLG', (r) => FACTURATION_LABELS[r.blg_invoice_status ?? ''] ?? r.blg_invoice_status ?? ''],
         ['Date cde BLG', (r) => fmtDate(r.blg_order_date)],
         ['Dernière modif BLG', (r) => fmtDate(r.blg_last_update)],
+        ...(domaine === 'VENTE'
+          ? ([
+              ['Livr. souhaitée SAGE (entête)', (r) => fmtDate(r.sage_date_livraison)],
+              ['Livr. souhaitée BLG (entête)', (r) => fmtDate(r.blg_date_livraison_souhaitee)],
+              ['Écart date entête', (r) => (r.ecart_date_entete ? 'Oui' : '')],
+              ['Livr. souhaitée SAGE (lignes à livrer)', (r) => fmtPlage(r.sage_lignes_date_min, r.sage_lignes_date_max)],
+              ['Livr. souhaitée BLG (lignes à livrer)', (r) => fmtPlage(r.blg_lignes_date_min, r.blg_lignes_date_max)],
+              ['Lignes comparées (date)', (r) => num(r.nb_lignes_dates_comparees)],
+              ['Lignes en écart de date', (r) => num(r.nb_lignes_ecart_date)],
+            ] as [string, (r: ListeRow) => unknown][])
+          : ([['Réception prévue SAGE', (r) => fmtDate(r.sage_date_livraison)]] as [string, (r: ListeRow) => unknown][])),
         ['N° tiers', (r) => r.numero_tiers ?? ''],
         [T.tiers, (r) => r.intitule_tiers ?? ''],
         [T.lieu, (r) => r.agence ?? ''],
@@ -753,7 +833,7 @@ function PortefeuilleBlgSageContent() {
               <div style={{ ...s.muted, marginTop: 4 }}>
                 {loadingListe
                   ? 'Chargement…'
-                  : `${nf0.format(listeTotaux.nb)} commandes · montant BLG ${nfEur.format(listeTotaux.blg)} · ${(T.reste.charAt(0).toLowerCase() + T.reste.slice(1))} ${nfEur.format(listeTotaux.reste)}${listeTotaux.recentes ? ` · ${nf0.format(listeTotaux.recentes)} facturée(s) depuis ≤ 2 j` : ''}`}
+                  : `${nf0.format(listeTotaux.nb)} commandes · montant BLG ${nfEur.format(listeTotaux.blg)} · ${(T.reste.charAt(0).toLowerCase() + T.reste.slice(1))} ${nfEur.format(listeTotaux.reste)}${listeTotaux.recentes ? ` · ${nf0.format(listeTotaux.recentes)} facturée(s) depuis ≤ 2 j` : ''}${domaine === 'VENTE' && listeTotaux.ecartDates ? ` · ${nf0.format(listeTotaux.ecartDates)} en écart de date de livraison` : ''}`}
               </div>
             </div>
             <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
@@ -762,6 +842,12 @@ function PortefeuilleBlgSageContent() {
                 <input type="checkbox" checked={masquerRecentes} onChange={(e) => setMasquerRecentes(e.target.checked)} />
                 {domaine === 'ACHAT' ? 'Masquer les FAF récentes' : 'Masquer les factures récentes (≤ 2 j)'}
               </label>
+              {domaine === 'VENTE' && (
+                <label style={{ fontSize: 12, display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }} title="Date de livraison souhaitée différente entre SAGE et BLG, en entête ou sur au moins une ligne à livrer.">
+                  <input type="checkbox" checked={ecartDatesSeul} onChange={(e) => setEcartDatesSeul(e.target.checked)} />
+                  Écart de date de livraison uniquement
+                </label>
+              )}
             </div>
           </div>
           <div style={{ ...s.scroll, maxHeight: '70vh', overflowY: 'auto' }}>
@@ -771,6 +857,11 @@ function PortefeuilleBlgSageContent() {
                   <th style={{ ...s.th, ...s.sortable }} onClick={() => toggleSort('reference')}>{domaine === 'ACHAT' ? 'CDF BLG' : 'CDC / pièce SAGE'}</th>
                   <th style={s.th}>Statut BLG</th>
                   <th style={{ ...s.th, ...s.sortable }} onClick={() => toggleSort('blg_order_date')}>Cde BLG</th>
+                  {domaine === 'VENTE' && (
+                    <th style={{ ...s.th, ...s.sortable }} onClick={() => toggleSort('sage_date_livraison')} title="Date de livraison souhaitée : entête SAGE / entête BLG, puis plage des lignes à livrer de chaque côté">
+                      Livr. souhaitée
+                    </th>
+                  )}
                   <th style={{ ...s.th, ...s.sortable }} onClick={() => toggleSort('intitule_tiers')}>{T.tiers}</th>
                   <th style={{ ...s.th, ...s.sortable }} onClick={() => toggleSort('agence')}>{T.lieu}</th>
                   <th style={s.thNum}>Lignes BLG</th>
@@ -786,8 +877,11 @@ function PortefeuilleBlgSageContent() {
               <tbody>
                 {filtered.slice(0, limit).map((r) => {
                   const v = VERDICTS[r.verdict]
+                  const ouverte = ouvertes.has(r.reference)
+                  const peutDetailler = domaine === 'VENTE' && r.statut_code !== 'SANS_CDC'
                   return (
-                    <tr key={r.reference}>
+                    <React.Fragment key={r.reference}>
+                    <tr>
                       <td style={{ ...s.td, whiteSpace: 'nowrap', borderLeft: `3px solid ${tc(v?.color ?? '#9AA3B5')}` }}>
                         {r.lien_blg ? (
                           <a href={r.lien_blg} target="_blank" rel="noreferrer" style={{ ...s.mono, ...s.link }} title="Ouvrir la commande dans BLG">
@@ -797,6 +891,16 @@ function PortefeuilleBlgSageContent() {
                           <span style={s.mono}>{r.reference}</span>
                         )}
                         <span style={{ ...s.small, color: tc(v?.color ?? '#9AA3B5') }}>{v?.label ?? r.verdict}</span>
+                        {peutDetailler && (
+                          <button
+                            type="button"
+                            onClick={() => toggleLignes(r.reference)}
+                            style={{ ...s.btn, padding: '2px 8px', fontSize: 11, marginTop: 4 }}
+                            title="Détail des lignes : dates de livraison souhaitées SAGE / BLG"
+                          >
+                            {ouverte ? '▾' : '▸'} Lignes
+                          </button>
+                        )}
                       </td>
                       <td style={{ ...s.td, whiteSpace: 'nowrap' }}>
                         <span>{r.statut_libelle}</span>
@@ -809,6 +913,26 @@ function PortefeuilleBlgSageContent() {
                         {fmtDate(r.blg_order_date)}
                         <span style={s.small}>modif. {fmtDate(r.blg_last_update)}</span>
                       </td>
+                      {domaine === 'VENTE' && (
+                        <td style={{ ...s.td, whiteSpace: 'nowrap' }}>
+                          <span style={r.ecart_date_entete ? { color: tc(ECART_COLOR), fontWeight: 700 } : undefined} title="Entête : SAGE / BLG">
+                            <span style={s.muted}>S </span>{fmtDate(r.sage_date_livraison)}
+                            <span style={s.muted}> · B </span>{fmtDate(r.blg_date_livraison_souhaitee)}
+                          </span>
+                          {(r.sage_lignes_date_min || r.blg_lignes_date_min) && (
+                            <span style={s.small} title="Lignes à livrer : plage SAGE / plage BLG">
+                              lignes S {fmtPlage(r.sage_lignes_date_min, r.sage_lignes_date_max)} · B {fmtPlage(r.blg_lignes_date_min, r.blg_lignes_date_max)}
+                            </span>
+                          )}
+                          {num(r.nb_lignes_ecart_date) > 0 ? (
+                            <span style={{ ...s.small, color: tc(ECART_COLOR), fontWeight: 600 }}>
+                              {nf0.format(num(r.nb_lignes_ecart_date))} / {nf0.format(num(r.nb_lignes_dates_comparees))} ligne(s) en écart
+                            </span>
+                          ) : r.ecart_date_entete ? (
+                            <span style={{ ...s.small, color: tc(ECART_COLOR), fontWeight: 600 }}>écart en entête</span>
+                          ) : null}
+                        </td>
+                      )}
                       <td style={s.td}>
                         <span>{r.intitule_tiers ?? '—'}</span>
                         <span style={s.small}>{r.numero_tiers ?? ''}{r.collaborateur ? ` · ${r.collaborateur}` : ''}</span>
@@ -825,7 +949,7 @@ function PortefeuilleBlgSageContent() {
                         {num(r.sage_montant_en_cours) !== 0 && (
                           <span style={s.small}>{nfEur2.format(num(r.sage_montant_en_cours))} · {nf0.format(num(r.sage_nb_lignes_en_cours))} l.</span>
                         )}
-                        {r.sage_date_livraison && <span style={s.small}>{domaine === 'ACHAT' ? 'Récept. prévue' : 'Livr. prévue'} {fmtDate(r.sage_date_livraison)}</span>}
+                        {domaine === 'ACHAT' && r.sage_date_livraison && <span style={s.small}>Récept. prévue {fmtDate(r.sage_date_livraison)}</span>}
                       </td>
                       <td style={{ ...s.td, maxWidth: 200 }}>
                         {r.sage_pieces_en_cours ? <span style={s.mono}>{r.sage_pieces_en_cours}</span> : <span style={s.muted}>—</span>}
@@ -840,11 +964,19 @@ function PortefeuilleBlgSageContent() {
                         {r.facture_recente && <span style={{ ...s.small, color: tc('#8FC7DA') }}>{domaine === 'ACHAT' ? 'FAF récente' : 'récente : synchro BLG ?'}</span>}
                       </td>
                     </tr>
+                    {ouverte && peutDetailler && (
+                      <tr>
+                        <td colSpan={14} style={{ ...s.td, background: tc('rgba(255,255,255,0.03)'), padding: '10px 16px 14px 28px' }}>
+                          <LignesDates etat={lignesParCdc[r.reference]} />
+                        </td>
+                      </tr>
+                    )}
+                    </React.Fragment>
                   )
                 })}
                 {!loadingListe && filtered.length === 0 && (
                   <tr>
-                    <td style={s.td} colSpan={13}>Aucune commande.</td>
+                    <td style={s.td} colSpan={domaine === 'VENTE' ? 14 : 13}>Aucune commande.</td>
                   </tr>
                 )}
               </tbody>
@@ -857,9 +989,71 @@ function PortefeuilleBlgSageContent() {
               </button>
             </div>
           )}
-          <div style={s.note}>{T.noteListe}</div>
+          <div style={s.note}>
+            {T.noteListe}
+            {domaine === 'VENTE' && ' « Livr. souhaitée » : S = SAGE, B = BLG ; en orange quand les deux dates existent et diffèrent (une date absente d’un côté n’est pas comptée en écart). Le bouton « ▸ Lignes » détaille, article par article, la date souhaitée des lignes encore à livrer.'}
+          </div>
         </div>
       )}
+    </div>
+  )
+}
+
+// ── Détail des lignes d'une CDC : dates de livraison souhaitées SAGE ↔ BLG ──
+const PRESENCE_LABELS: Record<LigneDate['presence'], string> = { LES_DEUX: 'SAGE + BLG', SAGE_SEUL: 'SAGE seul', BLG_SEUL: 'BLG seul' }
+
+function LignesDates({ etat }: { etat?: LignesState }) {
+  if (!etat || etat.loading) return <span style={s.muted}>Chargement des lignes…</span>
+  if (etat.error) return <span style={{ color: tc(ECART_COLOR), fontSize: 12 }}>Lignes : {etat.error}</span>
+  if (!etat.lignes.length) return <span style={s.muted}>Aucune ligne article.</span>
+  const nbEcart = etat.lignes.filter((l) => l.ecart_date).length
+  const dateCell = (d: string | null, max: string | null, plusieurs: boolean, ecart: boolean) => (
+    <td style={{ ...s.td, whiteSpace: 'nowrap', ...(ecart ? { color: tc(ECART_COLOR), fontWeight: 700 } : {}) }}>
+      {fmtDate(d)}
+      {plusieurs && <span style={s.small}>→ {fmtDate(max)} (plusieurs dates)</span>}
+    </td>
+  )
+  return (
+    <div>
+      <div style={{ ...s.muted, marginBottom: 6 }}>
+        {nf0.format(etat.lignes.length)} article(s){nbEcart ? ` · ` : ''}
+        {nbEcart > 0 && <span style={{ color: tc(ECART_COLOR), fontWeight: 600 }}>{nf0.format(nbEcart)} en écart de date souhaitée</span>}
+      </div>
+      <table style={{ ...s.table, fontSize: 12 }}>
+        <thead>
+          <tr>
+            <th style={s.th}>Article</th>
+            <th style={s.th}>Présence</th>
+            <th style={{ ...s.thNum, borderLeft: '2px solid rgba(166,161,129,0.5)' }}>Qté SAGE</th>
+            <th style={s.thNum}>À livrer SAGE</th>
+            <th style={s.th}>État SAGE</th>
+            <th style={s.th}>Livr. souhaitée SAGE</th>
+            <th style={{ ...s.thNum, borderLeft: '2px solid rgba(166,161,129,0.5)' }}>Qté BLG</th>
+            <th style={s.thNum}>À livrer BLG</th>
+            <th style={s.th}>État BLG</th>
+            <th style={s.th}>Livr. souhaitée BLG</th>
+          </tr>
+        </thead>
+        <tbody>
+          {etat.lignes.map((l, i) => (
+            <tr key={`${l.reference_article ?? ''}-${i}`}>
+              <td style={s.td}>
+                <span style={s.mono}>{l.reference_article ?? '—'}</span>
+                <span style={s.small}>{l.designation ?? ''}</span>
+              </td>
+              <td style={{ ...s.td, whiteSpace: 'nowrap', ...(l.presence !== 'LES_DEUX' ? { color: tc('#E0A961') } : {}) }}>{PRESENCE_LABELS[l.presence]}</td>
+              <td style={{ ...s.tdNum, borderLeft: '2px solid rgba(166,161,129,0.35)' }}>{l.sage_qte == null ? '—' : nf0.format(num(l.sage_qte))}</td>
+              <td style={s.tdNum}>{l.sage_qte_a_livrer == null ? '—' : nf0.format(num(l.sage_qte_a_livrer))}</td>
+              <td style={s.td}>{l.sage_etats ?? '—'}</td>
+              {dateCell(l.sage_date_souhaitee, l.sage_date_max, l.sage_plusieurs_dates, l.ecart_date)}
+              <td style={{ ...s.tdNum, borderLeft: '2px solid rgba(166,161,129,0.35)' }}>{l.blg_qte == null ? '—' : nf0.format(num(l.blg_qte))}</td>
+              <td style={s.tdNum}>{l.blg_qte_a_livrer == null ? '—' : nf0.format(num(l.blg_qte_a_livrer))}</td>
+              <td style={s.td}>{l.blg_etats ?? '—'}</td>
+              {dateCell(l.blg_date_souhaitee, l.blg_date_max, l.blg_plusieurs_dates, l.ecart_date)}
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   )
 }
