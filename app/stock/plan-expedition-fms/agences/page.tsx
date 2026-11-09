@@ -238,6 +238,39 @@ function echelle(auj: string, fin: string, px: number): Echelle {
 
 type Glisse = { docs: string[]; depot: string; libelle: string }
 
+// ─────────────────────────────────────────────────────────────────────────
+// Qualité client (couleur SAGE de la fiche tiers, ref_tiers.qualite) — 09/11/2026
+// Même code couleur que la fiche client mobile : VERT CHECK / VERT LC / VERT CEGECLIM,
+// ORANGE CEGECLIM, ROUGE COMPTANT, CLOTURE ; préfixe « ROSE » = anneau rose.
+// ─────────────────────────────────────────────────────────────────────────
+
+function couleurQualite(raw: string | null | undefined): { couleur: string; rose: boolean; libelle: string } | null {
+  const libelle = (raw ?? '').trim().replace(/\s+/g, ' ')
+  if (!libelle) return null
+  const q = libelle.toUpperCase()
+  const rose = q.startsWith('ROSE')
+  const reste = rose ? q.slice(4).trim() : q
+  let couleur = '#8A8F99'
+  if (reste.includes('VERT')) couleur = '#3F9142'
+  else if (reste.includes('ORANGE')) couleur = '#E08A2E'
+  else if (reste.includes('ROUGE')) couleur = '#C8433A'
+  else if (reste.includes('CLOTURE')) couleur = '#4B5160'
+  else if (rose && !reste) couleur = '#E78AB8'
+  return { couleur, rose, libelle }
+}
+
+function PointQualite({ qualite, taille = 11 }: { qualite: string | null | undefined; taille?: number }) {
+  const c = couleurQualite(qualite)
+  if (!c) return <span className="inline-block shrink-0 rounded-full border border-dashed border-[#B9B4A6]" style={{ width: taille, height: taille }} title="Qualité SAGE non renseignée" />
+  return (
+    <span
+      className="inline-block shrink-0 rounded-full"
+      style={{ width: taille, height: taille, background: c.couleur, boxShadow: c.rose ? '0 0 0 2px #E78AB8' : undefined }}
+      title={`Qualité SAGE : ${c.libelle}`}
+    />
+  )
+}
+
 function Pastille({ m, titre, manque, transfert, fantome, split, couleur, onDragStart, onClick, petit, chantier }: {
   m: Metriques; titre: string; manque?: boolean; transfert?: boolean; fantome?: boolean; split?: 1 | 2
   couleur: string; onDragStart?: (e: React.DragEvent) => void; onClick?: () => void; petit?: boolean; chantier?: boolean
@@ -517,7 +550,8 @@ function BlocCommande({ c, depots, onEnregistre, onSplit, onLieu }: {
   )
 }
 
-function FicheCommandes({ cmds, depots, onClose, onEnregistre, onSplit, onLieu }: {
+function FicheCommandes({ cmds, depots, qualite, onClose, onEnregistre, onSplit, onLieu }: {
+  qualite?: string | null
   cmds: Commande[]; depots: string[]; onClose: () => void
   onEnregistre: (c: Commande, depot: string, date: string | null, comm: string) => Promise<void>; onSplit: (c: Commande) => void
   onLieu: (cmds: Commande[], lieu: 'PRO' | 'CHANTIER') => Promise<void>
@@ -529,7 +563,11 @@ function FicheCommandes({ cmds, depots, onClose, onEnregistre, onSplit, onLieu }
         <div className="flex items-start justify-between gap-2">
           <div>
             <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-[#B4761A]">Détail {cmds.length > 1 ? `de ${cmds.length} commandes` : 'de la commande'}</p>
-            <h2 className="text-[18px] font-bold">{cmds[0]?.client} <span className="text-[13px] font-semibold text-[#8A8474]">{cmds[0]?.tiers}</span></h2>
+            <h2 className="flex items-center gap-2 text-[18px] font-bold">
+              <PointQualite qualite={qualite} taille={13} />
+              {cmds[0]?.client} <span className="text-[13px] font-semibold text-[#8A8474]">{cmds[0]?.tiers}</span>
+              {couleurQualite(qualite) && <span className="text-[11.5px] font-semibold text-[#5E5A44]">{couleurQualite(qualite)?.libelle}</span>}
+            </h2>
             <p className="text-[11.5px] text-[#5E5A44]">Les changements de date ou de dépôt sont simulés ici et ajoutés à la liste « à reporter dans SAGE ». Départ FMS : les envois ne se regroupent que pour un même lieu de livraison.</p>
             {fmsCmds.length > 1 && (
               <div className="mt-1 flex items-center gap-1.5 text-[11.5px]">
@@ -712,6 +750,7 @@ function VueAgence() {
   const [agences, setAgences] = useState<AgenceResume[] | null>(null)
   const [meta, setMeta] = useState<Meta | null>(null)
   const [lignes, setLignes] = useState<Ligne[] | null>(null)
+  const [qualites, setQualites] = useState<Map<string, string | null>>(new Map())
   const [actions, setActions] = useState<Action[]>([])
   const [erreur, setErreur] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
@@ -752,6 +791,22 @@ function VueAgence() {
     setLignes(d.lignes); setActions(d.actions); setMeta(d.meta)
     if (d.meta) setHorizon(d.meta.parametres.horizon_jours)
   }, [])
+
+  // Qualité SAGE (couleur) des clients affichés, lue sur la fiche tiers.
+  useEffect(() => {
+    const manquants = Array.from(new Set((lignes ?? []).map((l) => l.tiers).filter((t): t is string => !!t))).filter((t) => !qualites.has(t))
+    if (!manquants.length) return
+    let actif = true
+    void (async () => {
+      const lus = new Map<string, string | null>(manquants.map((t) => [t, null]))
+      for (let i = 0; i < manquants.length; i += 200) {
+        const { data } = await supabase.from('ref_tiers').select('numero, qualite').in('numero', manquants.slice(i, i + 200))
+        ;((data ?? []) as { numero: string; qualite: string | null }[]).forEach((r) => lus.set(r.numero, r.qualite))
+      }
+      if (actif) setQualites((prev) => new Map([...prev, ...lus]))
+    })()
+    return () => { actif = false }
+  }, [lignes, qualites])
 
   useEffect(() => {
     if (accessLoading || !autorise) return
@@ -1091,8 +1146,9 @@ function VueAgence() {
                             <div className={`flex border-b ${ouvert ? 'border-transparent' : 'border-[#F0EDE6]'} hover:brightness-[0.98]`} style={{ background: ouvert ? (fms ? '#E9E2F5' : '#E8E5D6') : fms ? '#FBFAFD' : '#FFFFFF' }}>
                               <div className="sticky left-0 z-10 flex shrink-0 items-center gap-1.5 border-r border-[#E5E1D8] px-2 py-1" style={{ width: LARGEUR_GAUCHE, background: ouvert ? (fms ? '#E9E2F5' : '#E8E5D6') : fms ? '#FBFAFD' : '#FFFFFF', boxShadow: ouvert ? `inset 4px 0 0 ${couleur}` : undefined }}>
                                 <button type="button" onClick={() => setOuverts((s) => { const n = new Set(s); const k = `${depot}|${cl.tiers}`; if (n.has(k)) n.delete(k); else n.add(k); return n })} className="w-4 text-[11px] text-[#8A8474]">{ouvert ? '▾' : '▸'}</button>
+                                <PointQualite qualite={qualites.get(cl.tiers)} />
                                 <div className="min-w-0 flex-1">
-                                  <button type="button" onClick={() => setFicheCles(cl.cmds.map((c) => c.cle))} className="block max-w-full truncate text-left text-[12.5px] font-bold hover:underline" title={`${cl.client} — détail des commandes`}>{cl.client}</button>
+                                  <button type="button" onClick={() => setFicheCles(cl.cmds.map((c) => c.cle))} className="block max-w-full truncate text-left text-[12.5px] font-bold hover:underline" title={`${cl.client}${qualites.get(cl.tiers) ? ` — qualité ${couleurQualite(qualites.get(cl.tiers))?.libelle}` : ''} — détail des commandes`}>{cl.client}</button>
                                   <div className="text-[10.5px] text-[#8A8474]">{cl.tiers} · {cl.cmds.length} CDC{modif ? ' · ✎ modifié' : ''}</div>
                                 </div>
                                 <button type="button" onClick={() => setSplitCmds(cl.cmds)} title={interessant ? 'Scinder : le dispo vaut un envoi (groupe extérieur ou ≥ 1 palette)' : 'Scinder l’expédition'}
@@ -1160,7 +1216,7 @@ function VueAgence() {
       </div>
 
       {deplacement && <FenetreDeplacement d={deplacement} commandes={commandes} onAnnule={() => setDeplacement(null)} onValide={validerDeplacement} />}
-      {ficheCmds.length > 0 && <FicheCommandes cmds={ficheCmds} depots={depotsChoix} onClose={() => setFicheCles(null)} onEnregistre={enregistrerFiche} onSplit={(c) => setSplitCmds([c])} onLieu={enregistrerLieu} />}
+      {ficheCmds.length > 0 && <FicheCommandes cmds={ficheCmds} depots={depotsChoix} qualite={qualites.get(ficheCmds[0]?.tiers ?? '')} onClose={() => setFicheCles(null)} onEnregistre={enregistrerFiche} onSplit={(c) => setSplitCmds([c])} onLieu={enregistrerLieu} />}
 
       {/* Barre de dépôts pendant un glisser : déposer sur un dépôt = changer le dépôt de départ */}
       {enGlisse && (
