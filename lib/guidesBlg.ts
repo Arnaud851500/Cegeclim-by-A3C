@@ -172,15 +172,33 @@ export function construireGuide(html: string, urls: Map<string, string>, ancre?:
   // Dans une iframe srcdoc, un lien « #etape » se résout sur l'URL du compagnon et
   // rechargerait le cadre : on intercepte ces liens (et location.hash du script de
   // la page) pour faire défiler le document lui-même.
+  // 09/11/2026 : les images sont chargées à la demande et n'ont pas de hauteur avant
+  // chargement ; celles situées au-dessus de la cible grossissent après le saut et la
+  // repoussent vers le bas (ex. « Livraison partielle » ouvrait sur le MODOP précédent).
+  // La cible reste donc « épinglée » : à chaque changement de hauteur du document, on
+  // y revient, jusqu'à ce que l'utilisateur fasse défiler / clique, ou au bout de 15 s.
+  // Les images situées avant la cible sont aussi chargées tout de suite, et le saut est
+  // instantané : les chapitres imposent « scroll-behavior: smooth », dont l'animation sur
+  // une longue page était interrompue en cours de route par le chargement des images.
   const ancreSure = (ancre ?? '').replace(/[^A-Za-z0-9_-]/g, '')
   const script =
     `<script>(function(){` +
-    `function aller(id){var e=id?document.getElementById(id):null;if(e){e.scrollIntoView();}else if(!id){scrollTo(0,0);}}` +
+    `var cible=null,fin=0,ro=null;` +
+    `function stop(){cible=null;if(ro){ro.disconnect();ro=null;}}` +
+    `function recaler(){if(!cible)return;if(Date.now()>fin){stop();return;}cible.scrollIntoView({block:'start',behavior:'instant'});}` +
+    `function aller(id){var e=id?document.getElementById(id):null;` +
+    `if(!e){stop();if(!id)scrollTo(0,0);return;}` +
+    `var imgs=document.images;for(var i=0;i<imgs.length;i++){var im=imgs[i];` +
+    `if(im.compareDocumentPosition(e)&Node.DOCUMENT_POSITION_FOLLOWING){im.loading='eager';}}` +
+    `cible=e;fin=Date.now()+15000;e.scrollIntoView({block:'start',behavior:'instant'});` +
+    `if(!ro&&window.ResizeObserver){ro=new ResizeObserver(recaler);ro.observe(document.body);}}` +
+    `['wheel','touchstart','keydown','mousedown'].forEach(function(t){addEventListener(t,function(){if(cible)stop();},{passive:true,capture:true});});` +
+    `document.addEventListener('load',function(ev){if(ev.target&&ev.target.tagName==='IMG')recaler();},true);` +
     `document.addEventListener('click',function(ev){var a=ev.target&&ev.target.closest?ev.target.closest('a[href^="#"]'):null;` +
-    `if(!a)return;ev.preventDefault();aller(decodeURIComponent(a.getAttribute('href').slice(1)));},true);` +
+    `if(!a)return;ev.preventDefault();setTimeout(function(){aller(decodeURIComponent(a.getAttribute('href').slice(1)));},0);},true);` +
     `addEventListener('hashchange',function(){aller(decodeURIComponent(location.hash.slice(1)));});` +
     (ancreSure
-      ? `function go(){aller('${ancreSure}');}if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded',go);}else{go();}setTimeout(go,300);`
+      ? `function go(){aller('${ancreSure}');}if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded',go);}else{go();}`
       : '') +
     `})();</script>`
   out = /<\/body>/i.test(out) ? out.replace(/<\/body>/i, `${script}</body>`) : out + script

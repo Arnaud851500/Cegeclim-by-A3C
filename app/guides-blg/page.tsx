@@ -17,7 +17,12 @@
 // Droits : lecture can_guides_blg (ou administration), dépôt réservé aux
 // administrateurs — contrôlés en base (peut_lire_guides_blg / peut_gerer_guides_blg).
 // URL : ?chapitre=clients&ancre=comprendre-fiche-04 (ouvre le chapitre sur une étape).
-// Migrations : 20261103g_guides_blg.sql, 20261103h_guides_blg_icone.sql
+// 09/11/2026 : chaque chapitre peut être rattaché à son lien Teams / SharePoint (partage
+//   « Toute personne disposant du lien ») ; « Mettre à jour » (par chapitre ou pour tous)
+//   relit le fichier côté serveur (/api/admin/guides-blg/source) et ne republie que les
+//   chapitres modifiés. Ouverture sur une étape fiabilisée (lib/guidesBlg.ts).
+// Migrations : 20261103g_guides_blg.sql, 20261103h_guides_blg_icone.sql,
+//   20261109c_guides_blg_source_teams.sql
 // ============================================================================
 
 import React, { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
@@ -57,11 +62,18 @@ type GuideRow = {
   taille_page: number | null
   actif: boolean
   icone: string | null
+  source_url: string | null
+  source_hash: string | null
+  source_verifie_at: string | null
+  source_message: string | null
   updated_at: string
   updated_by: string | null
 }
 
 type IndexGuide = { prefixe: string; modops: GuideModopIndex[] }
+
+type OptionsPublication = { slug?: string; sourceHash?: string; ordreMax: number; auteur: string | null }
+type ReponseSource = { statut: 'INCHANGE' | 'A_PUBLIER' | 'SANS_LIEN' | 'ERREUR'; message?: string; path?: string; hash?: string; taille?: number }
 
 const EXEMPLES = ['bloquer un client', 'créer une adresse de livraison', 'livraison partielle', 'réserver un article', 'devis Préco']
 
@@ -235,6 +247,72 @@ function GuidesBlgContent() {
   }, [ouvert])
 
   // ── Dépôt ────────────────────────────────────────────────────────────────
+  /** Publie un fichier chapitre (extraction des images / PDF, page légère, catalogue). */
+  const publier = async (file: File, opts: OptionsPublication): Promise<{ resume: string; ordreMax: number }> => {
+    let ordreMax = opts.ordreMax
+    setBusy(`${file.name} : préparation…`)
+    const prep = await preparerGuide(file)
+    const slug = opts.slug ?? prep.slug
+    const existant = guides.find((g) => g.slug === slug) ?? null
+    const version = (existant?.version ?? 0) + 1
+    const prefixe = `${slug}/v${version}`
+    const bucket = supabase.storage.from(GUIDES_BUCKET)
+
+    let envoyes = 0
+    const queue = [...prep.assets]
+    const worker = async () => {
+      for (let a = queue.shift(); a; a = queue.shift()) {
+        const { error: upErr } = await bucket.upload(`${prefixe}/${a.nom}`, a.blob, { contentType: a.mime, upsert: true, cacheControl: '31536000' })
+        if (upErr) throw new Error(`${a.nom} : ${upErr.message}`)
+        envoyes++
+        setBusy(`${file.name} : envoi des images et PDF ${envoyes}/${prep.assets.length}…`)
+      }
+    }
+    await Promise.all(Array.from({ length: 6 }, () => worker()))
+
+    setBusy(`${file.name} : enregistrement de la page…`)
+    const page = new Blob([prep.html], { type: 'text/plain;charset=utf-8' })
+    const { error: pageErr } = await bucket.upload(`${prefixe}/index.html`, page, { contentType: 'text/plain;charset=utf-8', upsert: true, cacheControl: '60' })
+    if (pageErr) throw new Error(`page : ${pageErr.message}`)
+
+    if (!existant) ordreMax += 10
+    const maintenant = new Date().toISOString()
+    const { error: rowErr } = await supabase.from('guides_blg').upsert(
+      {
+        slug,
+        titre: existant?.titre ?? prep.titre,
+        sous_titre: prep.sous_titre || null,
+        fichier_origine: existant?.fichier_origine && opts.sourceHash ? existant.fichier_origine : file.name,
+        ordre: existant?.ordre ?? ordreMax,
+        version,
+        prefixe,
+        sommaire: prep.sommaire,
+        nb_modop: prep.nb_modop,
+        nb_etapes: prep.nb_etapes,
+        nb_images: prep.nb_images,
+        nb_pdf: prep.nb_pdf,
+        taille_origine: prep.taille_origine,
+        taille_page: prep.taille_page,
+        actif: existant?.actif ?? true,
+        icone: existant?.icone ?? null,
+        // Un dépôt manuel n'efface pas le lien Teams ; l'empreinte n'est connue que pour une mise à jour depuis le lien.
+        source_hash: opts.sourceHash ?? null,
+        ...(opts.sourceHash ? { source_verifie_at: maintenant, source_message: 'Nouvelle version publiée depuis Teams.' } : {}),
+        updated_at: maintenant,
+        updated_by: opts.auteur,
+      },
+      { onConflict: 'slug' },
+    )
+    if (rowErr) throw new Error(`catalogue : ${rowErr.message}`)
+
+    if (existant?.prefixe && existant.prefixe !== prefixe) await viderDossier(existant.prefixe)
+
+    return {
+      ordreMax,
+      resume: `${existant?.titre ?? prep.titre} (${prep.nb_modop} modes opératoires, ${prep.nb_etapes} étapes, ${formatTaille(prep.taille_origine)} → page ${formatTaille(prep.taille_page)})`,
+    }
+  }
+
   const deposer = async (files: FileList | File[] | null) => {
     const liste = Array.from(files ?? []).filter((f) => /\.html?$/i.test(f.name))
     if (!liste.length) {
@@ -249,59 +327,9 @@ function GuidesBlgContent() {
     let ordreMax = guides.reduce((m, g) => Math.max(m, g.ordre ?? 0), 0)
     try {
       for (const file of liste) {
-        setBusy(`${file.name} : préparation…`)
-        const prep = await preparerGuide(file)
-        const existant = guides.find((g) => g.slug === prep.slug) ?? null
-        const version = (existant?.version ?? 0) + 1
-        const prefixe = `${prep.slug}/v${version}`
-        const bucket = supabase.storage.from(GUIDES_BUCKET)
-
-        let envoyes = 0
-        const queue = [...prep.assets]
-        const worker = async () => {
-          for (let a = queue.shift(); a; a = queue.shift()) {
-            const { error: upErr } = await bucket.upload(`${prefixe}/${a.nom}`, a.blob, { contentType: a.mime, upsert: true, cacheControl: '31536000' })
-            if (upErr) throw new Error(`${a.nom} : ${upErr.message}`)
-            envoyes++
-            setBusy(`${file.name} : envoi des images et PDF ${envoyes}/${prep.assets.length}…`)
-          }
-        }
-        await Promise.all(Array.from({ length: 6 }, () => worker()))
-
-        setBusy(`${file.name} : enregistrement de la page…`)
-        const page = new Blob([prep.html], { type: 'text/plain;charset=utf-8' })
-        const { error: pageErr } = await bucket.upload(`${prefixe}/index.html`, page, { contentType: 'text/plain;charset=utf-8', upsert: true, cacheControl: '60' })
-        if (pageErr) throw new Error(`page : ${pageErr.message}`)
-
-        if (!existant) ordreMax += 10
-        const { error: rowErr } = await supabase.from('guides_blg').upsert(
-          {
-            slug: prep.slug,
-            titre: existant?.titre ?? prep.titre,
-            sous_titre: prep.sous_titre || null,
-            fichier_origine: file.name,
-            ordre: existant?.ordre ?? ordreMax,
-            version,
-            prefixe,
-            sommaire: prep.sommaire,
-            nb_modop: prep.nb_modop,
-            nb_etapes: prep.nb_etapes,
-            nb_images: prep.nb_images,
-            nb_pdf: prep.nb_pdf,
-            taille_origine: prep.taille_origine,
-            taille_page: prep.taille_page,
-            actif: existant?.actif ?? true,
-            icone: existant?.icone ?? null,
-            updated_at: new Date().toISOString(),
-            updated_by: auteur,
-          },
-          { onConflict: 'slug' },
-        )
-        if (rowErr) throw new Error(`catalogue : ${rowErr.message}`)
-
-        if (existant?.prefixe && existant.prefixe !== prefixe) await viderDossier(existant.prefixe)
-
-        faits.push(`${prep.titre} (${prep.nb_modop} modes opératoires, ${prep.nb_etapes} étapes, ${formatTaille(prep.taille_origine)} → page ${formatTaille(prep.taille_page)})`)
+        const r = await publier(file, { ordreMax, auteur })
+        ordreMax = r.ordreMax
+        faits.push(r.resume)
       }
       setMessage(`Chapitre${faits.length > 1 ? 's' : ''} publié${faits.length > 1 ? 's' : ''} : ${faits.join(' · ')}.`)
     } catch (e) {
@@ -310,6 +338,94 @@ function GuidesBlgContent() {
       setBusy(null)
       setTick((n) => n + 1)
     }
+  }
+
+  // ── Mise à jour depuis le lien Teams ─────────────────────────────────────
+  /** Relit un chapitre depuis son lien ; renvoie une ligne de compte rendu. */
+  const mettreAJourUn = async (g: GuideRow, auteur: string | null, force = false): Promise<{ ok: boolean; ligne: string }> => {
+    setBusy(`${g.titre} : lecture du fichier sur Teams…`)
+    let rep: ReponseSource
+    try {
+      const res = await fetch('/api/admin/guides-blg/source', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ slug: g.slug, force }),
+      })
+      rep = (await res.json()) as ReponseSource
+      if (!res.ok && !rep?.statut) throw new Error(`HTTP ${res.status}`)
+    } catch (e) {
+      return { ok: false, ligne: `${g.titre} : ${e instanceof Error ? e.message : String(e)}` }
+    }
+    if (rep.statut === 'INCHANGE') return { ok: true, ligne: `${g.titre} : inchangé` }
+    if (rep.statut === 'SANS_LIEN') return { ok: true, ligne: `${g.titre} : pas de lien Teams` }
+    if (rep.statut !== 'A_PUBLIER' || !rep.path || !rep.hash) return { ok: false, ligne: `${g.titre} : ${rep.message ?? 'erreur inconnue'}` }
+
+    const bucket = supabase.storage.from(GUIDES_BUCKET)
+    try {
+      setBusy(`${g.titre} : nouvelle version trouvée, récupération…`)
+      const { data: blob, error: dlErr } = await bucket.download(rep.path)
+      if (dlErr || !blob) throw new Error(dlErr?.message ?? 'fichier temporaire introuvable')
+      const nom = g.fichier_origine || `CHAPITRE-${g.slug}.html`
+      const file = new File([blob], nom, { type: 'text/html' })
+      const ordreMax = guides.reduce((m, x) => Math.max(m, x.ordre ?? 0), 0)
+      await publier(file, { slug: g.slug, sourceHash: rep.hash, ordreMax, auteur })
+      return { ok: true, ligne: `${g.titre} : nouvelle version publiée` }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      await supabase.from('guides_blg').update({ source_verifie_at: new Date().toISOString(), source_message: `Publication interrompue : ${msg}` }).eq('slug', g.slug)
+      return { ok: false, ligne: `${g.titre} : publication interrompue — ${msg}` }
+    } finally {
+      await bucket.remove([rep.path])
+    }
+  }
+
+  const mettreAJour = async (liste: GuideRow[], force = false) => {
+    const cibles = liste.filter((g) => g.source_url)
+    if (!cibles.length) {
+      setError('Aucun chapitre n’a de lien Teams : ouvrez un chapitre et utilisez « Lien Teams… ».')
+      return
+    }
+    setError(null)
+    setMessage(null)
+    const { data: userData } = await supabase.auth.getUser()
+    const auteur = userData.user?.email ?? null
+    const lignes: string[] = []
+    let erreurs = 0
+    try {
+      for (const g of cibles) {
+        const r = await mettreAJourUn(g, auteur, force)
+        lignes.push(r.ligne)
+        if (!r.ok) erreurs++
+      }
+    } finally {
+      setBusy(null)
+      setTick((n) => n + 1)
+    }
+    if (erreurs) setError(`Mise à jour : ${lignes.join(' · ')}`)
+    else setMessage(`Mise à jour terminée : ${lignes.join(' · ')}.`)
+  }
+
+  const definirLien = async (g: GuideRow) => {
+    const saisie = window.prompt(
+      'Lien Teams / SharePoint du fichier (partage « Toute personne disposant du lien »). Laisser vide pour retirer le lien.',
+      g.source_url ?? '',
+    )
+    if (saisie === null) return
+    const url = saisie.trim()
+    if (url && !/^https:\/\/[^\s]+$/i.test(url)) {
+      setError('Le lien doit commencer par https://')
+      return
+    }
+    const { error: err } = await supabase
+      .from('guides_blg')
+      .update({ source_url: url || null, source_hash: null, source_message: url ? 'Lien enregistré, pas encore vérifié.' : null, source_verifie_at: null })
+      .eq('slug', g.slug)
+    if (err) {
+      setError(err.message)
+      return
+    }
+    if (url) await mettreAJour([{ ...g, source_url: url, source_hash: null }])
+    else setTick((n) => n + 1)
   }
 
   const viderDossier = async (prefixe: string) => {
@@ -395,6 +511,20 @@ function GuidesBlgContent() {
           <h1 style={s.title}>Guides BLG</h1>
           <p style={s.subtitle}>Modes opératoires BLG Cloud : posez votre question, ou ouvrez un chapitre pour parcourir ses modes opératoires.</p>
         </div>
+        {gestion && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+            {busy && <span style={{ ...s.muted, color: tc('#8FC7DA') }}>{busy}</span>}
+            <button
+              type="button"
+              style={s.btnPrimary}
+              disabled={Boolean(busy)}
+              onClick={() => void mettreAJour(guides)}
+              title="Relit chaque chapitre depuis son lien Teams et republie ceux qui ont changé"
+            >
+              ⟳ Mettre à jour depuis Teams ({guides.filter((g) => g.source_url).length}/{guides.length})
+            </button>
+          </div>
+        )}
       </div>
 
       {error && <div style={s.error}>{error}</div>}
@@ -562,6 +692,14 @@ function GuidesBlgContent() {
             </div>
             {gestion && (
               <div style={s.modalFoot}>
+                <button type="button" style={s.btn} disabled={Boolean(busy)} onClick={() => void definirLien(guideOuvert)}>
+                  {guideOuvert.source_url ? 'Lien Teams…' : '+ Lien Teams'}
+                </button>
+                {guideOuvert.source_url && (
+                  <button type="button" style={s.btnPrimary} disabled={Boolean(busy)} onClick={() => void mettreAJour([guideOuvert])}>
+                    {busy ? 'Mise à jour…' : '⟳ Mettre à jour'}
+                  </button>
+                )}
                 <button type="button" style={s.btn} onClick={() => void modifier(guideOuvert)}>Titre / ordre / icône</button>
                 <button type="button" style={s.btn} onClick={() => void basculerActif(guideOuvert)}>{guideOuvert.actif ? 'Masquer' : 'Publier'}</button>
                 <button type="button" style={s.btnDanger} disabled={Boolean(busy)} onClick={() => void supprimer(guideOuvert)}>Supprimer</button>
@@ -569,6 +707,22 @@ function GuidesBlgContent() {
                   {guideOuvert.fichier_origine ?? '—'} · v{guideOuvert.version} · {formatTaille(guideOuvert.taille_origine)} → {formatTaille(guideOuvert.taille_page)} · {guideOuvert.nb_images} images
                   {guideOuvert.updated_by ? ` · ${guideOuvert.updated_by}` : ''}
                 </span>
+                <div style={{ flexBasis: '100%', ...s.muted }}>
+                  {busy ? (
+                    <span style={{ color: tc('#8FC7DA') }}>{busy}</span>
+                  ) : guideOuvert.source_url ? (
+                    <>
+                      Source Teams :{' '}
+                      <a href={guideOuvert.source_url} target="_blank" rel="noreferrer" style={{ color: tc('#8FC7DA') }}>ouvrir le fichier ↗</a>
+                      {guideOuvert.source_verifie_at
+                        ? ` · vérifié le ${new Date(guideOuvert.source_verifie_at).toLocaleString('fr-FR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}`
+                        : ''}
+                      {guideOuvert.source_message ? ` — ${guideOuvert.source_message}` : ''}
+                    </>
+                  ) : (
+                    'Aucun lien Teams : le chapitre ne se met à jour que par dépôt manuel.'
+                  )}
+                </div>
               </div>
             )}
           </div>
