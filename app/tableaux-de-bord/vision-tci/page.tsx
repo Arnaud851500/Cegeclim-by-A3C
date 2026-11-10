@@ -875,7 +875,7 @@ function WidgetFrame({
     <div
       ref={ref}
       data-widget={widget.id}
-      className={`group relative ${COL_SPAN[widget.w]} [&>div]:h-full`}
+      className={`group relative ${COL_SPAN[widget.w]} [&>*:first-child]:h-full`}
       style={{
         opacity: dragging === widget.id ? 0.4 : 1,
         boxShadow: over === "avant" ? "-4px 0 0 0 #2E5BB8" : over === "apres" ? "4px 0 0 0 #2E5BB8" : undefined,
@@ -897,7 +897,7 @@ function WidgetFrame({
     >
       {children}
       <div
-        className="pointer-events-none absolute -top-3 left-1/2 z-20 flex -translate-x-1/2 items-center gap-0.5 rounded-full border px-1 py-0.5 opacity-0 shadow-md transition group-hover:pointer-events-auto group-hover:opacity-100"
+        className="pointer-events-none absolute -top-3 left-1/2 z-20 flex h-6 -translate-x-1/2 items-center gap-0.5 whitespace-nowrap rounded-full border px-1 opacity-0 shadow-md transition group-hover:pointer-events-auto group-hover:opacity-100"
         style={{ background: "var(--cg-panel)", borderColor: GRID, color: "var(--cg-ink)" }}
       >
         <span
