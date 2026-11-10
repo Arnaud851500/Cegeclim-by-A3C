@@ -9,8 +9,9 @@
 //
 // À chaque passage (toutes les 5 minutes via launchd, voir
 // scripts/installer-synchro-guides-mac.sh) :
-//   1. liste les fichiers CHAPITRE-*.html du dossier (sans descendre dans les
-//      sous-dossiers, pour ignorer les brouillons type « RELECTURE MODOP ») ;
+//   1. liste les fichiers CHAPITRE-*.html du dossier et de ses sous-dossiers par
+//      thème (sauf dossiers de relecture, « z - Formation » et anciennes versions,
+//      voir listerChapitres) ;
 //   2. ignore ceux dont la taille et la date de modification n'ont pas bougé
 //      depuis le passage précédent (état local ~/.cegeclim-guides-sync.json) ;
 //   3. pour les autres, calcule l'empreinte SHA-256 et la compare à
@@ -321,18 +322,71 @@ async function synchroFormation(sb: SupabaseClient, racine: string, etat: Etat, 
   if (envoyes || lignes.length || retires.length) log(`Formation : ${parts.join(', ')}`)
 }
 
+// 10/11/2026 — les chapitres sont désormais rangés dans un sous-dossier par thème
+// (Articles/, CLIENT/, Devis/, LOGISTIQUE/…). On les cherche donc aussi dans les
+// sous-dossiers (3 niveaux), en ignorant :
+//   - les dossiers de relecture (« Relecture Modop », « RELECTURE MODOP »…) et
+//     « z - Formation » (pavé Formation, traité à part) ;
+//   - les anciennes versions : nom contenant « old », « ancien » ou « avant retours ».
+// Le nom est normalisé (« CHAPITRE-Logistique Copier » → Logistique,
+// « CHAPITRE-Articles_2 » → Articles, « … (1) » → …) ; si plusieurs fichiers
+// donnent le même chapitre, le plus récemment modifié est publié.
+type ChapitreFichier = { abs: string; nom: string; mtime: number }
+
+function nomNormalise(nom: string): string {
+  const ext = (nom.match(/\.html?$/i) ?? ['.html'])[0]
+  let base = nom.slice(0, nom.length - ext.length).trim()
+  for (;;) {
+    const avant = base
+    base = base
+      .replace(/[\s_-]*\(\d+\)$/, '')
+      .replace(/[\s_-]+(copier|copie|copy)(\s*\d+)?$/i, '')
+      .replace(/_\d+$/, '')
+      .trim()
+    if (base === avant) break
+  }
+  return `${base}${ext}`
+}
+
+function listerChapitres(racine: string): ChapitreFichier[] {
+  const trouves: ChapitreFichier[] = []
+  const parcourir = (dir: string, profondeur: number) => {
+    for (const ent of readdirSync(dir, { withFileTypes: true })) {
+      if (ent.name.startsWith('.') || ent.name.startsWith('~$')) continue
+      const abs = join(dir, ent.name)
+      if (ent.isDirectory()) {
+        if (profondeur >= 3) continue
+        if (/relecture/i.test(ent.name) || ent.name.toLowerCase() === FORMATION_DOSSIER_DEFAUT.toLowerCase()) continue
+        parcourir(abs, profondeur + 1)
+        continue
+      }
+      if (!/^chapitre[-_ ].+\.html?$/i.test(ent.name)) continue
+      if (/(^|[^a-z])(old|ancien)([^a-z]|$)|avant retours/i.test(ent.name)) continue
+      trouves.push({ abs, nom: nomNormalise(ent.name), mtime: statSync(abs).mtimeMs })
+    }
+  }
+  parcourir(racine, 0)
+  const parSlug = new Map<string, ChapitreFichier>()
+  for (const f of trouves) {
+    const slug = slugDepuisFichier(f.nom)
+    const deja = parSlug.get(slug)
+    if (!deja || f.mtime > deja.mtime) parSlug.set(slug, f)
+  }
+  return Array.from(parSlug.values()).sort((a, b) => a.nom.localeCompare(b.nom, 'fr'))
+}
+
 async function synchroChapitres(sb: SupabaseClient, dossier: string, etat: Etat, force: boolean) {
-  let noms: string[]
+  let fichiers: ChapitreFichier[]
   try {
-    noms = readdirSync(dossier).filter((n) => /^chapitre[-_ ].+\.html?$/i.test(n) && !n.startsWith('~$')).sort()
+    fichiers = listerChapitres(dossier)
   } catch (e) {
     const code = (e as NodeJS.ErrnoException).code
     if (code === 'EPERM' || code === 'EACCES')
       throw new Error(`macOS refuse l'accès au dossier (${code}). Réglages Système › Confidentialité et sécurité › Accès complet au disque : ajoutez « node » (${process.execPath}).`)
     throw new Error(`Dossier introuvable : ${dossier}`)
   }
-  if (!noms.length) {
-    log(`Aucun fichier CHAPITRE-*.html dans ${dossier}`)
+  if (!fichiers.length) {
+    log(`Aucun fichier CHAPITRE-*.html dans ${dossier} (ni dans ses sous-dossiers)`)
     return
   }
 
@@ -343,8 +397,9 @@ async function synchroChapitres(sb: SupabaseClient, dossier: string, etat: Etat,
 
   const inchanges: string[] = []
   let publies = 0
-  for (const nom of noms) {
-    const chemin = join(dossier, nom)
+  for (const f of fichiers) {
+    const chemin = f.abs
+    const nom = f.nom
     const slug = slugDepuisFichier(nom)
     const existant = guides.find((g) => g.slug === slug) ?? null
     try {
