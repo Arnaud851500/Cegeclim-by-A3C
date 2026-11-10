@@ -449,11 +449,21 @@ async function main() {
   if (!url || !cle) throw new Error(`NEXT_PUBLIC_SUPABASE_URL ou SUPABASE_SERVICE_ROLE_KEY absent de ${join(RACINE, '.env.local')}.`)
   const dossierFormation = argument('--formation') ?? process.env.GUIDES_FORMATION_DOSSIER ?? trouverDossierFormation(dossier)
 
+  // 10/11/2026 — la tâche macOS a été installée sur un sous-dossier (CFLUIDE) ; les
+  // chapitres sont désormais rangés par thème sous la racine de l'équipe Teams,
+  // celle qui contient « z - Formation ». On repart donc de cette racine.
+  let racineChapitres = resolve(dossier)
+  const parentFormation = dirname(resolve(dossierFormation))
+  if (existsSync(dossierFormation) && parentFormation !== racineChapitres && racineChapitres.startsWith(parentFormation + sep)) {
+    log(`Chapitres cherchés depuis la racine de l'équipe : ${parentFormation}`)
+    racineChapitres = parentFormation
+  }
+
   const sb = createClient(url, cle, { auth: { persistSession: false, autoRefreshToken: false } })
   const etat = lireEtat()
   let echec: unknown = null
   try {
-    await synchroChapitres(sb, dossier, etat, force)
+    await synchroChapitres(sb, racineChapitres, etat, force)
   } catch (e) {
     echec = e
     log(`Chapitres : ERREUR — ${e instanceof Error ? e.message : String(e)}`)
