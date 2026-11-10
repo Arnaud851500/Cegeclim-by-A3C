@@ -836,6 +836,19 @@ function WidgetFrame({
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const [over, setOver] = useState<null | "avant" | "apres">(null);
+  // Barre d'outils (déplacer / largeur) ouverte seulement au clic sur l'engrenage,
+  // pour ne plus masquer les données au survol.
+  const [outils, setOutils] = useState(false);
+  useEffect(() => {
+    if (!outils) return;
+    const fermer = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOutils(false);
+    };
+    const echap = (e: KeyboardEvent) => { if (e.key === "Escape") setOutils(false); };
+    document.addEventListener("mousedown", fermer);
+    document.addEventListener("keydown", echap);
+    return () => { document.removeEventListener("mousedown", fermer); document.removeEventListener("keydown", echap); };
+  }, [outils]);
   return (
     <div
       ref={ref}
@@ -861,8 +874,19 @@ function WidgetFrame({
       }}
     >
       {children}
+      <button
+        type="button"
+        onClick={() => setOutils((v) => !v)}
+        title="Modifier le widget (déplacer, largeur)"
+        aria-label="Modifier le widget"
+        className={`absolute -left-2 -top-2 z-20 flex h-6 w-6 items-center justify-center rounded-full border text-[13px] leading-none shadow-sm transition ${outils ? "opacity-100" : "opacity-0 group-hover:opacity-70 hover:!opacity-100"}`}
+        style={{ background: "var(--cg-panel)", borderColor: GRID, color: "var(--cg-ink)" }}
+      >
+        ⚙
+      </button>
+      {outils && (
       <div
-        className="pointer-events-none absolute -top-3 left-1/2 z-20 flex -translate-x-1/2 items-center gap-0.5 rounded-full border px-1 py-0.5 opacity-0 shadow-md transition group-hover:pointer-events-auto group-hover:opacity-100"
+        className="absolute -top-3 left-6 z-20 flex items-center gap-0.5 rounded-full border px-1 py-0.5 shadow-md"
         style={{ background: "var(--cg-panel)", borderColor: GRID, color: "var(--cg-ink)" }}
       >
         <span
@@ -895,6 +919,7 @@ function WidgetFrame({
           </button>
         ))}
       </div>
+      )}
     </div>
   );
 }
@@ -1051,6 +1076,16 @@ export default function VisionTciBisPage() {
     [effAgence, effCollab, familleMacroFiltre, jMoins1, refreshTick],
   );
 
+  // Filtre « Famille macro » du haut de l'écran appliqué aussi aux colonnes des graphes.
+  const fluxFiltre = useMemo(
+    () => (familleMacroFiltre ? flux.filter((r) => r.famille_macro === familleMacroFiltre) : flux),
+    [flux, familleMacroFiltre],
+  );
+  const pfFiltre = useMemo(
+    () => (familleMacroFiltre ? pf.filter((r) => r.famille_macro === familleMacroFiltre) : pf),
+    [pf, familleMacroFiltre],
+  );
+
   // Opérations sur la disposition
   function retirer(id: string) { setWidgets((cur) => cur.filter((w) => w.id !== id)); }
   function maj(id: string, patch: Partial<Widget>) {
@@ -1092,7 +1127,7 @@ export default function VisionTciBisPage() {
       if (w.cle === "PORTEFEUILLE") {
         return (
           <PortefeuilleFamillesCard
-            rows={pf} topN={topN} color={def.color} anneeN={anneeN}
+            rows={pfFiltre} topN={topN} color={def.color} anneeN={anneeN}
             vue={w.vue || "E"} setVue={(v) => maj(w.id, { vue: v })}
             onRemove={() => retirer(w.id)}
           />
@@ -1100,7 +1135,7 @@ export default function VisionTciBisPage() {
       }
       return (
         <GrapheFamillesCard
-          type={w.cle} label={def.label} color={def.color} rows={flux} topN={topN} anneeN={anneeN}
+          type={w.cle} label={def.label} color={def.color} rows={fluxFiltre} topN={topN} anneeN={anneeN}
           mode={w.mode || "mensuel"} onMode={(m) => maj(w.id, { mode: m })}
           onRemove={() => retirer(w.id)} kpiScope={kpiScope}
         />
