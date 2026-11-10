@@ -350,7 +350,7 @@ function GrapheFamillesCard({
               <BarChart data={dataMensuel} barGap={2} barCategoryGap="18%" margin={{ top: 6, right: 6, left: 0, bottom: 0 }}>
                 <CartesianGrid stroke={GRID} vertical={false} />
                 <XAxis dataKey="mois" tick={{ fill: AXIS, fontSize: 11 }} axisLine={false} tickLine={false} />
-                <YAxis tickFormatter={fmtAxis} tick={{ fill: AXIS, fontSize: 11 }} axisLine={false} tickLine={false} width={44} />
+                <YAxis domain={[0, "auto"]} allowDataOverflow tickFormatter={fmtAxis} tick={{ fill: AXIS, fontSize: 11 }} axisLine={false} tickLine={false} width={44} />
                 <Tooltip cursor={{ fill: "rgba(var(--cg-ink-rgb),0.05)" }} content={<ChartTooltip familles={familles} />} />
                 {familles.map((f, i) => (
                   <Bar key={`P_${f}`} dataKey={`P_${f}`} stackId="P" barSize={9} fill={familleColor(f, i)} fillOpacity={0.32} isAnimationActive={false} />
@@ -376,7 +376,7 @@ function GrapheFamillesCard({
               <ComposedChart data={dataCumul} margin={{ top: 6, right: 6, left: 0, bottom: 0 }}>
                 <CartesianGrid stroke={GRID} vertical={false} />
                 <XAxis dataKey="mois" tick={{ fill: AXIS, fontSize: 11 }} axisLine={false} tickLine={false} />
-                <YAxis tickFormatter={fmtAxis} tick={{ fill: AXIS, fontSize: 11 }} axisLine={false} tickLine={false} width={44} />
+                <YAxis domain={[0, "auto"]} allowDataOverflow tickFormatter={fmtAxis} tick={{ fill: AXIS, fontSize: 11 }} axisLine={false} tickLine={false} width={44} />
                 <Tooltip content={<ChartTooltip familles={familles} kind="cumul" />} />
                 {familles.map((f, i) => (
                   <Area key={f} type="monotone" dataKey={`N_${f}`} stackId="N" stroke={familleColor(f, i)} fill={familleColor(f, i)} fillOpacity={0.75} isAnimationActive={false} />
@@ -540,7 +540,7 @@ function PortefeuilleFamillesCard({
               <ComposedChart data={data} margin={{ top: 6, right: 6, left: 0, bottom: 0 }}>
                 <CartesianGrid stroke={GRID} vertical={false} />
                 <XAxis dataKey="sem" interval={3} tick={{ fill: AXIS, fontSize: 10 }} axisLine={false} tickLine={false} />
-                <YAxis tickFormatter={fmtAxis} tick={{ fill: AXIS, fontSize: 11 }} axisLine={false} tickLine={false} width={44} />
+                <YAxis domain={[0, "auto"]} allowDataOverflow tickFormatter={fmtAxis} tick={{ fill: AXIS, fontSize: 11 }} axisLine={false} tickLine={false} width={44} />
                 <Tooltip content={<ChartTooltip familles={familles} kind="fin de semaine" />} />
                 {familles.map((f, i) => (
                   <Area key={f} type="monotone" dataKey={`N_${f}`} stackId="N" stroke={familleColor(f, i)} fill={familleColor(f, i)} fillOpacity={0.75} isAnimationActive={false} />
