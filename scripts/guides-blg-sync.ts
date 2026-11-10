@@ -29,8 +29,8 @@
 // Teams ne fait que mettre à jour son chemin ; un PDF supprimé dans Teams disparaît
 // du compagnon. Par sécurité, rien n'est supprimé si le dossier est introuvable ou
 // vide (OneDrive en cours de resynchronisation).
-// Dossier : GUIDES_FORMATION_DOSSIER (ou --formation), par défaut
-// « <dossier des chapitres>/z - Formation ». Migration : 20261110a_guides_blg_formation.sql
+// Dossier : GUIDES_FORMATION_DOSSIER (ou --formation), sinon « z - Formation » cherché
+// dans le dossier des chapitres puis dans ses parents (jusqu'à 3 niveaux). Migration : 20261110a_guides_blg_formation.sql
 //
 // Lancement manuel :  npx tsx scripts/guides-blg-sync.ts [--force] [--dossier "<chemin>"] [--formation "<chemin>"]
 // Configuration : GUIDES_BLG_DOSSIER (ou --dossier), et dans .env.local :
@@ -40,7 +40,7 @@
 import { createHash } from 'node:crypto'
 import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { join, relative, resolve, sep } from 'node:path'
+import { dirname, join, relative, resolve, sep } from 'node:path'
 import { DOMParser as LinkedomDOMParser } from 'linkedom'
 import { createClient, type SupabaseClient } from '@supabase/supabase-js'
 import { GUIDES_BUCKET, preparerGuide, slugDepuisFichier } from '../lib/guidesBlg'
@@ -152,6 +152,29 @@ async function publier(sb: SupabaseClient, chemin: string, nom: string, hash: st
   if (rowErr) throw new Error(`catalogue : ${rowErr.message}`)
   if (existant?.prefixe && existant.prefixe !== prefixe) await viderDossier(sb, existant.prefixe)
   return `${existant?.titre ?? prep.titre} v${version} (${prep.nb_modop} modes opératoires, ${prep.nb_etapes} étapes, ${prep.assets.length} images/PDF)`
+}
+
+/**
+ * Dossier « z - Formation » : cherché dans le dossier des chapitres puis dans ses
+ * parents (jusqu'à 3 niveaux) — chez Cegeclim il est dans « MODE OPERATOIRE », au-dessus
+ * de CFLUIDE où sont les chapitres. Nom comparé sans tenir compte de la casse.
+ */
+function trouverDossierFormation(dossierChapitres: string): string {
+  let courant = resolve(dossierChapitres)
+  for (let niveau = 0; niveau <= 3; niveau++) {
+    try {
+      const trouve = readdirSync(courant, { withFileTypes: true }).find(
+        (e) => e.isDirectory() && e.name.trim().toLowerCase() === FORMATION_DOSSIER_DEFAUT.toLowerCase(),
+      )
+      if (trouve) return join(courant, trouve.name)
+    } catch {
+      // dossier illisible : on remonte
+    }
+    const parent = dirname(courant)
+    if (parent === courant) break
+    courant = parent
+  }
+  return join(dossierChapitres, FORMATION_DOSSIER_DEFAUT)
 }
 
 /** PDF du dossier Formation (récursif), chemins relatifs avec « / ». */
@@ -354,7 +377,7 @@ async function main() {
   const cle = process.env.SUPABASE_SERVICE_ROLE_KEY
   if (!dossier) throw new Error('Dossier des chapitres non renseigné (GUIDES_BLG_DOSSIER ou --dossier).')
   if (!url || !cle) throw new Error(`NEXT_PUBLIC_SUPABASE_URL ou SUPABASE_SERVICE_ROLE_KEY absent de ${join(RACINE, '.env.local')}.`)
-  const dossierFormation = argument('--formation') ?? process.env.GUIDES_FORMATION_DOSSIER ?? join(dossier, FORMATION_DOSSIER_DEFAUT)
+  const dossierFormation = argument('--formation') ?? process.env.GUIDES_FORMATION_DOSSIER ?? trouverDossierFormation(dossier)
 
   const sb = createClient(url, cle, { auth: { persistSession: false, autoRefreshToken: false } })
   const etat = lireEtat()
