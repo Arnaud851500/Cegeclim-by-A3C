@@ -22,7 +22,17 @@
 //      visible dans la fenêtre du chapitre.
 // Un nouveau chapitre (nouveau fichier CHAPITRE-xxx.html) est créé en fin de liste.
 //
-// Lancement manuel :  npx tsx scripts/guides-blg-sync.ts [--force] [--dossier "<chemin>"]
+// 10/11/2026 — pavé « Formation » : le sous-dossier « z - Formation » du même dossier
+// Teams est publié sous le nom « Formation », arborescence comprise, PDF seulement
+// (les autres fichiers sont ignorés). Chaque PDF est envoyé une fois sous
+// formation/<sha256>.pdf (bucket « guides-blg ») ; renommer ou déplacer un PDF dans
+// Teams ne fait que mettre à jour son chemin ; un PDF supprimé dans Teams disparaît
+// du compagnon. Par sécurité, rien n'est supprimé si le dossier est introuvable ou
+// vide (OneDrive en cours de resynchronisation).
+// Dossier : GUIDES_FORMATION_DOSSIER (ou --formation), par défaut
+// « <dossier des chapitres>/z - Formation ». Migration : 20261110a_guides_blg_formation.sql
+//
+// Lancement manuel :  npx tsx scripts/guides-blg-sync.ts [--force] [--dossier "<chemin>"] [--formation "<chemin>"]
 // Configuration : GUIDES_BLG_DOSSIER (ou --dossier), et dans .env.local :
 //   NEXT_PUBLIC_SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
 // ============================================================================
@@ -30,7 +40,7 @@
 import { createHash } from 'node:crypto'
 import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { join, relative, resolve, sep } from 'node:path'
 import { DOMParser as LinkedomDOMParser } from 'linkedom'
 import { createClient, type SupabaseClient } from '@supabase/supabase-js'
 import { GUIDES_BUCKET, preparerGuide, slugDepuisFichier } from '../lib/guidesBlg'
@@ -43,6 +53,9 @@ const ETAT = join(homedir(), '.cegeclim-guides-sync.json')
 const AUTEUR = 'synchro OneDrive (Mac)'
 
 type Etat = Record<string, { taille: number; mtime: number; hash: string }>
+type FormationRow = { chemin: string; dossier: string; nom: string; taille: number | null; hash: string; storage_path: string; modifie_le: string | null }
+const FORMATION_PREFIXE = 'formation'
+const FORMATION_DOSSIER_DEFAUT = 'z - Formation'
 type GuideRow = { slug: string; titre: string; ordre: number; version: number; prefixe: string; actif: boolean; icone: string | null; source_hash: string | null; fichier_origine: string | null }
 
 function log(msg: string) {
@@ -141,15 +154,136 @@ async function publier(sb: SupabaseClient, chemin: string, nom: string, hash: st
   return `${existant?.titre ?? prep.titre} v${version} (${prep.nb_modop} modes opératoires, ${prep.nb_etapes} étapes, ${prep.assets.length} images/PDF)`
 }
 
-async function main() {
-  chargerEnv()
-  const force = process.argv.includes('--force')
-  const dossier = argument('--dossier') ?? process.env.GUIDES_BLG_DOSSIER ?? ''
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL
-  const cle = process.env.SUPABASE_SERVICE_ROLE_KEY
-  if (!dossier) throw new Error('Dossier des chapitres non renseigné (GUIDES_BLG_DOSSIER ou --dossier).')
-  if (!url || !cle) throw new Error(`NEXT_PUBLIC_SUPABASE_URL ou SUPABASE_SERVICE_ROLE_KEY absent de ${join(RACINE, '.env.local')}.`)
+/** PDF du dossier Formation (récursif), chemins relatifs avec « / ». */
+function listerPdf(racine: string): { chemin: string; abs: string }[] {
+  const out: { chemin: string; abs: string }[] = []
+  const parcourir = (dir: string) => {
+    for (const ent of readdirSync(dir, { withFileTypes: true })) {
+      if (ent.name.startsWith('.') || ent.name.startsWith('~$')) continue
+      const abs = join(dir, ent.name)
+      if (ent.isDirectory()) parcourir(abs)
+      else if (ent.isFile() && /\.pdf$/i.test(ent.name)) out.push({ chemin: relative(racine, abs).split(sep).join('/'), abs })
+    }
+  }
+  parcourir(racine)
+  return out.sort((a, b) => a.chemin.localeCompare(b.chemin, 'fr', { numeric: true }))
+}
 
+async function synchroFormation(sb: SupabaseClient, racine: string, etat: Etat, force: boolean) {
+  const majEtat = (champs: Record<string, unknown>) => sb.from('guides_blg_formation_etat').upsert({ id: 1, verifie_at: new Date().toISOString(), ...champs }, { onConflict: 'id' })
+
+  if (!existsSync(racine)) {
+    log(`Formation : dossier introuvable (${racine}), rien n'est modifié`)
+    await majEtat({ message: `Dossier introuvable sur le Mac : ${racine}` })
+    return
+  }
+  let fichiers: { chemin: string; abs: string }[]
+  try {
+    fichiers = listerPdf(racine)
+  } catch (e) {
+    const code = (e as NodeJS.ErrnoException).code
+    throw new Error(code === 'EPERM' || code === 'EACCES' ? `macOS refuse l'accès au dossier Formation (${code}).` : `Lecture du dossier Formation : ${e instanceof Error ? e.message : String(e)}`)
+  }
+  if (!fichiers.length) {
+    log('Formation : aucun PDF trouvé, rien n\'est supprimé par sécurité')
+    await majEtat({ message: 'Aucun PDF trouvé dans le dossier : contenu du compagnon conservé.' })
+    return
+  }
+
+  const { data, error } = await sb.from('guides_blg_formation').select('chemin, dossier, nom, taille, hash, storage_path, modifie_le')
+  if (error) throw new Error(`Formation, lecture du catalogue : ${error.message}`)
+  const existants = new Map(((data ?? []) as FormationRow[]).map((r) => [r.chemin, r]))
+  const hashesConnus = new Set(((data ?? []) as FormationRow[]).map((r) => r.hash))
+  const bucket = sb.storage.from(GUIDES_BUCKET)
+
+  const vus = new Set<string>()
+  const lignes: FormationRow[] = []
+  let envoyes = 0
+  let enAttente = 0
+  for (const f of fichiers) {
+    vus.add(f.chemin)
+    const st = statSync(f.abs)
+    const avant = etat[f.abs]
+    const existant = existants.get(f.chemin)
+    if (Date.now() - st.mtimeMs < 20_000) {
+      enAttente++
+      continue
+    }
+    let hash: string
+    if (!force && avant && avant.taille === st.size && avant.mtime === st.mtimeMs) hash = avant.hash
+    else {
+      hash = createHash('sha256').update(readFileSync(f.abs)).digest('hex')
+      etat[f.abs] = { taille: st.size, mtime: st.mtimeMs, hash }
+    }
+    const storagePath = `${FORMATION_PREFIXE}/${hash}.pdf`
+    if (force || !hashesConnus.has(hash)) {
+      const { error: upErr } = await bucket.upload(storagePath, readFileSync(f.abs), { contentType: 'application/pdf', upsert: true, cacheControl: '31536000' })
+      if (upErr) {
+        delete etat[f.abs]
+        log(`Formation : ${f.chemin} : ERREUR envoi — ${upErr.message}`)
+        continue
+      }
+      hashesConnus.add(hash)
+      envoyes++
+      log(`Formation : ${f.chemin} envoyé`)
+    }
+    const morceaux = f.chemin.split('/')
+    const ligne: FormationRow = {
+      chemin: f.chemin,
+      dossier: morceaux.slice(0, -1).join('/'),
+      nom: morceaux[morceaux.length - 1],
+      taille: st.size,
+      hash,
+      storage_path: storagePath,
+      modifie_le: new Date(st.mtimeMs).toISOString(),
+    }
+    if (!existant || existant.hash !== hash || existant.taille !== ligne.taille || existant.storage_path !== storagePath) lignes.push(ligne)
+  }
+
+  const maintenant = new Date().toISOString()
+  for (let i = 0; i < lignes.length; i += 200) {
+    const { error: upErr } = await sb.from('guides_blg_formation').upsert(lignes.slice(i, i + 200).map((l) => ({ ...l, updated_at: maintenant })), { onConflict: 'chemin' })
+    if (upErr) throw new Error(`Formation, catalogue : ${upErr.message}`)
+  }
+
+  // PDF retirés de Teams (fichiers en cours d'écriture conservés jusqu'au passage suivant).
+  const retires = Array.from(existants.keys()).filter((c) => !vus.has(c))
+  for (let i = 0; i < retires.length; i += 200) {
+    const { error: delErr } = await sb.from('guides_blg_formation').delete().in('chemin', retires.slice(i, i + 200))
+    if (delErr) throw new Error(`Formation, suppression : ${delErr.message}`)
+  }
+  if (retires.length) log(`Formation : ${retires.length} PDF retiré(s) — ${retires.join(' · ')}`)
+
+  // Fichiers du stockage qui ne sont plus référencés.
+  const { data: restants } = await sb.from('guides_blg_formation').select('hash')
+  const utiles = new Set(((restants ?? []) as { hash: string }[]).map((r) => r.hash))
+  const objets: { name: string }[] = []
+  for (let offset = 0; ; offset += 1000) {
+    const { data: page, error: listErr } = await bucket.list(FORMATION_PREFIXE, { limit: 1000, offset })
+    if (listErr) throw new Error(`Formation, lecture du stockage : ${listErr.message}`)
+    objets.push(...(page ?? []))
+    if (!page || page.length < 1000) break
+  }
+  const orphelins = objets
+    .filter((o) => o.name && !utiles.has(o.name.replace(/\.pdf$/i, '')))
+    .map((o) => `${FORMATION_PREFIXE}/${o.name}`)
+  for (let i = 0; i < orphelins.length; i += 200) await bucket.remove(orphelins.slice(i, i + 200))
+
+  const dossiers = new Set<string>()
+  for (const c of vus) {
+    const m = c.split('/').slice(0, -1)
+    for (let k = 1; k <= m.length; k++) dossiers.add(m.slice(0, k).join('/'))
+  }
+  const parts = [`${vus.size} PDF dans ${dossiers.size} dossier(s)`]
+  if (envoyes) parts.push(`${envoyes} envoyé(s)`)
+  if (lignes.length) parts.push(`${lignes.length} mis à jour`)
+  if (retires.length) parts.push(`${retires.length} retiré(s)`)
+  if (enAttente) parts.push(`${enAttente} en cours de synchronisation OneDrive`)
+  await majEtat({ message: `Synchronisé depuis le dossier OneDrive : ${parts.join(', ')}.`, nb_fichiers: vus.size, nb_dossiers: dossiers.size })
+  if (envoyes || lignes.length || retires.length) log(`Formation : ${parts.join(', ')}`)
+}
+
+async function synchroChapitres(sb: SupabaseClient, dossier: string, etat: Etat, force: boolean) {
   let noms: string[]
   try {
     noms = readdirSync(dossier).filter((n) => /^chapitre[-_ ].+\.html?$/i.test(n) && !n.startsWith('~$')).sort()
@@ -164,13 +298,11 @@ async function main() {
     return
   }
 
-  const sb = createClient(url, cle, { auth: { persistSession: false, autoRefreshToken: false } })
   const { data, error } = await sb.from('guides_blg').select('slug, titre, ordre, version, prefixe, actif, icone, source_hash, fichier_origine')
   if (error) throw new Error(`Lecture du catalogue : ${error.message}`)
   const guides = (data ?? []) as GuideRow[]
   let ordreMax = guides.reduce((m, g) => Math.max(m, g.ordre ?? 0), 0)
 
-  const etat = lireEtat()
   const inchanges: string[] = []
   let publies = 0
   for (const nom of noms) {
@@ -211,8 +343,38 @@ async function main() {
   }
   // Date de dernière vérification visible dans l'écran (preuve que la synchro tourne).
   if (inchanges.length) await sb.from('guides_blg').update({ source_verifie_at: new Date().toISOString() }).in('slug', inchanges)
-  writeFileSync(ETAT, JSON.stringify(etat, null, 2))
   if (publies) log(`${publies} chapitre(s) publié(s).`)
+}
+
+async function main() {
+  chargerEnv()
+  const force = process.argv.includes('--force')
+  const dossier = argument('--dossier') ?? process.env.GUIDES_BLG_DOSSIER ?? ''
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL
+  const cle = process.env.SUPABASE_SERVICE_ROLE_KEY
+  if (!dossier) throw new Error('Dossier des chapitres non renseigné (GUIDES_BLG_DOSSIER ou --dossier).')
+  if (!url || !cle) throw new Error(`NEXT_PUBLIC_SUPABASE_URL ou SUPABASE_SERVICE_ROLE_KEY absent de ${join(RACINE, '.env.local')}.`)
+  const dossierFormation = argument('--formation') ?? process.env.GUIDES_FORMATION_DOSSIER ?? join(dossier, FORMATION_DOSSIER_DEFAUT)
+
+  const sb = createClient(url, cle, { auth: { persistSession: false, autoRefreshToken: false } })
+  const etat = lireEtat()
+  let echec: unknown = null
+  try {
+    await synchroChapitres(sb, dossier, etat, force)
+  } catch (e) {
+    echec = e
+    log(`Chapitres : ERREUR — ${e instanceof Error ? e.message : String(e)}`)
+  }
+  try {
+    await synchroFormation(sb, dossierFormation, etat, force)
+  } catch (e) {
+    echec = echec ?? e
+    const msg = e instanceof Error ? e.message : String(e)
+    log(`Formation : ERREUR — ${msg}`)
+    await sb.from('guides_blg_formation_etat').upsert({ id: 1, verifie_at: new Date().toISOString(), message: `Synchronisation en échec : ${msg}` }, { onConflict: 'id' })
+  }
+  writeFileSync(ETAT, JSON.stringify(etat, null, 2))
+  if (echec) throw echec
 }
 
 main().catch((e) => {

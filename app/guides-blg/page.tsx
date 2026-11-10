@@ -21,8 +21,11 @@
 //   « Toute personne disposant du lien ») ; « Mettre à jour » (par chapitre ou pour tous)
 //   relit le fichier côté serveur (/api/admin/guides-blg/source) et ne republie que les
 //   chapitres modifiés. Ouverture sur une étape fiabilisée (lib/guidesBlg.ts).
+// 10/11/2026 : pavé à part « Formation » sous les chapitres → /guides-blg/formation
+//   (supports PDF du dossier Teams « z - Formation », arborescence reprise, publiés par
+//   la synchronisation OneDrive du Mac — scripts/guides-blg-sync.ts).
 // Migrations : 20261103g_guides_blg.sql, 20261103h_guides_blg_icone.sql,
-//   20261109c_guides_blg_source_teams.sql
+//   20261109c_guides_blg_source_teams.sql, 20261110a_guides_blg_formation.sql
 // ============================================================================
 
 import React, { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
@@ -72,6 +75,8 @@ type GuideRow = {
 
 type IndexGuide = { prefixe: string; modops: GuideModopIndex[] }
 
+type FormationEtat = { titre: string; icone: string; actif: boolean; nb_fichiers: number; nb_dossiers: number; verifie_at: string | null }
+
 type OptionsPublication = { slug?: string; sourceHash?: string; ordreMax: number; auteur: string | null }
 type ReponseSource = { statut: 'INCHANGE' | 'A_PUBLIER' | 'SANS_LIEN' | 'ERREUR'; message?: string; path?: string; hash?: string; taille?: number }
 
@@ -101,6 +106,7 @@ const s = themed({
   tileIcon: { fontSize: 54, lineHeight: 1, width: 84, height: 84, borderRadius: 20, background: 'rgba(255,255,255,0.18)', display: 'flex', alignItems: 'center', justifyContent: 'center', marginBottom: 6 },
   tileTitle: { fontFamily: '"Space Grotesk", system-ui, sans-serif', fontSize: 21, fontWeight: 700, color: '#ffffff', margin: 0 },
   tileSub: { fontSize: 12, color: 'rgba(255,255,255,0.78)' },
+  sectionTitle: { fontSize: 12, textTransform: 'uppercase', letterSpacing: 0.6, color: 'rgba(245,243,236,0.6)', fontWeight: 600, margin: '26px 0 12px' },
   tileBadge: { position: 'absolute', top: 12, right: 12, fontSize: 11, padding: '3px 9px', borderRadius: 999, background: 'rgba(224,122,78,0.85)', color: '#ffffff', fontWeight: 600 },
   // Fenêtre flottante
   overlay: { position: 'fixed', inset: 0, zIndex: 900, background: 'rgba(5,9,18,0.72)', display: 'flex', alignItems: 'flex-start', justifyContent: 'center', padding: '5vh 2vw', overflowY: 'auto' },
@@ -163,6 +169,7 @@ function GuidesBlgContent() {
   const [question, setQuestion] = useState('')
   const [indexes, setIndexes] = useState<Map<string, IndexGuide>>(new Map())
   const [indexation, setIndexation] = useState(false)
+  const [formation, setFormation] = useState<FormationEtat | null>(null)
   const fileInput = useRef<HTMLInputElement | null>(null)
   const enCours = useRef<Set<string>>(new Set())
 
@@ -181,11 +188,13 @@ function GuidesBlgContent() {
   useEffect(() => {
     let active = true
     void (async () => {
-      const [{ data, error: err }, droit] = await Promise.all([
+      const [{ data, error: err }, droit, form] = await Promise.all([
         supabase.from('guides_blg').select('*').order('ordre', { ascending: true }).order('titre', { ascending: true }),
         supabase.rpc('peut_gerer_guides_blg'),
+        supabase.from('guides_blg_formation_etat').select('titre, icone, actif, nb_fichiers, nb_dossiers, verifie_at').eq('id', 1).maybeSingle(),
       ])
       if (!active) return
+      setFormation((form.data as FormationEtat | null) ?? null)
       if (err) setError(`Lecture des guides : ${err.message}`)
       setGuides(((data ?? []) as GuideRow[]).map((g) => ({ ...g, sommaire: Array.isArray(g.sommaire) ? g.sommaire : [] })))
       setGestion(Boolean(droit.data))
@@ -660,6 +669,30 @@ function GuidesBlgContent() {
             )
           })}
         </div>
+      )}
+
+      {/* Pavé à part : supports de formation (PDF du dossier Teams « z - Formation ») */}
+      {!loading && formation && (formation.actif || gestion) && (formation.nb_fichiers > 0 || gestion) && (
+        <>
+          <div style={s.sectionTitle}>Formation</div>
+          <div style={s.tiles}>
+            <button
+              type="button"
+              style={{ ...s.tile, background: 'linear-gradient(160deg, #B08A3E, #6E5420)', opacity: formation.actif ? 1 : 0.55 }}
+              onClick={() => router.push('/guides-blg/formation')}
+              onMouseEnter={(e) => (e.currentTarget.style.transform = 'translateY(-3px)')}
+              onMouseLeave={(e) => (e.currentTarget.style.transform = 'none')}
+            >
+              {!formation.actif && <span style={s.tileBadge}>Masqué</span>}
+              <div style={s.tileIcon}>{formation.icone || '🎓'}</div>
+              <h2 style={s.tileTitle}>{formation.titre || 'Formation'}</h2>
+              <div style={s.tileSub}>
+                {formation.nb_fichiers} support{formation.nb_fichiers > 1 ? 's' : ''} PDF · {formation.nb_dossiers} dossier{formation.nb_dossiers > 1 ? 's' : ''}
+                {formation.verifie_at ? ` · synchro ${new Date(formation.verifie_at).toLocaleDateString('fr-FR')}` : ''}
+              </div>
+            </button>
+          </div>
+        </>
       )}
 
       {/* Dépôt (administrateurs) */}
