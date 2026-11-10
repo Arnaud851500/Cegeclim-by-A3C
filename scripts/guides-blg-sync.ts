@@ -32,12 +32,14 @@
 // Dossier : GUIDES_FORMATION_DOSSIER (ou --formation), sinon « z - Formation » cherché
 // dans le dossier des chapitres puis dans ses parents (jusqu'à 3 niveaux). Migration : 20261110a_guides_blg_formation.sql
 //
-// Lancement manuel :  npx tsx scripts/guides-blg-sync.ts [--force] [--dossier "<chemin>"] [--formation "<chemin>"]
+// Lancement manuel :  npx tsx scripts/guides-blg-sync.ts [--force]   (dossier repris de la tâche macOS si non précisé)
+//                    npx tsx scripts/guides-blg-sync.ts [--force] [--dossier "<chemin>"] [--formation "<chemin>"]
 // Configuration : GUIDES_BLG_DOSSIER (ou --dossier), et dans .env.local :
 //   NEXT_PUBLIC_SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
 // ============================================================================
 
 import { createHash } from 'node:crypto'
+import { execFileSync } from 'node:child_process'
 import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join, relative, resolve, sep } from 'node:path'
@@ -65,6 +67,19 @@ function log(msg: string) {
 function argument(nom: string): string | null {
   const i = process.argv.indexOf(nom)
   return i >= 0 ? process.argv[i + 1] ?? null : null
+}
+
+// Lancement manuel sans --dossier : reprend le dossier enregistré dans la tâche
+// macOS installée par scripts/installer-synchro-guides-mac.sh (10/11/2026).
+function dossierDeLaTacheMac(): string | null {
+  const plist = join(homedir(), 'Library', 'LaunchAgents', 'fr.cegeclim.guides-blg-sync.plist')
+  if (!existsSync(plist)) return null
+  try {
+    const v = execFileSync('/usr/bin/plutil', ['-extract', 'EnvironmentVariables.GUIDES_BLG_DOSSIER', 'raw', '-o', '-', plist], { encoding: 'utf8' }).trim()
+    return v || null
+  } catch {
+    return null
+  }
 }
 
 function chargerEnv() {
@@ -372,7 +387,7 @@ async function synchroChapitres(sb: SupabaseClient, dossier: string, etat: Etat,
 async function main() {
   chargerEnv()
   const force = process.argv.includes('--force')
-  const dossier = argument('--dossier') ?? process.env.GUIDES_BLG_DOSSIER ?? ''
+  const dossier = argument('--dossier') ?? process.env.GUIDES_BLG_DOSSIER ?? dossierDeLaTacheMac() ?? ''
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL
   const cle = process.env.SUPABASE_SERVICE_ROLE_KEY
   if (!dossier) throw new Error('Dossier des chapitres non renseigné (GUIDES_BLG_DOSSIER ou --dossier).')
