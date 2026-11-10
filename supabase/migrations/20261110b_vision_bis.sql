@@ -1,0 +1,6 @@
+-- Appliquée via MCP le 10/11/2026 (nom : 20261110b_vision_bis).
+-- Objets : get_vision_bis_flux_familles(text,text), vue matérialisée
+-- vision_bis_portefeuille_cdc_mvt (mouvements hebdo du portefeuille CDC),
+-- get_vision_bis_portefeuille_cdc(text,text), vision_bis_refresh(),
+-- crons vision_bis_portefeuille_refresh (22:40 UTC) et _midi (11:40 UTC, lun-ven).
+-- Définition de référence : voir supabase_migrations.schema_migrations.
