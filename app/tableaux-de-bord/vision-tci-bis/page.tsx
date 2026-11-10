@@ -2,31 +2,35 @@
 
 // app/tableaux-de-bord/vision-tci-bis/page.tsx
 //
-// VISION ONE PAGE BIS (2026-11-10) — page de travail pour la mise en forme.
+// VISION ONE PAGE BIS — page de travail pour la mise en forme.
 //
-//  - 2/3 de la largeur pour les graphes (2 graphes côte à côte), 1/3 pour un
-//    agenda et une todo compacts (repliables, ouverture en grand au clic).
-//  - Graphes par type de document choisi par l'utilisateur (BL, Factures,
-//    CDC, Devis) + Portefeuille CDC — choix mémorisé dans le navigateur.
-//  - 3 modes par graphe :
-//      Mensuel  : barres empilées par famille macro (N) + barre fine et terne
-//                 empilée pour N-1, côte à côte.
-//      Cumulé   : aires empilées cumulées N par famille + courbe N-1 (toutes
-//                 familles).
-//      Base 100 : barres 100 % par mois (mix familles) + panneau YtD à droite
-//                 (N vs N-1). Clic sur un mois -> valeurs du mois.
-//  - Portefeuille CDC : aires empilées hebdo par famille + N-1 (vue E), bouton
-//    pour basculer en petits multiples par famille (vue F).
+// V2 (2026-11-10 après-midi) :
+//  - Lisible en sombre : les graphes sont posés sur --cg-panel (foncé en
+//    sombre, blanc en clair) au lieu de --cg-card (papier dans les deux
+//    thèmes), encre / légendes / axes suivent --cg-ink.
+//  - Grille de widgets libre, comme Vision ONE PAGE : on ajoute les graphes
+//    par familles (BL, Factures, CDC, Devis, Portefeuille CDC) ET tous les
+//    pavés de la page d'origine (flux, compteurs, taux, portefeuille,
+//    projection, espaces vides). Ordre au glisser-déposer (poignée ⠿) ou
+//    aux flèches, largeur réglable (1/4, 1/2, 3/4, pleine largeur) — dans
+//    la zone des 2/3.
+//  - Disposition enregistrée par utilisateur en base
+//    (vision_tci_bis_preferences) — premier affichage : les graphes par
+//    familles puis la disposition actuelle de Vision ONE PAGE.
+//  - Chaque graphe flux garde les 3 métriques Jour / Mois (MTD) / Année
+//    (YTD) avec l'évolution vs N-1 (get_vision_tci_kpi, comme les pavés
+//    flux d'origine ; bascule Jour / J-1 en en-tête).
 //
-// Données :
-//  - get_vision_bis_flux_familles(p_agence, p_collaborateur) : mois x famille,
-//    N et N-1 (montant du mois + montant à date pour N-1).
-//  - get_vision_bis_portefeuille_cdc(p_agence, p_collaborateur) : portefeuille
-//    CDC reconstitué en fin de semaine, par famille (recalcul 12h40 / 23h40).
-//  - Périmètre : restrictions agence / collaborateur du profil
-//    (usePageFilterAccess), sinon sélecteurs libres.
+// V1 : 3 modes par graphe (Mensuel N + N-1 fin et terne / Cumulé + N-1
+// toutes familles / Base 100 + panneau YtD, clic mois), portefeuille CDC
+// hebdo par famille (empilé E / petits multiples F), agenda et todo compacts
+// dans le 1/3 droit.
+//
+// Données : get_vision_bis_flux_familles, get_vision_bis_portefeuille_cdc,
+// get_vision_tci_kpi ; périmètre agence / collaborateur du profil
+// (usePageFilterAccess) sinon sélecteurs libres.
 
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Area, Bar, BarChart, CartesianGrid, Line, LineChart, ResponsiveContainer,
   Tooltip, XAxis, YAxis, ComposedChart,
@@ -38,6 +42,11 @@ import MobileStandaloneActivite from "@/components/mobile/MobileStandaloneActivi
 import OutlookAgenda from "@/components/OutlookAgenda";
 import TodoDenseList from "@/components/TodoDenseList";
 import LastSyncBadge from "@/components/LastSyncBadge";
+import {
+  AjouterKpiForm, CompteurCard, FamilleMacroFiltreRow, FluxCard, FluxCardGrand, PortefeuilleCard,
+  ProjectionCard, RetardsPaiementCard, SpacerCard, TauxCard,
+  type KpiCardConfig,
+} from "@/components/VisionTciKpiPanel";
 
 // ─── Constantes ──────────────────────────────────────────────────────────
 
@@ -70,28 +79,14 @@ function familleColor(f: string, i = 0) {
 }
 
 const MOIS = ["Janv", "Févr", "Mars", "Avr", "Mai", "Juin", "Juil", "Août", "Sept", "Oct", "Nov", "Déc"];
-const LS_CARDS = "visionBis.cartes";
-const LS_MODES = "visionBis.modes";
-const LS_TOP = "visionBis.topFamilles";
-const LS_AGENDA = "visionBis.agendaOuvert";
-const LS_TODO = "visionBis.todoOuverte";
 
-const GRID = "rgba(var(--cg-ink-rgb), 0.10)";
-const AXIS = "rgba(var(--cg-ink-rgb), 0.55)";
+const GRID = "rgba(var(--cg-ink-rgb), 0.12)";
+const AXIS = "rgba(var(--cg-ink-rgb), 0.6)";
+
+// Périmètre transmis aux métriques Jour / MTD / YTD des graphes.
+type KpiScope = { agence: string | null; collaborateur: string | null; familleMacro: string | null; jMoins1: boolean; refreshTick: number };
 
 // ─── Utilitaires ─────────────────────────────────────────────────────────
-
-function lsGet<T>(key: string, fallback: T): T {
-  try {
-    const raw = window.localStorage.getItem(key);
-    return raw ? (JSON.parse(raw) as T) : fallback;
-  } catch {
-    return fallback;
-  }
-}
-function lsSet(key: string, value: unknown) {
-  try { window.localStorage.setItem(key, JSON.stringify(value)); } catch { /* ignore */ }
-}
 
 function fmtEur(v: number | null | undefined, digits = 1): string {
   const n = Number(v || 0);
@@ -150,7 +145,7 @@ function Segmented<T extends string>({
             className="px-2.5 py-1 text-[11px] font-bold transition"
             style={{
               background: active ? `${color}33` : "transparent",
-              color: active ? color : "var(--cg-ink-soft)",
+              color: active ? color : "rgba(var(--cg-ink-rgb),0.62)",
             }}
           >
             {o.l}
@@ -163,7 +158,7 @@ function Segmented<T extends string>({
 
 function Legend({ familles, n1Label }: { familles: string[]; n1Label?: string }) {
   return (
-    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px]" style={{ color: "var(--cg-ink-soft)" }}>
+    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px]" style={{ color: "rgba(var(--cg-ink-rgb),0.62)" }}>
       {familles.map((f, i) => (
         <span key={f} className="flex items-center gap-1">
           <span className="inline-block h-2.5 w-2.5 rounded-sm" style={{ background: familleColor(f, i) }} />
@@ -191,11 +186,11 @@ function ChartTooltip({ active, payload, label, familles, kind }: any) {
   const totN = Number(row.totN ?? lignes.reduce((s: number, l: any) => s + l.n, 0));
   const totP = Number(row.totP ?? lignes.reduce((s: number, l: any) => s + l.p, 0));
   return (
-    <div className="rounded-lg border px-3 py-2 text-[11px] shadow-lg" style={{ background: "var(--cg-card)", borderColor: GRID, color: "var(--cg-ink)" }}>
+    <div className="rounded-lg border px-3 py-2 text-[11px] shadow-lg" style={{ background: "var(--cg-panel)", borderColor: GRID, color: "var(--cg-ink)" }}>
       <div className="mb-1 font-bold">{label}{kind ? ` · ${kind}` : ""}</div>
       <table className="tabular-nums">
         <thead>
-          <tr style={{ color: "var(--cg-ink-soft)" }}>
+          <tr style={{ color: "rgba(var(--cg-ink-rgb),0.62)" }}>
             <th className="pr-3 text-left font-semibold">Famille</th>
             <th className="pr-3 text-right font-semibold">N</th>
             <th className="pr-3 text-right font-semibold">N-1</th>
@@ -207,14 +202,14 @@ function ChartTooltip({ active, payload, label, familles, kind }: any) {
             <tr key={l.f}>
               <td className="pr-3"><span className="mr-1 inline-block h-2 w-2 rounded-sm" style={{ background: l.c }} />{l.f}</td>
               <td className="pr-3 text-right">{row.hasN === false ? "—" : fmtEur(l.n)}</td>
-              <td className="pr-3 text-right" style={{ color: "var(--cg-ink-soft)" }}>{fmtEur(l.p)}</td>
+              <td className="pr-3 text-right" style={{ color: "rgba(var(--cg-ink-rgb),0.62)" }}>{fmtEur(l.p)}</td>
               <td className="text-right">{row.hasN === false ? "—" : fmtPct(evol(l.n, l.p))}</td>
             </tr>
           ))}
           <tr className="border-t font-bold" style={{ borderColor: GRID }}>
             <td className="pr-3 pt-1">Total</td>
             <td className="pr-3 pt-1 text-right">{row.hasN === false ? "—" : fmtEur(totN)}</td>
-            <td className="pr-3 pt-1 text-right" style={{ color: "var(--cg-ink-soft)" }}>{fmtEur(totP)}</td>
+            <td className="pr-3 pt-1 text-right" style={{ color: "rgba(var(--cg-ink-rgb),0.62)" }}>{fmtEur(totP)}</td>
             <td className="pt-1 text-right">{row.hasN === false ? "—" : fmtPct(evol(totN, totP))}</td>
           </tr>
         </tbody>
@@ -225,11 +220,12 @@ function ChartTooltip({ active, payload, label, familles, kind }: any) {
 
 // ─── Carte graphe "flux" (BL / Factures / CDC / Devis) ───────────────────
 
-function FluxCard({
-  type, label, color, rows, topN, mode, onMode, anneeN,
+function GrapheFamillesCard({
+  type, label, color, rows, topN, mode, onMode, anneeN, onRemove, kpiScope,
 }: {
   type: DocType; label: string; color: string; rows: FluxRow[]; topN: number;
-  mode: Mode; onMode: (m: Mode) => void; anneeN: number;
+  mode: Mode; onMode: (m: Mode) => void; anneeN: number; onRemove: () => void;
+  kpiScope: KpiScope;
 }) {
   const moisCourant = new Date().getMonth() + 1;
   const [moisSel, setMoisSel] = useState<number | null>(null);
@@ -329,16 +325,13 @@ function FluxCard({
     return { n, p, e: evol(n, p) };
   }, [mat, familles, moisCourant]);
 
+  void kpi;
   return (
-    <div className="flex flex-col rounded-2xl border-2 p-3" style={{ borderColor: `${color}55`, background: "var(--cg-card)" }}>
-      <div className="mb-2 flex flex-wrap items-center gap-2">
+    <div className="relative flex h-full flex-col rounded-2xl border-2 p-3" style={{ borderColor: `${color}55`, background: "var(--cg-panel)" }}>
+      <RemoveButton onRemove={onRemove} />
+      <div className="mb-2 flex flex-wrap items-center gap-2 pr-6">
         <span className="h-3 w-3 rounded-full" style={{ background: color }} />
         <span className="text-[14px] font-extrabold uppercase tracking-[0.08em]" style={{ color }}>{label}</span>
-        <span className="text-[12px] tabular-nums" style={{ color: "var(--cg-ink)" }}>
-          <b>{fmtEur(kpi.n)}</b> YtD
-          <span className="ml-1.5" style={{ color: kpi.e !== null && kpi.e < 0 ? "var(--cg-down-ink)" : "var(--cg-up-ink)" }}>{fmtPct(kpi.e)}</span>
-          <span className="ml-1.5" style={{ color: "var(--cg-ink-soft)" }}>vs {fmtEur(kpi.p)}</span>
-        </span>
         <div className="ml-auto">
           <Segmented<Mode>
             value={mode}
@@ -348,6 +341,7 @@ function FluxCard({
           />
         </div>
       </div>
+      <TroisMetriques famille={type} scope={kpiScope} />
 
       {mode === "mensuel" && (
         <>
@@ -370,7 +364,7 @@ function FluxCard({
           </div>
           <div className="mt-1 flex items-center justify-between gap-2">
             <Legend familles={familles} />
-            <span className="whitespace-nowrap text-[10px]" style={{ color: "var(--cg-ink-soft)" }}>barre fine terne = N-1</span>
+            <span className="whitespace-nowrap text-[10px]" style={{ color: "rgba(var(--cg-ink-rgb),0.62)" }}>barre fine terne = N-1</span>
           </div>
         </>
       )}
@@ -420,20 +414,20 @@ function FluxCard({
               </BarChart>
             </ResponsiveContainer>
           </div>
-          <div className="w-[200px] shrink-0 rounded-xl border p-2" style={{ borderColor: GRID, background: "var(--cg-panel)" }}>
+          <div className="w-[200px] shrink-0 rounded-xl border p-2" style={{ borderColor: GRID, background: "rgba(var(--cg-ink-rgb),0.04)" }}>
             <div className="mb-1 flex items-center justify-between">
               <span className="text-[11px] font-extrabold uppercase tracking-wider" style={{ color }}>
                 {moisSel ? `${MOIS[moisSel - 1]} ${anneeN}` : `YtD ${anneeN}`}
               </span>
               {moisSel && (
-                <button type="button" onClick={() => setMoisSel(null)} className="text-[10px] font-bold underline" style={{ color: "var(--cg-ink-soft)" }}>
+                <button type="button" onClick={() => setMoisSel(null)} className="text-[10px] font-bold underline" style={{ color: "rgba(var(--cg-ink-rgb),0.62)" }}>
                   ← YtD
                 </button>
               )}
             </div>
             <table className="w-full text-[11px] tabular-nums" style={{ color: "var(--cg-ink)" }}>
               <thead>
-                <tr style={{ color: "var(--cg-ink-soft)" }}>
+                <tr style={{ color: "rgba(var(--cg-ink-rgb),0.62)" }}>
                   <th className="text-left font-semibold">Fam.</th>
                   <th className="text-right font-semibold">Part</th>
                   <th className="text-right font-semibold">N-1</th>
@@ -449,7 +443,7 @@ function FluxCard({
                     <tr key={l.f} title={`${l.f} : ${fmtEur(l.n)} (N-1 ${fmtEur(l.p)})`}>
                       <td className="py-0.5"><span className="mr-1 inline-block h-2 w-2 rounded-sm" style={{ background: l.c }} />{l.f}</td>
                       <td className="text-right font-bold">{Math.round(part * 100)}%</td>
-                      <td className="text-right" style={{ color: "var(--cg-ink-soft)" }}>{Math.round(partP * 100)}%</td>
+                      <td className="text-right" style={{ color: "rgba(var(--cg-ink-rgb),0.62)" }}>{Math.round(partP * 100)}%</td>
                       <td className="text-right" style={{ color: e !== null && e < 0 ? "var(--cg-down-ink)" : "var(--cg-up-ink)" }}>{fmtPct(e)}</td>
                     </tr>
                   );
@@ -463,7 +457,7 @@ function FluxCard({
                 </tr>
               </tbody>
             </table>
-            <div className="mt-1 text-[10px]" style={{ color: "var(--cg-ink-soft)" }}>
+            <div className="mt-1 text-[10px]" style={{ color: "rgba(var(--cg-ink-rgb),0.62)" }}>
               {moisSel ? "Cliquer à nouveau le mois pour revenir au YtD." : "Cliquer un mois pour le détail."} N-1 du mois en cours : à date.
             </div>
           </div>
@@ -475,9 +469,12 @@ function FluxCard({
 
 // ─── Carte Portefeuille CDC (E : aires empilées / F : petits multiples) ──
 
-function PortefeuilleCard({ rows, topN, color, anneeN }: { rows: PfRow[]; topN: number; color: string; anneeN: number }) {
-  const [vue, setVue] = useState<"E" | "F">(() => (typeof window === "undefined" ? "E" : lsGet<"E" | "F">("visionBis.pfVue", "E")));
-  useEffect(() => { lsSet("visionBis.pfVue", vue); }, [vue]);
+function PortefeuilleFamillesCard({
+  rows, topN, color, anneeN, vue, setVue, onRemove,
+}: {
+  rows: PfRow[]; topN: number; color: string; anneeN: number;
+  vue: "E" | "F"; setVue: (v: "E" | "F") => void; onRemove: () => void;
+}) {
 
   const semaineCourante = useMemo(() => {
     const n = rows.filter((r) => r.annee_iso === anneeN).map((r) => r.semaine_iso);
@@ -514,15 +511,16 @@ function PortefeuilleCard({ rows, topN, color, anneeN }: { rows: PfRow[]; topN: 
   const calculeAt = rows[0]?.calcule_at ? new Date(rows[0].calcule_at) : null;
 
   return (
-    <div className="flex flex-col rounded-2xl border-2 p-3" style={{ borderColor: `${color}55`, background: "var(--cg-card)" }}>
-      <div className="mb-2 flex flex-wrap items-center gap-2">
+    <div className="relative flex h-full flex-col rounded-2xl border-2 p-3" style={{ borderColor: `${color}55`, background: "var(--cg-panel)" }}>
+      <RemoveButton onRemove={onRemove} />
+      <div className="mb-2 flex flex-wrap items-center gap-2 pr-6">
         <span className="h-3 w-3 rounded-full" style={{ background: color }} />
         <span className="text-[14px] font-extrabold uppercase tracking-[0.08em]" style={{ color }}>Portefeuille CDC</span>
         {actuel && (
           <span className="text-[12px] tabular-nums" style={{ color: "var(--cg-ink)" }}>
             <b>{fmtEur(actuel.totN)}</b> S{semaineCourante}
             <span className="ml-1.5" style={{ color: e !== null && e < 0 ? "var(--cg-down-ink)" : "var(--cg-up-ink)" }}>{fmtPct(e)}</span>
-            <span className="ml-1.5" style={{ color: "var(--cg-ink-soft)" }}>vs {fmtEur(actuel.totP)}</span>
+            <span className="ml-1.5" style={{ color: "rgba(var(--cg-ink-rgb),0.62)" }}>vs {fmtEur(actuel.totP)}</span>
           </span>
         )}
         <div className="ml-auto">
@@ -560,7 +558,7 @@ function PortefeuilleCard({ rows, topN, color, anneeN }: { rows: PfRow[]; topN: 
             const prev = actuel ? Number((actuel as any)[`P_${f}`] || 0) : 0;
             const ef = evol(cur, prev);
             return (
-              <div key={f} className="rounded-xl border p-2" style={{ borderColor: GRID, background: "var(--cg-panel)" }}>
+              <div key={f} className="rounded-xl border p-2" style={{ borderColor: GRID, background: "rgba(var(--cg-ink-rgb),0.04)" }}>
                 <div className="flex items-baseline justify-between text-[11px]">
                   <span className="font-bold" style={{ color: familleColor(f, i) }}>{f}</span>
                   <span className="tabular-nums" style={{ color: "var(--cg-ink)" }}>
@@ -575,7 +573,7 @@ function PortefeuilleCard({ rows, topN, color, anneeN }: { rows: PfRow[]; topN: 
                       <Tooltip
                         formatter={(v: any, name: any) => [fmtEur(Number(v)), String(name).startsWith("N_") ? String(anneeN) : String(anneeN - 1)]}
                         labelStyle={{ color: "var(--cg-ink)" }}
-                        contentStyle={{ background: "var(--cg-card)", border: `1px solid ${GRID}`, fontSize: 11 }}
+                        contentStyle={{ background: "var(--cg-panel)", border: `1px solid ${GRID}`, fontSize: 11, color: "var(--cg-ink)" }}
                       />
                       <Line type="monotone" dataKey={`P_${f}`} stroke={familleColor(f, i)} strokeOpacity={0.45} strokeDasharray="4 3" strokeWidth={1.5} dot={false} isAnimationActive={false} />
                       <Line type="monotone" dataKey={`N_${f}`} stroke={familleColor(f, i)} strokeWidth={2.2} dot={false} isAnimationActive={false} />
@@ -587,7 +585,7 @@ function PortefeuilleCard({ rows, topN, color, anneeN }: { rows: PfRow[]; topN: 
           })}
         </div>
       )}
-      <div className="mt-1 text-[10px]" style={{ color: "var(--cg-ink-soft)" }}>
+      <div className="mt-1 text-[10px]" style={{ color: "rgba(var(--cg-ink-rgb),0.62)" }}>
         Reconstitué en fin de semaine (lignes de CDC entre date de commande et date de PL/BL/facture).
         {calculeAt ? ` Calculé le ${calculeAt.toLocaleString("fr-FR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}.` : ""}
       </div>
@@ -642,10 +640,10 @@ function AgendaCompact({ onOpenFull }: { onOpenFull: () => void }) {
     return Array.from(m.entries());
   }, [rdvs]);
 
-  if (loading) return <div className="p-2 text-[12px]" style={{ color: "var(--cg-ink-soft)" }}>Chargement…</div>;
+  if (loading) return <div className="p-2 text-[12px]" style={{ color: "rgba(var(--cg-ink-rgb),0.62)" }}>Chargement…</div>;
   if (rdvs.length === 0) {
     return (
-      <div className="p-2 text-[12px]" style={{ color: "var(--cg-ink-soft)" }}>
+      <div className="p-2 text-[12px]" style={{ color: "rgba(var(--cg-ink-rgb),0.62)" }}>
         Aucun rendez-vous sur 14 jours. <button type="button" className="underline" onClick={onOpenFull}>Ouvrir l’agenda</button>
       </div>
     );
@@ -663,12 +661,12 @@ function AgendaCompact({ onOpenFull }: { onOpenFull: () => void }) {
               className="flex w-full items-center gap-2 rounded-md px-1.5 py-1 text-left text-[12px] transition hover:bg-[color:var(--cg-panel-hover)]"
               style={{ color: "var(--cg-ink)" }}
             >
-              <span className="w-10 shrink-0 tabular-nums" style={{ color: "var(--cg-ink-soft)" }}>
+              <span className="w-10 shrink-0 tabular-nums" style={{ color: "rgba(var(--cg-ink-rgb),0.62)" }}>
                 {r.allDay ? "jour" : new Date(r.start).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" })}
               </span>
               <span className="min-w-0 flex-1 truncate">
                 <b>{r.company || r.subject}</b>
-                {r.company && <span style={{ color: "var(--cg-ink-soft)" }}> · {r.subject}</span>}
+                {r.company && <span style={{ color: "rgba(var(--cg-ink-rgb),0.62)" }}> · {r.subject}</span>}
               </span>
             </button>
           ))}
@@ -728,89 +726,357 @@ function Overlay({ title, color, onClose, children, lien }: { title: string; col
   );
 }
 
+// ─── Briques communes widgets ────────────────────────────────────────────
+
+function RemoveButton({ onRemove }: { onRemove: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={(e) => { e.stopPropagation(); onRemove(); }}
+      title="Retirer ce widget"
+      className="absolute right-2 top-2 z-10 text-[14px] leading-none text-[color:var(--cg-ink)]/30 hover:text-[color:var(--cg-ink)]/80"
+    >
+      ✕
+    </button>
+  );
+}
+
+type FluxValues = { jour_valeur: number; jour_n1: number; mois_valeur: number; mois_n1: number; annee_valeur: number; annee_n1: number };
+
+function Evol({ v, n1 }: { v: number; n1: number }) {
+  if (!n1) return <span className="text-[11px]" style={{ color: "rgba(var(--cg-ink-rgb),0.35)" }}>—</span>;
+  const pct = ((v - n1) / Math.abs(n1)) * 100;
+  const up = pct >= 0;
+  return (
+    <span className="text-[11px] font-semibold" style={{ color: up ? "var(--cg-up-ink)" : "var(--cg-down-ink)" }}>
+      {up ? "▲" : "▼"} {Math.abs(pct).toLocaleString("fr-FR", { maximumFractionDigits: 1 })} %
+    </span>
+  );
+}
+
+// Jour / Mois (MTD) / Année (YTD) + évolution N-1 — même source que les
+// pavés flux de Vision ONE PAGE (get_vision_tci_kpi).
+function TroisMetriques({ famille, scope }: { famille: DocType; scope: KpiScope }) {
+  const [values, setValues] = useState<FluxValues | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    supabase.rpc("get_vision_tci_kpi", {
+      p_famille: famille,
+      p_famille_macro: scope.familleMacro,
+      p_agence: scope.agence,
+      p_collaborateur: scope.collaborateur,
+      p_utiliser_j_moins_1: scope.jMoins1,
+    }).then(({ data, error }) => {
+      if (cancelled) return;
+      if (error) { setErr(error.message); return; }
+      setErr(null);
+      setValues((Array.isArray(data) ? data[0] : data) as FluxValues);
+    });
+    return () => { cancelled = true; };
+  }, [famille, scope.familleMacro, scope.agence, scope.collaborateur, scope.jMoins1, scope.refreshTick]);
+
+  if (err) return <div className="mb-2 text-[11px]" style={{ color: "var(--cg-err-ink)" }}>{err}</div>;
+  const cols: { l: string; v: number; n1: number }[] = values
+    ? [
+        { l: scope.jMoins1 ? "Jour (J-1)" : "Jour", v: Number(values.jour_valeur || 0), n1: Number(values.jour_n1 || 0) },
+        { l: "Mois (MTD)", v: Number(values.mois_valeur || 0), n1: Number(values.mois_n1 || 0) },
+        { l: "Année (YTD)", v: Number(values.annee_valeur || 0), n1: Number(values.annee_n1 || 0) },
+      ]
+    : [];
+  return (
+    <div className="mb-2 grid grid-cols-3 gap-2 rounded-xl px-2 py-1.5" style={{ background: "rgba(var(--cg-ink-rgb),0.04)" }}>
+      {values
+        ? cols.map((c) => (
+            <div key={c.l} className="min-w-0">
+              <div className="text-[10px] uppercase tracking-wide" style={{ color: "rgba(var(--cg-ink-rgb),0.55)" }}>{c.l}</div>
+              <div className="whitespace-nowrap text-[20px] font-extrabold leading-tight tabular-nums" style={{ color: "var(--cg-ink)" }}>{fmtEur(c.v, 2)}</div>
+              <Evol v={c.v} n1={c.n1} />
+            </div>
+          ))
+        : [0, 1, 2].map((i) => <div key={i} className="h-[52px] animate-pulse rounded" style={{ background: "rgba(var(--cg-ink-rgb),0.06)" }} />)}
+    </div>
+  );
+}
+
+// ─── Widgets ─────────────────────────────────────────────────────────────
+
+type Largeur = 1 | 2 | 3 | 4;
+type Widget =
+  | { id: string; w: Largeur; type: "graphe"; cle: CardKey; mode?: Mode; vue?: "E" | "F" }
+  | { id: string; w: Largeur; type: "kpi"; kpi: KpiCardConfig };
+
+const COL_SPAN: Record<Largeur, string> = { 1: "col-span-1", 2: "col-span-2", 3: "col-span-3", 4: "col-span-4" };
+
+function largeurParDefaut(k: KpiCardConfig): Largeur {
+  if (k.kind === "flux") return 2;
+  if (k.kind === "spacer") return k.cle === "2" ? 2 : 1;
+  if (k.kind === "compteur" && k.cle === "clients_actifs") return 2;
+  return 1;
+}
+
+function newId() {
+  try { return crypto.randomUUID(); } catch { return `w${Date.now()}${Math.random().toString(36).slice(2, 8)}`; }
+}
+
+function widgetsParDefaut(layout: KpiCardConfig[]): Widget[] {
+  const graphes: Widget[] = (["CDC", "BL", "Factures", "PORTEFEUILLE"] as CardKey[]).map((cle) => ({ id: newId(), w: 2, type: "graphe", cle }));
+  return [...graphes, ...layout.map((k) => ({ id: newId(), w: largeurParDefaut(k), type: "kpi" as const, kpi: k }))];
+}
+
+// Coquille de widget : poignée de glisser-déposer, flèches, largeur.
+function WidgetFrame({
+  widget, index, total, onMove, onWidth, onDragStartId, onDropOn, dragging, children,
+}: {
+  widget: Widget; index: number; total: number;
+  onMove: (dir: -1 | 1) => void; onWidth: (w: Largeur) => void;
+  onDragStartId: (id: string | null) => void; onDropOn: (targetId: string, after: boolean) => void;
+  dragging: string | null;
+  children: React.ReactNode;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [over, setOver] = useState<null | "avant" | "apres">(null);
+  return (
+    <div
+      ref={ref}
+      data-widget={widget.id}
+      className={`group relative ${COL_SPAN[widget.w]} [&>div]:h-full`}
+      style={{
+        opacity: dragging === widget.id ? 0.4 : 1,
+        boxShadow: over === "avant" ? "-4px 0 0 0 #2E5BB8" : over === "apres" ? "4px 0 0 0 #2E5BB8" : undefined,
+        borderRadius: 16,
+      }}
+      onDragOver={(e) => {
+        if (!dragging || dragging === widget.id) return;
+        e.preventDefault();
+        const r = ref.current?.getBoundingClientRect();
+        setOver(r && e.clientX > r.left + r.width / 2 ? "apres" : "avant");
+      }}
+      onDragLeave={() => setOver(null)}
+      onDrop={(e) => {
+        e.preventDefault();
+        const after = over === "apres";
+        setOver(null);
+        onDropOn(widget.id, after);
+      }}
+    >
+      {children}
+      <div
+        className="pointer-events-none absolute -top-3 left-1/2 z-20 flex -translate-x-1/2 items-center gap-0.5 rounded-full border px-1 py-0.5 opacity-0 shadow-md transition group-hover:pointer-events-auto group-hover:opacity-100"
+        style={{ background: "var(--cg-panel)", borderColor: GRID, color: "var(--cg-ink)" }}
+      >
+        <span
+          draggable
+          onDragStart={(e) => {
+            e.dataTransfer.effectAllowed = "move";
+            e.dataTransfer.setData("text/plain", widget.id);
+            if (ref.current) e.dataTransfer.setDragImage(ref.current, 30, 20);
+            onDragStartId(widget.id);
+          }}
+          onDragEnd={() => onDragStartId(null)}
+          title="Glisser pour déplacer"
+          className="cursor-grab select-none px-1.5 text-[13px] active:cursor-grabbing"
+        >
+          ⠿
+        </span>
+        <button type="button" disabled={index === 0} onClick={() => onMove(-1)} title="Avancer" className="px-1 text-[12px] disabled:opacity-25">◀</button>
+        <button type="button" disabled={index === total - 1} onClick={() => onMove(1)} title="Reculer" className="px-1 text-[12px] disabled:opacity-25">▶</button>
+        <span className="mx-0.5 h-3 w-px" style={{ background: GRID }} />
+        {([1, 2, 3, 4] as Largeur[]).map((w) => (
+          <button
+            key={w}
+            type="button"
+            onClick={() => onWidth(w)}
+            title={w === 4 ? "Pleine largeur" : `${w}/4 de largeur`}
+            className="rounded px-1 text-[10px] font-bold"
+            style={{ background: widget.w === w ? "rgba(46,91,184,0.35)" : "transparent" }}
+          >
+            {w === 4 ? "▭" : `${w}/4`}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function AjouterWidget({
+  famillesMacro, agenceForcee, agencesDisponibles, onAddGraphe, onAddKpi, onClose,
+}: {
+  famillesMacro: string[]; agenceForcee: string | null; agencesDisponibles: string[];
+  onAddGraphe: (k: CardKey) => void; onAddKpi: (c: Omit<KpiCardConfig, "id">) => void; onClose: () => void;
+}) {
+  return (
+    <div className="mb-3 rounded-2xl border p-3" style={{ borderColor: GRID, background: "var(--cg-panel)" }}>
+      <div className="mb-2 flex items-center">
+        <span className="text-[12px] font-extrabold uppercase tracking-wider" style={{ color: "var(--cg-ink)" }}>Ajouter un widget</span>
+        <button type="button" onClick={onClose} className="ml-auto text-[12px] underline" style={{ color: "rgba(var(--cg-ink-rgb),0.6)" }}>Fermer</button>
+      </div>
+      <div className="mb-1 text-[11px] font-semibold" style={{ color: "rgba(var(--cg-ink-rgb),0.6)" }}>Graphes par familles</div>
+      <div className="mb-3 flex flex-wrap gap-2">
+        {CARDS.map((c) => (
+          <button
+            key={c.key}
+            type="button"
+            onClick={() => onAddGraphe(c.key)}
+            className="rounded-full border-2 px-3 py-1 text-[12px] font-bold"
+            style={{ borderColor: c.color, background: `${c.color}22`, color: c.color }}
+          >
+            + {c.label}
+          </button>
+        ))}
+      </div>
+      <div className="mb-1 text-[11px] font-semibold" style={{ color: "rgba(var(--cg-ink-rgb),0.6)" }}>Pavés de Vision ONE PAGE</div>
+      <AjouterKpiForm
+        famillesMacro={famillesMacro}
+        agenceForcee={agenceForcee}
+        agencesDisponibles={agencesDisponibles}
+        onAdd={onAddKpi}
+        onCancel={onClose}
+      />
+    </div>
+  );
+}
+
 // ─── Page ────────────────────────────────────────────────────────────────
+
+type Reglages = { topN?: number; agendaOpen?: boolean; todoOpen?: boolean; jMoins1?: boolean };
 
 export default function VisionTciBisPage() {
   const { isMobile } = useViewport();
   const access = usePageFilterAccess();
   const anneeN = new Date().getFullYear();
 
-  const [cartes, setCartes] = useState<CardKey[]>(["CDC", "BL", "Factures", "PORTEFEUILLE"]);
-  const [modes, setModes] = useState<Record<string, Mode>>({});
-  const [topN, setTopN] = useState<number>(5);
-  const [agendaOpen, setAgendaOpen] = useState(true);
-  const [todoOpen, setTodoOpen] = useState(true);
+  const [email, setEmail] = useState<string>("");
+  const [widgets, setWidgets] = useState<Widget[]>([]);
+  const [reglages, setReglages] = useState<Reglages>({});
   const [prefsLues, setPrefsLues] = useState(false);
+  const [showAdd, setShowAdd] = useState(false);
+  const [dragging, setDragging] = useState<string | null>(null);
   const [overlay, setOverlay] = useState<null | "agenda" | "todo">(null);
+  const [refreshTick, setRefreshTick] = useState(0);
+  const [familleMacroFiltre, setFamilleMacroFiltre] = useState<string | null>(null);
 
   const [agence, setAgence] = useState<string>("");
   const [collaborateur, setCollaborateur] = useState<string>("");
   const [collabs, setCollabs] = useState<{ nom: string; agence: string }[]>([]);
+  const [famillesMacro, setFamillesMacro] = useState<string[]>([]);
 
   const [flux, setFlux] = useState<FluxRow[]>([]);
   const [pf, setPf] = useState<PfRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  // Préférences locales
-  useEffect(() => {
-    setCartes(lsGet<CardKey[]>(LS_CARDS, ["CDC", "BL", "Factures", "PORTEFEUILLE"]));
-    setModes(lsGet<Record<string, Mode>>(LS_MODES, {}));
-    setTopN(lsGet<number>(LS_TOP, 5));
-    setAgendaOpen(lsGet<boolean>(LS_AGENDA, true));
-    setTodoOpen(lsGet<boolean>(LS_TODO, true));
-    setPrefsLues(true);
-  }, []);
-  useEffect(() => { if (prefsLues) lsSet(LS_CARDS, cartes); }, [cartes, prefsLues]);
-  useEffect(() => { if (prefsLues) lsSet(LS_MODES, modes); }, [modes, prefsLues]);
-  useEffect(() => { if (prefsLues) lsSet(LS_TOP, topN); }, [topN, prefsLues]);
-  useEffect(() => { if (prefsLues) lsSet(LS_AGENDA, agendaOpen); }, [agendaOpen, prefsLues]);
-  useEffect(() => { if (prefsLues) lsSet(LS_TODO, todoOpen); }, [todoOpen, prefsLues]);
+  const topN = reglages.topN ?? 5;
+  const agendaOpen = reglages.agendaOpen ?? true;
+  const todoOpen = reglages.todoOpen ?? true;
+  const jMoins1 = reglages.jMoins1 ?? true;
 
-  // Périmètre imposé par le profil
+  // Chargement de la disposition (base), sinon disposition par défaut.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const { data: s } = await supabase.auth.getSession();
+      const mail = (s.session?.user?.email || "").toLowerCase();
+      if (!mail) { setPrefsLues(true); return; }
+      const [{ data: pref }, { data: layout }, { data: fams }, { data: cols }] = await Promise.all([
+        supabase.from("vision_tci_bis_preferences").select("widgets, reglages").eq("user_email", mail).maybeSingle(),
+        supabase.rpc("get_vision_tci_effective_layout", { p_email: mail }),
+        supabase.from("ref_familles").select("famille_macro"),
+        supabase.from("ref_collaborateurs").select("nom, agence, mise_en_sommeil").order("nom"),
+      ]);
+      if (cancelled) return;
+      setEmail(mail);
+      const saved = (pref?.widgets || null) as Widget[] | null;
+      if (saved && Array.isArray(saved) && saved.length > 0) {
+        setWidgets(saved);
+      } else {
+        const raw = ((layout as any[] | null) || []).map((c) => ({
+          id: String(c.id || newId()), kind: c.kind || "flux", cle: c.cle || c.famille || "BL",
+          famille_macro: c.famille_macro ?? null, agence: c.agence ?? null, grand: Boolean(c.grand),
+        })) as KpiCardConfig[];
+        setWidgets(widgetsParDefaut(raw));
+      }
+      setReglages(((pref?.reglages || {}) as Reglages) || {});
+      setFamillesMacro(Array.from(new Set(((fams || []) as Array<{ famille_macro: string | null }>).map((f) => f.famille_macro).filter((v): v is string => Boolean(v)))).sort());
+      setCollabs(((cols || []) as any[])
+        .filter((c) => c.nom && c.agence && !c.mise_en_sommeil && !String(c.nom).includes(" "))
+        .map((c) => ({ nom: String(c.nom), agence: String(c.agence) })));
+      setPrefsLues(true);
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  // Enregistrement (léger différé) à chaque changement de disposition.
+  useEffect(() => {
+    if (!prefsLues || !email) return;
+    const t = window.setTimeout(() => {
+      void supabase.from("vision_tci_bis_preferences").upsert({
+        user_email: email, widgets, reglages, updated_at: new Date().toISOString(),
+      });
+    }, 600);
+    return () => window.clearTimeout(t);
+  }, [widgets, reglages, prefsLues, email]);
+
+  const setReglage = useCallback(<K extends keyof Reglages>(k: K, v: Reglages[K]) => {
+    setReglages((cur) => ({ ...cur, [k]: v }));
+  }, []);
+
+  // Périmètre
   const agenceForcee = access.hasAgenceRestriction && access.allowedAgences.length > 0 ? access.allowedAgences[0] : null;
   const collaborateurForce = access.hasCollaborateurRestriction && access.allowedCollaborateurs.length > 0 ? access.allowedCollaborateurs[0] : null;
   const effAgence = agenceForcee || agence || null;
   const effCollab = collaborateurForce || collaborateur || null;
 
-  useEffect(() => {
-    (async () => {
-      const { data } = await supabase.from("ref_collaborateurs").select("nom, agence, mise_en_sommeil").order("nom");
-      setCollabs(((data || []) as any[])
-        .filter((c) => c.nom && c.agence && !c.mise_en_sommeil && !String(c.nom).includes(" "))
-        .map((c) => ({ nom: String(c.nom), agence: String(c.agence) })));
-    })();
-  }, []);
   const agences = useMemo(() => Array.from(new Set(collabs.map((c) => c.agence))).sort(), [collabs]);
-  const collabsVisibles = useMemo(
-    () => collabs.filter((c) => !effAgence || c.agence === effAgence),
-    [collabs, effAgence],
-  );
+  const collabsVisibles = useMemo(() => collabs.filter((c) => !effAgence || c.agence === effAgence), [collabs, effAgence]);
 
   useEffect(() => {
     if (access.loading) return;
     let cancelled = false;
-    setLoading(true);
-    setError(null);
     Promise.all([
       supabase.rpc("get_vision_bis_flux_familles", { p_agence: effAgence, p_collaborateur: effCollab }),
       supabase.rpc("get_vision_bis_portefeuille_cdc", { p_agence: effAgence, p_collaborateur: effCollab }),
     ]).then(([f, p]) => {
       if (cancelled) return;
-      if (f.error) setError(f.error.message);
-      else if (p.error) setError(p.error.message);
+      setError(f.error?.message || p.error?.message || null);
       setFlux(((f.data || []) as any[]).map((r) => ({ ...r, montant: Number(r.montant || 0), montant_a_date: Number(r.montant_a_date || 0) })));
       setPf(((p.data || []) as any[]).map((r) => ({ ...r, montant: Number(r.montant || 0) })));
       setLoading(false);
     });
     return () => { cancelled = true; };
-  }, [access.loading, effAgence, effCollab]);
+  }, [access.loading, effAgence, effCollab, refreshTick]);
 
-  function toggleCarte(k: CardKey) {
-    setCartes((cur) => {
-      if (cur.includes(k)) return cur.filter((c) => c !== k);
-      const ordre = CARDS.map((c) => c.key);
-      return [...cur, k].sort((a, b) => ordre.indexOf(a) - ordre.indexOf(b));
+  const kpiScope: KpiScope = useMemo(
+    () => ({ agence: effAgence, collaborateur: effCollab, familleMacro: familleMacroFiltre, jMoins1, refreshTick }),
+    [effAgence, effCollab, familleMacroFiltre, jMoins1, refreshTick],
+  );
+
+  // Opérations sur la disposition
+  function retirer(id: string) { setWidgets((cur) => cur.filter((w) => w.id !== id)); }
+  function maj(id: string, patch: Partial<Widget>) {
+    setWidgets((cur) => cur.map((w) => (w.id === id ? ({ ...w, ...patch } as Widget) : w)));
+  }
+  function deplacer(id: string, dir: -1 | 1) {
+    setWidgets((cur) => {
+      const i = cur.findIndex((w) => w.id === id);
+      const j = i + dir;
+      if (i < 0 || j < 0 || j >= cur.length) return cur;
+      const next = cur.slice();
+      [next[i], next[j]] = [next[j], next[i]];
+      return next;
+    });
+  }
+  function deposer(targetId: string, after: boolean) {
+    const src = dragging;
+    setDragging(null);
+    if (!src || src === targetId) return;
+    setWidgets((cur) => {
+      const moved = cur.find((w) => w.id === src);
+      if (!moved) return cur;
+      const rest = cur.filter((w) => w.id !== src);
+      const t = rest.findIndex((w) => w.id === targetId);
+      rest.splice(after ? t + 1 : t, 0, moved);
+      return rest;
     });
   }
 
@@ -818,39 +1084,82 @@ export default function VisionTciBisPage() {
 
   const selectCls = "rounded-lg border px-2 py-1 text-[12px] font-semibold";
   const selectStyle = { background: "var(--cg-panel)", borderColor: GRID, color: "var(--cg-ink)" } as React.CSSProperties;
+  const btnStyle = { background: "var(--cg-panel)", borderColor: GRID, color: "var(--cg-ink)" } as React.CSSProperties;
+
+  function renderWidget(w: Widget) {
+    if (w.type === "graphe") {
+      const def = CARDS.find((c) => c.key === w.cle) || CARDS[0];
+      if (w.cle === "PORTEFEUILLE") {
+        return (
+          <PortefeuilleFamillesCard
+            rows={pf} topN={topN} color={def.color} anneeN={anneeN}
+            vue={w.vue || "E"} setVue={(v) => maj(w.id, { vue: v })}
+            onRemove={() => retirer(w.id)}
+          />
+        );
+      }
+      return (
+        <GrapheFamillesCard
+          type={w.cle} label={def.label} color={def.color} rows={flux} topN={topN} anneeN={anneeN}
+          mode={w.mode || "mensuel"} onMode={(m) => maj(w.id, { mode: m })}
+          onRemove={() => retirer(w.id)} kpiScope={kpiScope}
+        />
+      );
+    }
+    const c = w.kpi;
+    const ag = agenceForcee || agence || c.agence || null;
+    const co = effCollab;
+    const rm = () => retirer(w.id);
+    switch (c.kind) {
+      case "flux":
+        return c.grand
+          ? <FluxCardGrand config={c} effectiveAgence={ag} effectiveCollaborateur={co} refreshTick={refreshTick} familleMacroEffective={familleMacroFiltre ?? c.famille_macro} onRemove={rm} />
+          : <FluxCard config={c} effectiveAgence={ag} effectiveCollaborateur={co} utiliserJMoins1={jMoins1} refreshTick={refreshTick} familleMacroFiltre={familleMacroFiltre} onRemove={rm} />;
+      case "taux":
+        return <TauxCard config={c} effectiveAgence={ag} effectiveCollaborateur={co} refreshTick={refreshTick} familleMacroFiltre={familleMacroFiltre} onRemove={rm} />;
+      case "portefeuille":
+        return <PortefeuilleCard effectiveAgence={ag} effectiveCollaborateur={co} refreshTick={refreshTick} familleMacroFiltre={familleMacroFiltre} onRemove={rm} />;
+      case "projection":
+        return <ProjectionCard effectiveAgence={ag} effectiveCollaborateur={co} refreshTick={refreshTick} familleMacroFiltre={familleMacroFiltre} onRemove={rm} />;
+      case "spacer":
+        return <SpacerCard span={c.cle === "2" ? 2 : 1} onRemove={rm} />;
+      default:
+        return c.cle === "factures_retard"
+          ? <RetardsPaiementCard effectiveAgence={ag} effectiveCollaborateur={co} refreshTick={refreshTick} onRemove={rm} />
+          : <CompteurCard config={c} effectiveAgence={ag} effectiveCollaborateur={co} refreshTick={refreshTick} onRemove={rm} />;
+    }
+  }
 
   return (
     <div className="min-h-screen w-full bg-[color:var(--cg-bg)] p-5">
       <div className="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,2fr)_minmax(320px,1fr)]">
-        {/* ── Colonne graphes (2/3) ── */}
+        {/* ── Colonne widgets (2/3) ── */}
         <div className="min-w-0">
           <div className="mb-3 flex flex-wrap items-center gap-2">
-            {CARDS.map((c) => {
-              const on = cartes.includes(c.key);
-              return (
-                <button
-                  key={c.key}
-                  type="button"
-                  onClick={() => toggleCarte(c.key)}
-                  className="rounded-full border-2 px-3 py-1 text-[12px] font-bold transition"
-                  style={{
-                    borderColor: on ? c.color : GRID,
-                    background: on ? `${c.color}2A` : "transparent",
-                    color: on ? c.color : "var(--cg-ink-soft)",
-                  }}
-                >
-                  {on ? "✓ " : "+ "}{c.label}
-                </button>
-              );
-            })}
-            <span className="mx-1 h-5 w-px" style={{ background: GRID }} />
-            <span className="text-[11px] font-semibold" style={{ color: "var(--cg-ink-soft)" }}>Familles</span>
+            <button
+              type="button"
+              onClick={() => setShowAdd((v) => !v)}
+              className="rounded-full border-2 px-3 py-1 text-[12px] font-bold"
+              style={{ borderColor: "#2E5BB8", background: "rgba(46,91,184,0.18)", color: "var(--cg-ink)" }}
+            >
+              + Ajouter un widget
+            </button>
+            <span className="text-[11px] font-semibold" style={{ color: "rgba(var(--cg-ink-rgb),0.6)" }}>Familles</span>
             <Segmented<string>
               value={String(topN)}
-              onChange={(v) => setTopN(Number(v))}
-              color="#2E5BB8"
+              onChange={(v) => setReglage("topN", Number(v))}
+              color="#4C8FD6"
               options={[{ v: "3", l: "Top 3" }, { v: "5", l: "Top 5" }, { v: "8", l: "Top 8" }]}
             />
+            <Segmented<string>
+              value={jMoins1 ? "j1" : "j"}
+              onChange={(v) => setReglage("jMoins1", v === "j1")}
+              color="#A6A181"
+              options={[{ v: "j", l: "Jour" }, { v: "j1", l: "J-1" }]}
+            />
+            <button type="button" onClick={() => setRefreshTick((t) => t + 1)} className="rounded-lg border px-2.5 py-1 text-[11px] font-semibold" style={btnStyle} title="Actualiser toutes les valeurs">
+              ↻ Actualiser
+            </button>
             <div className="ml-auto flex items-center gap-2">
               {agenceForcee ? (
                 <span className={selectCls} style={selectStyle}>{agenceForcee} 🔒</span>
@@ -872,37 +1181,54 @@ export default function VisionTciBisPage() {
             </div>
           </div>
 
+          <FamilleMacroFiltreRow familles={famillesMacro} actif={familleMacroFiltre} onChange={setFamilleMacroFiltre} />
+
+          {showAdd && (
+            <AjouterWidget
+              famillesMacro={famillesMacro}
+              agenceForcee={agenceForcee}
+              agencesDisponibles={agences}
+              onAddGraphe={(k) => { setWidgets((cur) => [...cur, { id: newId(), w: 2, type: "graphe", cle: k }]); setShowAdd(false); }}
+              onAddKpi={(c) => {
+                const kpi: KpiCardConfig = { ...c, id: newId() };
+                setWidgets((cur) => [...cur, { id: newId(), w: largeurParDefaut(kpi), type: "kpi", kpi }]);
+                setShowAdd(false);
+              }}
+              onClose={() => setShowAdd(false)}
+            />
+          )}
+
           {error && (
             <div className="mb-3 rounded-lg border px-3 py-2 text-[12px]" style={{ borderColor: "var(--cg-danger-border)", background: "var(--cg-danger-bg)", color: "var(--cg-danger-text)" }}>
               {error}
             </div>
           )}
 
-          {cartes.length === 0 ? (
-            <div className="rounded-2xl border-2 border-dashed p-10 text-center text-[13px]" style={{ borderColor: GRID, color: "var(--cg-ink-soft)" }}>
-              Choisissez un ou plusieurs types de document ci-dessus.
+          {!prefsLues ? (
+            <div className="grid grid-cols-4 gap-4">
+              {[0, 1, 2, 3].map((i) => <div key={i} className="col-span-2 h-72 animate-pulse rounded-2xl" style={{ background: "rgba(var(--cg-ink-rgb),0.05)" }} />)}
+            </div>
+          ) : widgets.length === 0 ? (
+            <div className="rounded-2xl border-2 border-dashed p-10 text-center text-[13px]" style={{ borderColor: GRID, color: "rgba(var(--cg-ink-rgb),0.6)" }}>
+              Aucun widget — « + Ajouter un widget » pour composer la page.
             </div>
           ) : (
-            <div className={`grid grid-cols-1 gap-4 lg:grid-cols-2 ${loading ? "opacity-60" : ""}`}>
-              {cartes.map((k) => {
-                const def = CARDS.find((c) => c.key === k)!;
-                if (k === "PORTEFEUILLE") {
-                  return <PortefeuilleCard key={k} rows={pf} topN={topN} color={def.color} anneeN={anneeN} />;
-                }
-                return (
-                  <FluxCard
-                    key={k}
-                    type={k}
-                    label={def.label}
-                    color={def.color}
-                    rows={flux}
-                    topN={topN}
-                    anneeN={anneeN}
-                    mode={modes[k] || "mensuel"}
-                    onMode={(m) => setModes((cur) => ({ ...cur, [k]: m }))}
-                  />
-                );
-              })}
+            <div className={`grid grid-cols-4 gap-4 pt-2 ${loading ? "opacity-60" : ""}`}>
+              {widgets.map((w, i) => (
+                <WidgetFrame
+                  key={w.id}
+                  widget={w}
+                  index={i}
+                  total={widgets.length}
+                  onMove={(dir) => deplacer(w.id, dir)}
+                  onWidth={(l) => maj(w.id, { w: l })}
+                  onDragStartId={setDragging}
+                  onDropOn={deposer}
+                  dragging={dragging}
+                >
+                  {renderWidget(w)}
+                </WidgetFrame>
+              ))}
             </div>
           )}
         </div>
@@ -914,10 +1240,10 @@ export default function VisionTciBisPage() {
             icon="📅"
             color="#7A5EA8"
             open={agendaOpen}
-            onToggle={() => setAgendaOpen((v) => !v)}
+            onToggle={() => setReglage("agendaOpen", !agendaOpen)}
             actions={
               <button type="button" onClick={() => setOverlay("agenda")} className="rounded-lg border px-2 py-0.5 text-[11px] font-bold"
-                style={{ color: "#7A5EA8", borderColor: "#7A5EA888" }}>
+                style={{ color: "#A48BD6", borderColor: "#7A5EA888" }}>
                 Agenda complet ⤢
               </button>
             }
@@ -930,10 +1256,10 @@ export default function VisionTciBisPage() {
             icon="✅"
             color="#B4761A"
             open={todoOpen}
-            onToggle={() => setTodoOpen((v) => !v)}
+            onToggle={() => setReglage("todoOpen", !todoOpen)}
             actions={
               <button type="button" onClick={() => setOverlay("todo")} className="rounded-lg border px-2 py-0.5 text-[11px] font-bold"
-                style={{ color: "#B4761A", borderColor: "#B4761A88" }}>
+                style={{ color: "#D69A4A", borderColor: "#B4761A88" }}>
                 Agrandir ⤢
               </button>
             }

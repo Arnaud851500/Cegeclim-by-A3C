@@ -128,7 +128,7 @@ type FamilleFlux = (typeof FAMILLES_FLUX)[number];
 
 type KpiKind = "flux" | "compteur" | "taux" | "spacer" | "portefeuille" | "projection";
 
-type KpiCardConfig = {
+export type KpiCardConfig = {
   id: string;
   kind: KpiKind;
   cle: string;
@@ -139,7 +139,7 @@ type KpiCardConfig = {
   grand?: boolean;
 };
 
-const COMPTEUR_OPTIONS = [
+export const COMPTEUR_OPTIONS = [
   // "Clients créés cette année" n'est plus un pavé séparé — intégré comme
   // sous-mesure de "Clients actifs" (cf. CompteurCard).
   { cle: "clients_actifs", label: "Clients actifs", isAlerte: false },
@@ -303,7 +303,7 @@ function CardShell({
 
 // ── Pavé FLUX (compact) ──────────────────────────────────────────────────
 
-function FluxCard({
+export function FluxCard({
   config, effectiveAgence, effectiveCollaborateur, utiliserJMoins1, refreshTick, familleMacroFiltre, onRemove,
 }: { config: KpiCardConfig; effectiveAgence: string | null; effectiveCollaborateur: string | null; utiliserJMoins1: boolean; refreshTick: number; familleMacroFiltre: string | null; onRemove: () => void }) {
   const famille = config.cle as FamilleFlux;
@@ -395,7 +395,7 @@ const PASTILLE_PALETTE = ["#4B92AC", "#D69A4A", "#C1683C", "#3F9142", "#7A5EA8",
 // macro propre à chaque pavé quand elle est définie ; "Toutes" retombe sur
 // le réglage individuel de chaque pavé). Voir familleMacroFor() dans le
 // composant principal.
-function FamilleMacroFiltreRow({
+export function FamilleMacroFiltreRow({
   familles, actif, onChange,
 }: { familles: string[]; actif: string | null; onChange: (f: string | null) => void }) {
   if (familles.length === 0) return null;
@@ -620,7 +620,7 @@ function BarMensuelChart({ points, color }: { points: CourbePoint[]; color: stri
   );
 }
 
-function FluxCardGrand({
+export function FluxCardGrand({
   config, effectiveAgence, effectiveCollaborateur, refreshTick, familleMacroEffective, onRemove,
 }: { config: KpiCardConfig; effectiveAgence: string | null; effectiveCollaborateur: string | null; refreshTick: number; familleMacroEffective: string | null; onRemove: () => void }) {
   const famille = config.cle as FamilleFlux;
@@ -846,7 +846,7 @@ async function fetchClientsActifsDepuisCache(agence: string | null, collaborateu
 // fenêtre avec la liste des clients concernés, clic sur un client -> fiche
 // compta complète (toutes les colonnes du fichier).
 
-function RetardsPaiementCard({
+export function RetardsPaiementCard({
   effectiveAgence, effectiveCollaborateur, refreshTick, onRemove,
 }: { effectiveAgence: string | null; effectiveCollaborateur: string | null; refreshTick: number; onRemove: () => void }) {
   const [loading, setLoading] = useState(true);
@@ -1031,7 +1031,7 @@ function RetardsPaiementCard({
   );
 }
 
-function CompteurCard({
+export function CompteurCard({
   config, effectiveAgence, effectiveCollaborateur, refreshTick, onRemove,
 }: { config: KpiCardConfig; effectiveAgence: string | null; effectiveCollaborateur: string | null; refreshTick: number; onRemove: () => void }) {
   const [loading, setLoading] = useState(true);
@@ -1240,7 +1240,7 @@ function tauxCouleurDelta(delta: number | null): string {
   return delta >= 0 ? "text-[color:var(--cg-up-ink)]" : "text-[color:var(--cg-down-ink)]";
 }
 
-function TauxCard({
+export function TauxCard({
   config, effectiveAgence, effectiveCollaborateur, refreshTick, familleMacroFiltre, onRemove,
 }: { config: KpiCardConfig; effectiveAgence: string | null; effectiveCollaborateur: string | null; refreshTick: number; familleMacroFiltre: string | null; onRemove: () => void }) {
   const [loading, setLoading] = useState(true);
@@ -1584,7 +1584,7 @@ function ProjectionTable({ rows }: { rows: AgenceLigne[] }) {
   );
 }
 
-function PortefeuilleCard({
+export function PortefeuilleCard({
   effectiveAgence, effectiveCollaborateur, refreshTick, familleMacroFiltre, onRemove,
 }: { effectiveAgence: string | null; effectiveCollaborateur: string | null; refreshTick: number; familleMacroFiltre: string | null; onRemove: () => void }) {
   const [loading, setLoading] = useState(true);
@@ -1661,7 +1661,7 @@ function PortefeuilleCard({
   );
 }
 
-function ProjectionCard({
+export function ProjectionCard({
   effectiveAgence, effectiveCollaborateur, refreshTick, familleMacroFiltre, onRemove,
 }: { effectiveAgence: string | null; effectiveCollaborateur: string | null; refreshTick: number; familleMacroFiltre: string | null; onRemove: () => void }) {
   const [loading, setLoading] = useState(true);
@@ -1749,7 +1749,7 @@ function ProjectionCard({
 
 // ── Pavé vide (mise en forme uniquement, pas de bordure ni de données) ───
 
-function SpacerCard({ span, onRemove }: { span: 1 | 2; onRemove: () => void }) {
+export function SpacerCard({ span, onRemove }: { span: 1 | 2; onRemove: () => void }) {
   return (
     <div className={span === 2 ? "col-span-4 sm:col-span-2" : "col-span-2 sm:col-span-1"}>
       <div className="group relative flex h-full min-h-[64px] items-center justify-center rounded-xl">
@@ -1767,7 +1767,7 @@ function SpacerCard({ span, onRemove }: { span: 1 | 2; onRemove: () => void }) {
 
 // ── Formulaire d'ajout ───────────────────────────────────────────────────
 
-function AjouterKpiForm({
+export function AjouterKpiForm({
   famillesMacro, agenceForcee, agencesDisponibles, onAdd, onCancel,
 }: {
   famillesMacro: string[];
