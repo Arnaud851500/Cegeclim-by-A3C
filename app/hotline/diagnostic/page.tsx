@@ -52,7 +52,7 @@ export default function HotlineDiagnosticPage() {
   const [arbreId, setArbreId] = useState<string>('')
   const [noeuds, setNoeuds] = useState<Noeud[]>([])
   const [modifies, setModifies] = useState<Set<string>>(new Set())
-  const [lignes, setLignes] = useState<Array<Ligne & { nouveau?: boolean }>>([])
+  const [lignes, setLignes] = useState<Array<Ligne & { nouveau?: boolean; origine?: string }>>([])
   const [erreur, setErreur] = useState<string | null>(null)
   const [info, setInfo] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
@@ -69,7 +69,7 @@ export default function HotlineDiagnosticPage() {
     try {
       const [a, l] = await Promise.all([chargerArbres(), chargerLignes()])
       setArbres(a)
-      setLignes(l)
+      setLignes(l.map((x) => ({ ...x, origine: x.numero })))
       setArbreId((id) => id || a[0]?.id || '')
     } catch (e) {
       setErreur(messageErreur(e))
@@ -275,9 +275,17 @@ export default function HotlineDiagnosticPage() {
       const rows = lignes
         .filter((l) => l.numero.trim())
         .map((l) => ({ numero: l.numero.trim(), filiere: l.filiere, libelle: l.libelle, actif: l.actif }))
+      // Numéro modifié sur une ligne existante : l'ancien numéro est remplacé.
+      const remplaces = lignes
+        .filter((l) => l.origine && l.origine !== l.numero.trim())
+        .map((l) => l.origine as string)
       const { error } = await supabase.from('hotline_lignes').upsert(rows)
       if (error) throw error
-      setLignes(await chargerLignes())
+      if (remplaces.length) {
+        const { error: errDel } = await supabase.from('hotline_lignes').delete().in('numero', remplaces)
+        if (errDel) throw errDel
+      }
+      setLignes((await chargerLignes()).map((x) => ({ ...x, origine: x.numero })))
     }, 'Lignes 3CX enregistrées')
   }
 
@@ -285,7 +293,7 @@ export default function HotlineDiagnosticPage() {
     await run(async () => {
       const { error } = await supabase.from('hotline_lignes').delete().eq('numero', numero)
       if (error) throw error
-      setLignes(await chargerLignes())
+      setLignes((await chargerLignes()).map((x) => ({ ...x, origine: x.numero })))
     })
   }
 
@@ -407,14 +415,15 @@ export default function HotlineDiagnosticPage() {
             <div className="space-y-2 p-3">
               <p className="text-[11px] text-slate-500">Numéro appelé (ligne hotline) → filière proposée à l’ouverture de la console.</p>
               {lignes.map((l, i) => (
-                <div key={`${l.numero}-${i}`} className="space-y-1 rounded-lg border border-[#E2DFD8] p-2">
+                <div key={`${l.origine ?? 'nouveau'}-${i}`} className="space-y-1 rounded-lg border border-[#E2DFD8] p-2">
                   <div className="flex gap-1">
                     <input
                       value={l.numero}
-                      disabled={!l.nouveau}
-                      title={l.nouveau ? 'Numéro appelé, tel que transmis par 3CX' : 'Pour changer de numéro : supprimer la ligne et en créer une nouvelle'}
+                      placeholder="N° appelé, ex. 0559148494"
+                      title="Numéro de la ligne hotline appelée (c'est lui qui choisit la filière)"
+                      inputMode="tel"
                       onChange={(e) => setLignes((list) => list.map((x, j) => (j === i ? { ...x, numero: e.target.value } : x)))}
-                      className={`${champ} disabled:bg-[#FAF9F7]`}
+                      className={champ}
                     />
                     <select value={l.filiere} onChange={(e) => setLignes((list) => list.map((x, j) => (j === i ? { ...x, filiere: e.target.value as Filiere } : x)))} className={`${champ} w-[120px]`}>
                       {FILIERES.map((f) => (
@@ -425,8 +434,8 @@ export default function HotlineDiagnosticPage() {
                     </select>
                   </div>
                   <div className="flex gap-1">
-                    <input value={l.libelle} onChange={(e) => setLignes((list) => list.map((x, j) => (j === i ? { ...x, libelle: e.target.value } : x)))} className={champ} />
-                    <button type="button" onClick={() => (l.nouveau ? setLignes((list) => list.filter((_, j) => j !== i)) : supprimerLigne(l.numero))} className="px-2 text-[12px] text-slate-400 hover:text-[#A32C2C]" title="Supprimer">
+                    <input value={l.libelle} placeholder="Libellé (affichage seul)" title="Libellé affiché, sans effet sur la reconnaissance" onChange={(e) => setLignes((list) => list.map((x, j) => (j === i ? { ...x, libelle: e.target.value } : x)))} className={champ} />
+                    <button type="button" onClick={() => (l.nouveau ? setLignes((list) => list.filter((_, j) => j !== i)) : supprimerLigne(l.origine || l.numero))} className="px-2 text-[12px] text-slate-400 hover:text-[#A32C2C]" title="Supprimer">
                       ✕
                     </button>
                   </div>
