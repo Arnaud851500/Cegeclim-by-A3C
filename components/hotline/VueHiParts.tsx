@@ -344,7 +344,7 @@ export default function VueHiParts({
                 </div>
                 <div className="grid grid-cols-2 gap-2 text-[12px]">
                   <div className="rounded-md bg-[#FAF9F7] px-2 py-1.5">
-                    <div className="text-[10px] font-semibold uppercase text-slate-400">Prix unitaire HT Hi-Parts</div>
+                    <div className="text-[10px] font-semibold uppercase text-slate-400">Prix public HT (Hi-Parts)</div>
                     <div className="text-[16px] font-bold text-slate-900">{piece.prix_ht !== null ? euro(piece.prix_ht) : <span className="text-[12px] font-normal text-slate-500">pas encore récupéré</span>}</div>
                   </div>
                   <div className="rounded-md bg-[#FAF9F7] px-2 py-1.5">
@@ -374,7 +374,7 @@ export default function VueHiParts({
               </div>
             ) : (
               <div className="border-b border-[#EFEDE8] p-4 text-[13px] text-slate-600">
-                Cliquer un <span className="font-semibold">repère</span> sur le dessin ou une pièce dans la liste, puis « Ajouter au ticket » : la référence, la désignation et le prix sont ajoutés au motif de l’appel.
+                Cliquer un <span className="font-semibold">repère</span> sur le dessin ou une pièce dans la liste, puis « Ajouter au ticket » : la référence, la désignation et le prix public sont ajoutés au motif de l’appel.
               </div>
             )}
 

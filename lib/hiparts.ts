@@ -110,7 +110,7 @@ export function ligneTicketHiParts(d: { piece: HiPartsPiece; produit: string; sc
   return [
     `Pièce Hi-Parts : ${piece.reference || 'réf. ?'} — ${piece.designation || ''}`.trim(),
     `repère ${piece.repere || '?'} · ${produit}${vue ? ` (${vue})` : ''}`,
-    `qté ${quantite} · prix unitaire ${euro(piece.prix_ht)}${total}`,
+    `qté ${quantite} · prix public ${euro(piece.prix_ht)}${total}`,
     piece.ref_remplacement ? `remplacée par ${piece.ref_remplacement}` : '',
   ]
     .filter(Boolean)
