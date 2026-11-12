@@ -174,6 +174,17 @@ export function parserPrix(reponse: string) {
 export class HiPartsClient {
   private cookies = new Map<string, string>()
   private connecte = false
+  // (12/11/2026) Cadence limitée : ~900 prix/min ont fait couper la session
+  // puis refuser la connexion par Hi-Parts. Une requête toutes les 1,5 s au
+  // plus, tous travailleurs confondus.
+  private prochaine = 0
+  static INTERVALLE_MS = 1500
+
+  private async cadence() {
+    const attente = this.prochaine - Date.now()
+    this.prochaine = Math.max(Date.now(), this.prochaine) + HiPartsClient.INTERVALLE_MS
+    if (attente > 0) await new Promise((r) => setTimeout(r, attente))
+  }
 
   constructor(private login: string, private motDePasse: string) {}
 
@@ -195,6 +206,7 @@ export class HiPartsClient {
     let url = new URL(chemin, HIPARTS_BASE).toString()
     let opts: RequestInit = init
     for (let i = 0; i < 6; i++) {
+      await this.cadence()
       const r = await fetch(url, {
         ...opts,
         redirect: 'manual',
@@ -212,7 +224,12 @@ export class HiPartsClient {
     throw new Error(`Trop de redirections sur ${chemin}`)
   }
 
+  private derniereConnexion = 0
+
   async connecter() {
+    // Pas plus d'une connexion par minute et par passage (sinon Hi-Parts finit par refuser le compte).
+    if (this.connecte && Date.now() - this.derniereConnexion < 60_000) throw new Error('Session Hi-Parts perdue juste après connexion : arrêt du passage')
+    this.derniereConnexion = Date.now()
     this.cookies.clear()
     const page = await this.requete('/Login.aspx')
     const champs = new URLSearchParams()
@@ -399,11 +416,27 @@ async function traiter(db: SupabaseClient, hp: HiPartsClient, el: Element, compt
   }
 }
 
+/**
+ * (12/11/2026) Après un refus de connexion, on ne retente pas avant 30 min
+ * (éviter de faire bloquer le compte partagé par Hi-Parts).
+ */
+const PAUSE_APRES_REFUS_MS = 30 * 60_000
+async function enPauseApresRefus(db: SupabaseClient) {
+  const { data } = await db.from('hiparts_sync_etat').select('dernier_passage, dernier_message').eq('id', 1).maybeSingle()
+  const e = data as { dernier_passage: string | null; dernier_message: string | null } | null
+  if (!e?.dernier_passage || !/Connexion Hi-Parts refusée/.test(e.dernier_message || '')) return null
+  const reprise = new Date(e.dernier_passage).getTime() + PAUSE_APRES_REFUS_MS
+  return reprise > Date.now() ? new Date(reprise) : null
+}
+
 /** Un passage : prend des lots dans la file jusqu'à épuisement du temps imparti. */
 export async function passageHiParts(db: SupabaseClient, opts: { dureeMs: number; parallelisme?: number; forcerRelance?: boolean }) {
   const login = process.env.HIPARTS_LOGIN
   const motDePasse = process.env.HIPARTS_PASSWORD
   if (!login || !motDePasse) throw new Error('Variables HIPARTS_LOGIN / HIPARTS_PASSWORD manquantes (Vercel → Settings → Environment Variables).')
+
+  const pause = await enPauseApresRefus(db)
+  if (pause) return { pause: `Connexion refusée récemment : reprise après ${pause.toISOString()}`, traites: 0, erreurs: 0 }
 
   const debut = Date.now()
   const relance = await db.rpc('hiparts_relancer_si_besoin', { p_jours: 7, p_forcer: Boolean(opts.forcerRelance) })
@@ -411,10 +444,10 @@ export async function passageHiParts(db: SupabaseClient, opts: { dureeMs: number
 
   const hp = new HiPartsClient(login, motDePasse)
   const compteurs: Record<string, number> = { traites: 0, erreurs: 0 }
-  const parallelisme = Math.max(1, Math.min(opts.parallelisme || 4, 8))
+  const parallelisme = Math.max(1, Math.min(opts.parallelisme || 2, 3))
 
   while (Date.now() - debut < opts.dureeMs) {
-    const { data, error } = await db.rpc('hiparts_prendre_lot', { p_n: parallelisme * 6 })
+    const { data, error } = await db.rpc('hiparts_prendre_lot', { p_n: parallelisme * 4 })
     if (error) throw error
     const lot = (data || []) as Element[]
     if (!lot.length) break
@@ -433,7 +466,7 @@ export async function passageHiParts(db: SupabaseClient, opts: { dureeMs: number
         } catch (e) {
           compteurs.erreurs++
           const msg = e instanceof Error ? e.message : String(e)
-          if (/Connexion Hi-Parts refusée|HIPARTS_/.test(msg)) throw e
+          if (/Connexion Hi-Parts refusée|HIPARTS_|Session Hi-Parts perdue/.test(msg)) throw e
           await db
             .from('hiparts_file')
             .update({ statut: el.essais >= 3 ? 'ERREUR' : 'A_FAIRE', erreur: msg.slice(0, 500), verrou_jusqua: null, traite_le: new Date().toISOString() })
@@ -460,9 +493,11 @@ export async function copierModeleHiParts(db: SupabaseClient, idgam: number, opt
   const login = process.env.HIPARTS_LOGIN
   const motDePasse = process.env.HIPARTS_PASSWORD
   if (!login || !motDePasse) throw new Error('Variables HIPARTS_LOGIN / HIPARTS_PASSWORD manquantes (Vercel → Settings → Environment Variables).')
+  const pause = await enPauseApresRefus(db)
+  if (pause) throw new Error(`Hi-Parts a refusé la connexion récemment ; nouvel essai après ${pause.toLocaleTimeString('fr-FR', { timeZone: 'Europe/Paris' })}`)
   const debut = Date.now()
   const dureeMs = opts.dureeMs ?? 50_000
-  const parallelisme = Math.max(1, Math.min(opts.parallelisme || 4, 6))
+  const parallelisme = Math.max(1, Math.min(opts.parallelisme || 2, 3))
   const hp = new HiPartsClient(login, motDePasse)
   const compteurs: Record<string, number> = { traites: 0, erreurs: 0 }
 
@@ -484,7 +519,10 @@ export async function copierModeleHiParts(db: SupabaseClient, idgam: number, opt
           compteurs.erreurs++
           const msg = e instanceof Error ? e.message : String(e)
           await db.from('hiparts_file').update({ statut: 'A_FAIRE', erreur: msg.slice(0, 500), verrou_jusqua: null }).eq('id', el.id)
-          if (/Connexion Hi-Parts refusée|HIPARTS_/.test(msg)) throw e
+          if (/Connexion Hi-Parts refusée|HIPARTS_|Session Hi-Parts perdue/.test(msg)) {
+            await db.from('hiparts_sync_etat').update({ dernier_passage: new Date().toISOString(), dernier_message: `Erreur : ${msg}` }).eq('id', 1)
+            throw e
+          }
         }
       }
     }
