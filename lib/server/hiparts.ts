@@ -154,6 +154,11 @@ export function parserSchema(html: string) {
   return { titre, image, lignes }
 }
 
+/** Réponse GetNomenclature non remplie (session perdue) : marqueurs [LabelXxx.Text] restés tels quels. */
+export function estGabaritVide(reponse: string) {
+  return /\[Label(PUHT|Title|RefSubstitution)\.Text\]/i.test(reponse)
+}
+
 export function parserPrix(reponse: string) {
   const html = reponse.replace(/\\r\\n|\\n|\\t/g, ' ').replace(/\\"/g, '"').replace(/\\'/g, "'").replace(/\\\\/g, '\\')
   const designation = texte(/id="ctl00_LabelTitle"[^>]*>([\s\S]*?)<\/span>/i.exec(html)?.[1]) || null
@@ -270,12 +275,18 @@ export class HiPartsClient {
         headers: { 'Content-Type': 'text/plain; charset=utf-8' },
         body: `idNomenclature=${idNomenclature}\r\ntypeRub=PR\r\nidIncident=0\r\nmultirepere=false`,
       })
+    // (12/11/2026) Session expirée : Hi-Parts ne redirige pas, il renvoie le
+    // gabarit vide « [LabelPUHT.Text] [LabelTitle.Text]… ». On se reconnecte et,
+    // si le gabarit revient encore, on échoue (l'élément reste dans la file)
+    // plutôt que d'enregistrer une pièce sans prix.
+    const vide = (body: string) => !/labelpuht|LabelTitle/i.test(body) || estGabaritVide(body)
     let r = await appel()
-    if (r.status >= 400 || /Login\.aspx/i.test(r.url) || !/labelpuht|LabelTitle/i.test(r.body)) {
+    if (r.status >= 400 || /Login\.aspx/i.test(r.url) || vide(r.body)) {
       await this.connecter()
       r = await appel()
     }
     if (r.status >= 400) throw new Error(`HTTP ${r.status} sur GetNomenclature ${idNomenclature}`)
+    if (estGabaritVide(r.body)) throw new Error(`Session Hi-Parts non reconnue pour le prix (nomenclature ${idNomenclature})`)
     return r.body
   }
 }
