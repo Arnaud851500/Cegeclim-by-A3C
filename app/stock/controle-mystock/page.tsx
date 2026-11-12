@@ -31,11 +31,12 @@ import { useRouter, useSearchParams } from 'next/navigation'
 import ExcelJS from 'exceljs'
 import { supabase } from '@/lib/supabaseClient'
 
-type Statut = 'ok' | 'bl_jour' | 'absent_mystock' | 'absent_sage' | 'ecart'
+type Statut = 'ok' | 'bl_jour' | 'transit' | 'absent_mystock' | 'absent_sage' | 'ecart'
 type Suivi = 'a_analyser' | 'explique' | 'corrige'
 
 type Resume = {
-  nb_references: number; nb_ok: number; nb_bl_jour: number; nb_ecart: number
+  nb_references: number; nb_ok: number; nb_bl_jour: number; nb_transit?: number; nb_ecart: number
+  valeur_bl_jour?: number; valeur_transit?: number; valeur_a_analyser_abs?: number
   nb_absent_mystock: number; nb_absent_sage: number; nb_a_analyser: number
   qte_mystock: number; qte_sage: number; valeur_ecart_abs: number; valeur_ecart_net: number
 }
@@ -48,6 +49,7 @@ type Ligne = {
   qte_mystock: number | null; nb_lignes_fichier: number
   qte_sage: number; qte_sage_actuel: number; prepa_fin_j: number
   bl_jour: number; bl_apres: number; transit: number
+  bl_non_expedies?: number; bl_depuis?: string | null
   ecart: number; pu: number; ecart_valeur: number; statut: Statut
   suivi_statut: Suivi | null; suivi_commentaire: string | null; suivi_par: string | null; suivi_le: string | null
 }
@@ -67,7 +69,8 @@ const STATUTS: Record<Statut, { libelle: string; court: string; bg: string; fg: 
   ecart:          { libelle: 'Écart à analyser', court: 'Écart', bg: '#FBE4DD', fg: '#A3401C' },
   absent_mystock: { libelle: 'Absent de MyStock', court: 'Absent MyStock', bg: '#FCEFD9', fg: '#96600F' },
   absent_sage:    { libelle: 'Absent de SAGE', court: 'Absent SAGE', bg: '#EDE6F6', fg: '#5E4590' },
-  bl_jour:        { libelle: 'Écart = BL SAGE du jour J', court: 'BL du jour', bg: '#E4EEF8', fg: '#2D5F8C' },
+  bl_jour:        { libelle: 'Écart = BL SAGE non encore expédiés', court: 'BL non expédiés', bg: '#E4EEF8', fg: '#2D5F8C' },
+  transit:        { libelle: 'Écart = stock en transit vers FMS', court: 'Transit', bg: '#E3F1F0', fg: '#1F6B66' },
   ok:             { libelle: 'Identique', court: 'OK', bg: '#E9F5EA', fg: '#2F6F33' },
 }
 const SUIVIS: Record<Suivi, string> = { a_analyser: 'À analyser', explique: 'Expliqué', corrige: 'Corrigé' }
@@ -90,13 +93,23 @@ function isoLocal(d: Date) {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
 }
 
-/** Date de l'image : lue dans le nom du fichier (2026-11-11, 20261111, 11-11-2026, 11112026), sinon la veille. */
+/**
+ * Date de l'image (J) lue dans le nom du fichier : 2026-11-11, 20261111, 11-11-2026, 11112026 ou
+ * 121126 (jjmmaa, export MyStock « STOCK_FMS_121126_8h48 »). Une image prise le matin (heure < 12h,
+ * « 8h48 ») est le stock de fin de la journée précédente : J = veille. Sans date : la veille.
+ */
 function dateDepuisNomFichier(nom: string): string {
-  const a = nom.match(/(20\d{2})[-_.]?(\d{2})[-_.]?(\d{2})/)
-  if (a && n0(a[2]) >= 1 && n0(a[2]) <= 12 && n0(a[3]) >= 1 && n0(a[3]) <= 31) return `${a[1]}-${a[2]}-${a[3]}`
-  const b = nom.match(/(\d{2})[-_.]?(\d{2})[-_.]?(20\d{2})/)
-  if (b && n0(b[2]) >= 1 && n0(b[2]) <= 12 && n0(b[1]) >= 1 && n0(b[1]) <= 31) return `${b[3]}-${b[2]}-${b[1]}`
-  const d = new Date(); d.setDate(d.getDate() - 1)
+  const valide = (a: number, m: number, j: number) => m >= 1 && m <= 12 && j >= 1 && j <= 31 && a >= 2020 && a <= 2099
+  let d: Date | null = null
+  const a = nom.match(/(20\d{2})[-_.]?(\d{2})[-_.]?(\d{2})(?!\d)/)
+  const b = nom.match(/(?<!\d)(\d{2})[-_.]?(\d{2})[-_.]?(20\d{2})(?!\d)/)
+  const c = nom.match(/(?<!\d)(\d{2})[-_.]?(\d{2})[-_.]?(\d{2})(?!\d)/)
+  if (a && valide(+a[1], +a[2], +a[3])) d = new Date(+a[1], +a[2] - 1, +a[3])
+  else if (b && valide(+b[3], +b[2], +b[1])) d = new Date(+b[3], +b[2] - 1, +b[1])
+  else if (c && valide(2000 + +c[3], +c[2], +c[1])) d = new Date(2000 + +c[3], +c[2] - 1, +c[1])
+  if (!d) { const v = new Date(); v.setDate(v.getDate() - 1); return isoLocal(v) }
+  const h = nom.match(/(?<!\d)(\d{1,2})\s?h\s?\d{0,2}/i)
+  if (h && +h[1] < 12) d.setDate(d.getDate() - 1)
   return isoLocal(d)
 }
 
@@ -208,6 +221,8 @@ async function exporterExcel(res: Resultat) {
     { header: 'PUMP FMS', key: 'pu', width: 11, style: { numFmt: euro } },
     { header: 'Valeur écart', key: 'val', width: 13, style: { numFmt: euro } },
     { header: 'BL SAGE datés J', key: 'bl_jour', width: 11, style: { numFmt: qte } },
+    { header: 'BL non expédiés (explication)', key: 'bl_ne', width: 12, style: { numFmt: qte } },
+    { header: 'BL datés depuis le', key: 'bl_depuis', width: 12 },
     { header: 'BL SAGE après J', key: 'bl_apres', width: 11, style: { numFmt: qte } },
     { header: 'PL en cours fin J', key: 'prepa', width: 11, style: { numFmt: qte } },
     { header: 'Transit vers FMS', key: 'transit', width: 11, style: { numFmt: qte } },
@@ -219,7 +234,7 @@ async function exporterExcel(res: Resultat) {
     ws.addRow({
       reference: l.reference, designation: l.designation, famille: l.famille, statut: STATUTS[l.statut].libelle,
       mystock: l.qte_mystock, sage: n0(l.qte_sage), ecart: n0(l.ecart), pu: n0(l.pu), val: n0(l.ecart_valeur),
-      bl_jour: n0(l.bl_jour), bl_apres: n0(l.bl_apres), prepa: n0(l.prepa_fin_j), transit: n0(l.transit), actuel: n0(l.qte_sage_actuel),
+      bl_jour: n0(l.bl_jour), bl_ne: n0(l.bl_non_expedies) || null, bl_depuis: l.bl_depuis ? fmtDate(l.bl_depuis) : '', bl_apres: n0(l.bl_apres), prepa: n0(l.prepa_fin_j), transit: n0(l.transit), actuel: n0(l.qte_sage_actuel),
       suivi: l.statut === 'ok' ? '' : SUIVIS[l.suivi_statut || 'a_analyser'], com: l.suivi_commentaire,
     })
   }
@@ -238,7 +253,7 @@ async function exporterExcel(res: Resultat) {
     ['Fichier', res.controle.fichier_nom || ''],
     ['Dépôt SAGE', res.meta.depot],
     ['Stock SAGE fin de J', res.meta.source_sage === 'photo' ? `Photo SAGE du ${fmtDateHeure(res.meta.photo_loaded_at)}` : 'Reconstitué (stock actuel + BL après J, sans réceptions ni transferts)'],
-    ['Références', s.nb_references], ['Identiques', s.nb_ok], ['Écart = BL du jour', s.nb_bl_jour],
+    ['Références', s.nb_references], ['Identiques', s.nb_ok], ['Écart = BL SAGE non encore expédiés', s.nb_bl_jour], ['Écart = transit vers FMS', s.nb_transit ?? 0],
     ['Écarts à analyser', s.nb_ecart], ['Absentes de MyStock', s.nb_absent_mystock], ['Absentes de SAGE', s.nb_absent_sage],
     ['Quantité MyStock', s.qte_mystock], ['Quantité SAGE', s.qte_sage],
     ['Valeur des écarts (absolue)', s.valeur_ecart_abs], ['Valeur des écarts (nette)', s.valeur_ecart_net],
@@ -319,7 +334,11 @@ function ControleMyStock() {
       const brut = await lireClasseur(file, feuille)
       if (!brut.matrice.length) throw new Error('Le fichier est vide.')
       setFichierBrut(file)
-      setFichier(preparerColonnes({ ...brut, date: fichier && feuille ? fichier.date : dateDepuisNomFichier(file.name) }))
+      const prepare = preparerColonnes({ ...brut, date: '' })
+      const enteteQte = prepare.colQte >= 0 ? String((prepare.matrice[prepare.ligneEntete] || [])[prepare.colQte] ?? '') : ''
+      // Date lue dans le nom du fichier, sinon dans l'en-tête de la colonne quantité (« Quantité physique 121126 8h48 »).
+      const dateNom = /\d{6}/.test(file.name) ? dateDepuisNomFichier(file.name) : dateDepuisNomFichier(enteteQte)
+      setFichier({ ...prepare, date: fichier && feuille ? fichier.date : dateNom })
     } catch (e) {
       setErreur(`Lecture du fichier impossible : ${messageErreur(e)}`)
     } finally {
@@ -610,24 +629,26 @@ function ControleMyStock() {
               </span>
             </section>
 
-            <section className="grid grid-cols-2 gap-2 md:grid-cols-4 xl:grid-cols-8">
+            <section className="grid grid-cols-2 gap-2 md:grid-cols-5 xl:grid-cols-9">
               <Kpi label="Références" value={s.nb_references.toLocaleString('fr-FR')} sub={`MyStock ${fmtQte(s.qte_mystock)} · SAGE ${fmtQte(s.qte_sage)}`} onClick={() => setFiltre('tous')} actif={filtre === 'tous'} />
               <Kpi label="Identiques" value={s.nb_ok.toLocaleString('fr-FR')} tone="ok" sub={s.nb_references ? `${Math.round((s.nb_ok / s.nb_references) * 100)} % des références` : undefined} onClick={() => setFiltre('ok')} actif={filtre === 'ok'} />
-              <Kpi label="Écart = BL du jour" value={s.nb_bl_jour.toLocaleString('fr-FR')} tone="info" sub="BL daté J, parti après l’image" onClick={() => setFiltre('bl_jour')} actif={filtre === 'bl_jour'} />
+              <Kpi label="BL non expédiés" value={s.nb_bl_jour.toLocaleString('fr-FR')} tone="info" sub={`BL SAGE pas encore partis · ${fmtEuro(s.valeur_bl_jour ?? 0)}`} onClick={() => setFiltre('bl_jour')} actif={filtre === 'bl_jour'} />
+              <Kpi label="Transit vers FMS" value={(s.nb_transit ?? 0).toLocaleString('fr-FR')} tone="info" sub={`arrivé, non réceptionné SAGE · ${fmtEuro(s.valeur_transit ?? 0)}`} onClick={() => setFiltre('transit')} actif={filtre === 'transit'} />
               <Kpi label="Écarts à analyser" value={s.nb_ecart.toLocaleString('fr-FR')} tone={s.nb_ecart ? 'alerte' : 'ok'} onClick={() => setFiltre('ecart')} actif={filtre === 'ecart'} />
               <Kpi label="Absentes de MyStock" value={s.nb_absent_mystock.toLocaleString('fr-FR')} tone={s.nb_absent_mystock ? 'warn' : 'ok'} sub="stock SAGE, pas dans le fichier" onClick={() => setFiltre('absent_mystock')} actif={filtre === 'absent_mystock'} />
               <Kpi label="Absentes de SAGE" value={s.nb_absent_sage.toLocaleString('fr-FR')} tone={s.nb_absent_sage ? 'warn' : 'ok'} sub="dans le fichier, stock SAGE nul" onClick={() => setFiltre('absent_sage')} actif={filtre === 'absent_sage'} />
               <Kpi label="Restant à analyser" value={s.nb_a_analyser.toLocaleString('fr-FR')} tone={s.nb_a_analyser ? 'warn' : 'ok'} sub="non expliqués / non corrigés" onClick={() => { setFiltre('a_traiter'); setFiltreSuivi('a_analyser') }} actif={filtre === 'a_traiter' && filtreSuivi === 'a_analyser'} />
-              <Kpi label="Valeur des écarts" value={fmtEuro(s.valeur_ecart_abs)} sub={`net ${fmtEuro(s.valeur_ecart_net)} (au PUMP FMS)`} tone={s.valeur_ecart_abs ? 'alerte' : 'ok'} />
+              <Kpi label="Valeur à analyser" value={fmtEuro(s.valeur_a_analyser_abs ?? s.valeur_ecart_abs)} sub={`tous écarts ${fmtEuro(s.valeur_ecart_abs)} (au PUMP FMS)`} tone={(s.valeur_a_analyser_abs ?? s.valeur_ecart_abs) ? 'alerte' : 'ok'} />
             </section>
 
             <section className="rounded-xl border border-[#E5E1D8] bg-white">
               <div className="flex flex-wrap items-center gap-2 border-b border-[#EFECE5] px-3 py-2">
-                {pastille('a_traiter', 'Écarts hors BL du jour', s.nb_ecart + s.nb_absent_mystock + s.nb_absent_sage)}
+                {pastille('a_traiter', 'Écarts inexpliqués', s.nb_ecart + s.nb_absent_mystock + s.nb_absent_sage)}
                 {pastille('ecart', 'Écarts', s.nb_ecart)}
                 {pastille('absent_mystock', 'Absents MyStock', s.nb_absent_mystock)}
                 {pastille('absent_sage', 'Absents SAGE', s.nb_absent_sage)}
-                {pastille('bl_jour', 'BL du jour', s.nb_bl_jour)}
+                {pastille('bl_jour', 'BL non expédiés', s.nb_bl_jour)}
+                {pastille('transit', 'Transit', s.nb_transit ?? 0)}
                 {pastille('ok', 'Identiques', s.nb_ok)}
                 {pastille('tous', 'Tout', s.nb_references)}
                 <span className="mx-1 h-5 w-px bg-[#E5E1D8]" />
@@ -718,7 +739,8 @@ function ControleMyStock() {
             </div>
 
             <div className="mt-3 rounded-lg bg-[#FAF9F6] px-3 py-2 text-[12.5px] text-[#3A362E]">
-              {fiche.statut === 'bl_jour' && <>L’écart est égal aux BL SAGE datés du {fmtDate(res.controle.date_image)} ({fmtQte(fiche.bl_jour)}) : BL daté de J mais expédié par FMS après l’image. Rien à corriger.</>}
+              {fiche.statut === 'bl_jour' && <>L’écart est égal aux BL SAGE datés {fiche.bl_depuis && fiche.bl_depuis !== res.controle.date_image ? `du ${fmtDate(fiche.bl_depuis)} au ${fmtDate(res.controle.date_image)}` : `du ${fmtDate(res.controle.date_image)}`} ({fmtQte(fiche.bl_non_expedies ?? fiche.bl_jour)}) : BL saisis dans SAGE mais pas encore partis de chez FMS au moment de l’image.{fiche.bl_depuis && fiche.bl_depuis < res.controle.date_image ? ' Si le BL a plusieurs jours, vérifier avec FMS qu’il part bien.' : ' Rien à corriger.'}</>}
+              {fiche.statut === 'transit' && <>L’écart correspond au stock SAGE du dépôt « TRANSIT {res.meta.depot} » ({fmtQte(fiche.transit)}){fiche.bl_non_expedies ? ` et à ${fmtQte(fiche.bl_non_expedies)} en BL non expédiés` : ''} : marchandise arrivée chez FMS mais pas encore réceptionnée dans SAGE.</>}
               {fiche.statut === 'absent_mystock' && <>La référence a du stock dans SAGE mais n’est pas dans le fichier MyStock.</>}
               {fiche.statut === 'absent_sage' && <>La référence est dans le fichier MyStock mais n’a pas de stock SAGE sur le dépôt FMS en fin de J.</>}
               {fiche.statut === 'ecart' && <>{fiche.ecart > 0 ? 'FMS a plus de stock que SAGE' : 'FMS a moins de stock que SAGE'}{fiche.bl_jour ? ` · BL SAGE datés de J : ${fmtQte(fiche.bl_jour)}` : ''}{fiche.transit ? ` · ${fmtQte(fiche.transit)} en transit vers FMS dans SAGE` : ''}.</>}

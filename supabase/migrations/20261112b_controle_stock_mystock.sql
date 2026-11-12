@@ -16,7 +16,12 @@
 --
 -- Statuts par référence :
 --   ok              stock identique
---   bl_jour         l'écart égale les BL SAGE datés de J (BL daté J, parti J+1)
+--   bl_jour         l'écart égale les BL SAGE des derniers jours non encore expédiés :
+--                   cumul des BL datés de d à J pour un jour d entre J−7 et J (BL saisi J,
+--                   parti le jour ouvré suivant ; jours fériés). bl_depuis = d le plus récent.
+--   transit         l'écart égale le stock SAGE du dépôt « TRANSIT FMS » (arrivé
+--                   physiquement chez FMS, pas encore réceptionné dans SAGE), seul ou
+--                   avec des BL non expédiés comme ci-dessus.
 --   absent_mystock  stock SAGE ≠ 0, référence absente du fichier MyStock
 --   absent_sage     référence du fichier sans stock SAGE
 --   ecart           écart à analyser
@@ -155,6 +160,17 @@ begin
     from public.mystock_sorties_depot(v_depot, c.date_image, current_date + 1)
     group by reference
   ),
+  sorties_j as (
+    select reference, date_bl, sum(quantite) as q
+    from public.mystock_sorties_depot(v_depot, c.date_image - 7, c.date_image)
+    group by reference, date_bl
+    having sum(quantite) <> 0
+  ),
+  cumul_bl as (
+    select reference, date_bl,
+           sum(q) over (partition by reference order by date_bl desc) as cumul
+    from sorties_j
+  ),
   transit as (
     select upper(trim(s.sto_art_num)) as reference, sum(s.sto_qte) as qte
     from sage.stock_depot s
@@ -197,24 +213,42 @@ begin
     left join public.ref_articles ra on upper(trim(ra.reference_article)) = r.reference
     left join public.mystock_controle_suivi su on su.controle_id = p_id and su.reference = r.reference
   ),
+  res0 as (
+    select calc.*, coalesce(qte_mystock, 0) - qte_sage as ecart
+    from calc
+  ),
+  res1 as (
+    select res0.*,
+           (select max(cb.date_bl) from cumul_bl cb
+             where cb.reference = res0.reference and cb.cumul = res0.ecart) as bl_depuis,
+           (select max(cb.date_bl) from cumul_bl cb
+             where cb.reference = res0.reference and cb.cumul + res0.transit = res0.ecart) as bl_transit_depuis
+    from res0
+  ),
   res as (
-    select calc.*,
-           coalesce(qte_mystock, 0) - qte_sage as ecart,
+    select res1.*,
+           case when bl_depuis is not null
+                then (select cb.cumul from cumul_bl cb where cb.reference = res1.reference and cb.date_bl = res1.bl_depuis)
+                when bl_transit_depuis is not null
+                then (select cb.cumul from cumul_bl cb where cb.reference = res1.reference and cb.date_bl = res1.bl_transit_depuis)
+                else 0 end as bl_non_expedies,
            case
              when qte_mystock is null and qte_sage = 0 then 'ok'
-             when coalesce(qte_mystock, 0) = qte_sage then 'ok'
+             when ecart = 0 then 'ok'
              when qte_mystock is null then 'absent_mystock'
+             when bl_depuis is not null then 'bl_jour'
+             when transit <> 0 and (ecart = transit or bl_transit_depuis is not null) then 'transit'
              when qte_sage = 0 then 'absent_sage'
-             when bl_jour <> 0 and qte_mystock - qte_sage = bl_jour then 'bl_jour'
              else 'ecart'
            end as statut
-    from calc
+    from res1
   )
   select coalesce(jsonb_agg(jsonb_build_object(
            'reference', reference, 'designation', designation, 'famille', famille,
            'qte_mystock', qte_mystock, 'nb_lignes_fichier', nb_lignes_fichier,
            'qte_sage', qte_sage, 'qte_sage_actuel', qte_sage_actuel, 'prepa_fin_j', prepa_fin_j,
            'bl_jour', bl_jour, 'bl_apres', bl_apres, 'transit', transit,
+           'bl_non_expedies', bl_non_expedies, 'bl_depuis', coalesce(bl_depuis, bl_transit_depuis),
            'ecart', ecart, 'pu', round(pu, 4), 'ecart_valeur', round(ecart * pu, 2),
            'statut', statut,
            'suivi_statut', suivi_statut, 'suivi_commentaire', suivi_commentaire,
@@ -224,6 +258,9 @@ begin
            'nb_references', count(*),
            'nb_ok', count(*) filter (where statut = 'ok'),
            'nb_bl_jour', count(*) filter (where statut = 'bl_jour'),
+           'nb_transit', count(*) filter (where statut = 'transit'),
+           'valeur_bl_jour', coalesce(round(sum(ecart * pu) filter (where statut = 'bl_jour'), 2), 0),
+           'valeur_transit', coalesce(round(sum(ecart * pu) filter (where statut = 'transit'), 2), 0),
            'nb_ecart', count(*) filter (where statut = 'ecart'),
            'nb_absent_mystock', count(*) filter (where statut = 'absent_mystock'),
            'nb_absent_sage', count(*) filter (where statut = 'absent_sage'),
@@ -232,6 +269,7 @@ begin
            'qte_mystock', coalesce(sum(qte_mystock), 0),
            'qte_sage', coalesce(sum(qte_sage), 0),
            'valeur_ecart_abs', coalesce(round(sum(abs(ecart * pu)) filter (where statut <> 'ok'), 2), 0),
+           'valeur_a_analyser_abs', coalesce(round(sum(abs(ecart * pu)) filter (where statut in ('ecart', 'absent_mystock', 'absent_sage')), 2), 0),
            'valeur_ecart_net', coalesce(round(sum(ecart * pu), 2), 0)
          )
     into v_lignes, v_resume
