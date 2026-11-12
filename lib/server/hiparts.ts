@@ -437,3 +437,81 @@ export async function passageHiParts(db: SupabaseClient, opts: { dureeMs: number
   await db.from('hiparts_sync_etat').update({ dernier_passage: new Date().toISOString(), dernier_message: message }).eq('id', 1)
   return { relance: relance.data, ...compteurs, message, dureeMs: Date.now() - debut }
 }
+
+/**
+ * (12/11/2026) Copie immédiate d'un modèle à la demande de la console : sans
+ * attendre la file, traite tout de suite ce qui reste à copier pour ce modèle
+ * (fiche produit, rubriques, vues éclatées, puis prix des pièces de ses vues).
+ * Les éléments sont réservés atomiquement (RPC hiparts_reserver) pour ne pas
+ * être traités en même temps par le cron, puis marqués FAIT comme par lui.
+ */
+export async function copierModeleHiParts(db: SupabaseClient, idgam: number, opts: { dureeMs?: number; parallelisme?: number } = {}) {
+  const login = process.env.HIPARTS_LOGIN
+  const motDePasse = process.env.HIPARTS_PASSWORD
+  if (!login || !motDePasse) throw new Error('Variables HIPARTS_LOGIN / HIPARTS_PASSWORD manquantes (Vercel → Settings → Environment Variables).')
+  const debut = Date.now()
+  const dureeMs = opts.dureeMs ?? 50_000
+  const parallelisme = Math.max(1, Math.min(opts.parallelisme || 4, 6))
+  const hp = new HiPartsClient(login, motDePasse)
+  const compteurs: Record<string, number> = { traites: 0, erreurs: 0 }
+
+  async function executer(lot: Element[]) {
+    let i = 0
+    const travailleur = async () => {
+      while (i < lot.length) {
+        const el = lot[i++]
+        if (Date.now() - debut > dureeMs) {
+          // plus de temps : rendu à la file, le cron le reprendra
+          await db.from('hiparts_file').update({ statut: 'A_FAIRE', verrou_jusqua: null }).eq('id', el.id)
+          continue
+        }
+        try {
+          await traiter(db, hp, el, compteurs)
+          await db.from('hiparts_file').update({ statut: 'FAIT', traite_le: new Date().toISOString(), erreur: null, verrou_jusqua: null }).eq('id', el.id)
+          compteurs.traites++
+        } catch (e) {
+          compteurs.erreurs++
+          const msg = e instanceof Error ? e.message : String(e)
+          await db.from('hiparts_file').update({ statut: 'A_FAIRE', erreur: msg.slice(0, 500), verrou_jusqua: null }).eq('id', el.id)
+          if (/Connexion Hi-Parts refusée|HIPARTS_/.test(msg)) throw e
+        }
+      }
+    }
+    await Promise.all(Array.from({ length: parallelisme }, travailleur))
+  }
+
+  async function prendre(filtre: string, limite = 60): Promise<Element[]> {
+    const { data, error } = await db.from('hiparts_file').select('id').or(filtre).neq('statut', 'FAIT').order('priorite').limit(limite)
+    if (error) throw error
+    const ids = (data || []).map((r: { id: number }) => r.id)
+    if (!ids.length) return []
+    const res = await db.rpc('hiparts_reserver', { p_ids: ids })
+    if (res.error) throw res.error
+    return (res.data || []) as Element[]
+  }
+
+  // 1. fiche produit, rubriques et vues du modèle (les vues découvertes à un tour sont reprises au suivant)
+  const filtreModele = `and(type.eq.PRODUIT,cle.eq.${idgam}),and(type.eq.RUBRIQUE,payload->>idgam.eq.${idgam}),and(type.eq.SCHEMA,payload->>idgam.eq.${idgam})`
+  for (let tour = 0; tour < 4 && Date.now() - debut < dureeMs; tour++) {
+    const lot = await prendre(filtreModele)
+    if (!lot.length) break
+    await executer(lot)
+  }
+
+  // 2. prix des pièces des vues du modèle
+  if (Date.now() - debut < dureeMs) {
+    const { data: schemas } = await db.from('hiparts_schemas').select('idscg').eq('idgam', idgam)
+    const ids = (schemas || []).map((s: { idscg: number }) => s.idscg)
+    if (ids.length) {
+      const { data: refs } = await db.from('hiparts_schema_pieces').select('reference').in('idscg', ids).not('reference', 'is', null)
+      const references = Array.from(new Set((refs || []).map((r: { reference: string }) => r.reference))).slice(0, 300)
+      for (let k = 0; k < references.length && Date.now() - debut < dureeMs; k += 60) {
+        const tranche = references.slice(k, k + 60).map((r) => `"${String(r).replace(/[",()]/g, '')}"`).join(',')
+        const lot = await prendre(`and(type.eq.PRIX,cle.in.(${tranche}))`, 60)
+        if (lot.length) await executer(lot)
+      }
+    }
+  }
+
+  return { idgam, ...compteurs, dureeMs: Date.now() - debut }
+}

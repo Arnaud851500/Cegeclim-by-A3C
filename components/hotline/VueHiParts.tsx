@@ -8,6 +8,9 @@
  * affiche ses planches (image hébergée par Hi-Parts + repères cliquables) et la
  * nomenclature avec le prix HT. « Ajouter au ticket » reporte la référence, la
  * désignation, le repère et le prix dans le corps du ticket.
+ * Copie immédiate (12/11/2026) : à l'ouverture d'un modèle, /api/hiparts/modele
+ * copie tout de suite ce qui manque pour ce modèle (vues, pièces, prix) sans
+ * attendre la copie générale du catalogue ; la vue se recharge ensuite.
  */
 
 import { useEffect, useMemo, useRef, useState } from 'react'
@@ -62,6 +65,34 @@ export default function VueHiParts({
   const [zoom, setZoom] = useState(1)
   const [avancement, setAvancement] = useState<HiPartsAvancement | null>(null)
   const listeRef = useRef<HTMLUListElement>(null)
+  // Copie immédiate du modèle choisi : idgam terminé, message, rechargement.
+  const [copieFinie, setCopieFinie] = useState<number | null>(null)
+  const [copieMessage, setCopieMessage] = useState<string | null>(null)
+  const [version, setVersion] = useState(0)
+
+  useEffect(() => {
+    if (!produit) return
+    let actif = true
+    const idgam = produit.idgam
+    fetch('/api/hiparts/modele', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ idgam }) })
+      .then(async (r) => {
+        const j = (await r.json().catch(() => ({}))) as { ok?: boolean; traites?: number; error?: string }
+        if (!actif) return
+        if (!r.ok || !j.ok) setCopieMessage(`Copie immédiate impossible : ${j.error || r.status}`)
+        else {
+          setCopieMessage(null)
+          if ((j.traites || 0) > 0) {
+            setVersion((v) => v + 1)
+            avancementHiParts().then(setAvancement).catch(() => undefined)
+          }
+        }
+      })
+      .catch((e) => actif && setCopieMessage(`Copie immédiate impossible : ${String(e?.message || e)}`))
+      .finally(() => actif && setCopieFinie(idgam))
+    return () => {
+      actif = false
+    }
+  }, [produit])
 
   // Recherche du modèle (saisie libre, temporisée)
   useEffect(() => {
@@ -98,14 +129,14 @@ export default function VueHiParts({
       .then((l) => {
         if (!actif) return
         setSchemas(l)
-        setSchema(l[0] || null)
+        setSchema((cur) => l.find((x) => x.idscg === cur?.idscg) || l[0] || null)
       })
       .catch((e) => actif && setErreur(String(e?.message || e)))
       .finally(() => actif && setChargement(false))
     return () => {
       actif = false
     }
-  }, [produit])
+  }, [produit, version])
 
   // Nomenclature de la planche
   useEffect(() => {
@@ -175,6 +206,7 @@ export default function VueHiParts({
 
   const image = imageHiParts(schema?.image_path)
   const enCours = avancement && avancement.a_faire > 0
+  const copieModele = Boolean(produit && copieFinie !== produit.idgam)
 
   return (
     <div className="fixed inset-0 z-40 flex items-center justify-center bg-[rgba(6,10,18,0.6)] p-3" onClick={onFermer}>
@@ -266,8 +298,12 @@ export default function VueHiParts({
                 <div className="text-[13px] text-slate-500">Chargement des vues…</div>
               ) : !schema ? (
                 <MessageVide
-                  titre="Vues éclatées pas encore copiées pour ce modèle"
-                  texte={enCours ? 'La copie du catalogue est en cours ; en attendant, ouvrez le modèle directement sur Hi-Parts.' : 'Ce modèle n’a pas de vue éclatée dans Hi-Parts.'}
+                  titre={copieModele ? 'Copie de ce modèle depuis Hi-Parts…' : 'Pas de vue éclatée pour ce modèle'}
+                  texte={
+                    copieModele
+                      ? 'Les vues éclatées, les pièces et les prix de ce modèle sont récupérés maintenant (quelques secondes à une minute).'
+                      : copieMessage || 'Hi-Parts ne propose pas de vue éclatée pour ce modèle. Vous pouvez l’ouvrir directement sur Hi-Parts.'
+                  }
                   lien={lienProduitHiParts(produit)}
                 />
               ) : image ? (
@@ -422,6 +458,8 @@ export default function VueHiParts({
               <div className="border-t border-[#EFEDE8] px-4 py-1.5 text-[10px] text-slate-400">
                 Catalogue copié : {avancement.produits.toLocaleString('fr-FR')} modèles · {avancement.schemas.toLocaleString('fr-FR')} vues · {avancement.prix.toLocaleString('fr-FR')} prix
                 {enCours ? ` · copie en cours (${avancement.a_faire.toLocaleString('fr-FR')} pages restantes)` : ''}
+                {copieModele ? <span className="font-semibold text-[#B4761A]"> · mise à jour de ce modèle (vues, prix)…</span> : null}
+                {copieMessage ? <span className="text-[#A32C2C]"> · {copieMessage}</span> : null}
               </div>
             ) : null}
           </aside>
