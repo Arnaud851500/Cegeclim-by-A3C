@@ -19,7 +19,7 @@
  * 2. Résultat par référence : stock MyStock, stock SAGE fin de J, écart, valeur (PUMP FMS),
  *    BL SAGE datés de J (piège : BL daté J parti physiquement J+1), stock en transit vers FMS.
  *    Statuts : ok / écart = BL du jour / absent MyStock / absent SAGE / écart à analyser.
- * 3. Fiche d'une référence : mouvements SAGE J−3 → aujourd'hui, photos quotidiennes, annotation
+ * 3. Fiche d'une référence : mouvements SAGE J−7 → aujourd'hui, photos quotidiennes, annotation
  *    (à analyser / expliqué / corrigé + commentaire). Export Excel.
  *
  * SQL : supabase/migrations/20261112a_stock_depot_snapshot_journalier.sql,
@@ -747,7 +747,7 @@ function ControleMyStock() {
               {fiche.statut === 'ok' && <>Stocks identiques.</>}
             </div>
 
-            <h3 className="mt-4 text-[12px] font-bold uppercase tracking-wide text-[#8A8474]">Mouvements SAGE FMS du {fmtDate(res.controle.date_image)} − 3 j à aujourd’hui</h3>
+            <h3 className="mt-4 text-[12px] font-bold uppercase tracking-wide text-[#8A8474]">Mouvements SAGE FMS de J − 7 j à aujourd’hui</h3>
             {!mouvements ? <div className="py-2 text-[12.5px] text-[#8A8474]">Chargement…</div> : (
               <>
                 <table className="mt-1 w-full text-[12px]">

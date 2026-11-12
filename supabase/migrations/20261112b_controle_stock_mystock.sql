@@ -391,7 +391,7 @@ begin
 end;
 $$;
 
--- Mouvements SAGE d'une référence autour de J (J−3 → aujourd'hui).
+-- Mouvements SAGE d'une référence autour de J (J−7 → aujourd'hui).
 create or replace function public.mystock_controle_mouvements(p_id bigint, p_reference text)
 returns jsonb
 language plpgsql stable security definer
@@ -419,7 +419,7 @@ begin
                                 when m.date_bl = c.date_image then 'jour'
                                 else 'apres' end
              ) order by m.date_bl, m.numero_bl)
-      from public.mystock_sorties_depot(v_depot, c.date_image - 3, current_date + 1) m
+      from public.mystock_sorties_depot(v_depot, c.date_image - 7, current_date + 1) m
       where m.reference = upper(trim(p_reference))
     ), '[]'::jsonb),
     'photos', coalesce((
@@ -427,7 +427,7 @@ begin
                        order by s.date_stock)
       from public.stock_depot_snapshot_journalier s
       where s.sto_dep_num = c.depot_num and s.reference = upper(trim(p_reference))
-        and s.date_stock between c.date_image - 3 and current_date
+        and s.date_stock between c.date_image - 7 and current_date
     ), '[]'::jsonb)
   );
 end;
