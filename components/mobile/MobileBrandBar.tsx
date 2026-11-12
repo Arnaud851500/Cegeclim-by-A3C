@@ -2,6 +2,7 @@
 
 import MobileNouveautes from '@/components/mobile/MobileNouveautes'
 import TaskAssignmentBanner from '@/components/TaskAssignmentBanner'
+import HotlineAssignmentBanner from '@/components/HotlineAssignmentBanner'
 
 const LOGO_CEGECLIM =
   'https://gchwihltydsplarhveyv.supabase.co/storage/v1/object/sign/Agences/cegecilm%20officiel.jpg?token=eyJraWQiOiJzdG9yYWdlLXVybC1zaWduaW5nLWtleV8yZWU1N2MxYS05ZjJjLTQ1OTItYjE0Ny03ZGE2YzlmOTRmMDIiLCJhbGciOiJIUzI1NiJ9.eyJ1cmwiOiJBZ2VuY2VzL2NlZ2VjaWxtIG9mZmljaWVsLmpwZyIsImlhdCI6MTc3NDY1MTM3OSwiZXhwIjo0ODk2NzE1Mzc5fQ.ePcMFHir7RsvdR-cR7nwh83H03S8oihNKwVgK2eCmy0'
@@ -94,6 +95,7 @@ export default function MobileBrandBar({
       </div>
     </div>
     {showTaskAlerts ? <TaskAssignmentBanner variant="mobile" /> : null}
+    {showTaskAlerts ? <HotlineAssignmentBanner variant="mobile" /> : null}
     </div>
   )
 }

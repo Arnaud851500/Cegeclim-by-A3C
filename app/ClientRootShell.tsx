@@ -59,6 +59,7 @@ import { isLightReadyPath, tc, themed } from '@/lib/theme'
 import NewsTicker from '@/components/actualites/NewsTicker'
 import NouveautesButton from '@/components/actualites/NouveautesButton'
 import TaskAssignmentBanner from '@/components/TaskAssignmentBanner'
+import HotlineAssignmentBanner from '@/components/HotlineAssignmentBanner'
 // ÉVOLUTION (2026-09-15 soir) : Centre d'alertes.
 // - nouvelle pastille « Commande non complète à la date de livraison client »
 //   (ex-« Non servables », renommée le 2026-09-16) = CDC dont au moins une
@@ -2144,6 +2145,7 @@ const lastAppliedScopeSignatureRef = useRef<string | null>(null)
 
             {/* ÉVOLUTION (2026-10-15) : alerte « une tâche vous a été affectée ». */}
             {hasSession && !isFinancementOnly && <TaskAssignmentBanner variant="desktop" />}
+            {hasSession && !isFinancementOnly && <HotlineAssignmentBanner variant="desktop" />}
           </header>
         )}
 

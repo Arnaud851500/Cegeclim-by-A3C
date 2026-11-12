@@ -155,11 +155,18 @@ const FORM_VIDE: Formulaire = {
   reference_article: '',
   modele_ge: '',
   serie_ge: '',
-  nature: '',
+  nature: 'DEPANNAGE',
   code_defaut: '',
   date_mes: '',
   description: '',
   rappel_par: '',
+}
+
+// (12/11/2026) Nature proposée par défaut : « Dépannage », ou « Assistance /
+// réglage » quand le motif est « Mise en service ». Une nature choisie à la main
+// (autre que ces deux valeurs par défaut) n'est pas écrasée au changement de motif.
+function natureParDefaut(motif: Motif | null): Nature {
+  return motif === 'MISE_EN_SERVICE' ? 'ASSISTANCE' : 'DEPANNAGE'
 }
 
 const champ =
@@ -921,7 +928,12 @@ function HotlineConsole() {
                   <button
                     key={m.value}
                     type="button"
-                    onClick={() => patch({ motif: m.value })}
+                    onClick={() =>
+                      patch({
+                        motif: m.value,
+                        ...(form.nature === '' || form.nature === 'DEPANNAGE' || form.nature === 'ASSISTANCE' ? { nature: natureParDefaut(m.value) } : {}),
+                      })
+                    }
                     className={`flex-1 rounded-md px-2 py-1.5 font-semibold ${form.motif === m.value ? 'bg-[#B4761A] text-white' : 'text-slate-600'}`}
                   >
                     {m.label}
