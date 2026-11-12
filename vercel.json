@@ -1,5 +1,7 @@
 {
-  "regions": ["cdg1"],
+  "regions": [
+    "cdg1"
+  ],
   "env": {
     "OPENAI_MODEL": "gpt-5.6-terra",
     "OPENAI_INTERPRET_MODEL": "gpt-5.6-terra",
@@ -12,6 +14,10 @@
     },
     {
       "path": "/api/cron/client-maintenance-worker?iterations=8",
+      "schedule": "*/5 * * * *"
+    },
+    {
+      "path": "/api/hiparts/sync",
       "schedule": "*/5 * * * *"
     }
   ]

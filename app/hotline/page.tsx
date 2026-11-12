@@ -33,6 +33,10 @@
  *   proposé), retour N2 → N1, rappel du client confié à un N1, modèles GE / UI
  *   proposés d'après le début du n° de série, listes de droite repliées sur
  *   2 lignes (non résolus d'abord) avec un bouton « Développer ».
+ * - Hi-Parts (12/11/2026) : boutons « Hi-Parts » à côté des modèles GE et UI ;
+ *   vue éclatée du catalogue Hitachi (components/hotline/VueHiParts.tsx), la pièce
+ *   choisie (référence, désignation, repère, prix HT) est ajoutée au motif de l'appel
+ *   et, ticket ouvert, en commentaire (migration 20261112e_hiparts_catalogue.sql).
  * Tables / RPC : migration 20261102_hotline_technique.sql.
  */
 
@@ -44,6 +48,7 @@ import { useAccess } from '@/components/AccessContext'
 import HotlineHeader, { HotlineErreur, Pastille } from '@/components/hotline/HotlineHeader'
 import PiecesJointes from '@/components/hotline/PiecesJointes'
 import VueEclatee from '@/components/hotline/VueEclatee'
+import VueHiParts from '@/components/hotline/VueHiParts'
 import HistoriqueTicket from '@/components/hotline/HistoriqueTicket'
 import FenetreNiveau from '@/components/hotline/FenetreNiveau'
 import ChampSerie from '@/components/hotline/ChampSerie'
@@ -218,6 +223,8 @@ function HotlineConsole() {
   // Vues éclatées : références qui en ont une, vue ouverte.
   const [refsVues, setRefsVues] = useState<Set<string>>(new Set())
   const [vueOuverte, setVueOuverte] = useState<string | null>(null)
+  // Vue éclatée Hi-Parts (12/11/2026) : modèle GE ou UI ouvert.
+  const [hiParts, setHiParts] = useState<{ modele: string; unite: 'GE' | 'UI' } | null>(null)
   // Ticket de l'historique affiché en fenêtre flottante (04/11/2026).
   const [ticketHisto, setTicketHisto] = useState<string | null>(null)
   const fermerTicketHisto = useCallback(() => setTicketHisto(null), [])
@@ -738,6 +745,19 @@ function HotlineConsole() {
     if (ticket) void ajouterEtape(ticket.id, 'COMMENTAIRE', `Vue éclatée consultée : ${ref}`).then(() => rafraichirEtapes(ticket.id))
   }
 
+  // Hi-Parts : la pièce choisie est ajoutée au motif de l'appel (et au ticket s'il est ouvert).
+  async function ajouterPieceHiParts(texte: string) {
+    const base = form.description.trim()
+    const description = base ? `${base}\n${texte}` : texte
+    patch({ description })
+    if (ticket) {
+      await majTicket(ticket.id, { description })
+      setTicket((t) => (t ? { ...t, description } : t))
+      await ajouterEtape(ticket.id, 'COMMENTAIRE', texte)
+      await rafraichirEtapes(ticket.id)
+    }
+  }
+
   async function preparerMessage(v: { to: string; subject: string; text: string; mode: 'auto' | 'eml' }) {
     if (!docAEnvoyer) return
     const doc = docAEnvoyer
@@ -965,7 +985,10 @@ function HotlineConsole() {
                 </label>
               </div>
               <div className="rounded-lg border border-[#EFEDE8] bg-[#FAF9F7] p-2">
-                <div className="mb-1 text-[10px] font-bold uppercase tracking-[0.06em] text-slate-500">Groupe extérieur (GE)</div>
+                <div className="mb-1 flex items-center justify-between text-[10px] font-bold uppercase tracking-[0.06em] text-slate-500">
+                  Groupe extérieur (GE)
+                  <BoutonHiParts modele={form.modele_ge} onClick={() => setHiParts({ modele: form.modele_ge.trim(), unite: 'GE' })} />
+                </div>
                 <div className="grid grid-cols-2 gap-2">
                   <input value={form.modele_ge} onChange={(e) => patch({ modele_ge: e.target.value })} placeholder="Modèle GE" className={champ} />
                   <ChampSerie
@@ -979,11 +1002,14 @@ function HotlineConsole() {
                 </div>
                 <div className="mb-1 mt-2 flex items-center justify-between text-[10px] font-bold uppercase tracking-[0.06em] text-slate-500">
                   Unité intérieure (UI)
-                  {refsVues.has(form.reference_article.trim().toUpperCase()) ? (
-                    <button type="button" onClick={() => ouvrirVue(form.reference_article)} className="text-[11px] font-bold normal-case tracking-normal text-[#B4761A] underline">
-                      🔍 Vue éclatée
-                    </button>
-                  ) : null}
+                  <span className="flex items-center gap-3">
+                    {refsVues.has(form.reference_article.trim().toUpperCase()) ? (
+                      <button type="button" onClick={() => ouvrirVue(form.reference_article)} className="text-[11px] font-bold normal-case tracking-normal text-[#B4761A] underline">
+                        🔍 Vue éclatée
+                      </button>
+                    ) : null}
+                    <BoutonHiParts modele={form.reference_article} onClick={() => setHiParts({ modele: form.reference_article.trim(), unite: 'UI' })} />
+                  </span>
                 </div>
                 <div className="grid grid-cols-2 gap-2">
                   <input value={form.reference_article} onChange={(e) => patch({ reference_article: e.target.value })} placeholder="Modèle UI / référence" className={champ} />
@@ -1415,6 +1441,15 @@ function HotlineConsole() {
         />
       ) : null}
 
+      {hiParts ? (
+        <VueHiParts
+          modele={hiParts.modele}
+          unite={hiParts.unite}
+          onFermer={() => setHiParts(null)}
+          onAjouter={ajouterPieceHiParts}
+        />
+      ) : null}
+
       {docAEnvoyer ? (
         <FenetreEnvoi
           doc={docAEnvoyer}
@@ -1428,6 +1463,22 @@ function HotlineConsole() {
         />
       ) : null}
     </div>
+  )
+}
+
+// ── Bouton Hi-Parts (12/11/2026) ─────────────────────────────────────────────
+function BoutonHiParts({ modele, onClick }: { modele: string; onClick: () => void }) {
+  const actif = modele.replace(/[^A-Za-z0-9]/g, '').length >= 3
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={!actif}
+      title={actif ? 'Vue éclatée et prix des pièces sur le catalogue Hitachi Hi-Parts' : 'Saisir le modèle pour ouvrir sa vue éclatée Hi-Parts'}
+      className="rounded border border-[#C8102E] px-1.5 py-0.5 text-[10px] font-bold normal-case tracking-normal text-[#C8102E] hover:bg-[#FDE7EA] disabled:border-[#D8D3C8] disabled:text-slate-400 disabled:hover:bg-transparent"
+    >
+      ⚙ Hi-Parts
+    </button>
   )
 }
 
