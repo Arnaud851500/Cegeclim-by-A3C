@@ -301,17 +301,29 @@ function HotlineConsole() {
   }, [])
 
   // Reprise d'un ticket existant -------------------------------------------
-  const ticketAReprendre = useRef(params.get('ticket') || '')
+  // (12/11/2026) Suivi du paramètre ?ticket= : le bandeau violet peut faire
+  // basculer la console, déjà ouverte, sur un autre ticket.
+  const ticketParam = params.get('ticket') || ''
+  const dernierRepris = useRef('')
   // Réponses à rejouer quand les questions de l'arbre du ticket sont chargées.
   const aRejouer = useRef<{ arbreId: string; reponses: Etape[] } | null>(null)
   const [arbresCharges, setArbresCharges] = useState(false)
+  // Rechargement du parcours quand on bascule sur un ticket du même arbre.
+  const [rechargeArbre, setRechargeArbre] = useState(0)
 
   useEffect(() => {
-    const id = ticketAReprendre.current
-    if (!id || !arbresCharges) return
-    ticketAReprendre.current = ''
+    const id = ticketParam
+    if (!id || !arbresCharges || dernierRepris.current === id) return
+    dernierRepris.current = id
     void (async () => {
       try {
+        // Saisie en cours du ticket précédent abandonnée.
+        setCommentaire('')
+        setCommentaireInterne('')
+        setFenetreNiveau(null)
+        setVueOuverte(null)
+        setErreur(null)
+        setAppelants(null)
         const { data, error } = await supabase.from('hotline_tickets').select('*').eq('id', id).maybeSingle()
         if (error) throw error
         if (!data) throw new Error('Ticket introuvable.')
@@ -341,6 +353,10 @@ function HotlineConsole() {
         if (t.arbre_id) {
           aRejouer.current = { arbreId: t.arbre_id, reponses: liste.filter((e) => e.type === 'QUESTION' && e.noeud_id) }
           setArbreId(t.arbre_id)
+          setRechargeArbre((n) => n + 1)
+        } else {
+          aRejouer.current = null
+          setArbreId('')
         }
         // Reprise = prise en charge par la personne qui rouvre la console.
         // Un ticket résolu ou clos rouvert depuis la liste repart « en cours ».
@@ -356,7 +372,7 @@ function HotlineConsole() {
       }
     })()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [arbresCharges, email])
+  }, [arbresCharges, email, ticketParam])
 
   const telInitial = useRef(params.get('tel') || '')
   useEffect(() => {
@@ -529,7 +545,7 @@ function HotlineConsole() {
         setDocsDiagnostic(racine.documents)
       })
       .catch((e) => setErreur(messageErreur(e)))
-  }, [arbreId, arbres])
+  }, [arbreId, arbres, rechargeArbre])
 
   const noeudMap = useMemo(() => new Map(noeuds.map((n) => [n.id, n])), [noeuds])
   const noeud = noeudCourant ? noeudMap.get(noeudCourant) || null : null
@@ -814,6 +830,7 @@ function HotlineConsole() {
     setFenetreNiveau(null)
     setErreur(null)
     setVueOuverte(null)
+    dernierRepris.current = ''
     window.history.replaceState(null, '', '/hotline')
   }
 

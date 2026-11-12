@@ -12,12 +12,15 @@
 // Source : RPC get_mes_alertes_hotline() (table hotline_notifications alimentée
 // par trigger sur hotline_ticket_etapes, migration 20261112h). Lecture toutes
 // les 60 s, au changement d'écran et au retour sur l'onglet / l'app.
-// « Prendre en charge » ouvre le ticket dans la console ; « Fiche » ouvre la
-// fiche du ticket ; « Vu » masque l'alerte. Un ticket résolu ne s'affiche plus.
+// Clic sur le bandeau (12/11/2026) : un seul ticket → on bascule directement sur
+// CE ticket (console sur PC, fiche sur mobile) ; plusieurs tickets en attente →
+// fenêtre flottante listant les tickets, et le ticket choisi s'ouvre.
+// « Vu » masque l'alerte. Un ticket résolu ne s'affiche plus.
 // =============================================================================
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type React from 'react'
+import { createPortal } from 'react-dom'
 import { usePathname, useRouter } from 'next/navigation'
 import { supabase } from '@/lib/supabaseClient'
 
@@ -66,7 +69,7 @@ export default function HotlineAssignmentBanner({ variant }: { variant: 'desktop
   const router = useRouter()
   const pathname = usePathname()
   const [alertes, setAlertes] = useState<AlerteHotline[]>([])
-  const [ouvert, setOuvert] = useState(false)
+  const [liste, setListe] = useState(false)
   const indisponibleRef = useRef(false)
 
   const charger = useCallback(async () => {
@@ -101,27 +104,37 @@ export default function HotlineAssignmentBanner({ variant }: { variant: 'desktop
     return () => window.clearTimeout(t)
   }, [pathname, charger])
 
+  useEffect(() => {
+    if (!liste) return
+    const touche = (e: KeyboardEvent) => e.key === 'Escape' && setListe(false)
+    window.addEventListener('keydown', touche)
+    return () => window.removeEventListener('keydown', touche)
+  }, [liste])
+
   async function marquerVues(ids: string[] | null) {
     setAlertes((cur) => (ids ? cur.filter((a) => !ids.includes(a.id)) : []))
     await supabase.rpc('marquer_alertes_hotline_vues', { p_ids: ids })
   }
 
-  function prendre(a: AlerteHotline) {
-    void marquerVues([a.id])
-    setOuvert(false)
+  /** Bascule sur LE ticket : console sur PC, fiche du ticket sur mobile. */
+  function ouvrirTicket(a: AlerteHotline) {
+    // Toutes les alertes de ce ticket sont traitées d'un coup.
+    void marquerVues(alertes.filter((x) => x.ticket_id === a.ticket_id).map((x) => x.id))
+    setListe(false)
     router.push(variant === 'mobile' ? `/hotline/tickets?id=${encodeURIComponent(a.ticket_id)}` : `/hotline?ticket=${encodeURIComponent(a.ticket_id)}`)
   }
 
-  function fiche(a: AlerteHotline) {
-    void marquerVues([a.id])
-    setOuvert(false)
-    router.push(`/hotline/tickets?id=${encodeURIComponent(a.ticket_id)}`)
-  }
-
   const mobile = variant === 'mobile'
-  const premiere = alertes[0]
-  const autres = alertes.length - 1
+  // Un ticket peut porter plusieurs alertes (escalade puis rappel…) : une ligne par ticket.
+  const parTicket = alertes.filter((a, i) => alertes.findIndex((x) => x.ticket_id === a.ticket_id) === i)
+  const premiere = parTicket[0]
   if (!premiere) return null
+  const plusieurs = parTicket.length > 1
+
+  function clicBandeau() {
+    if (plusieurs) setListe(true)
+    else ouvrirTicket(premiere)
+  }
 
   return (
     <>
@@ -129,66 +142,144 @@ export default function HotlineAssignmentBanner({ variant }: { variant: 'desktop
         @keyframes cgcHotlinePulse { 0%,100% { opacity: 1; transform: scale(1); } 50% { opacity: .35; transform: scale(1.35); } }
         .cgcHotlineBtn:hover { filter: brightness(1.12); }
         .cgcHotlineBtn:focus-visible { outline: 2px solid #F5F3EC; outline-offset: 2px; }
+        .cgcHotlineBar:hover { filter: brightness(1.06); }
+        .cgcHotlineLigne:hover { background: #F4F0FA; }
       `}</style>
 
-      <div role="alert" aria-live="polite" style={barStyle(mobile)}>
+      <div
+        role="button"
+        tabIndex={0}
+        aria-live="polite"
+        className="cgcHotlineBar"
+        onClick={clicBandeau}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault()
+            clicBandeau()
+          }
+        }}
+        title={plusieurs ? 'Choisir le ticket à ouvrir' : 'Ouvrir le ticket'}
+        style={{ ...barStyle(mobile), cursor: 'pointer' }}
+      >
         <span
           aria-hidden="true"
           style={{ width: 9, height: 9, borderRadius: '50%', background: '#F5F3EC', flexShrink: 0, animation: 'cgcHotlinePulse 1.4s ease-in-out infinite' }}
         />
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ fontWeight: 700, fontSize: mobile ? 12.5 : 13, lineHeight: 1.3 }}>
-            {titre(premiere)}
-            {autres > 0 && (
-              <button
-                type="button"
-                className="cgcHotlineBtn"
-                onClick={() => setOuvert((v) => !v)}
-                style={{ marginLeft: 8, border: 'none', background: 'rgba(255,255,255,0.2)', color: '#fff', borderRadius: 999, padding: '1px 8px', fontSize: 11.5, fontWeight: 700, cursor: 'pointer' }}
-              >
-                +{autres} {ouvert ? '▲' : '▼'}
-              </button>
-            )}
+            {plusieurs ? `🎧 ${parTicket.length} tickets hotline vous ont été confiés — cliquer pour choisir` : titre(premiere)}
           </div>
           <div style={{ fontSize: mobile ? 12 : 12.5, opacity: 0.92, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-            {detail(premiere, mobile ? 80 : 160)}
+            {plusieurs
+              ? parTicket
+                  .slice(0, 4)
+                  .map((a) => `${a.numero}${a.intitule_tiers ? ` (${a.intitule_tiers})` : ''}`)
+                  .join(' · ') + (parTicket.length > 4 ? ' …' : '')
+              : detail(premiere, mobile ? 80 : 160)}
           </div>
         </div>
-        <Actions mobile={mobile} onPrendre={() => prendre(premiere)} onFiche={() => fiche(premiere)} onVu={() => void marquerVues([premiere.id])} />
-      </div>
-
-      {ouvert && autres > 0 && (
-        <div style={{ background: 'rgba(43,31,64,0.97)', borderBottom: '1px solid rgba(255,255,255,0.12)', padding: mobile ? '4px 12px 8px' : '6px 24px 10px' }}>
-          {alertes.slice(1).map((a) => (
-            <div key={a.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '7px 0', borderTop: '1px solid rgba(255,255,255,0.08)', color: '#fff' }}>
-              <div style={{ flex: 1, minWidth: 0, fontSize: 12.5 }}>
-                <div style={{ fontWeight: 700 }}>{titre(a)}</div>
-                <div style={{ opacity: 0.85, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{detail(a, mobile ? 70 : 140)}</div>
-              </div>
-              <Actions mobile={mobile} onPrendre={() => prendre(a)} onFiche={() => fiche(a)} onVu={() => void marquerVues([a.id])} />
-            </div>
-          ))}
-          <div style={{ textAlign: 'right', paddingTop: 6 }}>
+        <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
+          <span className="cgcHotlineBtn" style={{ ...bouton(mobile), background: '#F5F3EC', color: '#2B1F40' }}>
+            {plusieurs ? `Choisir (${parTicket.length})` : 'Ouvrir le ticket'}
+          </span>
+          {!plusieurs ? (
             <button
               type="button"
               className="cgcHotlineBtn"
-              onClick={() => {
-                void marquerVues(null)
-                setOuvert(false)
+              onClick={(e) => {
+                e.stopPropagation()
+                void marquerVues(alertes.filter((x) => x.ticket_id === premiere.ticket_id).map((x) => x.id))
               }}
-              style={{ border: '1px solid rgba(255,255,255,0.3)', background: 'transparent', color: '#fff', borderRadius: 8, padding: '4px 10px', fontSize: 11.5, fontWeight: 600, cursor: 'pointer' }}
+              aria-label="Marquer comme vu"
+              title="Marquer comme vu"
+              style={{ ...bouton(mobile), background: 'transparent', color: 'rgba(255,255,255,0.85)', border: '1px solid rgba(255,255,255,0.3)' }}
             >
-              Tout marquer comme vu
+              {mobile ? '✕' : 'Vu'}
             </button>
-          </div>
+          ) : null}
         </div>
-      )}
+      </div>
+
+      {/* Portail : le bandeau mobile a un backdrop-filter, qui piégerait un position: fixed. */}
+      {liste &&
+        createPortal(
+          <div
+            onClick={() => setListe(false)}
+            style={{ position: 'fixed', inset: 0, zIndex: 1000, background: 'rgba(6,10,18,0.55)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 12, fontFamily: 'var(--font-body)' }}
+          >
+            <div
+              role="dialog"
+              aria-label="Tickets hotline qui vous ont été confiés"
+              onClick={(e) => e.stopPropagation()}
+              style={{ width: '100%', maxWidth: 640, maxHeight: '85vh', display: 'flex', flexDirection: 'column', background: '#fff', borderRadius: 16, overflow: 'hidden', boxShadow: '0 20px 60px rgba(0,0,0,0.35)' }}
+            >
+              <div style={{ background: 'linear-gradient(90deg, #7A5EA8 0%, #5E4688 100%)', color: '#fff', padding: '14px 18px', display: 'flex', alignItems: 'center', gap: 10 }}>
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontWeight: 700, fontSize: 15 }}>🎧 {parTicket.length} tickets vous ont été confiés</div>
+                  <div style={{ fontSize: 12, opacity: 0.85 }}>Choisir le ticket à ouvrir</div>
+                </div>
+                <button type="button" onClick={() => setListe(false)} style={{ border: 'none', background: 'rgba(255,255,255,0.18)', color: '#fff', borderRadius: 8, padding: '6px 10px', fontWeight: 700, cursor: 'pointer' }}>
+                  Fermer ✕
+                </button>
+              </div>
+              <div style={{ overflowY: 'auto' }}>
+                {parTicket.map((a) => (
+                  <div
+                    key={a.id}
+                    role="button"
+                    tabIndex={0}
+                    className="cgcHotlineLigne"
+                    onClick={() => ouvrirTicket(a)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') ouvrirTicket(a)
+                    }}
+                    style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '12px 18px', borderBottom: '1px solid #EFEDE8', cursor: 'pointer' }}
+                  >
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontWeight: 700, fontSize: 13, color: '#0F172A' }}>{titre(a)}</div>
+                      <div style={{ fontSize: 12, color: '#475569', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{detail(a, 120)}</div>
+                      <div style={{ fontSize: 11, color: '#94A3B8' }}>
+                        {new Date(a.created_at).toLocaleString('fr-FR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}
+                        {a.statut === 'ESCALADE' ? ' · en escalade' : ''}
+                      </div>
+                    </div>
+                    <span style={{ ...bouton(false), background: '#7A5EA8', color: '#fff' }}>Ouvrir</span>
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        void marquerVues(alertes.filter((x) => x.ticket_id === a.ticket_id).map((x) => x.id))
+                      }}
+                      title="Marquer comme vu sans ouvrir"
+                      style={{ ...bouton(false), background: 'transparent', color: '#64748B', border: '1px solid #E2DFD8' }}
+                    >
+                      Vu
+                    </button>
+                  </div>
+                ))}
+              </div>
+              <div style={{ padding: '10px 18px', textAlign: 'right', borderTop: '1px solid #EFEDE8' }}>
+                <button
+                  type="button"
+                  onClick={() => {
+                    void marquerVues(null)
+                    setListe(false)
+                  }}
+                  style={{ border: '1px solid #E2DFD8', background: '#fff', color: '#334155', borderRadius: 8, padding: '6px 12px', fontSize: 12, fontWeight: 600, cursor: 'pointer' }}
+                >
+                  Tout marquer comme vu
+                </button>
+              </div>
+            </div>
+          </div>,
+          document.body,
+        )}
     </>
   )
 }
 
-function Actions({ mobile, onPrendre, onFiche, onVu }: { mobile: boolean; onPrendre: () => void; onFiche: () => void; onVu: () => void }) {
-  const btn: React.CSSProperties = {
+function bouton(mobile: boolean): React.CSSProperties {
+  return {
     border: 'none',
     borderRadius: 9,
     padding: mobile ? '7px 10px' : '7px 12px',
@@ -196,29 +287,8 @@ function Actions({ mobile, onPrendre, onFiche, onVu }: { mobile: boolean; onPren
     fontWeight: 700,
     cursor: 'pointer',
     whiteSpace: 'nowrap',
+    display: 'inline-block',
   }
-  return (
-    <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
-      <button type="button" className="cgcHotlineBtn" onClick={onPrendre} style={{ ...btn, background: '#F5F3EC', color: '#2B1F40' }}>
-        {mobile ? 'Ouvrir' : 'Prendre en charge'}
-      </button>
-      {!mobile && (
-        <button type="button" className="cgcHotlineBtn" onClick={onFiche} style={{ ...btn, background: 'rgba(255,255,255,0.18)', color: '#fff' }}>
-          Fiche
-        </button>
-      )}
-      <button
-        type="button"
-        className="cgcHotlineBtn"
-        onClick={onVu}
-        aria-label="Marquer comme vu"
-        title="Marquer comme vu"
-        style={{ ...btn, background: 'transparent', color: 'rgba(255,255,255,0.8)', border: '1px solid rgba(255,255,255,0.3)', padding: mobile ? '6px 9px' : '6px 10px' }}
-      >
-        {mobile ? '✕' : 'Vu'}
-      </button>
-    </div>
-  )
 }
 
 function barStyle(mobile: boolean): React.CSSProperties {
