@@ -231,6 +231,7 @@ export class HiPartsClient {
     if (this.connecte && Date.now() - this.derniereConnexion < 60_000) throw new Error('Session Hi-Parts perdue juste après connexion : arrêt du passage')
     this.derniereConnexion = Date.now()
     this.cookies.clear()
+    this.schemaCourant = null
     const page = await this.requete('/Login.aspx')
     const champs = new URLSearchParams()
     const reInput = /<input\b[^>]*>/gi
@@ -259,6 +260,9 @@ export class HiPartsClient {
     if (!this.connecte) await this.connecter()
   }
 
+  /** Dernière vue éclatée ouverte dans la session (le prix d'une pièce n'est servi que pour elle). */
+  private schemaCourant: number | null = null
+
   /** GET d'une page ; reconnexion automatique si la session a expiré. */
   async page(chemin: string): Promise<string> {
     await this.assurer()
@@ -268,7 +272,13 @@ export class HiPartsClient {
       r = await this.requete(chemin)
     }
     if (r.status >= 400) throw new Error(`HTTP ${r.status} sur ${chemin}`)
+    const vue = /FicheSchema\.aspx\?IDSCG=(\d+)/i.exec(chemin)?.[1]
+    if (vue) this.schemaCourant = Number(vue)
     return r.body
+  }
+
+  async ouvrirSchema(idscg: number) {
+    if (this.schemaCourant !== idscg) await this.page(`/FicheSchema.aspx?IDSCG=${idscg}`)
   }
 
   async controle(fichier: string, param: string, valeur: number): Promise<string> {
@@ -284,8 +294,14 @@ export class HiPartsClient {
     return (JSON.parse(r.body) as { d?: string }).d || ''
   }
 
-  async prix(idNomenclature: number): Promise<string> {
+  /**
+   * Prix d'une pièce. (12/11/2026) Hi-Parts ne sert le prix que pour une pièce
+   * de la vue éclatée ouverte en dernier dans la session (sinon gabarit vide) :
+   * on ouvre d'abord la vue de la pièce (idscg).
+   */
+  async prix(idNomenclature: number, idscg?: number | null): Promise<string> {
     await this.assurer()
+    if (idscg) await this.ouvrirSchema(idscg)
     const appel = () =>
       this.requete('/ajax/SpelogWeb.Libraries.Core.ajax.SpelogAjaxObjects,SpelogWeb.ashx?_method=GetNomenclature&_session=r', {
         method: 'POST',
@@ -298,8 +314,15 @@ export class HiPartsClient {
     // plutôt que d'enregistrer une pièce sans prix.
     const vide = (body: string) => !/labelpuht|LabelTitle/i.test(body) || estGabaritVide(body)
     let r = await appel()
+    if (idscg && r.status < 400 && vide(r.body)) {
+      // vue peut-être remplacée par une autre entre-temps : on la rouvre
+      this.schemaCourant = null
+      await this.ouvrirSchema(idscg)
+      r = await appel()
+    }
     if (r.status >= 400 || /Login\.aspx/i.test(r.url) || vide(r.body)) {
       await this.connecter()
+      if (idscg) await this.ouvrirSchema(idscg)
       r = await appel()
     }
     if (r.status >= 400) throw new Error(`HTTP ${r.status} sur GetNomenclature ${idNomenclature}`)
@@ -396,13 +419,19 @@ async function traiter(db: SupabaseClient, hp: HiPartsClient, el: Element, compt
       // un prix par référence (le premier repère rencontré sert à l'interroger)
       const parRef = new Map<string, number>()
       for (const l of lignes) if (l.reference && l.id_nomenclature && !parRef.has(l.reference)) parRef.set(l.reference, l.id_nomenclature)
-      await ajouter(db, [...parRef].map(([reference, idn]) => ({ type: 'PRIX', cle: reference, payload: { reference, id_nomenclature: idn }, priorite: PRIORITE.PRIX })))
+      await ajouter(db, [...parRef].map(([reference, idn]) => ({ type: 'PRIX', cle: reference, payload: { reference, id_nomenclature: idn, idscg }, priorite: PRIORITE.PRIX })))
       break
     }
     case 'PRIX': {
       const reference = String(p.reference)
       const idn = Number(p.id_nomenclature)
-      const r = parserPrix(await hp.prix(idn))
+      // vue éclatée de la pièce (absente des éléments créés avant le 12/11 après-midi)
+      let idscg = Number(p.idscg) || null
+      if (!idscg) {
+        const { data: vue } = await db.from('hiparts_schema_pieces').select('idscg').eq('id_nomenclature', idn).limit(1).maybeSingle()
+        idscg = (vue as { idscg: number } | null)?.idscg || null
+      }
+      const r = parserPrix(await hp.prix(idn, idscg))
       const { error } = await db.from('hiparts_articles').upsert(
         { reference, designation: r.designation, prix_ht: r.prix, ref_remplacement: r.remplacement, stock_info: r.stock, id_nomenclature: idn, prix_maj_le: maintenant, erreur: r.prix === null ? 'Prix non trouvé' : null },
         { onConflict: 'reference' },
@@ -444,7 +473,8 @@ export async function passageHiParts(db: SupabaseClient, opts: { dureeMs: number
 
   const hp = new HiPartsClient(login, motDePasse)
   const compteurs: Record<string, number> = { traites: 0, erreurs: 0 }
-  const parallelisme = Math.max(1, Math.min(opts.parallelisme || 2, 3))
+  // un seul travailleur : la session Hi-Parts ne garde qu'une vue éclatée « courante »
+  const parallelisme = 1
 
   while (Date.now() - debut < opts.dureeMs) {
     const { data, error } = await db.rpc('hiparts_prendre_lot', { p_n: parallelisme * 4 })
@@ -497,7 +527,8 @@ export async function copierModeleHiParts(db: SupabaseClient, idgam: number, opt
   if (pause) throw new Error(`Hi-Parts a refusé la connexion récemment ; nouvel essai après ${pause.toLocaleTimeString('fr-FR', { timeZone: 'Europe/Paris' })}`)
   const debut = Date.now()
   const dureeMs = opts.dureeMs ?? 50_000
-  const parallelisme = Math.max(1, Math.min(opts.parallelisme || 2, 3))
+  // un seul travailleur : la session Hi-Parts ne garde qu'une vue éclatée « courante »
+  const parallelisme = 1
   const hp = new HiPartsClient(login, motDePasse)
   const compteurs: Record<string, number> = { traites: 0, erreurs: 0 }
 
