@@ -42,6 +42,9 @@ export type MobileScreen = 'home' | 'activite' | 'clients' | 'rdv' | 'alertes' |
  * global du shell -- pour que deux écrans du même type empilés (ex. Mes rdv
  * -> client A -> ... ) ne se marchent pas dessus.
  */
+const PILE_STORAGE_KEY = 'cgc.mobile.pile'
+const ECRANS_VALIDES: MobileScreen[] = ['activite', 'clients', 'rdv', 'alertes', 'prospects', 'stock', 'Admin', 'actualites', 'hotline']
+
 type PileEntree = {
   key: number
   screen: MobileScreen
@@ -135,16 +138,64 @@ export default function MobileShell() {
   // correspond (state.cgcDepth). Au chargement, l'entrée courante vaut
   // profondeur 0 (accueil) ; on la marque explicitement pour que le premier
   // "retour" système depuis un écran enfant retombe dessus proprement.
+  //
+  // ÉVOLUTION (2026-11-12) : un rafraîchissement (tirer vers le bas, F5)
+  // ne ramène plus à l'accueil. La pile est sauvegardée dans le
+  // sessionStorage de l'onglet (effacé à la fermeture de l'onglet / de
+  // l'app) et restaurée au montage. Le navigateur conserve history.state
+  // au rechargement : on restaure la pile jusqu'à la profondeur de l'entrée
+  // d'historique courante (cgcDepth), ce qui garde « ← Retour » et le
+  // retour système cohérents. Les cibles non encore consommées (client,
+  // référence, publication à lire) sont restaurées avec l'écran.
+  const pileRestauree = useRef(false)
   useEffect(() => {
+    let depth = 0
     try {
       const st = window.history.state
       if (!st || typeof st.cgcDepth !== 'number') {
         window.history.replaceState({ ...(st || {}), cgcDepth: 0 }, '')
+      } else {
+        depth = st.cgcDepth
       }
     } catch {
       // Historique indisponible (iframe sandbox...) : navigation interne seule.
     }
+    try {
+      const brut = window.sessionStorage.getItem(PILE_STORAGE_KEY)
+      const sauvee = brut ? (JSON.parse(brut) as PileEntree[]) : []
+      if (depth > 0 && Array.isArray(sauvee) && sauvee.length > 0) {
+        const restauree = sauvee
+          .slice(0, depth)
+          .filter((e) => e && ECRANS_VALIDES.includes(e.screen))
+          .map((e) => ({ ...e, key: nextKey.current++ }))
+        if (restauree.length > 0) {
+          pileRef.current = restauree
+          setPile(restauree)
+          // Si la pile restaurée est moins profonde que l'entrée
+          // d'historique, on recale l'entrée courante.
+          if (restauree.length !== depth) {
+            try {
+              window.history.replaceState({ ...(window.history.state || {}), cgcDepth: restauree.length }, '')
+            } catch { /* ignore */ }
+          }
+        }
+      }
+    } catch {
+      // sessionStorage indisponible ou contenu illisible : accueil.
+    }
+    pileRestauree.current = true
   }, [])
+
+  // Sauvegarde de la pile à chaque changement (après la restauration).
+  useEffect(() => {
+    if (!pileRestauree.current) return
+    try {
+      if (pile.length === 0) window.sessionStorage.removeItem(PILE_STORAGE_KEY)
+      else window.sessionStorage.setItem(PILE_STORAGE_KEY, JSON.stringify(pile))
+    } catch {
+      // Quota / mode privé : pas de persistance, navigation inchangée.
+    }
+  }, [pile])
 
   useEffect(() => {
     function onPopState(e: PopStateEvent) {
