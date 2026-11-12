@@ -672,7 +672,7 @@ function ControleMyStock() {
                       <th className="px-2 py-1.5">Désignation</th>
                       <th className="px-2 py-1.5">Statut</th>
                       <th className="px-2 py-1.5 text-right">MyStock J</th>
-                      <th className="px-2 py-1.5 text-right">SAGE fin J</th>
+                      <th className="px-2 py-1.5 text-right" title="Stock réel SAGE du dépôt FMS en fin de journée J (sto_qte), PL en cours comprises">SAGE fin J</th>
                       <th className="px-2 py-1.5 text-right">Écart</th>
                       <th className="px-2 py-1.5 text-right">Valeur</th>
                       <th className="px-2 py-1.5 text-right" title="BL / factures SAGE du dépôt FMS datés du jour de l’image">BL datés J</th>
@@ -734,7 +734,7 @@ function ControleMyStock() {
 
             <div className="mt-3 grid grid-cols-3 gap-2">
               <Kpi label={`MyStock ${fmtDate(res.controle.date_image)}`} value={fmtQte(fiche.qte_mystock)} sub={fiche.nb_lignes_fichier > 1 ? `${fiche.nb_lignes_fichier} lignes additionnées` : undefined} />
-              <Kpi label="SAGE fin de J" value={fmtQte(fiche.qte_sage)} sub={fiche.prepa_fin_j ? `dont ${fmtQte(fiche.prepa_fin_j)} en PL` : undefined} />
+              <Kpi label="SAGE fin de J (stock réel)" value={fmtQte(fiche.qte_sage)} sub={fiche.prepa_fin_j ? `PL comprises : ${fmtQte(fiche.prepa_fin_j)}` : 'aucune PL en cours'} />
               <Kpi label="Écart" value={signe(fiche.ecart)} sub={fiche.ecart_valeur ? fmtEuro(fiche.ecart_valeur) : undefined} tone={fiche.ecart === 0 ? 'ok' : 'alerte'} />
             </div>
 
