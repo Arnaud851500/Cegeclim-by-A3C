@@ -52,6 +52,9 @@
 // ÉVOLUTION (2026-11-01) : « Inventaire – pilotage achats » (/stock/inventaire, can_appro) et
 // « Inventaire – saisie dépôt » (/stock/inventaire/saisie, can_stocks, dépôt de l'agence).
 // Migration 20261101_inventaire_annuel.sql.
+// ÉVOLUTION (2026-11-12) : « Contrôle stock FMS – MyStock » (/stock/controle-mystock, can_appro) :
+// image MyStock de fin de journée J comparée au stock SAGE FMS de fin de J (photo quotidienne).
+// Migrations 20261112a_stock_depot_snapshot_journalier.sql et 20261112b_controle_stock_mystock.sql.
 // ÉVOLUTION (2026-11-02) : nouveau bloc « Hotline technique » (SAV PV / thermique) :
 // console d'appel et tickets (can_hotline), éditeur de diagnostic et statistiques
 // (can_hotline_expert). Migration 20261102_hotline_technique.sql.
@@ -218,6 +221,7 @@ export const NAV_BLOCS: NavBloc[] = [
       { label: 'Calcul de besoin - Appro', path: '/stock/calcul-besoin', activeLabel: 'Calcul de besoin - Appro', accessKey: 'can_appro', description: 'Propositions de commande fournisseur par article, paramètres d’appro, conso retenue et écrêtage des ventes exceptionnelles.' },
       { label: 'Allocation AirH2O 600 / 800', path: '/stock/allocation-airh2o', activeLabel: 'Allocation AirH2O 600 / 800', accessKey: 'can_stocks', description: 'Groupes AirH2O 600 / 800 T3,5 à 6 : dispo, arrivages, CDC et BL par agence, reste à attribuer et allocations par agence (vue complète réservée ; droit de profil « Allocation AirH2O » = vue de son agence, en lecture).' },
       { label: 'Portefeuille commandes fournisseurs', path: '/stock/portefeuille-cdf', activeLabel: 'Portefeuille commandes fournisseurs', accessKey: 'can_appro', description: 'CDF ouvertes : alertes containers (n°, suivi bateau, marge), sans AR, CDF attendues par des CDC à faire confirmer, dates dépassées.' },
+      { label: 'Contrôle stock FMS – MyStock', path: '/stock/controle-mystock', activeLabel: 'Contrôle stock FMS – MyStock', accessKey: 'can_appro', description: 'Image de stock MyStock du prestataire FMS comparée au stock SAGE du dépôt FMS de fin de journée J : écarts, BL du jour, valeur, suivi des écarts.' },
       { label: 'Plan d’expédition FMS', path: '/stock/plan-expedition-fms', activeLabel: 'Plan d’expédition FMS', accessKey: 'can_superuser', description: 'Arrivages containers : ce qui peut partir de FMS dès maintenant (groupes extérieurs, cuivre, volumineux), ce qui attend les réceptions, préconisations par agence et planning de charge FMS (accès réservé).' },
       { label: 'Plan d’expédition – vue agence', path: '/stock/plan-expedition-fms/agences', activeLabel: 'Plan d’expédition – vue agence', accessKey: 'can_stocks', description: 'Par agence (commercial) : commandes rangées par dépôt de départ, frise des livraisons avec GE / UI / palettes, manques et complétude, glisser-déposer date ou dépôt, scission des envois — limité aux agences de l’utilisateur.' },
       { label: 'Projection stock', path: '/stocks-disponibilites2', accessKey: 'can_appro', description: 'Stock projeté par référence, hypothèses mensuelles et substitutions.' },
