@@ -71,6 +71,10 @@ type UserAccess = {
   soumis_objectif: boolean
   agence_objectif: string
   collaborateur_objectif: string
+  /** (2026-11-12) Fonction hotline : 1 = N1, 2 = N2, 3 = N3, null = aucune. */
+  hotline_niveau: number | null
+  /** Départements dont le N2 est le référent (proposé par défaut à l'escalade). */
+  hotline_departements: string[]
 }
 
 type TabKey = 'profiles' | 'users' | 'matrix'
@@ -303,6 +307,8 @@ const EMPTY_USER: UserAccess = {
   soumis_objectif: false,
   agence_objectif: '',
   collaborateur_objectif: '',
+  hotline_niveau: null,
+  hotline_departements: [],
 }
 
 function normalizeList(value: unknown, fallback: string[] = []) {
@@ -364,6 +370,8 @@ function userSignature(user: UserAccess) {
     soumis_objectif: user.soumis_objectif,
     agence_objectif: user.agence_objectif,
     collaborateur_objectif: user.collaborateur_objectif,
+    hotline_niveau: user.hotline_niveau,
+    hotline_departements: [...user.hotline_departements].sort(),
   })
 }
 
@@ -465,6 +473,8 @@ export default function AutorisationPage() {
       soumis_objectif: !!row.soumis_objectif,
       agence_objectif: String(row.agence_objectif || '').trim(),
       collaborateur_objectif: String(row.collaborateur_objectif || '').trim(),
+      hotline_niveau: row.hotline_niveau ? Number(row.hotline_niveau) : null,
+      hotline_departements: normalizeList(row.hotline_departements),
     }))
 
     const countByProfile = new Map<string, number>()
@@ -713,6 +723,8 @@ export default function AutorisationPage() {
         soumis_objectif: user.soumis_objectif,
         agence_objectif: user.soumis_objectif ? user.agence_objectif.trim() : '',
         collaborateur_objectif: user.soumis_objectif ? user.collaborateur_objectif.trim().toUpperCase() || null : null,
+        hotline_niveau: user.hotline_niveau,
+        hotline_departements: user.hotline_niveau === 2 ? user.hotline_departements : [],
       })
       .eq('email', email)
 
@@ -752,6 +764,8 @@ export default function AutorisationPage() {
       soumis_objectif: newUser.soumis_objectif,
       agence_objectif: newUser.soumis_objectif ? newUser.agence_objectif.trim() : '',
       collaborateur_objectif: newUser.soumis_objectif ? newUser.collaborateur_objectif.trim().toUpperCase() || null : null,
+      hotline_niveau: newUser.hotline_niveau,
+      hotline_departements: newUser.hotline_niveau === 2 ? newUser.hotline_departements : [],
     })
 
     setSavingKey(null)
@@ -1328,6 +1342,36 @@ export default function AutorisationPage() {
                           value={userDraft.collaborateur_objectif}
                           onChange={(value) => patchUserDraft({ collaborateur_objectif: value })}
                           placeholder="AAMENA, BRPAROUTOT…"
+                        />
+                      </Field>
+                    )}
+                  </div>
+
+                  <div className="mt-4 grid grid-cols-1 gap-4 rounded-xl border border-[#E7E4DD] bg-[#FAF9F7] p-4 lg:grid-cols-2">
+                    <Field
+                      label="Fonction hotline"
+                      hint="N1 : peut se voir confier le rappel d’un client. N2 : reçoit les escalades (choix obligatoire à l’escalade). N3 : expert ultime."
+                    >
+                      <select
+                        value={userDraft.hotline_niveau ?? ''}
+                        onChange={(event) => patchUserDraft({ hotline_niveau: event.target.value ? Number(event.target.value) : null })}
+                        className="h-[42px] w-full rounded-xl border border-[#D8D3C8] bg-white px-3 text-sm text-slate-800"
+                      >
+                        <option value="">Aucune</option>
+                        <option value="1">HOTLINE N1</option>
+                        <option value="2">HOTLINE N2</option>
+                        <option value="3">HOTLINE N3</option>
+                      </select>
+                    </Field>
+                    {userDraft.hotline_niveau === 2 && (
+                      <Field
+                        label="Départements rattachés (N2)"
+                        hint="Le N2 du département du client est proposé par défaut quand un ticket est escaladé au niveau 2. Ex. 64, 40, 33."
+                      >
+                        <ChipsField
+                          values={userDraft.hotline_departements}
+                          onChange={(values) => patchUserDraft({ hotline_departements: values.map((v) => v.trim().toUpperCase()).filter(Boolean) })}
+                          placeholder="64, 40, 33…"
                         />
                       </Field>
                     )}

@@ -277,7 +277,7 @@ export default function HotlineImport() {
                       </td>
                       <td className="px-3 py-1.5">{libelleNature(r.nature) || '—'}</td>
                       <td className="px-3 py-1.5">{libelleGamme(r.gamme) || '—'}</td>
-                      <td className="px-3 py-1.5">{r.statut === 'CLOS' ? 'Clos' : 'En cours'}</td>
+                      <td className="px-3 py-1.5">{r.statut === 'CLOS' || r.statut === 'RESOLU' ? 'Résolu' : 'En cours'}</td>
                     </tr>
                   ))}
                 </tbody>

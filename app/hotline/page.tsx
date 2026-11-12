@@ -25,10 +25,18 @@
  *   de vente, champ « Modèle », document VUE_ECLATEE d'un parcours) ouvre la vue
  *   interactive (components/hotline/VueEclatee.tsx) : repères cliquables, stock,
  *   demande d'envoi au SAV enregistrée dans le ticket, mail au pro.
+ * - Revue du 12/11/2026 (migration 20261112c_hotline_ticketing_v2.sql) :
+ *   numéros TICKJJMMAA###, plus d'état « Clos » (résolu = clos), historique
+ *   complet du ticket en haut de la colonne centrale (note rapide = motif de
+ *   l'appel, puis tous les commentaires), commentaire interne (hors fiche PDF),
+ *   escalade au N2 vers un collaborateur choisi (N2 du département du client
+ *   proposé), retour N2 → N1, rappel du client confié à un N1, modèles GE / UI
+ *   proposés d'après le début du n° de série, listes de droite repliées sur
+ *   2 lignes (non résolus d'abord) avec un bouton « Développer ».
  * Tables / RPC : migration 20261102_hotline_technique.sql.
  */
 
-import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import Link from 'next/link'
 import { useSearchParams } from 'next/navigation'
 import { supabase } from '@/lib/supabaseClient'
@@ -36,15 +44,28 @@ import { useAccess } from '@/components/AccessContext'
 import HotlineHeader, { HotlineErreur, Pastille } from '@/components/hotline/HotlineHeader'
 import PiecesJointes from '@/components/hotline/PiecesJointes'
 import VueEclatee from '@/components/hotline/VueEclatee'
+import HistoriqueTicket from '@/components/hotline/HistoriqueTicket'
+import FenetreNiveau from '@/components/hotline/FenetreNiveau'
+import ChampSerie from '@/components/hotline/ChampSerie'
+import { telechargerFicheTicket } from '@/lib/hotlineFiche'
 import ClassificationTicket, { CLASSIF_FORM_VIDE, patchClassif, useClassification, valeursDepuisTicket, type ValeursClassif } from '@/components/hotline/ClassificationTicket'
 import {
-  ETAPE_LIBELLES,
   FILIERES,
   GAMMES,
   MOTIFS,
   NATURES,
   libelleNature,
-  STATUTS,
+  styleStatut,
+  estResolu,
+  trierTickets,
+  chargerCollaborateurs,
+  COLLABORATEURS_VIDE,
+  nomCollaborateur,
+  redescendre,
+  demanderRappel,
+  rappelEffectue,
+  noteRapide,
+  type Collaborateurs,
   ajouterEtape,
   chargerArbres,
   CONTEXTE_VIDE,
@@ -61,7 +82,6 @@ import {
   fmtDate,
   fmtDateHeure,
   fmtEuro,
-  fmtHeure,
   fmtTel,
   identifierAppelant,
   libelleFiliere,
@@ -113,6 +133,8 @@ type Formulaire = {
   code_defaut: string
   date_mes: string
   description: string
+  /** (12/11/2026) Collaborateur N1 qui doit rappeler le client. */
+  rappel_par: string
 }
 
 const FORM_VIDE: Formulaire = {
@@ -132,6 +154,7 @@ const FORM_VIDE: Formulaire = {
   code_defaut: '',
   date_mes: '',
   description: '',
+  rappel_par: '',
 }
 
 const champ =
@@ -187,6 +210,11 @@ function HotlineConsole() {
   const [fin, setFin] = useState<Choix | null>(null)
   const [docsDiagnostic, setDocsDiagnostic] = useState<DocumentLien[]>([])
   const [commentaire, setCommentaire] = useState('')
+  // (12/11/2026) Commentaire interne : jamais repris dans la fiche ticket PDF.
+  const [commentaireInterne, setCommentaireInterne] = useState('')
+  // Collaborateurs hotline (fonction N1 / N2 / N3) et fenêtre d'escalade / de retour.
+  const [collaborateurs, setCollaborateurs] = useState<Collaborateurs>(COLLABORATEURS_VIDE)
+  const [fenetreNiveau, setFenetreNiveau] = useState<'escalade' | 'redescente' | null>(null)
   // Vues éclatées : références qui en ont une, vue ouverte.
   const [refsVues, setRefsVues] = useState<Set<string>>(new Set())
   const [vueOuverte, setVueOuverte] = useState<string | null>(null)
@@ -209,6 +237,16 @@ function HotlineConsole() {
       .then((refs) => setRefsVues(new Set(refs)))
       .catch(() => undefined)
   }, [])
+
+  // Collaborateurs hotline : N2 par défaut selon le département du client.
+  useEffect(() => {
+    const handle = window.setTimeout(() => {
+      chargerCollaborateurs(form.numero_tiers.trim() || null)
+        .then(setCollaborateurs)
+        .catch(() => undefined)
+    }, 400)
+    return () => window.clearTimeout(handle)
+  }, [form.numero_tiers])
 
   // Filière déduite de la ligne 3CX appelée.
   useEffect(() => {
@@ -283,6 +321,7 @@ function HotlineConsole() {
           code_defaut: t.code_defaut || '',
           date_mes: t.date_mes || '',
           description: t.description || '',
+          rappel_par: t.rappel_par || '',
         })
         setClassifForm(valeursDepuisTicket(t))
         if (t.arbre_id) {
@@ -294,7 +333,7 @@ function HotlineConsole() {
         const statut = 'EN_COURS' as const
         const qui = String(email || '').split('@')[0]
         await majTicket(t.id, { assigne_a: email || t.assigne_a, statut })
-        if (t.statut === 'RESOLU' || t.statut === 'CLOS') await ajouterEtape(t.id, 'REOUVERTURE', `Ticket rouvert dans la console par ${qui} (niveau ${t.niveau})`)
+        if (estResolu(t)) await ajouterEtape(t.id, 'REOUVERTURE', `Ticket rouvert dans la console par ${qui} (niveau ${t.niveau})`)
         else await ajouterEtape(t.id, 'COMMENTAIRE', `Repris dans la console par ${qui} (niveau ${t.niveau})`)
         setTicket({ ...t, assigne_a: email || t.assigne_a, statut })
         setEtapes(await chargerEtapes(t.id))
@@ -520,6 +559,9 @@ function HotlineConsole() {
           ...patchClassif(classifForm),
           arbre_id: arbreId || null,
           assigne_a: email || null,
+          rappel_par: form.rappel_par || null,
+          rappel_demande_le: form.rappel_par ? new Date().toISOString() : null,
+          rappel_demande_par: form.rappel_par ? email || null : null,
         })
         .select('*')
         .single()
@@ -531,6 +573,9 @@ function HotlineConsole() {
       if (form.numero_tiers) {
         await ajouterEtape(t.id, 'IDENTIFICATION', `Appelant : ${form.intitule_tiers || form.numero_tiers}${form.contact_nom ? ` (${form.contact_nom})` : ''}`)
       }
+      // Motif de l'appel = premier commentaire du ticket (« Note rapide »).
+      await noteRapide(t.id, form.description)
+      if (form.rappel_par) await ajouterEtape(t.id, 'RAPPEL', `Client à rappeler par ${nomCollaborateur(form.rappel_par, collaborateurs)}`, { details: { rappel_par: form.rappel_par } })
       setTicket(t)
       await rafraichirEtapes(t.id)
     } catch (e) {
@@ -564,7 +609,11 @@ function HotlineConsole() {
         ...patchClassif(classifForm),
         arbre_id: arbreId || null,
       })
-      await ajouterEtape(ticket.id, 'COMMENTAIRE', 'Informations du ticket mises à jour')
+      await ajouterEtape(ticket.id, 'IDENTIFICATION', 'Informations du ticket mises à jour')
+      if ((form.description || '').trim() !== (ticket.description || '').trim()) await noteRapide(ticket.id, form.description, true)
+      if ((form.rappel_par || null) !== (ticket.rappel_par || null)) {
+        await demanderRappel(ticket.id, form.rappel_par ? { email: form.rappel_par, nom: nomCollaborateur(form.rappel_par, collaborateurs) } : null)
+      }
       await rafraichirEtapes(ticket.id)
     } catch (e) {
       setErreur(messageErreur(e))
@@ -625,22 +674,45 @@ function HotlineConsole() {
     setFin(null)
   }
 
-  async function action(nom: 'escalader' | 'resoudre' | 'commentaire') {
+  async function action(nom: 'resoudre' | 'commentaire') {
     if (!ticket) return
     setBusy(true)
     try {
-      if (nom === 'escalader') {
-        await majTicket(ticket.id, patchClassif(classifForm))
-        await escalader({ ...ticket, actions: classifForm.actions }, commentaire || fin?.preconisation || '')
-        setClassifForm((c) => ({ ...c, actions: Array.from(new Set([...c.actions, 'ESCALADE'])) }))
-      }
+      // Les commentaires en cours de saisie sont enregistrés avant l'action.
+      if (commentaire.trim()) await ajouterEtape(ticket.id, 'COMMENTAIRE', commentaire.trim())
+      if (commentaireInterne.trim()) await ajouterEtape(ticket.id, 'COMMENTAIRE_INTERNE', commentaireInterne.trim())
       if (nom === 'resoudre') {
         if (issueRequise(ticket) && !classifForm.issue) throw new Error('Choisir l’issue du ticket (bloc Classification) avant de le marquer résolu.')
         await majTicket(ticket.id, patchClassif(classifForm))
-        await resoudre(ticket.id, fin?.preconisation || commentaire || '')
+        await resoudre(ticket.id, fin?.preconisation || commentaire.trim() || '')
+        patch({ rappel_par: '' })
       }
-      if (nom === 'commentaire' && commentaire.trim()) await ajouterEtape(ticket.id, 'COMMENTAIRE', commentaire.trim())
       setCommentaire('')
+      setCommentaireInterne('')
+      await rafraichirEtapes(ticket.id)
+    } catch (e) {
+      setErreur(messageErreur(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  // Escalade (collaborateur N2 obligatoire) ou retour au niveau inférieur (12/11/2026).
+  async function changerNiveau(v: { destinataire: { email: string; nom: string } | null; motif: string }) {
+    if (!ticket || !fenetreNiveau) return
+    setBusy(true)
+    try {
+      if (commentaireInterne.trim()) await ajouterEtape(ticket.id, 'COMMENTAIRE_INTERNE', commentaireInterne.trim())
+      if (fenetreNiveau === 'escalade') {
+        await majTicket(ticket.id, patchClassif(classifForm))
+        await escalader({ ...ticket, actions: classifForm.actions }, v.motif, v.destinataire)
+        setClassifForm((c) => ({ ...c, actions: Array.from(new Set([...c.actions, 'ESCALADE'])) }))
+      } else {
+        await redescendre(ticket, v.motif, v.destinataire)
+      }
+      setCommentaire('')
+      setCommentaireInterne('')
+      setFenetreNiveau(null)
       await rafraichirEtapes(ticket.id)
     } catch (e) {
       setErreur(messageErreur(e))
@@ -711,13 +783,15 @@ function HotlineConsole() {
     setEtapes([])
     setArbreId('')
     setCommentaire('')
+    setCommentaireInterne('')
+    setFenetreNiveau(null)
     setErreur(null)
     setVueOuverte(null)
     window.history.replaceState(null, '', '/hotline')
   }
 
-  const statut = ticket ? STATUTS[ticket.statut] : null
-  const diagnosticsRepris = etapes.filter(estDiagnosticRepris)
+  const statut = ticket ? styleStatut(ticket.statut) : null
+  const collaborateursN1 = collaborateurs.liste.filter((c) => c.niveau === 1)
 
   return (
     <div className="min-h-screen bg-[#F4F3F0] pb-16">
@@ -894,7 +968,14 @@ function HotlineConsole() {
                 <div className="mb-1 text-[10px] font-bold uppercase tracking-[0.06em] text-slate-500">Groupe extérieur (GE)</div>
                 <div className="grid grid-cols-2 gap-2">
                   <input value={form.modele_ge} onChange={(e) => patch({ modele_ge: e.target.value })} placeholder="Modèle GE" className={champ} />
-                  <input value={form.serie_ge} onChange={(e) => patch({ serie_ge: e.target.value })} placeholder="N° de série GE" className={champ} />
+                  <ChampSerie
+                    value={form.serie_ge}
+                    onChange={(v) => patch({ serie_ge: v })}
+                    onModele={(m) => patch({ modele_ge: m })}
+                    typePrefere="GE"
+                    placeholder="N° de série GE"
+                    className={champ}
+                  />
                 </div>
                 <div className="mb-1 mt-2 flex items-center justify-between text-[10px] font-bold uppercase tracking-[0.06em] text-slate-500">
                   Unité intérieure (UI)
@@ -906,7 +987,14 @@ function HotlineConsole() {
                 </div>
                 <div className="grid grid-cols-2 gap-2">
                   <input value={form.reference_article} onChange={(e) => patch({ reference_article: e.target.value })} placeholder="Modèle UI / référence" className={champ} />
-                  <input value={form.numero_serie} onChange={(e) => patch({ numero_serie: e.target.value })} placeholder="N° de série UI" className={champ} />
+                  <ChampSerie
+                    value={form.numero_serie}
+                    onChange={(v) => patch({ numero_serie: v })}
+                    onModele={(m) => patch({ reference_article: m })}
+                    typePrefere="UI"
+                    placeholder="N° de série UI"
+                    className={champ}
+                  />
                 </div>
                 <label className="mt-2 flex items-center gap-2 text-[11px] font-semibold text-slate-500">
                   Mise en service le
@@ -921,7 +1009,56 @@ function HotlineConsole() {
                   rows={3}
                   className="w-full rounded-lg border border-[#D8D3C8] bg-white px-2.5 py-2 text-[13px] text-slate-900 outline-none focus:border-[#B4761A]"
                 />
+                <span className="font-normal text-slate-400">Repris en tête des commentaires (« Note rapide ») et dans la liste des tickets.</span>
               </label>
+              <label className="block text-[11px] font-semibold text-slate-500">
+                📞 Client à rappeler par (N1)
+                <select
+                  value={form.rappel_par}
+                  onChange={(e) => patch({ rappel_par: e.target.value })}
+                  className={`${champ} ${form.rappel_par ? 'border-[#7A5EA8] font-semibold text-[#5B3F8C]' : ''}`}
+                >
+                  <option value="">— Pas de rappel —</option>
+                  {collaborateursN1.map((c) => (
+                    <option key={c.email} value={c.email}>
+                      {c.nom}
+                    </option>
+                  ))}
+                  {form.rappel_par && !collaborateursN1.some((c) => c.email === form.rappel_par) ? (
+                    <option value={form.rappel_par}>{nomCollaborateur(form.rappel_par, collaborateurs)}</option>
+                  ) : null}
+                </select>
+                {!collaborateursN1.length ? (
+                  <span className="font-normal text-slate-400">Aucun collaborateur de fonction N1 (Autorisations › Utilisateurs › Hotline).</span>
+                ) : null}
+              </label>
+              {ticket?.rappel_par ? (
+                <div className="flex items-center justify-between gap-2 rounded-lg border border-[#D9CCEB] bg-[#F4F0FA] px-3 py-2 text-[12px] text-[#5B3F8C]">
+                  <span>
+                    📞 À rappeler par <span className="font-semibold">{nomCollaborateur(ticket.rappel_par, collaborateurs)}</span>
+                    {ticket.rappel_demande_le ? <span className="text-[11px] text-slate-500"> depuis le {fmtDateHeure(ticket.rappel_demande_le)}</span> : null}
+                  </span>
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={async () => {
+                      setBusy(true)
+                      try {
+                        await rappelEffectue(ticket.id, String(email || '').split('@')[0])
+                        patch({ rappel_par: '' })
+                        await rafraichirEtapes(ticket.id)
+                      } catch (e) {
+                        setErreur(messageErreur(e))
+                      } finally {
+                        setBusy(false)
+                      }
+                    }}
+                    className="shrink-0 font-semibold underline disabled:opacity-40"
+                  >
+                    Rappel effectué
+                  </button>
+                </div>
+              ) : null}
 
               {ticket ? (
                 <button
@@ -944,28 +1081,6 @@ function HotlineConsole() {
               )}
             </div>
 
-            {ticket ? (
-              <div className="border-t border-[#EFEDE8] p-4">
-                <div className="mb-2 text-[12px] font-bold uppercase tracking-[0.05em] text-slate-500">Chronologie</div>
-                <ol className="space-y-1.5">
-                  {etapes.map((e) => (
-                    <li key={e.id} className="text-[12px] leading-snug">
-                      <span className="font-mono text-[11px] text-slate-400">{fmtHeure(e.at)}</span>{' '}
-                      <span className="font-semibold text-slate-700">{ETAPE_LIBELLES[e.type]}</span>{' '}
-                      {estDiagnosticRepris(e) ? (
-                        <span className="text-slate-600">
-                          Diagnostic de l’ancien outil <span className="text-slate-400">— affiché en entier au centre</span>
-                        </span>
-                      ) : (
-                        <span className="text-slate-600" title={e.libelle.length > 220 ? e.libelle : undefined}>
-                          {e.libelle.length > 220 ? `${e.libelle.slice(0, 200)}…` : e.libelle}
-                        </span>
-                      )}
-                    </li>
-                  ))}
-                </ol>
-              </div>
-            ) : null}
           </section>
 
           {/* ── Diagnostic guidé ─────────────────────────────────────── */}
@@ -988,26 +1103,21 @@ function HotlineConsole() {
               ) : null}
             </div>
             <div className="p-5">
-              {diagnosticsRepris.length || (ticket?.source === 'IMPORT' && ticket.description) ? (
+              {ticket ? (
                 <div className="mb-5 rounded-xl border border-[#E2DFD8] bg-[#FAF9F7]">
-                  <div className="border-b border-[#EFEDE8] px-4 py-2 text-[12px] font-bold uppercase tracking-[0.05em] text-slate-500">
-                    Ticket repris de l’ancien outil
+                  <div className="flex items-center justify-between gap-2 border-b border-[#EFEDE8] px-4 py-2 text-[12px] font-bold uppercase tracking-[0.05em] text-slate-500">
+                    <span>Historique du ticket{ticket.source === 'IMPORT' ? ' · repris de l’ancien outil' : ''}</span>
+                    <button
+                      type="button"
+                      onClick={() => telechargerFicheTicket(ticket.id).catch((e) => setErreur(messageErreur(e)))}
+                      title="Tout l’historique du ticket, sans les commentaires internes"
+                      className="text-[11px] font-semibold normal-case tracking-normal text-[#B4761A] underline"
+                    >
+                      Fiche ticket PDF
+                    </button>
                   </div>
-                  <div className="max-h-[420px] space-y-3 overflow-y-auto px-4 py-3 text-[13px] leading-relaxed text-slate-800">
-                    {ticket?.source === 'IMPORT' && ticket.description ? (
-                      <div>
-                        <div className="text-[11px] font-semibold uppercase tracking-[0.04em] text-slate-400">Notes rapides</div>
-                        <div className="whitespace-pre-wrap">{ticket.description}</div>
-                      </div>
-                    ) : null}
-                    {diagnosticsRepris.map((e) => (
-                      <div key={e.id}>
-                        <div className="text-[11px] font-semibold uppercase tracking-[0.04em] text-slate-400">
-                          Diagnostic · {fmtDateHeure(e.at)} · {e.auteur.split('@')[0]}
-                        </div>
-                        <div className="whitespace-pre-wrap">{e.libelle.replace(/^Diagnostic : /, '')}</div>
-                      </div>
-                    ))}
+                  <div className="px-3 py-3">
+                    <HistoriqueTicket ticket={ticket} etapes={etapes} hauteurMax={420} />
                   </div>
                 </div>
               ) : null}
@@ -1125,21 +1235,39 @@ function HotlineConsole() {
                       </button>
                     </div>
                   ) : null}
-                  <textarea
-                    value={commentaire}
-                    onChange={(e) => setCommentaire(e.target.value)}
-                    rows={2}
-                    placeholder="Commentaire, code défaut relevé, motif d’escalade…"
-                    className="w-full rounded-lg border border-[#D8D3C8] bg-white px-2.5 py-2 text-[13px] outline-none focus:border-[#B4761A]"
-                  />
+                  <label className="block text-[11px] font-semibold text-slate-500">
+                    Commentaire
+                    <textarea
+                      value={commentaire}
+                      onChange={(e) => setCommentaire(e.target.value)}
+                      rows={2}
+                      placeholder="Commentaire, code défaut relevé, solution apportée… (repris dans la fiche ticket)"
+                      className="w-full rounded-lg border border-[#D8D3C8] bg-white px-2.5 py-2 text-[13px] font-normal text-slate-900 outline-none focus:border-[#B4761A]"
+                    />
+                  </label>
+                  <label className="block text-[11px] font-semibold text-[#8A5A11]">
+                    Commentaire interne <span className="font-normal text-slate-400">— jamais repris dans la fiche ticket PDF</span>
+                    <textarea
+                      value={commentaireInterne}
+                      onChange={(e) => setCommentaireInterne(e.target.value)}
+                      rows={2}
+                      placeholder="Information purement interne (client, contexte commercial, consigne…)"
+                      className="w-full rounded-lg border border-[#EBD8AE] bg-[#FFFCF5] px-2.5 py-2 text-[13px] font-normal text-slate-900 outline-none focus:border-[#B4761A]"
+                    />
+                  </label>
                   <div className="flex flex-wrap gap-2">
-                    <button type="button" onClick={() => action('commentaire')} disabled={busy || !commentaire.trim()} className="rounded-lg border border-[#D8D3C8] px-3 py-2 text-[13px] font-semibold text-slate-700 disabled:opacity-40">
+                    <button type="button" onClick={() => action('commentaire')} disabled={busy || (!commentaire.trim() && !commentaireInterne.trim())} className="rounded-lg border border-[#D8D3C8] px-3 py-2 text-[13px] font-semibold text-slate-700 disabled:opacity-40">
                       Ajouter le commentaire
                     </button>
-                    <button type="button" onClick={() => action('escalader')} disabled={busy || ticket.niveau >= 3} className="rounded-lg bg-[#C1683C] px-3 py-2 text-[13px] font-semibold text-white disabled:opacity-40">
+                    <button type="button" onClick={() => setFenetreNiveau('escalade')} disabled={busy || ticket.niveau >= 3 || estResolu(ticket)} className="rounded-lg bg-[#C1683C] px-3 py-2 text-[13px] font-semibold text-white disabled:opacity-40">
                       Escalader au niveau {Math.min(3, ticket.niveau + 1)}
                     </button>
-                    <button type="button" onClick={() => action('resoudre')} disabled={busy || ticket.statut === 'RESOLU' || ticket.statut === 'CLOS' || (issueRequise(ticket) && !classifForm.issue)} title={issueRequise(ticket) && !classifForm.issue ? 'Choisir d’abord l’issue dans le bloc Classification' : undefined} className="rounded-lg bg-[#2F6B3A] px-3 py-2 text-[13px] font-semibold text-white disabled:opacity-40">
+                    {ticket.niveau >= 2 ? (
+                      <button type="button" onClick={() => setFenetreNiveau('redescente')} disabled={busy || estResolu(ticket)} className="rounded-lg bg-[#1E4E8C] px-3 py-2 text-[13px] font-semibold text-white disabled:opacity-40">
+                        Redescendre au niveau {ticket.niveau - 1}
+                      </button>
+                    ) : null}
+                    <button type="button" onClick={() => action('resoudre')} disabled={busy || estResolu(ticket) || (issueRequise(ticket) && !classifForm.issue)} title={issueRequise(ticket) && !classifForm.issue ? 'Choisir d’abord l’issue dans le bloc Classification' : 'Un ticket résolu est clos'} className="rounded-lg bg-[#2F6B3A] px-3 py-2 text-[13px] font-semibold text-white disabled:opacity-40">
                       Marquer résolu
                     </button>
                     <Link href={`/hotline/tickets?id=${ticket.id}`} className="ml-auto self-center text-[12px] font-semibold text-slate-500 underline">
@@ -1183,9 +1311,12 @@ function HotlineConsole() {
             />
             <div className={carte}>
               <div className={titreCarte}>Documents à envoyer</div>
-              <div className="space-y-1.5 p-4">
+              <div className="p-4">
                 {docsDiagnostic.length ? (
-                  docsDiagnostic.map((d, i) =>
+                  <ListeRepliable
+                    items={[...docsDiagnostic].reverse()}
+                    cle={(d) => d.titre}
+                    render={(d, i) =>
                     referenceVue(d) ? (
                       <div key={`${d.titre}-${i}`} className="flex items-center justify-between gap-2 rounded-lg border border-[#EBD8AE] bg-[#FDF7EA] px-3 py-2 text-[13px]">
                         <span className="min-w-0 truncate">
@@ -1219,10 +1350,11 @@ function HotlineConsole() {
                         </button>
                       </span>
                     </div>
-                    ),
-                  )
+                    )
+                    }
+                  />
                 ) : (
-                  <p className="text-[12px] text-slate-500">Les documents (procédures, schémas, firmwares) apparaissent au fil du diagnostic.</p>
+                  <p className="text-[12px] text-slate-500">Les documents (procédures, schémas, firmwares) apparaissent au fil du diagnostic (les plus récents en premier).</p>
                 )}
               </div>
             </div>
@@ -1252,6 +1384,18 @@ function HotlineConsole() {
       </main>
 
       {ticketHisto ? <FenetreTicket id={ticketHisto} onFermer={fermerTicketHisto} /> : null}
+
+      {ticket && fenetreNiveau ? (
+        <FenetreNiveau
+          mode={fenetreNiveau}
+          niveau={ticket.niveau}
+          collaborateurs={collaborateurs}
+          motifInitial={commentaire.trim() || (fenetreNiveau === 'escalade' ? fin?.preconisation || '' : '')}
+          busy={busy}
+          onValider={changerNiveau}
+          onFermer={() => setFenetreNiveau(null)}
+        />
+      ) : null}
 
       {vueOuverte ? (
         <VueEclatee
@@ -1316,9 +1460,12 @@ function PaveHistorique({
         </span>
         <span className="shrink-0 text-[11px] font-normal text-slate-400">{chargement ? 'mise à jour…' : tickets.length ? `${tickets.length} appel${tickets.length > 1 ? 's' : ''}` : ''}</span>
       </div>
-      <div className="max-h-[260px] space-y-1.5 overflow-y-auto p-4">
+      <div className="p-4">
         {tickets.length ? (
-          tickets.map((t) => (
+          <ListeRepliable
+            items={trierTickets(tickets)}
+            cle={(t) => t.id}
+            render={(t) => (
             <button
               key={t.id}
               type="button"
@@ -1330,9 +1477,9 @@ function PaveHistorique({
                 <span className="font-semibold text-slate-900">
                   {t.numero} · {fmtDateHeure(t.opened_at)}
                 </span>
-                <Pastille {...STATUTS[t.statut]} />
+                <Pastille {...styleStatut(t.statut)} />
               </div>
-              <div className="text-slate-600">
+              <div className="truncate text-slate-600">
                 {t.nature ? `${libelleNature(t.nature)} · ` : ''}
                 {libelleFiliere(t.filiere)} · {libelleMotif(t.motif)} · N{t.niveau}
                 {t.source === 'IMPORT' ? <span className="ml-1 text-[10px] font-bold text-slate-400">HISTORIQUE</span> : null}
@@ -1348,7 +1495,8 @@ function PaveHistorique({
               {t.description ? <div className="truncate text-slate-500">{t.description}</div> : null}
               {t.preconisation ? <div className="truncate text-[#2F6B3A]">→ {t.preconisation}</div> : null}
             </button>
-          ))
+            )}
+          />
         ) : (
           <p className="text-[12px] text-slate-500">{vide}</p>
         )}
@@ -1357,9 +1505,30 @@ function PaveHistorique({
   )
 }
 
-/** Diagnostic repris de l'ancien outil (étape d'import) : affiché au centre, pas dans la chronologie. */
-function estDiagnosticRepris(e: Etape) {
-  return e.type === 'COMMENTAIRE' && Boolean(e.details && (e.details as Record<string, unknown>).import) && e.libelle.startsWith('Diagnostic : ')
+// ── Listes de la colonne droite (12/11/2026) : les 2 premières lignes, puis
+// « Développer » pour afficher la suite.
+const LIGNES_VISIBLES = 2
+
+function ListeRepliable<T>({ items, cle, render }: { items: T[]; cle: (item: T, i: number) => string; render: (item: T, i: number) => ReactNode }) {
+  const [developpe, setDeveloppe] = useState(false)
+  const visibles = developpe ? items : items.slice(0, LIGNES_VISIBLES)
+  const reste = items.length - LIGNES_VISIBLES
+  return (
+    <div className="space-y-1.5">
+      {visibles.map((item, i) => (
+        <div key={`${cle(item, i)}-${i}`}>{render(item, i)}</div>
+      ))}
+      {reste > 0 ? (
+        <button
+          type="button"
+          onClick={() => setDeveloppe((v) => !v)}
+          className="w-full rounded-lg border border-dashed border-[#D8D3C8] py-1.5 text-[12px] font-semibold text-slate-600 hover:border-[#B4761A] hover:text-[#8A5A11]"
+        >
+          {developpe ? 'Réduire' : `Développer (${reste} de plus)`}
+        </button>
+      ) : null}
+    </div>
+  )
 }
 
 // ── Fenêtre flottante d'un ticket de l'historique (04/11/2026) ─────────────────
@@ -1397,7 +1566,7 @@ function FenetreTicket({ id, onFermer }: { id: string; onFermer: () => void }) {
           {t ? (
             <div>
               <div className="flex items-center gap-2 text-[17px] font-bold text-slate-900">
-                {t.numero} <Pastille {...STATUTS[t.statut]} /> <span className="text-[13px] text-slate-500">N{t.niveau}</span>
+                {t.numero} <Pastille {...styleStatut(t.statut)} /> <span className="text-[13px] text-slate-500">N{t.niveau}</span>
               </div>
               <div className="text-[12px] text-slate-500">
                 {libelleFiliere(t.filiere)}
@@ -1431,30 +1600,14 @@ function FenetreTicket({ id, onFermer }: { id: string; onFermer: () => void }) {
                 </div>
               ))}
             </dl>
-            {t.description ? <div className="rounded-lg bg-[#FAF9F7] p-3 text-slate-700">{t.description}</div> : null}
             {t.preconisation ? (
               <div className="rounded-lg border border-[#CDE5D1] bg-[#EEF7EF] p-3 text-slate-800">
                 <span className="font-semibold">Préconisation :</span> {t.preconisation}
               </div>
             ) : null}
-            {etapes.filter(estDiagnosticRepris).map((e) => (
-              <div key={e.id} className="rounded-lg border border-[#E2DFD8] bg-[#FAF9F7] p-3">
-                <div className="text-[11px] font-semibold uppercase tracking-[0.04em] text-slate-400">Diagnostic (ancien outil)</div>
-                <div className="max-h-[300px] overflow-y-auto whitespace-pre-wrap text-slate-800">{e.libelle.replace(/^Diagnostic : /, '')}</div>
-              </div>
-            ))}
             <div>
-              <div className="mb-2 text-[12px] font-bold uppercase tracking-[0.05em] text-slate-500">Chronologie</div>
-              <ol className="space-y-1.5">
-                {etapes.filter((e) => !estDiagnosticRepris(e)).map((e) => (
-                  <li key={e.id} className="text-[12px] leading-snug">
-                    <span className="font-mono text-[11px] text-slate-400">{fmtDateHeure(e.at)}</span>{' '}
-                    <span className="font-semibold text-slate-700">{ETAPE_LIBELLES[e.type]}</span> <span className="text-slate-600">{e.libelle}</span>
-                    <span className="text-[11px] text-slate-400"> · {e.auteur.split('@')[0]}</span>
-                  </li>
-                ))}
-                {!etapes.length ? <li className="text-[12px] text-slate-500">Aucune étape.</li> : null}
-              </ol>
+              <div className="mb-2 text-[12px] font-bold uppercase tracking-[0.05em] text-slate-500">Historique du ticket</div>
+              <HistoriqueTicket ticket={t} etapes={etapes} hauteurMax={0} />
             </div>
           </div>
         ) : null}
@@ -1833,10 +1986,13 @@ function PaveLivraisons({
           {chargement ? 'recherche…' : livraisons.length ? `${livraisons.length} expédition${livraisons.length > 1 ? 's' : ''}` : ''}
         </span>
       </div>
-      <div className="max-h-[460px] space-y-2 overflow-y-auto p-4">
+      <div className="p-4">
         {livraisons.length ? (
-          livraisons.map((l) => (
-            <div key={l.numero_bl} className="rounded-lg border border-[#E2DFD8] text-[12px]">
+          <ListeRepliable
+            items={livraisons}
+            cle={(l) => l.numero_bl}
+            render={(l) => (
+            <div className="rounded-lg border border-[#E2DFD8] text-[12px]">
               <div className="space-y-0.5 border-b border-[#EFEDE8] bg-[#FAF9F7] px-3 py-2">
                 <div className="flex flex-wrap items-baseline justify-between gap-x-3">
                   <span className="font-semibold text-slate-900">
@@ -1868,7 +2024,8 @@ function PaveLivraisons({
                 ))}
               </ul>
             </div>
-          ))
+            )}
+          />
         ) : (
           <p className="text-[12px] text-slate-500">
             {chargement
@@ -1924,7 +2081,7 @@ function PaveDossiers({
           {chargement ? 'recherche…' : total ? `${total} dossier${total > 1 ? 's' : ''}${total > dossiers.length ? ` (${dossiers.length} affichés)` : ''}` : ''}
         </span>
       </div>
-      <div className="max-h-[620px] overflow-y-auto p-4">
+      <div className="p-4">
         {dossier ? (
           <DetailDossier d={dossier} retour={dossiers.length > 1 ? () => onChoisir(null) : null} nbDossiers={dossiers.length} refsVues={refsVues} onVue={onVue} />
         ) : dossiers.length ? (
@@ -1932,9 +2089,11 @@ function PaveDossiers({
             <div className="text-[11px] font-semibold text-slate-500">
               {recherche ? 'Choisir le dossier :' : 'Dossiers récents — saisir le chantier, un n° de pièce ou un produit pour filtrer :'}
             </div>
-            {dossiers.map((d) => (
+            <ListeRepliable
+              items={dossiers}
+              cle={(d) => d.cle}
+              render={(d) => (
               <button
-                key={d.cle}
                 type="button"
                 onClick={() => onChoisir(d)}
                 className="block w-full rounded-lg border border-[#E2DFD8] px-3 py-2 text-left text-[12px] hover:border-[#B4761A] hover:bg-[#FDF7EA]"
@@ -1953,7 +2112,8 @@ function PaveDossiers({
                   {d.date_fin && d.date_fin !== d.date_debut ? ` → ${fmtDate(d.date_fin)}` : ''}
                 </div>
               </button>
-            ))}
+              )}
+            />
           </div>
         ) : (
           <p className="text-[12px] text-slate-500">

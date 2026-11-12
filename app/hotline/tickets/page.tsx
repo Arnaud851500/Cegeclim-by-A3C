@@ -9,6 +9,10 @@
  * résoudre, clore, rouvrir, commentaire). URL : ?id=<ticket>.
  * Suppression définitive d'un ticket (04/11/2026) : réservée au compte
  * valancha@gmail.com et a.valanchauskas@cegeclim-energies.com (RPC hotline_supprimer_ticket, migration 20261104b).
+ * Revue du 12/11/2026 : plus d'état « Clos » (résolu = clos), colonne « Motif
+ * de l'appel » (note rapide), rappels confiés à un N1 (filtre « Mes rappels »,
+ * ?rappels=1), escalade vers un collaborateur N2 choisi, retour au niveau
+ * inférieur, commentaire interne, historique complet et fiche ticket PDF.
  */
 
 import { Suspense, useCallback, useEffect, useMemo, useState } from 'react'
@@ -18,17 +22,26 @@ import { supabase } from '@/lib/supabaseClient'
 import { useAccess } from '@/components/AccessContext'
 import HotlineHeader, { HotlineErreur, Pastille } from '@/components/hotline/HotlineHeader'
 import PiecesJointes from '@/components/hotline/PiecesJointes'
+import HistoriqueTicket from '@/components/hotline/HistoriqueTicket'
+import FenetreNiveau from '@/components/hotline/FenetreNiveau'
+import { telechargerFicheTicket } from '@/lib/hotlineFiche'
 import FiltresClassification, { FILTRE_CLASSIF_VIDE, type FiltreClassif } from '@/components/hotline/FiltresClassification'
 import ClassificationTicket, { patchClassif, useClassification, valeursDepuisTicket, type ValeursClassif } from '@/components/hotline/ClassificationTicket'
 import {
-  ETAPE_LIBELLES,
   FILIERES,
   GAMMES,
   NATURES,
   STATUTS,
+  styleStatut,
+  estResolu,
   ajouterEtape,
   chargerEtapes,
-  clore,
+  chargerCollaborateurs,
+  COLLABORATEURS_VIDE,
+  nomCollaborateur,
+  demanderRappel,
+  rappelEffectue,
+  redescendre,
   escalader,
   fmtDateHeure,
   fmtDuree,
@@ -43,6 +56,7 @@ import {
   messageErreur,
   resoudre,
   rouvrir,
+  type Collaborateurs,
   type Etape,
   type Filiere,
   type Statut,
@@ -72,6 +86,17 @@ function HotlineTickets() {
   const [statut, setStatut] = useState<FiltreStatut>('ACTIFS')
   const [niveau, setNiveau] = useState<number | 0>(0)
   const [mesTickets, setMesTickets] = useState(false)
+  // (12/11/2026) Tickets dont le client est à rappeler par moi.
+  const [mesRappels, setMesRappels] = useState(params.get('rappels') === '1')
+  const [collaborateurs, setCollaborateurs] = useState<Collaborateurs>(COLLABORATEURS_VIDE)
+  useEffect(() => {
+    chargerCollaborateurs().then(setCollaborateurs).catch(() => undefined)
+  }, [])
+  // Lien « 📞 clients à rappeler » de l'en-tête.
+  const rappelsDemandes = params.get('rappels') === '1'
+  useEffect(() => {
+    if (rappelsDemandes) setMesRappels(true)
+  }, [rappelsDemandes])
   const [recherche, setRecherche] = useState('')
   // Filtres de classification (08/11/2026) : '' = tous, '-' = non renseigné.
   const [classifF, setClassifF] = useState<FiltreClassif>(FILTRE_CLASSIF_VIDE)
@@ -96,6 +121,7 @@ function HotlineTickets() {
         else if (statut !== 'TOUS') query = query.eq('statut', statut)
         if (niveau) query = query.eq('niveau', niveau)
         if (mesTickets && email) query = query.eq('assigne_a', email)
+        if (mesRappels && email) query = query.eq('rappel_par', email)
         if (du) query = query.gte('opened_at', new Date(`${du}T00:00:00`).toISOString())
         if (au) query = query.lt('opened_at', new Date(new Date(`${au}T00:00:00`).getTime() + 86_400_000).toISOString())
         for (const [col, v] of [['symptome', classifF.symptome], ['organe', classifF.organe], ['issue', classifF.issue], ['nature', natureF], ['gamme', gammeF]] as const) {
@@ -116,7 +142,7 @@ function HotlineTickets() {
     } finally {
       setLoading(false)
     }
-  }, [filiere, statut, niveau, mesTickets, email, du, au, classifF, natureF, gammeF])
+  }, [filiere, statut, niveau, mesTickets, mesRappels, email, du, au, classifF, natureF, gammeF])
 
   useEffect(() => {
     void charger()
@@ -133,15 +159,16 @@ function HotlineTickets() {
   }, [tickets, recherche])
 
   const compteurs = useMemo(() => {
-    const c = { n1: 0, n2: 0, n3: 0, escalades: 0 }
+    const c = { n1: 0, n2: 0, n3: 0, escalades: 0, rappels: 0 }
     tickets.forEach((t) => {
+      if (t.rappel_par && email && t.rappel_par.toLowerCase() === email.toLowerCase()) c.rappels += 1
       if (t.niveau === 1) c.n1 += 1
       if (t.niveau === 2) c.n2 += 1
       if (t.niveau === 3) c.n3 += 1
       if (t.statut === 'ESCALADE') c.escalades += 1
     })
     return c
-  }, [tickets])
+  }, [tickets, email])
 
   function ouvrir(id: string | null) {
     router.replace(id ? `/hotline/tickets?id=${id}` : '/hotline/tickets', { scroll: false })
@@ -171,7 +198,7 @@ function HotlineTickets() {
             ))}
           </div>
           <select value={statut} onChange={(e) => setStatut(e.target.value as FiltreStatut)} className="h-8 rounded-lg border border-[#D8D3C8] bg-white px-2 text-[13px]">
-            <option value="ACTIFS">Ouverts / en cours / escaladés</option>
+            <option value="ACTIFS">Non résolus (ouverts, en cours, escaladés)</option>
             {(Object.keys(STATUTS) as Statut[]).map((s) => (
               <option key={s} value={s}>
                 {STATUTS[s].label}
@@ -188,6 +215,10 @@ function HotlineTickets() {
           <label className="flex items-center gap-1.5 text-[12px] text-slate-600">
             <input type="checkbox" checked={mesTickets} onChange={(e) => setMesTickets(e.target.checked)} className="h-3.5 w-3.5 accent-[#B4761A]" />
             Mes tickets
+          </label>
+          <label className="flex items-center gap-1.5 text-[12px] font-semibold text-[#5B3F8C]">
+            <input type="checkbox" checked={mesRappels} onChange={(e) => setMesRappels(e.target.checked)} className="h-3.5 w-3.5 accent-[#7A5EA8]" />
+            📞 Mes rappels
           </label>
           <div className="flex items-center gap-1.5 text-[12px] text-slate-600">
             <span className="font-semibold">Créés du</span>
@@ -276,7 +307,7 @@ function HotlineTickets() {
       <main className="mx-auto w-full max-w-[1760px] px-4 py-5 md:px-8">
         {erreur ? <HotlineErreur message={erreur} onClose={() => setErreur(null)} /> : null}
 
-        <div className="mb-4 grid grid-cols-2 gap-3 md:grid-cols-5">
+        <div className="mb-4 grid grid-cols-2 gap-3 md:grid-cols-6">
           {[
             { label: 'Tickets affichés', value: filtres.length },
             { label: 'Niveau 1', value: compteurs.n1 },
@@ -289,12 +320,21 @@ function HotlineTickets() {
               <div className="mt-1 text-[22px] font-bold text-slate-900">{k.value}</div>
             </div>
           ))}
+          <button
+            type="button"
+            onClick={() => setMesRappels((v) => !v)}
+            className={`rounded-xl border bg-white px-4 py-3 text-left hover:border-[#7A5EA8] ${mesRappels ? 'border-[#7A5EA8] ring-2 ring-[#D9CCEB]' : 'border-[#E2DFD8]'}`}
+            title="Tickets dont le client est à rappeler par moi"
+          >
+            <div className="text-[11px] font-semibold uppercase tracking-[0.05em] text-[#5B3F8C]">📞 Rappels pour moi</div>
+            <div className="mt-1 text-[22px] font-bold text-[#5B3F8C]">{compteurs.rappels}</div>
+          </button>
         </div>
 
         <div className={`grid grid-cols-1 gap-4 ${selectedId ? 'xl:grid-cols-[minmax(0,1fr)_520px]' : ''}`}>
           <section className="min-w-0 rounded-2xl border border-[#E2DFD8] bg-white">
             <div className="overflow-x-auto">
-              <table className="w-full min-w-[1180px] text-[13px]">
+              <table className="w-full min-w-[1400px] text-[13px]">
                 <thead className="bg-[#FAF9F7] text-[11px] uppercase tracking-[0.05em] text-slate-500">
                   <tr>
                     <th className="px-3 py-2 text-left">Ticket</th>
@@ -302,6 +342,7 @@ function HotlineTickets() {
                     <th className="px-3 py-2 text-left">Filière · motif</th>
                     <th className="px-3 py-2 text-left">Classification</th>
                     <th className="px-3 py-2 text-left">Client</th>
+                    <th className="px-3 py-2 text-left">Motif de l’appel</th>
                     <th className="px-3 py-2 text-left">Chantier / n° série</th>
                     <th className="px-3 py-2 text-center">Niv.</th>
                     <th className="px-3 py-2 text-left">Statut</th>
@@ -312,13 +353,13 @@ function HotlineTickets() {
                 <tbody>
                   {loading ? (
                     <tr>
-                      <td colSpan={10} className="px-3 py-10 text-center text-slate-500">
+                      <td colSpan={11} className="px-3 py-10 text-center text-slate-500">
                         Chargement des tickets…
                       </td>
                     </tr>
                   ) : !filtres.length ? (
                     <tr>
-                      <td colSpan={10} className="px-3 py-10 text-center text-slate-500">
+                      <td colSpan={11} className="px-3 py-10 text-center text-slate-500">
                         Aucun ticket pour ces filtres.
                       </td>
                     </tr>
@@ -329,7 +370,14 @@ function HotlineTickets() {
                         onClick={() => ouvrir(t.id)}
                         className={`cursor-pointer border-t border-[#EFEDE8] hover:bg-[#FDF7EA] ${t.id === selectedId ? 'bg-[#FDF7EA]' : ''}`}
                       >
-                        <td className="px-3 py-2 font-semibold text-slate-900">{t.numero}</td>
+                        <td className="px-3 py-2 font-semibold text-slate-900">
+                          {t.numero}
+                          {t.rappel_par ? (
+                            <div className="text-[11px] font-semibold text-[#5B3F8C]" title="Client à rappeler">
+                              📞 {nomCollaborateur(t.rappel_par, collaborateurs)}
+                            </div>
+                          ) : null}
+                        </td>
                         <td className="px-3 py-2 text-slate-600">{fmtDateHeure(t.opened_at)}</td>
                         <td className="px-3 py-2 text-slate-700">
                           {libelleFiliere(t.filiere)} <span className="text-slate-500">· {libelleMotif(t.motif)}</span>
@@ -349,12 +397,17 @@ function HotlineTickets() {
                           <div className="font-medium text-slate-900">{t.intitule_tiers || t.numero_tiers || fmtTel(t.telephone_appelant) || '—'}</div>
                           {t.contact_nom ? <div className="text-[11px] text-slate-500">{t.contact_nom}</div> : null}
                         </td>
+                        <td className="max-w-[300px] px-3 py-2 text-[12px] text-slate-700">
+                          <div className="line-clamp-2" title={t.description || undefined}>
+                            {t.description || <span className="text-slate-400">—</span>}
+                          </div>
+                        </td>
                         <td className="px-3 py-2 text-slate-600">{[t.chantier, t.numero_serie].filter(Boolean).join(' · ') || '—'}</td>
                         <td className="px-3 py-2 text-center font-semibold">N{t.niveau}</td>
                         <td className="px-3 py-2">
-                          <Pastille {...STATUTS[t.statut]} />
+                          <Pastille {...styleStatut(t.statut)} />
                         </td>
-                        <td className="px-3 py-2 text-[12px] text-slate-500">{t.assigne_a ? t.assigne_a.split('@')[0] : '—'}</td>
+                        <td className="px-3 py-2 text-[12px] text-slate-500">{t.assigne_a ? nomCollaborateur(t.assigne_a, collaborateurs) : '—'}</td>
                         <td className="px-3 py-2 text-right text-slate-600">{fmtDuree(t.opened_at, t.resolved_at || t.closed_at || new Date().toISOString())}</td>
                       </tr>
                     ))
@@ -367,6 +420,7 @@ function HotlineTickets() {
           {selectedId ? (
             <FicheTicket
               id={selectedId}
+              collaborateurs={collaborateurs}
               onClose={() => ouvrir(null)}
               onChange={charger}
               onSupprime={() => {
@@ -383,13 +437,29 @@ function HotlineTickets() {
 
 const SUPPRESSION_AUTORISEE = ['valancha@gmail.com', 'a.valanchauskas@cegeclim-energies.com']
 
-function FicheTicket({ id, onClose, onChange, onSupprime }: { id: string; onClose: () => void; onChange: () => void; onSupprime: () => void }) {
+function FicheTicket({
+  id,
+  collaborateurs,
+  onClose,
+  onChange,
+  onSupprime,
+}: {
+  id: string
+  collaborateurs: Collaborateurs
+  onClose: () => void
+  onChange: () => void
+  onSupprime: () => void
+}) {
   const { email } = useAccess()
   const [confirmerSuppression, setConfirmerSuppression] = useState(false)
   const peutSupprimer = SUPPRESSION_AUTORISEE.includes(String(email || '').toLowerCase())
   const [ticket, setTicket] = useState<Ticket | null>(null)
   const [etapes, setEtapes] = useState<Etape[]>([])
   const [commentaire, setCommentaire] = useState('')
+  const [commentaireInterne, setCommentaireInterne] = useState('')
+  const [fenetreNiveau, setFenetreNiveau] = useState<'escalade' | 'redescente' | null>(null)
+  // N2 par défaut = département du client du ticket.
+  const [collabTicket, setCollabTicket] = useState<Collaborateurs>(collaborateurs)
   const [busy, setBusy] = useState(false)
   const [erreur, setErreur] = useState<string | null>(null)
   const { classif } = useClassification()
@@ -411,11 +481,18 @@ function FicheTicket({ id, onClose, onChange, onSupprime }: { id: string; onClos
     void charger()
   }, [charger])
 
+  useEffect(() => {
+    setCollabTicket(collaborateurs)
+    if (!ticket?.numero_tiers) return
+    chargerCollaborateurs(ticket.numero_tiers).then(setCollabTicket).catch(() => undefined)
+  }, [ticket?.numero_tiers, collaborateurs])
+
   async function run(fn: () => Promise<unknown>) {
     setBusy(true)
     try {
       await fn()
       setCommentaire('')
+      setCommentaireInterne('')
       await charger()
       onChange()
     } catch (e) {
@@ -443,7 +520,8 @@ function FicheTicket({ id, onClose, onChange, onSupprime }: { id: string; onClos
     return <aside className="rounded-2xl border border-[#E2DFD8] bg-white p-6 text-sm text-slate-500">{erreur || 'Chargement du ticket…'}</aside>
   }
 
-  const actif = ticket.statut !== 'RESOLU' && ticket.statut !== 'CLOS'
+  const actif = !estResolu(ticket)
+  const n1 = collaborateurs.liste.filter((c) => c.niveau === 1)
   const bouton = 'rounded-lg px-3 py-2 text-[13px] font-semibold disabled:opacity-40'
 
   return (
@@ -451,7 +529,7 @@ function FicheTicket({ id, onClose, onChange, onSupprime }: { id: string; onClos
       <div className="flex items-start justify-between gap-2 border-b border-[#EFEDE8] px-4 py-3">
         <div>
           <div className="flex items-center gap-2 text-[16px] font-bold text-slate-900">
-            {ticket.numero} <Pastille {...STATUTS[ticket.statut]} /> <span className="text-[13px] text-slate-500">N{ticket.niveau}</span>
+            {ticket.numero} <Pastille {...styleStatut(ticket.statut)} /> <span className="text-[13px] text-slate-500">N{ticket.niveau}</span>
           </div>
           <div className="text-[12px] text-slate-500">
             {libelleFiliere(ticket.filiere)} · {libelleMotif(ticket.motif)} · ouvert {fmtDateHeure(ticket.opened_at)} par {ticket.ouvert_par.split('@')[0]}
@@ -495,7 +573,7 @@ function FicheTicket({ id, onClose, onChange, onSupprime }: { id: string; onClos
             ['GE', [ticket.modele_ge, ticket.serie_ge && `n° ${ticket.serie_ge}`].filter(Boolean).join(' · ')],
             ['UI', [ticket.reference_article, ticket.numero_serie && `n° ${ticket.numero_serie}`].filter(Boolean).join(' · ')],
             ['Mise en service', ticket.date_mes ? new Date(ticket.date_mes).toLocaleDateString('fr-FR') : ''],
-            ['Assigné à', ticket.assigne_a],
+            ['Assigné à', nomCollaborateur(ticket.assigne_a, collaborateurs)],
             ['1re action', fmtDuree(ticket.opened_at, ticket.first_action_at)],
             ['Résolution', fmtDuree(ticket.opened_at, ticket.resolved_at)],
             ['Escalade', ticket.escalated_at ? fmtDateHeure(ticket.escalated_at) : '—'],
@@ -507,12 +585,45 @@ function FicheTicket({ id, onClose, onChange, onSupprime }: { id: string; onClos
           ))}
         </dl>
 
-        {ticket.description ? <div className="rounded-lg bg-[#FAF9F7] p-3 text-[13px] text-slate-700">{ticket.description}</div> : null}
+        <div className="flex flex-wrap items-center gap-2 rounded-lg border border-[#D9CCEB] bg-[#F4F0FA] px-3 py-2 text-[12px] text-[#5B3F8C]">
+          <span className="font-semibold">📞 Client à rappeler par</span>
+          <select
+            value={ticket.rappel_par || ''}
+            disabled={busy}
+            onChange={(e) => {
+              const v = e.target.value
+              void run(() => demanderRappel(ticket.id, v ? { email: v, nom: nomCollaborateur(v, collaborateurs) } : null))
+            }}
+            className="h-8 rounded-lg border border-[#D9CCEB] bg-white px-2 text-[12px] text-slate-800"
+          >
+            <option value="">— Pas de rappel —</option>
+            {n1.map((c) => (
+              <option key={c.email} value={c.email}>
+                {c.nom}
+              </option>
+            ))}
+            {ticket.rappel_par && !n1.some((c) => c.email === ticket.rappel_par) ? <option value={ticket.rappel_par}>{nomCollaborateur(ticket.rappel_par, collaborateurs)}</option> : null}
+          </select>
+          {ticket.rappel_par ? (
+            <button type="button" disabled={busy} onClick={() => run(() => rappelEffectue(ticket.id, String(email || '').split('@')[0], commentaire.trim()))} className="font-semibold underline disabled:opacity-40">
+              Rappel effectué
+            </button>
+          ) : null}
+        </div>
         {ticket.preconisation ? (
           <div className="rounded-lg border border-[#CDE5D1] bg-[#EEF7EF] p-3 text-[13px] text-slate-800">
             <span className="font-semibold">Préconisation :</span> {ticket.preconisation}
           </div>
         ) : null}
+
+        <button
+          type="button"
+          onClick={() => telechargerFicheTicket(ticket.id).catch((e) => setErreur(messageErreur(e)))}
+          className="flex h-9 w-full items-center justify-center rounded-lg border border-[#D8D3C8] text-[13px] font-semibold text-slate-700 hover:border-[#B4761A]"
+          title="Fiche ticket PDF : tout l'historique, sans les commentaires internes"
+        >
+          Fiche ticket PDF
+        </button>
 
         <a
           href={`/hotline?ticket=${ticket.id}`}
@@ -540,19 +651,14 @@ function FicheTicket({ id, onClose, onChange, onSupprime }: { id: string; onClos
           ) : null}
           {actif ? (
             <>
-              <button
-                type="button"
-                disabled={busy || ticket.niveau >= 3}
-                onClick={() =>
-                  run(async () => {
-                    await majTicket(ticket.id, patchClassif(classifForm))
-                    await escalader({ ...ticket, actions: classifForm.actions }, commentaire)
-                  })
-                }
-                className={`${bouton} bg-[#C1683C] text-white`}
-              >
+              <button type="button" disabled={busy || ticket.niveau >= 3} onClick={() => setFenetreNiveau('escalade')} className={`${bouton} bg-[#C1683C] text-white`}>
                 Escalader N{Math.min(3, ticket.niveau + 1)}
               </button>
+              {ticket.niveau >= 2 ? (
+                <button type="button" disabled={busy} onClick={() => setFenetreNiveau('redescente')} className={`${bouton} bg-[#1E4E8C] text-white`}>
+                  Redescendre N{ticket.niveau - 1}
+                </button>
+              ) : null}
               <button
                 type="button"
                 disabled={busy || (issueRequise(ticket) && !classifForm.issue)}
@@ -568,11 +674,6 @@ function FicheTicket({ id, onClose, onChange, onSupprime }: { id: string; onClos
                 Résolu
               </button>
             </>
-          ) : null}
-          {ticket.statut === 'RESOLU' ? (
-            <button type="button" disabled={busy} onClick={() => run(() => clore(ticket.id))} className={`${bouton} border border-[#D8D3C8] text-slate-700`}>
-              Clore
-            </button>
           ) : null}
           {!actif ? (
             <button type="button" disabled={busy} onClick={() => run(() => rouvrir(ticket.id))} className={`${bouton} border border-[#D8D3C8] text-slate-700`}>
@@ -612,13 +713,25 @@ function FicheTicket({ id, onClose, onChange, onSupprime }: { id: string; onClos
             value={commentaire}
             onChange={(e) => setCommentaire(e.target.value)}
             rows={2}
-            placeholder="Commentaire (sert aussi de motif d’escalade ou de solution)"
+            placeholder="Commentaire (sert aussi de motif d’escalade ou de solution) — repris dans la fiche ticket"
             className="w-full rounded-lg border border-[#D8D3C8] bg-white px-2.5 py-2 text-[13px] outline-none focus:border-[#B4761A]"
+          />
+          <textarea
+            value={commentaireInterne}
+            onChange={(e) => setCommentaireInterne(e.target.value)}
+            rows={2}
+            placeholder="Commentaire interne — jamais repris dans la fiche ticket PDF"
+            className="w-full rounded-lg border border-[#EBD8AE] bg-[#FFFCF5] px-2.5 py-2 text-[13px] outline-none focus:border-[#B4761A]"
           />
           <button
             type="button"
-            disabled={busy || !commentaire.trim()}
-            onClick={() => run(() => ajouterEtape(ticket.id, 'COMMENTAIRE', commentaire.trim()))}
+            disabled={busy || (!commentaire.trim() && !commentaireInterne.trim())}
+            onClick={() =>
+              run(async () => {
+                if (commentaire.trim()) await ajouterEtape(ticket.id, 'COMMENTAIRE', commentaire.trim())
+                if (commentaireInterne.trim()) await ajouterEtape(ticket.id, 'COMMENTAIRE_INTERNE', commentaireInterne.trim())
+              })
+            }
             className={`${bouton} border border-[#D8D3C8] text-slate-700`}
           >
             Ajouter le commentaire
@@ -631,21 +744,33 @@ function FicheTicket({ id, onClose, onChange, onSupprime }: { id: string; onClos
         </div>
 
         <div>
-          <div className="mb-2 text-[12px] font-bold uppercase tracking-[0.05em] text-slate-500">Chronologie</div>
-          <ol className="space-y-2 border-l-2 border-[#EBD8AE] pl-3">
-            {etapes.map((e) => (
-              <li key={e.id} className="text-[12px] leading-snug">
-                <div className="text-[11px] text-slate-400">
-                  {fmtDateHeure(e.at)} · {e.auteur.split('@')[0]}
-                </div>
-                <div>
-                  <span className="font-semibold text-slate-700">{ETAPE_LIBELLES[e.type]}</span> <span className="text-slate-600">{e.libelle}</span>
-                </div>
-              </li>
-            ))}
-          </ol>
+          <div className="mb-2 text-[12px] font-bold uppercase tracking-[0.05em] text-slate-500">Historique du ticket</div>
+          <HistoriqueTicket ticket={ticket} etapes={etapes} hauteurMax={520} />
         </div>
       </div>
+
+      {fenetreNiveau ? (
+        <FenetreNiveau
+          mode={fenetreNiveau}
+          niveau={ticket.niveau}
+          collaborateurs={collabTicket}
+          motifInitial={commentaire.trim()}
+          busy={busy}
+          onFermer={() => setFenetreNiveau(null)}
+          onValider={(v) =>
+            run(async () => {
+              if (commentaireInterne.trim()) await ajouterEtape(ticket.id, 'COMMENTAIRE_INTERNE', commentaireInterne.trim())
+              if (fenetreNiveau === 'escalade') {
+                await majTicket(ticket.id, patchClassif(classifForm))
+                await escalader({ ...ticket, actions: classifForm.actions }, v.motif, v.destinataire)
+              } else {
+                await redescendre(ticket, v.motif, v.destinataire)
+              }
+              setFenetreNiveau(null)
+            })
+          }
+        />
+      ) : null}
     </aside>
   )
 }

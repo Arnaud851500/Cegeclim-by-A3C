@@ -6,8 +6,10 @@
 
 import Link from 'next/link'
 import { usePathname } from 'next/navigation'
+import { useEffect, useState } from 'react'
 import type React from 'react'
 import { useAccess } from '@/components/AccessContext'
+import { supabase } from '@/lib/supabaseClient'
 
 const ONGLETS: Array<{ href: string; label: string; expert?: boolean }> = [
   { href: '/hotline', label: 'Console d’appel' },
@@ -27,8 +29,27 @@ export default function HotlineHeader({
   actions?: React.ReactNode
 }) {
   const pathname = usePathname()
-  const { rights } = useAccess()
+  const { rights, email } = useAccess()
   const expert = Boolean(rights.can_hotline_expert || rights.can_autorisation)
+  // (12/11/2026) Clients que l'utilisateur doit rappeler (tickets non résolus).
+  const [rappels, setRappels] = useState(0)
+  useEffect(() => {
+    if (!email) return
+    let vivant = true
+    const lire = () =>
+      supabase
+        .from('hotline_tickets')
+        .select('id', { count: 'exact', head: true })
+        .eq('rappel_par', email)
+        .neq('statut', 'RESOLU')
+        .then(({ count }) => vivant && setRappels(count || 0))
+    void lire()
+    const t = window.setInterval(lire, 60_000)
+    return () => {
+      vivant = false
+      window.clearInterval(t)
+    }
+  }, [email, pathname])
 
   return (
     <header className="border-b border-[color:var(--cg-hdr-border)] bg-[color:var(--cg-hdr-bg)]">
@@ -38,7 +59,20 @@ export default function HotlineHeader({
           <h1 className="mt-1 text-[24px] font-bold leading-tight text-[color:var(--cg-hdr-ink)] md:text-[28px]">{titre}</h1>
           {sousTitre ? <p className="mt-1 text-[12px] text-[color:var(--cg-hdr-muted)]">{sousTitre}</p> : null}
         </div>
-        {actions ? <div className="flex items-center gap-2 pb-1">{actions}</div> : null}
+        {actions || rappels ? (
+          <div className="flex items-center gap-2 pb-1">
+            {rappels ? (
+              <Link
+                href="/hotline/tickets?rappels=1"
+                className="rounded-lg bg-[#7A5EA8] px-3 py-1.5 text-sm font-semibold text-white hover:bg-[#5B3F8C]"
+                title="Tickets dont le client est à rappeler par vous"
+              >
+                📞 {rappels} client{rappels > 1 ? 's' : ''} à rappeler
+              </Link>
+            ) : null}
+            {actions}
+          </div>
+        ) : null}
       </div>
       <nav className="mx-auto mt-3 flex w-full max-w-[1760px] gap-1 overflow-x-auto px-4 md:px-8">
         {ONGLETS.filter((o) => !o.expert || expert).map((o) => {

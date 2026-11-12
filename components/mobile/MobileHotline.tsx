@@ -86,7 +86,6 @@ const PERIODES: Array<{ code: string; libelle: string; jours: number }> = [
 
 const STATUTS_FILTRE: Array<{ code: string; libelle: string }> = [
   { code: 'ACTIFS', libelle: 'En cours (ouverts, en cours, escaladés)' },
-  { code: 'TERMINES', libelle: 'Terminés (résolus, clos)' },
   ...(Object.keys(STATUTS) as Statut[]).map((s) => ({ code: s, libelle: STATUTS[s].label })),
 ]
 

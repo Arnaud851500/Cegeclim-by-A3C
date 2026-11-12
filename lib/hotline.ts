@@ -17,14 +17,19 @@ import { supabase } from '@/lib/supabaseClient'
 
 export type Filiere = 'PV' | 'THERMIQUE'
 export type Motif = 'MISE_EN_SERVICE' | 'EXPLOITATION'
-export type Statut = 'OUVERT' | 'EN_COURS' | 'ESCALADE' | 'RESOLU' | 'CLOS'
+/** (12/11/2026) Plus d'état « Clos » : un ticket résolu est clos. */
+export type Statut = 'OUVERT' | 'EN_COURS' | 'ESCALADE' | 'RESOLU'
 export type TypeEtape =
   | 'OUVERTURE'
   | 'IDENTIFICATION'
+  | 'NOTE_RAPIDE'
   | 'QUESTION'
   | 'DOCUMENT'
   | 'COMMENTAIRE'
+  | 'COMMENTAIRE_INTERNE'
   | 'ESCALADE'
+  | 'REDESCENTE'
+  | 'RAPPEL'
   | 'PRECONISATION'
   | 'RESOLUTION'
   | 'CLOTURE'
@@ -73,16 +78,33 @@ export const STATUTS: Record<Statut, { label: string; tone: string; bg: string }
   EN_COURS: { label: 'En cours', tone: '#8A5A11', bg: '#FDF2DD' },
   ESCALADE: { label: 'Escaladé', tone: '#A32C2C', bg: '#FCE9E6' },
   RESOLU: { label: 'Résolu', tone: '#2F6B3A', bg: '#E5F2E7' },
-  CLOS: { label: 'Clos', tone: '#4B5563', bg: '#EEEDEA' },
+}
+
+/** Statut d'un ticket lu en base ou dans un export ancien (« CLOS » = résolu). */
+export function styleStatut(statut: string | null | undefined) {
+  return STATUTS[(statut === 'CLOS' ? 'RESOLU' : statut) as Statut] || STATUTS.OUVERT
+}
+
+export function estResolu(t: { statut?: string | null } | null | undefined) {
+  return t?.statut === 'RESOLU' || t?.statut === 'CLOS'
+}
+
+/** (12/11/2026) Non résolus d'abord, puis du plus récent au plus ancien. */
+export function trierTickets<T extends { statut?: string | null; opened_at?: string | null }>(liste: T[]): T[] {
+  return [...liste].sort((a, b) => Number(estResolu(a)) - Number(estResolu(b)) || String(b.opened_at || '').localeCompare(String(a.opened_at || '')))
 }
 
 export const ETAPE_LIBELLES: Record<TypeEtape, string> = {
   OUVERTURE: 'Ouverture',
   IDENTIFICATION: 'Identification',
+  NOTE_RAPIDE: 'Note rapide',
   QUESTION: 'Diagnostic',
   DOCUMENT: 'Document envoyé',
   COMMENTAIRE: 'Commentaire',
+  COMMENTAIRE_INTERNE: 'Commentaire interne',
   ESCALADE: 'Escalade',
+  REDESCENTE: 'Retour au niveau inférieur',
+  RAPPEL: 'Rappel client',
   PRECONISATION: 'Préconisation',
   RESOLUTION: 'Résolution',
   CLOTURE: 'Clôture',
@@ -175,6 +197,10 @@ export type Ticket = {
   arbre_id: string | null
   ouvert_par: string
   assigne_a: string | null
+  /** (12/11/2026) Collaborateur N1 chargé de rappeler le client. */
+  rappel_par?: string | null
+  rappel_demande_le?: string | null
+  rappel_demande_par?: string | null
   opened_at: string
   first_action_at: string | null
   escalated_at: string | null
@@ -229,7 +255,7 @@ export type TicketHistorique = Pick<
   | 'reference_article'
   | 'code_defaut'
   | 'source'
->
+> & { assigne_a?: string | null; rappel_par?: string | null }
 
 export type DocumentVente = {
   numero_piece: string
@@ -578,30 +604,129 @@ export async function majTicket(ticketId: string, patch: Partial<Ticket>) {
 }
 
 /** Actions de cycle de vie : met à jour le ticket ET journalise l'étape (les
- * horodatages first_action / escalade / résolution / clôture sont posés par le
- * trigger hotline_etape_horodater). */
-export async function escalader(ticket: Pick<Ticket, 'id' | 'niveau'> & { actions?: string[] | null }, motif: string) {
+ * horodatages first_action / escalade / résolution sont posés par le trigger
+ * hotline_etape_horodater). */
+
+// ----------------------------------------------------------------------------
+// Collaborateurs hotline (12/11/2026) : fonction N1 / N2 / N3 portée par
+// user_page_access.hotline_niveau, départements du N2 (hotline_departements).
+// RPC hotline_collaborateurs(p_numero_tiers) : par_defaut = N2 du département
+// du client.
+// ----------------------------------------------------------------------------
+export type Collaborateur = {
+  email: string
+  nom: string
+  niveau: 1 | 2 | 3
+  departements: string[]
+  par_defaut: boolean
+}
+
+export type Collaborateurs = { departement: string | null; codePostal: string | null; liste: Collaborateur[] }
+
+export const COLLABORATEURS_VIDE: Collaborateurs = { departement: null, codePostal: null, liste: [] }
+
+export async function chargerCollaborateurs(numeroTiers?: string | null): Promise<Collaborateurs> {
+  const { data, error } = await supabase.rpc('hotline_collaborateurs', { p_numero_tiers: numeroTiers || null })
+  if (error) throw error
+  const v = (data || {}) as { departement?: string | null; code_postal?: string | null; collaborateurs?: Collaborateur[] }
+  return {
+    departement: v.departement || null,
+    codePostal: v.code_postal || null,
+    liste: Array.isArray(v.collaborateurs) ? v.collaborateurs.map((c) => ({ ...c, niveau: Number(c.niveau) as 1 | 2 | 3, departements: c.departements || [] })) : [],
+  }
+}
+
+export function nomCollaborateur(email: string | null | undefined, collab?: Collaborateurs | Collaborateur[] | null) {
+  if (!email) return ''
+  const liste = Array.isArray(collab) ? collab : collab?.liste || []
+  return liste.find((c) => c.email.toLowerCase() === email.toLowerCase())?.nom || email.split('@')[0]
+}
+
+export type Destinataire = { email: string; nom: string } | null
+
+/** Escalade au niveau supérieur, confiée au collaborateur choisi (obligatoire au N2). */
+export async function escalader(
+  ticket: Pick<Ticket, 'id' | 'niveau'> & { actions?: string[] | null },
+  motif: string,
+  destinataire?: Destinataire,
+) {
   const niveau = Math.min(3, (ticket.niveau || 1) + 1)
   // L'escalade est aussi une action de la classification (08/11/2026).
   const actions = Array.from(new Set([...(ticket.actions || []), 'ESCALADE']))
-  await majTicket(ticket.id, { niveau, statut: 'ESCALADE', actions })
-  await ajouterEtape(ticket.id, 'ESCALADE', `Escalade niveau ${niveau}${motif ? ` : ${motif}` : ''}`, { details: { niveau } })
+  await majTicket(ticket.id, { niveau, statut: 'ESCALADE', actions, ...(destinataire ? { assigne_a: destinataire.email } : {}) })
+  await ajouterEtape(
+    ticket.id,
+    'ESCALADE',
+    `Escalade niveau ${niveau}${destinataire ? ` → ${destinataire.nom}` : ''}${motif ? ` : ${motif}` : ''}`,
+    { details: { niveau, destinataire: destinataire?.email || null } },
+  )
   return niveau
 }
 
-export async function resoudre(ticketId: string, preconisation: string) {
-  await majTicket(ticketId, { statut: 'RESOLU', preconisation: preconisation || null })
-  await ajouterEtape(ticketId, 'RESOLUTION', preconisation ? `Résolu : ${preconisation}` : 'Résolu')
+/** (12/11/2026) Le N2 (ou N3) redescend le ticket d'un niveau. */
+export async function redescendre(ticket: Pick<Ticket, 'id' | 'niveau'>, motif: string, destinataire?: Destinataire) {
+  const niveau = Math.max(1, (ticket.niveau || 1) - 1)
+  await majTicket(ticket.id, { niveau, statut: 'EN_COURS', ...(destinataire ? { assigne_a: destinataire.email } : {}) })
+  await ajouterEtape(
+    ticket.id,
+    'REDESCENTE',
+    `Retour au niveau ${niveau}${destinataire ? ` → ${destinataire.nom}` : ''}${motif ? ` : ${motif}` : ''}`,
+    { details: { niveau, destinataire: destinataire?.email || null } },
+  )
+  return niveau
 }
 
-export async function clore(ticketId: string) {
-  await majTicket(ticketId, { statut: 'CLOS' })
-  await ajouterEtape(ticketId, 'CLOTURE', 'Ticket clos')
+/** Résolu = clos (12/11/2026). */
+export async function resoudre(ticketId: string, preconisation: string) {
+  await majTicket(ticketId, { statut: 'RESOLU', preconisation: preconisation || null, rappel_par: null })
+  await ajouterEtape(ticketId, 'RESOLUTION', preconisation ? `Résolu : ${preconisation}` : 'Résolu')
 }
 
 export async function rouvrir(ticketId: string) {
   await majTicket(ticketId, { statut: 'EN_COURS' })
   await ajouterEtape(ticketId, 'REOUVERTURE', 'Ticket rouvert')
+}
+
+/** (12/11/2026) Rappel du client confié à un collaborateur N1 (null = rappel annulé). */
+export async function demanderRappel(ticketId: string, destinataire: Destinataire, commentaire?: string) {
+  await majTicket(ticketId, {
+    rappel_par: destinataire?.email || null,
+    rappel_demande_le: destinataire ? new Date().toISOString() : null,
+  })
+  await ajouterEtape(
+    ticketId,
+    'RAPPEL',
+    destinataire ? `Client à rappeler par ${destinataire.nom}${commentaire ? ` : ${commentaire}` : ''}` : `Demande de rappel retirée${commentaire ? ` : ${commentaire}` : ''}`,
+    { details: { rappel_par: destinataire?.email || null } },
+  )
+}
+
+export async function rappelEffectue(ticketId: string, qui: string, commentaire?: string) {
+  await majTicket(ticketId, { rappel_par: null })
+  await ajouterEtape(ticketId, 'RAPPEL', `Client rappelé par ${qui}${commentaire ? ` : ${commentaire}` : ''}`, { details: { fait: true } })
+}
+
+/** (12/11/2026) Motif de l'appel repris en tête des commentaires. */
+export async function noteRapide(ticketId: string, texte: string, modification = false) {
+  if (!texte.trim()) return
+  await ajouterEtape(ticketId, 'NOTE_RAPIDE', texte.trim(), { details: modification ? { modification: true } : null })
+}
+
+/** Commentaire visible de l'appelant (fiche PDF) ou purement interne. */
+export function estInterne(e: Pick<Etape, 'type'>) {
+  return e.type === 'COMMENTAIRE_INTERNE'
+}
+
+// ----------------------------------------------------------------------------
+// Modèles possibles d'après le début d'un n° de série (12/11/2026)
+// ----------------------------------------------------------------------------
+export type ModeleSerie = { type: 'GE' | 'UI'; modele: string; n: number; dernier: string | null; exemples: string[] | null }
+
+export async function chargerModelesParSerie(prefixe: string): Promise<ModeleSerie[]> {
+  if (prefixe.replace(/\s/g, '').length < 3) return []
+  const { data, error } = await supabase.rpc('hotline_modeles_par_serie', { p_prefixe: prefixe })
+  if (error) throw error
+  return (Array.isArray(data) ? data : []) as ModeleSerie[]
 }
 
 // ----------------------------------------------------------------------------

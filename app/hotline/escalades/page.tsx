@@ -24,7 +24,12 @@ import FiltresClassification, { FILTRE_CLASSIF_VIDE, compterClassif, passeFiltre
 import {
   ETAPE_LIBELLES,
   FILIERES,
-  STATUTS,
+  styleStatut,
+  estResolu,
+  chargerCollaborateurs,
+  COLLABORATEURS_VIDE,
+  nomCollaborateur,
+  type Collaborateurs,
   chargerDemandesPieces,
   fmtDateHeure,
   fmtHeures,
@@ -57,12 +62,17 @@ export default function HotlineEscalades() {
   const [maintenant, setMaintenant] = useState(() => Date.now())
   const [classifF, setClassifF] = useState<FiltreClassif>(FILTRE_CLASSIF_VIDE)
   const { classif } = useClassification()
+  // (12/11/2026) Nom du collaborateur à qui le ticket a été escaladé.
+  const [collaborateurs, setCollaborateurs] = useState<Collaborateurs>(COLLABORATEURS_VIDE)
+  useEffect(() => {
+    chargerCollaborateurs().then(setCollaborateurs).catch(() => undefined)
+  }, [])
 
   const charger = useCallback(async () => {
     setChargement(true)
     try {
       let q = supabase.from('hotline_tickets').select('*').gte('niveau', 2).order('escalated_at', { ascending: true, nullsFirst: false }).limit(500)
-      if (!avecResolus) q = q.not('statut', 'in', '(RESOLU,CLOS)')
+      if (!avecResolus) q = q.neq('statut', 'RESOLU')
       const { data, error } = await q
       if (error) throw error
       const liste = (data || []) as Ticket[]
@@ -107,7 +117,7 @@ export default function HotlineEscalades() {
   const repartition = useMemo(() => compterClassif(visibles), [visibles])
 
   const kpi = useMemo(() => {
-    const actifs = tickets.filter((t) => t.statut !== 'RESOLU' && t.statut !== 'CLOS')
+    const actifs = tickets.filter((t) => !estResolu(t))
     const ages = actifs.map((t) => maintenant - new Date(t.escalated_at || t.opened_at).getTime())
     return {
       n2: actifs.filter((t) => t.niveau === 2).length,
@@ -167,7 +177,7 @@ export default function HotlineEscalades() {
           </div>
           <label className="flex items-center gap-2 text-slate-600">
             <input type="checkbox" checked={avecResolus} onChange={(e) => setAvecResolus(e.target.checked)} className="h-4 w-4 accent-[#B4761A]" />
-            Inclure les tickets résolus et clos
+            Inclure les tickets résolus
           </label>
           <span className="ml-auto text-[12px] text-slate-500">{visibles.length} ticket{visibles.length > 1 ? 's' : ''}</span>
         </div>
@@ -241,12 +251,13 @@ export default function HotlineEscalades() {
                 const depuis = t.escalated_at || t.opened_at
                 const heures = (maintenant - new Date(depuis).getTime()) / 3_600_000
                 const der = dernieres[t.id]
-                const st = STATUTS[t.statut]
+                const st = styleStatut(t.statut)
                 return (
                   <tr key={t.id} className="align-top hover:bg-[#FDFCFA]">
                     <td className="px-3 py-2">
                       <div className="font-semibold text-slate-900">{t.numero}</div>
                       <Pastille {...st} />
+                      {t.assigne_a ? <div className="mt-0.5 text-[11px] text-slate-500">→ {nomCollaborateur(t.assigne_a, collaborateurs)}</div> : null}
                     </td>
                     <td className="px-3 py-2">
                       <span className={`rounded-full px-2 py-0.5 text-[11px] font-bold ${t.niveau === 3 ? 'bg-[#FCE9E6] text-[#A32C2C]' : 'bg-[#FDF2DD] text-[#8A5A11]'}`}>N{t.niveau}</span>

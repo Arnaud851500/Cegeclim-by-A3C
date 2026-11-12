@@ -13,6 +13,8 @@
  * actions et codes défaut les plus fréquents (part finie en pièce / réglée au
  * téléphone). Filtre de filière. L'historique de l'ancien outil est classé
  * automatiquement (classif_source AUTO_2026_11).
+ * Scénarios proposés (12/11/2026) : components/hotline/ScenariosHotline.tsx,
+ * RPC hotline_scenarios.
  */
 
 import { useEffect, useMemo, useState } from 'react'
@@ -22,6 +24,7 @@ import HotlineHeader, { HotlineErreur } from '@/components/hotline/HotlineHeader
 import { FILIERES, STATUTS, fmtHeures, libelleFiliere, libelleMotif, messageErreur, type Filiere, type Statut } from '@/lib/hotline'
 import { useClassification } from '@/components/hotline/ClassificationTicket'
 import StatsClassification from '@/components/hotline/StatsClassification'
+import ScenariosHotline from '@/components/hotline/ScenariosHotline'
 
 type Stats = {
   total: number
@@ -244,6 +247,7 @@ export default function HotlineStatsPage() {
             </div>
 
             {filiere !== 'PV' ? <StatsClassification debut={debut} fin={fin} classif={classif} /> : null}
+            {filiere !== 'PV' ? <ScenariosHotline classif={classif} /> : null}
           </>
         )}
       </main>
