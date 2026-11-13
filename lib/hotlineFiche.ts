@@ -25,6 +25,9 @@ import {
   libelleMotif,
   libelleNature,
   styleStatut,
+  marqueSoleil,
+  libelleEquipementSoleil,
+  styleSeverite,
   type Ticket,
 } from '@/lib/hotline'
 
@@ -86,8 +89,17 @@ export async function telechargerFicheTicket(ticketId: string) {
     ['Chantier / référence', t.chantier || ''],
     ["Nature de l'appel", libelleNature(t.nature)],
     ['Code défaut', t.code_defaut || ''],
-    ['Groupe extérieur (GE)', [t.modele_ge, t.serie_ge && `n° ${t.serie_ge}`].filter(Boolean).join(' - ')],
-    ['Unité intérieure (UI)', [t.reference_article, t.numero_serie && `n° ${t.numero_serie}`].filter(Boolean).join(' - ')],
+    ...((t.filiere === 'PV'
+      ? [
+          ['Onduleur', [marqueSoleil(t.pv_marque)?.label, libelleEquipementSoleil(t.pv_marque, t.pv_equipement)].filter(Boolean).join(' > ')],
+          ['Sévérité', styleSeverite(t.severite)?.label || ''],
+          ['Modèle onduleur', [t.onduleur_modele, t.onduleur_serie && `n° ${t.onduleur_serie}`].filter(Boolean).join(' - ')],
+          ['Batterie', [t.batterie_modele, t.batterie_serie && `n° ${t.batterie_serie}`].filter(Boolean).join(' - ')],
+        ]
+      : [
+          ['Groupe extérieur (GE)', [t.modele_ge, t.serie_ge && `n° ${t.serie_ge}`].filter(Boolean).join(' - ')],
+          ['Unité intérieure (UI)', [t.reference_article, t.numero_serie && `n° ${t.numero_serie}`].filter(Boolean).join(' - ')],
+        ]) as Array<[string, string]>),
     ['Mise en service', t.date_mes ? fmtDate(t.date_mes) : ''],
   ]
   if (classif) {

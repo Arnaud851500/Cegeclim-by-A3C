@@ -26,6 +26,7 @@ import {
   FILIERES,
   styleStatut,
   estResolu,
+  chargerMonEnvironnement,
   chargerCollaborateurs,
   COLLABORATEURS_VIDE,
   nomCollaborateur,
@@ -58,6 +59,14 @@ export default function HotlineEscalades() {
   const [erreur, setErreur] = useState<string | null>(null)
   const [niveau, setNiveau] = useState<Niveau>(0)
   const [filiere, setFiliere] = useState<Filiere | 'TOUTES'>('TOUTES')
+  // (13/11/2026) Filtre par défaut sur l'environnement hotline de l'utilisateur (modifiable).
+  useEffect(() => {
+    chargerMonEnvironnement()
+      .then((env) => {
+        if (env.filiere) setFiliere((f) => (f === 'TOUTES' ? env.filiere! : f))
+      })
+      .catch(() => undefined)
+  }, [])
   const [avecResolus, setAvecResolus] = useState(false)
   const [maintenant, setMaintenant] = useState(() => Date.now())
   const [classifF, setClassifF] = useState<FiltreClassif>(FILTRE_CLASSIF_VIDE)

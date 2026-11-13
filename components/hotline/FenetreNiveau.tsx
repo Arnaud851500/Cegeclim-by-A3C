@@ -17,6 +17,7 @@ import type { Collaborateurs, Destinataire } from '@/lib/hotline'
 export default function FenetreNiveau({
   mode,
   niveau,
+  filiere,
   collaborateurs,
   motifInitial = '',
   busy,
@@ -25,6 +26,8 @@ export default function FenetreNiveau({
 }: {
   mode: 'escalade' | 'redescente'
   niveau: number
+  /** (13/11/2026) Filière du ticket : seuls les collaborateurs de cet environnement (ou sans environnement) sont proposés. */
+  filiere?: string | null
   collaborateurs: Collaborateurs
   motifInitial?: string
   busy?: boolean
@@ -32,7 +35,10 @@ export default function FenetreNiveau({
   onFermer: () => void
 }) {
   const cible = mode === 'escalade' ? Math.min(3, niveau + 1) : Math.max(1, niveau - 1)
-  const candidats = useMemo(() => collaborateurs.liste.filter((c) => c.niveau === cible), [collaborateurs, cible])
+  const candidats = useMemo(
+    () => collaborateurs.liste.filter((c) => c.niveau === cible && (!filiere || !c.filiere || c.filiere === filiere)),
+    [collaborateurs, cible, filiere],
+  )
   const parDefaut = candidats.find((c) => c.par_defaut) || (candidats.length === 1 ? candidats[0] : null)
   const [email, setEmail] = useState(parDefaut?.email || '')
   const [motif, setMotif] = useState(motifInitial)

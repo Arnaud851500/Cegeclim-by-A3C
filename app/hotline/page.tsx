@@ -70,6 +70,19 @@ import {
   demanderRappel,
   rappelEffectue,
   noteRapide,
+  MARQUES_SOLEIL,
+  marqueSoleil,
+  libelleEquipementSoleil,
+  SEVERITES,
+  ACTIONS_REPRISE,
+  CATEGORIES_DOC_SOLEIL,
+  chargerDocsSoleil,
+  chargerMonEnvironnement,
+  planifierReprise,
+  type ActionReprise,
+  type DocSoleil,
+  type MarqueSoleil,
+  type Severite,
   type Collaborateurs,
   ajouterEtape,
   chargerArbres,
@@ -140,6 +153,14 @@ type Formulaire = {
   description: string
   /** (12/11/2026) Collaborateur N1 qui doit rappeler le client. */
   rappel_par: string
+  /** (13/11/2026) Soleil : NIV 2 / NIV 3, onduleur, batterie, sévérité. */
+  pv_marque: MarqueSoleil | null
+  pv_equipement: string
+  onduleur_modele: string
+  onduleur_serie: string
+  batterie_modele: string
+  batterie_serie: string
+  severite: Severite | ''
 }
 
 const FORM_VIDE: Formulaire = {
@@ -160,7 +181,44 @@ const FORM_VIDE: Formulaire = {
   date_mes: '',
   description: '',
   rappel_par: '',
+  pv_marque: null,
+  pv_equipement: '',
+  onduleur_modele: '',
+  onduleur_serie: '',
+  batterie_modele: '',
+  batterie_serie: '',
+  severite: '',
 }
+
+/** Champs Soleil d'un ticket → formulaire. */
+function formSoleil(t: Ticket): Pick<Formulaire, 'pv_marque' | 'pv_equipement' | 'onduleur_modele' | 'onduleur_serie' | 'batterie_modele' | 'batterie_serie' | 'severite'> {
+  return {
+    pv_marque: t.pv_marque || null,
+    pv_equipement: t.pv_equipement || '',
+    onduleur_modele: t.onduleur_modele || '',
+    onduleur_serie: t.onduleur_serie || '',
+    batterie_modele: t.batterie_modele || '',
+    batterie_serie: t.batterie_serie || '',
+    severite: t.severite || '',
+  }
+}
+
+/** Formulaire → champs Soleil du ticket (vidés hors Soleil). */
+function patchSoleil(f: Formulaire) {
+  const pv = f.filiere === 'PV'
+  return {
+    pv_marque: pv ? f.pv_marque : null,
+    pv_equipement: pv ? f.pv_equipement || null : null,
+    onduleur_modele: pv ? f.onduleur_modele.trim() || null : null,
+    onduleur_serie: pv ? f.onduleur_serie.trim() || null : null,
+    batterie_modele: pv ? f.batterie_modele.trim() || null : null,
+    batterie_serie: pv ? f.batterie_serie.trim() || null : null,
+    severite: pv ? f.severite || null : null,
+  }
+}
+
+type Reprise = { date: string; action: ActionReprise | ''; precision: string; pour: string }
+const REPRISE_VIDE: Reprise = { date: '', action: '', precision: '', pour: '' }
 
 // (12/11/2026) Nature proposée par défaut : « Dépannage », ou « Assistance /
 // réglage » quand le motif est « Mise en service ». Une nature choisie à la main
@@ -226,6 +284,11 @@ function HotlineConsole() {
   const [commentaireInterne, setCommentaireInterne] = useState('')
   // Collaborateurs hotline (fonction N1 / N2 / N3) et fenêtre d'escalade / de retour.
   const [collaborateurs, setCollaborateurs] = useState<Collaborateurs>(COLLABORATEURS_VIDE)
+  // (13/11/2026) Environnement hotline de l'utilisateur (Thermie / Soleil),
+  // documents Soleil de la marque choisie, reprise du traitement (Soleil).
+  const [environnement, setEnvironnement] = useState<Filiere | null>(null)
+  const [docsSoleil, setDocsSoleil] = useState<DocSoleil[]>([])
+  const [reprise, setReprise] = useState<Reprise>(REPRISE_VIDE)
   const [fenetreNiveau, setFenetreNiveau] = useState<'escalade' | 'redescente' | null>(null)
   // Vues éclatées : références qui en ont une, vue ouverte.
   const [refsVues, setRefsVues] = useState<Set<string>>(new Set())
@@ -237,6 +300,28 @@ function HotlineConsole() {
   const fermerTicketHisto = useCallback(() => setTicketHisto(null), [])
 
   const patch = (p: Partial<Formulaire>) => setForm((f) => ({ ...f, ...p }))
+
+  // Environnement : la filière de l'utilisateur est présélectionnée.
+  useEffect(() => {
+    chargerMonEnvironnement()
+      .then((env) => {
+        setEnvironnement(env.filiere)
+        if (env.filiere) setForm((f) => (f.filiere ? f : { ...f, filiere: env.filiere }))
+      })
+      .catch(() => undefined)
+  }, [])
+
+  // Documents Soleil de la marque (NIV 2 + NIV 3).
+  useEffect(() => {
+    if (form.filiere !== 'PV' || !form.pv_marque) return
+    let actif = true
+    chargerDocsSoleil(form.pv_marque)
+      .then((l) => actif && setDocsSoleil(l))
+      .catch(() => undefined)
+    return () => {
+      actif = false
+    }
+  }, [form.filiere, form.pv_marque])
 
   // Référentiels -------------------------------------------------------------
   useEffect(() => {
@@ -348,7 +433,9 @@ function HotlineConsole() {
           date_mes: t.date_mes || '',
           description: t.description || '',
           rappel_par: t.rappel_par || '',
+          ...formSoleil(t),
         })
+        setReprise(REPRISE_VIDE)
         setClassifForm(valeursDepuisTicket(t))
         if (t.arbre_id) {
           aRejouer.current = { arbreId: t.arbre_id, reponses: liste.filter((e) => e.type === 'QUESTION' && e.noeud_id) }
@@ -559,7 +646,11 @@ function HotlineConsole() {
 
   async function ouvrirTicket() {
     if (!form.filiere) {
-      setErreur('Choisir la filière (photovoltaïque ou thermique) avant d’ouvrir le ticket.')
+      setErreur('Choisir la filière (Soleil ou thermique) avant d’ouvrir le ticket.')
+      return
+    }
+    if (form.filiere === 'PV' && !form.severite) {
+      setErreur('Choisir la sévérité (non bloquant, bloquant, critique) avant d’ouvrir le ticket.')
       return
     }
     setBusy(true)
@@ -592,12 +683,15 @@ function HotlineConsole() {
           rappel_par: form.rappel_par || null,
           rappel_demande_le: form.rappel_par ? new Date().toISOString() : null,
           rappel_demande_par: form.rappel_par ? email || null : null,
+          ...patchSoleil(form),
         })
         .select('*')
         .single()
       if (error) throw error
       const t = data as Ticket
-      await ajouterEtape(t.id, 'OUVERTURE', `Ticket ${t.numero} ouvert · ${libelleFiliere(t.filiere)}${t.gamme ? ` ${libelleGamme(t.gamme)}` : ''} · ${libelleMotif(t.motif)}`, {
+      const soleil = t.filiere === 'PV' && t.pv_marque ? ` · ${marqueSoleil(t.pv_marque)?.label}${t.pv_equipement ? ` › ${libelleEquipementSoleil(t.pv_marque, t.pv_equipement)}` : ''}` : ''
+      const sev = t.severite ? ` · ${SEVERITES.find((x) => x.value === t.severite)?.label}` : ''
+      await ajouterEtape(t.id, 'OUVERTURE', `Ticket ${t.numero} ouvert · ${libelleFiliere(t.filiere)}${t.gamme ? ` ${libelleGamme(t.gamme)}` : ''} · ${libelleMotif(t.motif)}${soleil}${sev}`, {
         details: { telephone: telephone || null, ligne: ligneAppelee || null },
       })
       if (form.numero_tiers) {
@@ -637,6 +731,7 @@ function HotlineConsole() {
         date_mes: form.date_mes || null,
         description: form.description || null,
         ...patchClassif(classifForm),
+        ...patchSoleil({ ...form, filiere: form.filiere || ticket.filiere }),
         arbre_id: arbreId || null,
       })
       await ajouterEtape(ticket.id, 'IDENTIFICATION', 'Informations du ticket mises à jour')
@@ -704,13 +799,35 @@ function HotlineConsole() {
     setFin(null)
   }
 
+  // (13/11/2026) Soleil : un ticket non résolu doit avoir une reprise du
+  // traitement planifiée (date + action) ; elle crée une tâche pour le collaborateur.
+  const repriseSaisie = Boolean(reprise.date && reprise.action && (reprise.action !== 'AUTRE' || reprise.precision.trim()))
+  const reprisePlanifiee = Boolean(ticket?.reprise_le && ticket.reprise_le >= new Date().toISOString().slice(0, 10))
+
   async function action(nom: 'resoudre' | 'commentaire') {
     if (!ticket) return
+    if (nom === 'commentaire' && ticket.filiere === 'PV' && !estResolu(ticket) && !repriseSaisie && !reprisePlanifiee) {
+      setErreur('Ticket non résolu : indiquer la reprise du traitement (date et action) avant d’enregistrer.')
+      return
+    }
+    if (nom === 'commentaire' && reprise.action === 'AUTRE' && reprise.date && !reprise.precision.trim()) {
+      setErreur('Action « Autre » : préciser l’action à mener.')
+      return
+    }
     setBusy(true)
     try {
       // Les commentaires en cours de saisie sont enregistrés avant l'action.
       if (commentaire.trim()) await ajouterEtape(ticket.id, 'COMMENTAIRE', commentaire.trim())
       if (commentaireInterne.trim()) await ajouterEtape(ticket.id, 'COMMENTAIRE_INTERNE', commentaireInterne.trim())
+      if (nom === 'commentaire' && ticket.filiere === 'PV' && repriseSaisie) {
+        const pourEmail = reprise.pour || email || ''
+        await planifierReprise(
+          { ...ticket, description: form.description || ticket.description },
+          { date: reprise.date, action: reprise.action as ActionReprise, precision: reprise.precision, pour: { email: pourEmail, nom: nomCollaborateur(pourEmail, collaborateurs) } },
+          { email: email || '', nom: nomCollaborateur(email, collaborateurs) },
+        )
+        setReprise(REPRISE_VIDE)
+      }
       if (nom === 'resoudre') {
         if (issueRequise(ticket) && !classifForm.issue) throw new Error('Choisir l’issue du ticket (bloc Classification) avant de le marquer résolu.')
         await majTicket(ticket.id, patchClassif(classifForm))
@@ -724,6 +841,21 @@ function HotlineConsole() {
       setErreur(messageErreur(e))
     } finally {
       setBusy(false)
+    }
+  }
+
+  // Soleil : NIV 2 (marque de l'onduleur) / NIV 3 (équipement), enregistrés
+  // aussitôt sur un ticket ouvert.
+  async function choisirSoleil(marque: MarqueSoleil | null, equipement: string) {
+    patch({ pv_marque: marque, pv_equipement: equipement })
+    if (!ticket) return
+    try {
+      await majTicket(ticket.id, { pv_marque: marque, pv_equipement: equipement || null })
+      const m = marqueSoleil(marque)
+      await ajouterEtape(ticket.id, 'IDENTIFICATION', m ? `Onduleur ${m.label}${equipement ? ` › ${libelleEquipementSoleil(marque, equipement)}` : ''}` : 'Marque de l’onduleur retirée')
+      await rafraichirEtapes(ticket.id)
+    } catch (e) {
+      setErreur(messageErreur(e))
     }
   }
 
@@ -820,7 +952,8 @@ function HotlineConsole() {
   function nouvelAppel() {
     setTelephone('')
     setAppelants(null)
-    setForm(FORM_VIDE)
+    setForm({ ...FORM_VIDE, filiere: environnement })
+    setReprise(REPRISE_VIDE)
     setClassifForm(CLASSIF_FORM_VIDE)
     setTicket(null)
     setEtapes([])
@@ -914,7 +1047,7 @@ function HotlineConsole() {
               ) : null}
 
               <div className="flex rounded-lg border border-[#D8D3C8] bg-white p-0.5 text-[13px]">
-                {FILIERES.map((f) => (
+                {FILIERES.filter((f) => !environnement || f.value === environnement || f.value === form.filiere || f.value === ticket?.filiere).map((f) => (
                   <button
                     key={f.value}
                     type="button"
@@ -1013,6 +1146,24 @@ function HotlineConsole() {
                   <input value={form.code_defaut} onChange={(e) => patch({ code_defaut: e.target.value })} className={champ} />
                 </label>
               </div>
+              {form.filiere === 'PV' ? (
+                <div className="rounded-lg border border-[#EFEDE8] bg-[#FAF9F7] p-2">
+                  <div className="mb-1 text-[10px] font-bold uppercase tracking-[0.06em] text-slate-500">Onduleur</div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <input value={form.onduleur_modele} onChange={(e) => patch({ onduleur_modele: e.target.value })} placeholder="Modèle onduleur" className={champ} />
+                    <input value={form.onduleur_serie} onChange={(e) => patch({ onduleur_serie: e.target.value.toUpperCase() })} placeholder="N° de série onduleur" className={champ} />
+                  </div>
+                  <div className="mb-1 mt-2 text-[10px] font-bold uppercase tracking-[0.06em] text-slate-500">Batterie</div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <input value={form.batterie_modele} onChange={(e) => patch({ batterie_modele: e.target.value })} placeholder="Modèle batterie" className={champ} />
+                    <input value={form.batterie_serie} onChange={(e) => patch({ batterie_serie: e.target.value.toUpperCase() })} placeholder="N° de série batterie" className={champ} />
+                  </div>
+                  <label className="mt-2 flex items-center gap-2 text-[11px] font-semibold text-slate-500">
+                    Mise en service le
+                    <input type="date" value={form.date_mes} onChange={(e) => patch({ date_mes: e.target.value })} className="h-8 rounded-lg border border-[#D8D3C8] bg-white px-2 text-[12px] text-slate-900" />
+                  </label>
+                </div>
+              ) : (
               <div className="rounded-lg border border-[#EFEDE8] bg-[#FAF9F7] p-2">
                 <div className="mb-1 flex items-center justify-between text-[10px] font-bold uppercase tracking-[0.06em] text-slate-500">
                   Groupe extérieur (GE)
@@ -1056,6 +1207,7 @@ function HotlineConsole() {
                   <input type="date" value={form.date_mes} onChange={(e) => patch({ date_mes: e.target.value })} className="h-8 rounded-lg border border-[#D8D3C8] bg-white px-2 text-[12px] text-slate-900" />
                 </label>
               </div>
+              )}
               <label className="block text-[11px] font-semibold text-slate-500">
                 Motif de l’appel
                 <textarea
@@ -1066,6 +1218,25 @@ function HotlineConsole() {
                 />
                 <span className="font-normal text-slate-400">Repris en tête des commentaires (« Note rapide ») et dans la liste des tickets.</span>
               </label>
+              {form.filiere === 'PV' ? (
+                <label className="block text-[11px] font-semibold text-slate-500">
+                  Sévérité <span className="text-[#C1683C]">*</span>
+                  <select
+                    value={form.severite}
+                    onChange={(e) => patch({ severite: e.target.value as Severite | '' })}
+                    className={`${champ} ${!form.severite ? 'border-[#C1683C]' : 'font-semibold'}`}
+                    style={form.severite ? { color: SEVERITES.find((x) => x.value === form.severite)?.tone } : undefined}
+                  >
+                    <option value="">— Choisir —</option>
+                    {SEVERITES.map((x) => (
+                      <option key={x.value} value={x.value}>
+                        {x.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              ) : (
+                <>
               <label className="block text-[11px] font-semibold text-slate-500">
                 📞 Client à rappeler par (N1)
                 <select
@@ -1114,6 +1285,8 @@ function HotlineConsole() {
                   </button>
                 </div>
               ) : null}
+                </>
+              )}
 
               {ticket ? (
                 <button
@@ -1174,6 +1347,56 @@ function HotlineConsole() {
                   <div className="px-3 py-3">
                     <HistoriqueTicket ticket={ticket} etapes={etapes} hauteurMax={420} />
                   </div>
+                </div>
+              ) : null}
+              {form.filiere === 'PV' ? (
+                <div className="mb-5 rounded-xl border border-[#E2DFD8] bg-white p-4">
+                  <div className="text-[11px] font-bold uppercase tracking-[0.06em] text-slate-500">Niveau 2 · marque de l’onduleur</div>
+                  <div className="mt-2 flex flex-wrap gap-2">
+                    {MARQUES_SOLEIL.map((m) => {
+                      const actif = form.pv_marque === m.value
+                      return (
+                        <button
+                          key={m.value}
+                          type="button"
+                          onClick={() => void choisirSoleil(actif ? null : m.value, '')}
+                          className="min-w-[120px] rounded-lg border-2 px-4 py-2 text-[14px] font-bold"
+                          style={{ borderColor: m.couleur, background: actif ? m.couleur : '#fff', color: actif ? '#fff' : m.couleur }}
+                        >
+                          {m.label}
+                        </button>
+                      )
+                    })}
+                  </div>
+                  {form.pv_marque ? (
+                    <>
+                      <div className="mt-4 text-[11px] font-bold uppercase tracking-[0.06em] text-slate-500">
+                        Niveau 3 · équipement {marqueSoleil(form.pv_marque)?.label}
+                      </div>
+                      <div className="mt-2 flex flex-wrap gap-2">
+                        {marqueSoleil(form.pv_marque)?.equipements.map((e) => {
+                          const m = marqueSoleil(form.pv_marque)!
+                          const actif = form.pv_equipement === e.value
+                          return (
+                            <button
+                              key={e.value}
+                              type="button"
+                              onClick={() => void choisirSoleil(form.pv_marque, actif ? '' : e.value)}
+                              className="min-w-[130px] rounded-lg border px-3 py-1.5 text-[13px] font-semibold"
+                              style={{ borderColor: m.couleur, background: actif ? m.fond : '#fff', color: '#0F172A', boxShadow: actif ? `inset 0 0 0 1px ${m.couleur}` : undefined }}
+                            >
+                              {e.label}
+                            </button>
+                          )
+                        })}
+                      </div>
+                      <p className="mt-2 text-[11px] text-slate-500">
+                        La marque affiche les notices CEGECLIM ; l’équipement ajoute les fiches techniques et notices fabricant (colonne de droite).
+                      </p>
+                    </>
+                  ) : (
+                    <p className="mt-2 text-[11px] text-slate-500">Choisir la marque pour afficher les notices CEGECLIM correspondantes.</p>
+                  )}
                 </div>
               ) : null}
               {!form.filiere ? (
@@ -1300,6 +1523,16 @@ function HotlineConsole() {
                       className="w-full rounded-lg border border-[#D8D3C8] bg-white px-2.5 py-2 text-[13px] font-normal text-slate-900 outline-none focus:border-[#B4761A]"
                     />
                   </label>
+                  {ticket.filiere === 'PV' ? (
+                    <BlocReprise
+                      ticket={ticket}
+                      reprise={reprise}
+                      onChange={setReprise}
+                      collaborateurs={collaborateurs}
+                      email={email || ''}
+                      planifiee={reprisePlanifiee}
+                    />
+                  ) : (
                   <label className="block text-[11px] font-semibold text-[#8A5A11]">
                     Commentaire interne <span className="font-normal text-slate-400">— jamais repris dans la fiche ticket PDF</span>
                     <textarea
@@ -1310,9 +1543,15 @@ function HotlineConsole() {
                       className="w-full rounded-lg border border-[#EBD8AE] bg-[#FFFCF5] px-2.5 py-2 text-[13px] font-normal text-slate-900 outline-none focus:border-[#B4761A]"
                     />
                   </label>
+                  )}
                   <div className="flex flex-wrap gap-2">
-                    <button type="button" onClick={() => action('commentaire')} disabled={busy || (!commentaire.trim() && !commentaireInterne.trim())} className="rounded-lg border border-[#D8D3C8] px-3 py-2 text-[13px] font-semibold text-slate-700 disabled:opacity-40">
-                      Ajouter le commentaire
+                    <button
+                      type="button"
+                      onClick={() => action('commentaire')}
+                      disabled={busy || (!commentaire.trim() && !commentaireInterne.trim() && !(ticket.filiere === 'PV' && repriseSaisie))}
+                      className="rounded-lg border border-[#D8D3C8] px-3 py-2 text-[13px] font-semibold text-slate-700 disabled:opacity-40"
+                    >
+                      {ticket.filiere === 'PV' ? 'Enregistrer (commentaire + reprise)' : 'Ajouter le commentaire'}
                     </button>
                     <button type="button" onClick={() => setFenetreNiveau('escalade')} disabled={busy || ticket.niveau >= 3 || estResolu(ticket)} className="rounded-lg bg-[#C1683C] px-3 py-2 text-[13px] font-semibold text-white disabled:opacity-40">
                       Escalader au niveau {Math.min(3, ticket.niveau + 1)}
@@ -1367,6 +1606,18 @@ function HotlineConsole() {
             <div className={carte}>
               <div className={titreCarte}>Documents à envoyer</div>
               <div className="p-4">
+                {form.filiere === 'PV' && form.pv_marque ? (
+                  <DocsSoleil
+                    marque={form.pv_marque}
+                    equipement={form.pv_equipement}
+                    docs={docsSoleil.filter((d) => d.marque === form.pv_marque)}
+                    envoiEnCours={envoiEnCours}
+                    onEnvoyer={(d) => envoyerDocument({ titre: d.titre, type: 'PDF', url: d.url })}
+                  />
+                ) : null}
+                {form.filiere === 'PV' && form.pv_marque && docsDiagnostic.length ? (
+                  <div className="mb-2 mt-4 text-[10px] font-bold uppercase tracking-[0.06em] text-slate-400">Documents du diagnostic</div>
+                ) : null}
                 {docsDiagnostic.length ? (
                   <ListeRepliable
                     items={[...docsDiagnostic].reverse()}
@@ -1408,8 +1659,12 @@ function HotlineConsole() {
                     )
                     }
                   />
-                ) : (
-                  <p className="text-[12px] text-slate-500">Les documents (procédures, schémas, firmwares) apparaissent au fil du diagnostic (les plus récents en premier).</p>
+                ) : form.filiere === 'PV' && form.pv_marque ? null : (
+                  <p className="text-[12px] text-slate-500">
+                    {form.filiere === 'PV'
+                      ? 'Choisir la marque de l’onduleur (niveau 2) pour afficher les notices.'
+                      : 'Les documents (procédures, schémas, firmwares) apparaissent au fil du diagnostic (les plus récents en premier).'}
+                  </p>
                 )}
               </div>
             </div>
@@ -1444,6 +1699,7 @@ function HotlineConsole() {
         <FenetreNiveau
           mode={fenetreNiveau}
           niveau={ticket.niveau}
+          filiere={ticket.filiere}
           collaborateurs={collaborateurs}
           motifInitial={commentaire.trim() || (fenetreNiveau === 'escalade' ? fin?.preconisation || '' : '')}
           busy={busy}
@@ -2315,6 +2571,157 @@ function DetailDossier({ d, retour, nbDossiers, refsVues, onVue }: { d: Dossier;
           {d.factures.map((f) => `${f.piece} du ${fmtDate(f.date)} (${fmtEuro(f.ht)})`).join(' · ')}
         </div>
       ) : null}
+    </div>
+  )
+}
+
+// ── Soleil : reprise du traitement (13/11/2026) ─────────────────────────────────
+function BlocReprise({
+  ticket,
+  reprise,
+  onChange,
+  collaborateurs,
+  email,
+  planifiee,
+}: {
+  ticket: Ticket
+  reprise: Reprise
+  onChange: (r: Reprise) => void
+  collaborateurs: Collaborateurs
+  email: string
+  planifiee: boolean
+}) {
+  if (estResolu(ticket)) return null
+  const liste = collaborateurs.liste.filter((c) => !c.filiere || c.filiere === 'PV')
+  const pour = reprise.pour || email
+  const requis = !planifiee
+  const set = (p: Partial<Reprise>) => onChange({ ...reprise, ...p })
+  return (
+    <div className={`rounded-lg border p-3 ${requis ? 'border-[#C1683C] bg-[#FDF5F0]' : 'border-[#E2DFD8] bg-[#FAF9F7]'}`}>
+      <div className="flex flex-wrap items-baseline justify-between gap-2">
+        <div className="text-[11px] font-bold uppercase tracking-[0.05em] text-slate-600">
+          Reprise du traitement du ticket {requis ? <span className="text-[#C1683C]">* obligatoire</span> : null}
+        </div>
+        {ticket.reprise_le ? (
+          <div className="text-[11px] text-slate-500">
+            Prévue le <span className="font-semibold text-slate-800">{fmtDate(ticket.reprise_le)}</span> :{' '}
+            {ticket.reprise_action === 'AUTRE' ? ticket.reprise_precision : ACTIONS_REPRISE.find((a) => a.value === ticket.reprise_action)?.label}
+            {ticket.reprise_par ? ` → ${nomCollaborateur(ticket.reprise_par, collaborateurs)}` : ''}
+          </div>
+        ) : null}
+      </div>
+      <div className="mt-2 grid grid-cols-1 gap-2 md:grid-cols-[150px_1fr_1fr]">
+        <label className="text-[11px] font-semibold text-slate-500">
+          Reprise le
+          <input
+            type="date"
+            value={reprise.date}
+            min={new Date().toISOString().slice(0, 10)}
+            onChange={(e) => set({ date: e.target.value })}
+            className="h-9 w-full rounded-lg border border-[#D8D3C8] bg-white px-2 text-[13px] text-slate-900"
+          />
+        </label>
+        <label className="text-[11px] font-semibold text-slate-500">
+          Action
+          <select
+            value={reprise.action}
+            onChange={(e) => set({ action: e.target.value as ActionReprise | '' })}
+            className="h-9 w-full rounded-lg border border-[#D8D3C8] bg-white px-2 text-[13px] text-slate-900"
+          >
+            <option value="">— Choisir —</option>
+            {ACTIONS_REPRISE.map((a) => (
+              <option key={a.value} value={a.value}>
+                {a.label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="text-[11px] font-semibold text-slate-500">
+          Tâche pour
+          <select value={pour} onChange={(e) => set({ pour: e.target.value })} className="h-9 w-full rounded-lg border border-[#D8D3C8] bg-white px-2 text-[13px] text-slate-900">
+            {!liste.some((c) => c.email === email) && email ? <option value={email}>Moi ({nomCollaborateur(email, collaborateurs)})</option> : null}
+            {liste.map((c) => (
+              <option key={c.email} value={c.email}>
+                {c.email === email ? `Moi (${c.nom})` : `${c.nom} · N${c.niveau}`}
+              </option>
+            ))}
+          </select>
+        </label>
+      </div>
+      <input
+        value={reprise.precision}
+        onChange={(e) => set({ precision: e.target.value })}
+        placeholder={reprise.action === 'AUTRE' ? 'Préciser l’action à mener (obligatoire)' : 'Précision (facultatif)'}
+        className={`mt-2 h-9 w-full rounded-lg border bg-white px-2.5 text-[13px] text-slate-900 ${reprise.action === 'AUTRE' && !reprise.precision.trim() ? 'border-[#C1683C]' : 'border-[#D8D3C8]'}`}
+      />
+      <p className="mt-1 text-[11px] text-slate-500">Une tâche est créée dans la Todo List du collaborateur choisi, à la date de reprise.</p>
+    </div>
+  )
+}
+
+// ── Soleil : notices CEGECLIM (NIV 2) en tête, documentation fabricant (NIV 3) séparée ──
+function DocsSoleil({
+  marque,
+  equipement,
+  docs,
+  envoiEnCours,
+  onEnvoyer,
+}: {
+  marque: MarqueSoleil
+  equipement: string
+  docs: DocSoleil[]
+  envoiEnCours: string | null
+  onEnvoyer: (d: DocSoleil) => void
+}) {
+  const m = marqueSoleil(marque)
+  const notices = docs.filter((d) => !d.equipement && d.categorie === 'NOTICE_CEGECLIM')
+  const fabricant = equipement ? docs.filter((d) => d.equipement === equipement) : []
+  const ligne = (d: DocSoleil, accent: string) => (
+    <div key={d.id} className="flex items-center justify-between gap-2 rounded-lg border px-3 py-2 text-[13px]" style={{ borderColor: accent }}>
+      <span className="min-w-0 truncate">
+        <span className="mr-1.5 rounded px-1.5 py-0.5 text-[10px] font-bold text-white" style={{ background: accent }}>
+          {d.categorie === 'FICHE_TECHNIQUE' ? 'FT' : d.categorie === 'NOTICE_FABRICANT' ? 'FAB.' : 'NOTICE'}
+        </span>
+        {d.titre}
+      </span>
+      <span className="flex shrink-0 gap-2">
+        <a href={d.url} target="_blank" rel="noreferrer" className="text-[12px] font-semibold text-slate-500 underline">
+          Ouvrir
+        </a>
+        <button type="button" onClick={() => onEnvoyer(d)} disabled={envoiEnCours !== null} className="text-[12px] font-semibold text-[#B4761A] underline disabled:opacity-50">
+          {envoiEnCours === d.titre ? 'Préparation…' : 'Envoyer'}
+        </button>
+      </span>
+    </div>
+  )
+  return (
+    <div className="space-y-3">
+      <div>
+        <div className="mb-1.5 text-[10px] font-bold uppercase tracking-[0.06em]" style={{ color: m?.couleur }}>
+          Notices CEGECLIM · {m?.label}
+        </div>
+        <div className="space-y-1.5">
+          {notices.length ? notices.map((d) => ligne(d, m?.couleur || '#334155')) : (
+            <p className="text-[12px] text-slate-500">Aucune notice CEGECLIM enregistrée pour {m?.label}{m?.notices ? ` (${m.notices})` : ''}.</p>
+          )}
+        </div>
+      </div>
+      {equipement ? (
+        <div className="rounded-lg border-2 border-dashed border-[#D8D3C8] bg-[#FAF9F7] p-2.5">
+          <div className="mb-1.5 text-[10px] font-bold uppercase tracking-[0.06em] text-slate-500">
+            Documentation fabricant · {libelleEquipementSoleil(marque, equipement)}
+          </div>
+          <div className="space-y-1.5">
+            {fabricant.length ? (
+              CATEGORIES_DOC_SOLEIL.filter((c) => c.value !== 'NOTICE_CEGECLIM').flatMap((c) => fabricant.filter((d) => d.categorie === c.value)).concat(fabricant.filter((d) => d.categorie === 'NOTICE_CEGECLIM')).map((d) => ligne(d, '#64748B'))
+            ) : (
+              <p className="text-[12px] text-slate-500">Aucune fiche technique ni notice fabricant enregistrée pour cet équipement.</p>
+            )}
+          </div>
+        </div>
+      ) : (
+        <p className="text-[11px] text-slate-500">Choisir l’équipement (niveau 3) pour ajouter les fiches techniques et notices fabricant.</p>
+      )}
     </div>
   )
 }

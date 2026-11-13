@@ -21,7 +21,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { supabase } from '@/lib/supabaseClient'
 import { useAccess } from '@/components/AccessContext'
 import HotlineHeader, { HotlineErreur } from '@/components/hotline/HotlineHeader'
-import { FILIERES, STATUTS, fmtHeures, libelleFiliere, libelleMotif, messageErreur, type Filiere, type Statut } from '@/lib/hotline'
+import { FILIERES, STATUTS, chargerMonEnvironnement, fmtHeures, libelleFiliere, libelleMotif, messageErreur, type Filiere, type Statut } from '@/lib/hotline'
 import { useClassification } from '@/components/hotline/ClassificationTicket'
 import StatsClassification from '@/components/hotline/StatsClassification'
 import ScenariosHotline from '@/components/hotline/ScenariosHotline'
@@ -70,6 +70,14 @@ export default function HotlineStatsPage() {
   const expert = Boolean(rights.can_hotline_expert || rights.can_autorisation)
   const [debut, setDebut] = useState(decaler(30))
   const [filiere, setFiliere] = useState<Filiere | ''>('')
+  // (13/11/2026) Filtre par défaut sur l'environnement hotline de l'utilisateur (modifiable).
+  useEffect(() => {
+    chargerMonEnvironnement()
+      .then((env) => {
+        if (env.filiere) setFiliere((f) => (f === '' ? env.filiere! : f))
+      })
+      .catch(() => undefined)
+  }, [])
   const { classif } = useClassification()
   const [fin, setFin] = useState(isoJour(new Date()))
   const [stats, setStats] = useState<Stats | null>(null)

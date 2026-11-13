@@ -43,6 +43,10 @@ import {
   rappelEffectue,
   redescendre,
   escalader,
+  chargerMonEnvironnement,
+  marqueSoleil,
+  libelleEquipementSoleil,
+  styleSeverite,
   fmtDateHeure,
   fmtDuree,
   fmtTel,
@@ -83,6 +87,14 @@ function HotlineTickets() {
   const [loading, setLoading] = useState(true)
   const [erreur, setErreur] = useState<string | null>(null)
   const [filiere, setFiliere] = useState<Filiere | 'TOUTES'>('TOUTES')
+  // (13/11/2026) Filtre par défaut sur l'environnement hotline de l'utilisateur (modifiable).
+  useEffect(() => {
+    chargerMonEnvironnement()
+      .then((env) => {
+        if (env.filiere) setFiliere((f) => (f === 'TOUTES' ? env.filiere! : f))
+      })
+      .catch(() => undefined)
+  }, [])
   const [statut, setStatut] = useState<FiltreStatut>('ACTIFS')
   const [niveau, setNiveau] = useState<number | 0>(0)
   const [mesTickets, setMesTickets] = useState(false)
@@ -406,6 +418,11 @@ function HotlineTickets() {
                         <td className="px-3 py-2 text-center font-semibold">N{t.niveau}</td>
                         <td className="px-3 py-2">
                           <Pastille {...styleStatut(t.statut)} />
+                          {styleSeverite(t.severite) ? (
+                            <div className="mt-1">
+                              <Pastille label={styleSeverite(t.severite)!.label} tone={styleSeverite(t.severite)!.tone} bg={styleSeverite(t.severite)!.bg} />
+                            </div>
+                          ) : null}
                         </td>
                         <td className="px-3 py-2 text-[12px] text-slate-500">{t.assigne_a ? nomCollaborateur(t.assigne_a, collaborateurs) : '—'}</td>
                         <td className="px-3 py-2 text-right text-slate-600">{fmtDuree(t.opened_at, t.resolved_at || t.closed_at || new Date().toISOString())}</td>
@@ -570,8 +587,18 @@ function FicheTicket({
             ['Chantier', ticket.chantier],
             ['Nature', libelleNature(ticket.nature)],
             ['Code défaut', ticket.code_defaut],
-            ['GE', [ticket.modele_ge, ticket.serie_ge && `n° ${ticket.serie_ge}`].filter(Boolean).join(' · ')],
-            ['UI', [ticket.reference_article, ticket.numero_serie && `n° ${ticket.numero_serie}`].filter(Boolean).join(' · ')],
+            ...(ticket.filiere === 'PV'
+              ? [
+                  ['Onduleur (NIV 2-3)', [marqueSoleil(ticket.pv_marque)?.label, libelleEquipementSoleil(ticket.pv_marque, ticket.pv_equipement)].filter(Boolean).join(' › ')],
+                  ['Sévérité', styleSeverite(ticket.severite)?.label || ''],
+                  ['Onduleur', [ticket.onduleur_modele, ticket.onduleur_serie && `n° ${ticket.onduleur_serie}`].filter(Boolean).join(' · ')],
+                  ['Batterie', [ticket.batterie_modele, ticket.batterie_serie && `n° ${ticket.batterie_serie}`].filter(Boolean).join(' · ')],
+                  ['Reprise', ticket.reprise_le ? `${new Date(ticket.reprise_le).toLocaleDateString('fr-FR')} → ${nomCollaborateur(ticket.reprise_par, collaborateurs)}` : ''],
+                ]
+              : [
+                  ['GE', [ticket.modele_ge, ticket.serie_ge && `n° ${ticket.serie_ge}`].filter(Boolean).join(' · ')],
+                  ['UI', [ticket.reference_article, ticket.numero_serie && `n° ${ticket.numero_serie}`].filter(Boolean).join(' · ')],
+                ]),
             ['Mise en service', ticket.date_mes ? new Date(ticket.date_mes).toLocaleDateString('fr-FR') : ''],
             ['Assigné à', nomCollaborateur(ticket.assigne_a, collaborateurs)],
             ['1re action', fmtDuree(ticket.opened_at, ticket.first_action_at)],
@@ -753,6 +780,7 @@ function FicheTicket({
         <FenetreNiveau
           mode={fenetreNiveau}
           niveau={ticket.niveau}
+          filiere={ticket.filiere}
           collaborateurs={collabTicket}
           motifInitial={commentaire.trim()}
           busy={busy}

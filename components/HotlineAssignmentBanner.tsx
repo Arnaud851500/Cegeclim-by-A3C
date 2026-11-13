@@ -59,7 +59,7 @@ function detail(a: AlerteHotline, max: number) {
   const morceaux = [
     a.intitule_tiers || a.numero_tiers || '',
     consigne ? `« ${consigne} »` : motif ? `« ${motif} »` : '',
-    a.filiere === 'PV' ? 'Photo' : a.filiere === 'THERMIQUE' ? 'Thermie' : '',
+    a.filiere === 'PV' ? 'Soleil' : a.filiere === 'THERMIQUE' ? 'Thermie' : '',
   ].filter(Boolean)
   const txt = morceaux.join(' · ')
   return txt.length > max ? `${txt.slice(0, max - 1)}…` : txt

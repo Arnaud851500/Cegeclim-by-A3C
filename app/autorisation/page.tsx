@@ -75,6 +75,8 @@ type UserAccess = {
   hotline_niveau: number | null
   /** Départements dont le N2 est le référent (proposé par défaut à l'escalade). */
   hotline_departements: string[]
+  /** (2026-11-13) Environnement hotline : PV (Soleil), THERMIQUE, ou null (les deux). */
+  hotline_filiere: string | null
 }
 
 type TabKey = 'profiles' | 'users' | 'matrix'
@@ -309,6 +311,7 @@ const EMPTY_USER: UserAccess = {
   collaborateur_objectif: '',
   hotline_niveau: null,
   hotline_departements: [],
+  hotline_filiere: null,
 }
 
 function normalizeList(value: unknown, fallback: string[] = []) {
@@ -422,6 +425,7 @@ function userSignature(user: UserAccess) {
     collaborateur_objectif: user.collaborateur_objectif,
     hotline_niveau: user.hotline_niveau,
     hotline_departements: [...user.hotline_departements].sort(),
+    hotline_filiere: user.hotline_filiere,
   })
 }
 
@@ -526,6 +530,7 @@ export default function AutorisationPage() {
       collaborateur_objectif: String(row.collaborateur_objectif || '').trim(),
       hotline_niveau: row.hotline_niveau ? Number(row.hotline_niveau) : null,
       hotline_departements: normalizeList(row.hotline_departements),
+      hotline_filiere: row.hotline_filiere ? String(row.hotline_filiere) : null,
     }))
 
     const countByProfile = new Map<string, number>()
@@ -776,6 +781,7 @@ export default function AutorisationPage() {
         collaborateur_objectif: user.soumis_objectif ? user.collaborateur_objectif.trim().toUpperCase() || null : null,
         hotline_niveau: user.hotline_niveau,
         hotline_departements: user.hotline_niveau === 2 ? user.hotline_departements : [],
+        hotline_filiere: user.hotline_niveau ? user.hotline_filiere : null,
       })
       .eq('email', email)
 
@@ -840,6 +846,7 @@ export default function AutorisationPage() {
       collaborateur_objectif: newUser.soumis_objectif ? newUser.collaborateur_objectif.trim().toUpperCase() || null : null,
       hotline_niveau: newUser.hotline_niveau,
       hotline_departements: newUser.hotline_niveau === 2 ? newUser.hotline_departements : [],
+      hotline_filiere: newUser.hotline_niveau ? newUser.hotline_filiere : null,
     })
 
     setSavingKey(null)
@@ -1456,6 +1463,22 @@ export default function AutorisationPage() {
                         <option value="3">HOTLINE N3</option>
                       </select>
                     </Field>
+                    {userDraft.hotline_niveau ? (
+                      <Field
+                        label="Environnement hotline"
+                        hint="Thermie ou Soleil : seul l’écran de saisie de cet environnement est proposé dans la console ; les autres onglets du ticketing sont filtrés par défaut (filtre modifiable)."
+                      >
+                        <select
+                          value={userDraft.hotline_filiere ?? ''}
+                          onChange={(event) => patchUserDraft({ hotline_filiere: event.target.value || null })}
+                          className="h-[42px] w-full rounded-xl border border-[#D8D3C8] bg-white px-3 text-sm text-slate-800"
+                        >
+                          <option value="">Les deux (Thermie et Soleil)</option>
+                          <option value="THERMIQUE">🔥 Thermie</option>
+                          <option value="PV">☀️ Soleil</option>
+                        </select>
+                      </Field>
+                    ) : null}
                     {userDraft.hotline_niveau === 2 && (
                       <Field
                         label="Départements rattachés (N2)"

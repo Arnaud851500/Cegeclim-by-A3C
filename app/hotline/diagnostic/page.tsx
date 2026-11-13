@@ -13,12 +13,16 @@
  * - Fichier Excel normé (03/11/2026) : export de tous les parcours (sert aussi
  *   de modèle) et import contrôlé avec bilan avant application
  *   (lib/hotlineExcel.ts, RPC hotline_importer_parcours).
+ * - (13/11/2026) Bouton « Supprimer le parcours » ; onglet « Documents Soleil »
+ *   (notices CEGECLIM par marque, fiches techniques / notices fabricant par
+ *   équipement : components/hotline/DocumentsSoleilAdmin.tsx).
  */
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { supabase } from '@/lib/supabaseClient'
 import { useAccess } from '@/components/AccessContext'
 import HotlineHeader, { HotlineErreur } from '@/components/hotline/HotlineHeader'
+import DocumentsSoleilAdmin from '@/components/hotline/DocumentsSoleilAdmin'
 import { exporterParcoursExcel, importerParcours, lireExcelParcours, type BilanImport, type ParcoursImport } from '@/lib/hotlineExcel'
 import {
   FILIERES,
@@ -56,6 +60,7 @@ export default function HotlineDiagnosticPage() {
   const [erreur, setErreur] = useState<string | null>(null)
   const [info, setInfo] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+  const [onglet, setOnglet] = useState<'parcours' | 'soleil'>('parcours')
   const [importEnCours, setImportEnCours] = useState<{ fichier: string; parcours: ParcoursImport[]; bilan: BilanImport | null; erreurs: string[] } | null>(null)
   const [nouveau, setNouveau] = useState<{ filiere: Filiere; motif: Motif; gamme: Gamme | ''; nom: string; famille: string }>({
     filiere: 'THERMIQUE',
@@ -173,6 +178,27 @@ export default function HotlineDiagnosticPage() {
         .eq('id', arbre.id)
       if (error) throw error
     }, 'Parcours enregistré')
+  }
+
+  // (13/11/2026) Suppression d'un parcours : ses questions sont supprimées
+  // (cascade) ; les tickets qui l'utilisaient gardent leur historique.
+  async function supprimerArbre() {
+    if (!arbre) return
+    const { count } = await supabase.from('hotline_tickets').select('id', { count: 'exact', head: true }).eq('arbre_id', arbre.id)
+    if (
+      !window.confirm(
+        `Supprimer définitivement le parcours « ${arbre.nom} » et ses ${noeuds.length} question(s) ?` +
+          (count ? `\n${count} ticket(s) l’ont utilisé : ils gardent leur historique mais ne sont plus rattachés au parcours.` : ''),
+      )
+    )
+      return
+    await run(async () => {
+      const { error } = await supabase.from('hotline_arbres').delete().eq('id', arbre.id)
+      if (error) throw error
+      const reste = arbres.filter((a) => a.id !== arbre.id)
+      setArbres(reste)
+      setArbreId(reste[0]?.id || '')
+    }, 'Parcours supprimé')
   }
 
   async function enregistrerNoeuds() {
@@ -312,6 +338,35 @@ export default function HotlineDiagnosticPage() {
     <div className="min-h-screen bg-[#F4F3F0] pb-16">
       <HotlineHeader titre="Éditeur de diagnostic" sousTitre="Parcours de questions-réponses suivis par le niveau 1, documents à proposer, préconisations" />
 
+      <div className="mx-auto flex w-full max-w-[1760px] gap-2 px-4 pt-4 md:px-8">
+        {[
+          { cle: 'parcours' as const, label: 'Parcours de diagnostic' },
+          { cle: 'soleil' as const, label: '☀️ Documents Soleil' },
+        ].map((o) => (
+          <button
+            key={o.cle}
+            type="button"
+            onClick={() => setOnglet(o.cle)}
+            className={`rounded-lg px-4 py-2 text-[13px] font-semibold ${onglet === o.cle ? 'bg-[#0B1220] text-white' : 'border border-[#D8D3C8] bg-white text-slate-700'}`}
+          >
+            {o.label}
+          </button>
+        ))}
+      </div>
+
+      {onglet === 'soleil' ? (
+        <main className="mx-auto w-full max-w-[1100px] px-4 py-5 md:px-8">
+          {erreur ? <HotlineErreur message={erreur} onClose={() => setErreur(null)} /> : null}
+          {info ? <div className="mb-2 rounded-xl border border-[#CDE5D1] bg-[#EEF7EF] px-4 py-2 text-[13px] text-[#2F6B3A]">{info}</div> : null}
+          <DocumentsSoleilAdmin
+            onErreur={setErreur}
+            onInfo={(m) => {
+              setInfo(m)
+              window.setTimeout(() => setInfo(null), 2500)
+            }}
+          />
+        </main>
+      ) : (
       <main className="mx-auto grid w-full max-w-[1760px] grid-cols-1 gap-4 px-4 py-5 md:px-8 xl:grid-cols-[320px_minmax(0,1fr)]">
         <div className="xl:col-span-2">
           {erreur ? <HotlineErreur message={erreur} onClose={() => setErreur(null)} /> : null}
@@ -516,9 +571,19 @@ export default function HotlineDiagnosticPage() {
                     {libelleFiliere(arbre.filiere)}
                     {arbre.updated_by ? ` · modifié par ${arbre.updated_by.split('@')[0]}` : ''}
                   </span>
-                  <button type="button" disabled={busy} onClick={enregistrerArbre} className="rounded-lg bg-[#0B1220] px-4 py-2 text-[13px] font-semibold text-white disabled:opacity-40">
-                    Enregistrer le parcours
-                  </button>
+                  <span className="flex gap-2">
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onClick={() => void supprimerArbre()}
+                      className="rounded-lg border border-[#E7B4AB] px-4 py-2 text-[13px] font-semibold text-[#A32C2C] hover:bg-[#FCEFEC] disabled:opacity-40"
+                    >
+                      Supprimer le parcours
+                    </button>
+                    <button type="button" disabled={busy} onClick={enregistrerArbre} className="rounded-lg bg-[#0B1220] px-4 py-2 text-[13px] font-semibold text-white disabled:opacity-40">
+                      Enregistrer le parcours
+                    </button>
+                  </span>
                 </div>
               </div>
 
@@ -640,6 +705,7 @@ export default function HotlineDiagnosticPage() {
           )}
         </section>
       </main>
+      )}
 
       {importEnCours ? (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-[rgba(6,10,18,0.55)] p-4" onClick={() => setImportEnCours(null)}>

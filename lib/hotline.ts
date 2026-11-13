@@ -30,6 +30,7 @@ export type TypeEtape =
   | 'ESCALADE'
   | 'REDESCENTE'
   | 'RAPPEL'
+  | 'REPRISE'
   | 'PRECONISATION'
   | 'RESOLUTION'
   | 'CLOTURE'
@@ -64,7 +65,8 @@ export function libelleGamme(value: string | null | undefined) {
 }
 
 export const FILIERES: Array<{ value: Filiere; label: string; court: string; icon: string }> = [
-  { value: 'PV', label: 'Photovoltaïque', court: 'Photo', icon: '☀️' },
+  // (13/11/2026) filière PV renommée « Soleil » (code PV conservé en base)
+  { value: 'PV', label: 'Soleil', court: 'Soleil', icon: '☀️' },
   { value: 'THERMIQUE', label: 'Thermique', court: 'Thermie', icon: '🔥' },
 ]
 
@@ -105,6 +107,7 @@ export const ETAPE_LIBELLES: Record<TypeEtape, string> = {
   ESCALADE: 'Escalade',
   REDESCENTE: 'Retour au niveau inférieur',
   RAPPEL: 'Rappel client',
+  REPRISE: 'Reprise du traitement',
   PRECONISATION: 'Préconisation',
   RESOLUTION: 'Résolution',
   CLOTURE: 'Clôture',
@@ -201,6 +204,20 @@ export type Ticket = {
   rappel_par?: string | null
   rappel_demande_le?: string | null
   rappel_demande_par?: string | null
+  /** (13/11/2026) Soleil : NIV 2 marque de l'onduleur, NIV 3 équipement. */
+  pv_marque?: MarqueSoleil | null
+  pv_equipement?: string | null
+  onduleur_modele?: string | null
+  onduleur_serie?: string | null
+  batterie_modele?: string | null
+  batterie_serie?: string | null
+  severite?: Severite | null
+  /** Reprise du traitement (Soleil) : date, action, tâche créée. */
+  reprise_le?: string | null
+  reprise_action?: ActionReprise | null
+  reprise_precision?: string | null
+  reprise_par?: string | null
+  reprise_todo_id?: string | null
   opened_at: string
   first_action_at: string | null
   escalated_at: string | null
@@ -617,6 +634,8 @@ export type Collaborateur = {
   email: string
   nom: string
   niveau: 1 | 2 | 3
+  /** Environnement hotline : PV (Soleil), THERMIQUE, ou null (les deux). */
+  filiere?: Filiere | null
   departements: string[]
   par_defaut: boolean
 }
@@ -1207,4 +1226,174 @@ export async function majDemandePiece(demande: DemandePiece, statut: DemandePiec
       { details: { demande_id: demande.id } },
     )
   }
+}
+
+// ============================================================================
+// Environnement « Soleil » (13/11/2026, demande d'Arnaud)
+// ----------------------------------------------------------------------------
+// NIV 1 = motif (mise en service / problème en exploitation),
+// NIV 2 = marque de l'onduleur → notices CEGECLIM de la marque (en tête),
+// NIV 3 = équipement selon la marque → fiches techniques + notices fabricant
+// (séparées visuellement). Documents : table hotline_docs_soleil, fichiers dans
+// le bucket public « hotline-documents ». Migration 20261113a_hotline_soleil.sql.
+// ============================================================================
+export type MarqueSoleil = 'HOYMILES' | 'SOLIS' | 'AUTRE'
+
+export const MARQUES_SOLEIL: Array<{
+  value: MarqueSoleil
+  label: string
+  couleur: string
+  fond: string
+  /** Notices CEGECLIM attendues en NIV 2 (aide à la saisie). */
+  notices?: string
+  equipements: Array<{ value: string; label: string }>
+}> = [
+  {
+    value: 'HOYMILES',
+    label: 'Hoymiles',
+    couleur: '#1E3A6E',
+    fond: '#E9EEF7',
+    equipements: [
+      { value: 'MICRO_ONDULEUR', label: 'Micro-onduleur' },
+      { value: 'ONDULEUR', label: 'Onduleur' },
+      { value: 'BATTERIE', label: 'Batterie' },
+      { value: 'MONITORING', label: 'Monitoring & Autre' },
+    ],
+  },
+  {
+    value: 'SOLIS',
+    label: 'Solis',
+    couleur: '#B4561F',
+    fond: '#FBEEE6',
+    equipements: [
+      { value: 'ONDULEUR', label: 'Onduleur' },
+      { value: 'BATTERIE', label: 'Batterie' },
+      { value: 'MONITORING', label: 'Monitoring / Autre' },
+    ],
+  },
+  {
+    value: 'AUTRE',
+    label: 'Autre',
+    couleur: '#6B4F9E',
+    fond: '#F2EEF9',
+    notices: 'Notices Huawei + Wallbox + Solar Edge',
+    equipements: [
+      { value: 'SOLAR_EDGE', label: 'Solar Edge' },
+      { value: 'HUAWEI', label: 'Huawei' },
+      { value: 'VE', label: 'V.E' },
+      { value: 'AUTRE', label: 'Autre' },
+    ],
+  },
+]
+
+export function marqueSoleil(value: string | null | undefined) {
+  return MARQUES_SOLEIL.find((m) => m.value === value) || null
+}
+
+export function libelleEquipementSoleil(marque: string | null | undefined, equipement: string | null | undefined) {
+  return marqueSoleil(marque)?.equipements.find((e) => e.value === equipement)?.label || equipement || ''
+}
+
+export type Severite = 'NON_BLOQUANT' | 'BLOQUANT' | 'CRITIQUE'
+
+export const SEVERITES: Array<{ value: Severite; label: string; tone: string; bg: string }> = [
+  { value: 'NON_BLOQUANT', label: 'Non bloquant', tone: '#2F6B3A', bg: '#E5F2E7' },
+  { value: 'BLOQUANT', label: 'Bloquant', tone: '#8A5A11', bg: '#FDF2DD' },
+  { value: 'CRITIQUE', label: 'Critique', tone: '#A32C2C', bg: '#FCE9E6' },
+]
+
+export function styleSeverite(value: string | null | undefined) {
+  return SEVERITES.find((s) => s.value === value) || null
+}
+
+export type ActionReprise = 'RAPPELER' | 'MAIL' | 'AUTRE'
+
+export const ACTIONS_REPRISE: Array<{ value: ActionReprise; label: string }> = [
+  { value: 'RAPPELER', label: 'Rappeler le client' },
+  { value: 'MAIL', label: 'Envoyer un mail' },
+  { value: 'AUTRE', label: 'Autre (à préciser)' },
+]
+
+export type CategorieDocSoleil = 'NOTICE_CEGECLIM' | 'FICHE_TECHNIQUE' | 'NOTICE_FABRICANT'
+
+export const CATEGORIES_DOC_SOLEIL: Array<{ value: CategorieDocSoleil; label: string }> = [
+  { value: 'NOTICE_CEGECLIM', label: 'Notice CEGECLIM' },
+  { value: 'FICHE_TECHNIQUE', label: 'Fiche technique' },
+  { value: 'NOTICE_FABRICANT', label: 'Notice fabricant' },
+]
+
+export type DocSoleil = {
+  id: string
+  marque: MarqueSoleil
+  equipement: string | null
+  categorie: CategorieDocSoleil
+  titre: string
+  url: string
+  chemin: string | null
+  ordre: number
+}
+
+export async function chargerDocsSoleil(marque?: MarqueSoleil | null): Promise<DocSoleil[]> {
+  let q = supabase.from('hotline_docs_soleil').select('*').order('marque').order('equipement', { nullsFirst: true }).order('ordre').order('titre')
+  if (marque) q = q.eq('marque', marque)
+  const { data, error } = await q
+  if (error) throw error
+  return (data || []) as DocSoleil[]
+}
+
+/** Environnement hotline de l'utilisateur connecté (Autorisations › Utilisateurs › Hotline). */
+export async function chargerMonEnvironnement(): Promise<{ filiere: Filiere | null; niveau: number | null }> {
+  const { data, error } = await supabase.rpc('hotline_mon_environnement')
+  if (error) return { filiere: null, niveau: null }
+  const v = (data || {}) as { filiere?: Filiere | null; niveau?: number | null }
+  return { filiere: v.filiere || null, niveau: v.niveau ?? null }
+}
+
+/**
+ * Reprise du traitement d'un ticket Soleil non résolu : date + action, et
+ * tâche créée dans la Todo List du collaborateur concerné (bandeau violet
+ * « tâche affectée » s'il ne l'a pas créée lui-même).
+ */
+export async function planifierReprise(
+  ticket: Pick<Ticket, 'id' | 'numero' | 'numero_tiers' | 'intitule_tiers' | 'contact_nom' | 'telephone_appelant' | 'description'>,
+  reprise: { date: string; action: ActionReprise; precision: string; pour: { email: string; nom: string } },
+  auteur: { email: string; nom: string },
+) {
+  const libelleAction = reprise.action === 'AUTRE' ? reprise.precision.trim() || 'Autre action' : ACTIONS_REPRISE.find((a) => a.value === reprise.action)?.label || ''
+  const client = ticket.intitule_tiers || ticket.numero_tiers || ticket.contact_nom || 'client'
+  const description = [
+    `Hotline ${ticket.numero} — ${libelleAction} (${client})`,
+    ticket.contact_nom ? `Contact : ${ticket.contact_nom}` : '',
+    ticket.telephone_appelant ? `Tél. : ${fmtTel(ticket.telephone_appelant)}` : '',
+    reprise.action !== 'AUTRE' && reprise.precision.trim() ? `Précision : ${reprise.precision.trim()}` : '',
+    ticket.description ? `Motif de l'appel : ${ticket.description}` : '',
+  ]
+    .filter(Boolean)
+    .join('\n')
+  const { data: tache, error } = await supabase
+    .from('todo_actions')
+    .insert({
+      created_by_email: auteur.email,
+      created_by_name: auteur.nom,
+      description_action: description,
+      assigned_to: reprise.pour.email,
+      due_date: reprise.date,
+      numero_tiers: ticket.numero_tiers || null,
+    })
+    .select('id')
+    .single()
+  if (error) throw error
+  await majTicket(ticket.id, {
+    reprise_le: reprise.date,
+    reprise_action: reprise.action,
+    reprise_precision: reprise.precision.trim() || null,
+    reprise_par: reprise.pour.email,
+    reprise_todo_id: (tache as { id: string }).id,
+  })
+  await ajouterEtape(
+    ticket.id,
+    'REPRISE',
+    `Reprise du traitement le ${fmtDate(reprise.date)} : ${libelleAction}${reprise.action !== 'AUTRE' && reprise.precision.trim() ? ` — ${reprise.precision.trim()}` : ''} → ${reprise.pour.nom}`,
+    { details: { date: reprise.date, action: reprise.action, pour: reprise.pour.email, todo_id: (tache as { id: string }).id } },
+  )
 }
