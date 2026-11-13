@@ -326,6 +326,56 @@ function textToList(value: string, fallback: string[] = []) {
   return result.length ? Array.from(new Set(result)) : fallback
 }
 
+// Comptes de connexion Supabase Auth : passent par la route serveur
+// /api/admin/utilisateurs (clé service, réservée aux administrateurs).
+const MOT_DE_PASSE_MIN = 8
+
+function genererMotDePasse(longueur = 12) {
+  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789'
+  const speciaux = '!?@#%+='
+  const octets = new Uint32Array(longueur)
+  crypto.getRandomValues(octets)
+  const caracteres = Array.from(octets, (n) => alphabet[n % alphabet.length])
+  // Garantit au moins un chiffre, une majuscule, une minuscule et un spécial.
+  caracteres[0] = 'ABCDEFGHJKLMNPQRSTUVWXYZ'[octets[0] % 24]
+  caracteres[1] = 'abcdefghijkmnpqrstuvwxyz'[octets[1] % 24]
+  caracteres[2] = '23456789'[octets[2] % 8]
+  caracteres[3] = speciaux[octets[3] % speciaux.length]
+  for (let i = caracteres.length - 1; i > 0; i--) {
+    const j = octets[i] % (i + 1)
+    ;[caracteres[i], caracteres[j]] = [caracteres[j], caracteres[i]]
+  }
+  return caracteres.join('')
+}
+
+type ReponseComptes = {
+  error?: string
+  existe?: boolean
+  cree?: boolean
+  mot_de_passe_modifie?: boolean
+  message?: string
+  derniere_connexion?: string | null
+  cree_le?: string | null
+}
+
+async function appelerComptes(corps: { action: 'create' | 'set_password' | 'status'; email: string; password?: string; display_name?: string }): Promise<ReponseComptes> {
+  const { data } = await supabase.auth.getSession()
+  const token = data.session?.access_token
+  if (!token) return { error: 'Session expirée : reconnectez-vous.' }
+  try {
+    const reponse = await fetch('/api/admin/utilisateurs', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify(corps),
+    })
+    const json = (await reponse.json().catch(() => ({}))) as ReponseComptes
+    if (!reponse.ok) return { error: json.error || `Erreur ${reponse.status}` }
+    return json
+  } catch (e) {
+    return { error: e instanceof Error ? e.message : 'Appel impossible.' }
+  }
+}
+
 function slugify(value: string) {
   return value
     .normalize('NFD')
@@ -425,6 +475,7 @@ export default function AutorisationPage() {
   const [userDraft, setUserDraft] = useState<UserAccess | null>(null)
   const [creatingUser, setCreatingUser] = useState(false)
   const [newUser, setNewUser] = useState<UserAccess>(EMPTY_USER)
+  const [newUserPassword, setNewUserPassword] = useState('')
 
   const [search, setSearch] = useState('')
   const [profileFilter, setProfileFilter] = useState('TOUS')
@@ -746,8 +797,31 @@ export default function AutorisationPage() {
       setToast({ tone: 'error', text: 'L’email et le profil d’accès sont obligatoires.' })
       return
     }
+    if (users.some((user) => user.email.toLowerCase() === email)) {
+      setToast({ tone: 'error', text: `${email} a déjà un accès : sélectionnez-le dans la liste.` })
+      return
+    }
+    if (newUserPassword.length < MOT_DE_PASSE_MIN) {
+      setToast({ tone: 'error', text: `Le mot de passe doit contenir au moins ${MOT_DE_PASSE_MIN} caractères.` })
+      return
+    }
 
     setSavingKey('user:new')
+
+    // 1. Compte de connexion Supabase (email confirmé, aucun mail envoyé).
+    const compte = await appelerComptes({
+      action: 'create',
+      email,
+      password: newUserPassword,
+      display_name: newUser.display_name.trim(),
+    })
+    if (compte.error) {
+      setSavingKey(null)
+      setToast({ tone: 'error', text: `Le compte de connexion n’a pas été créé : ${compte.error}` })
+      return
+    }
+
+    // 2. Droits d’accès dans le compagnon.
 
     const complementaires = newUser.profils_complementaires.filter((id) => id && id !== newUser.access_profile_id)
 
@@ -771,12 +845,23 @@ export default function AutorisationPage() {
     setSavingKey(null)
 
     if (error) {
-      setToast({ tone: 'error', text: `L’utilisateur n’a pas été créé : ${error.message}` })
+      setToast({
+        tone: 'error',
+        text: compte.cree
+          ? `Compte de connexion créé, mais les droits n’ont pas été enregistrés : ${error.message}. Relancez la création (le mot de passe ne sera pas modifié).`
+          : `L’utilisateur n’a pas été créé : ${error.message}`,
+      })
       return
     }
 
-    setToast({ tone: 'success', text: `${email} créé. Définissez son périmètre à droite.` })
+    setToast({
+      tone: 'success',
+      text: compte.existe
+        ? `${email} : accès créé. Un compte de connexion existait déjà, son mot de passe est inchangé.`
+        : `${email} créé avec son mot de passe. Définissez son périmètre à droite.`,
+    })
     setNewUser({ ...EMPTY_USER, access_profile_id: profiles[0]?.id || '' })
+    setNewUserPassword('')
     setCreatingUser(false)
     dispatchAccessChanged()
     await loadData({ userEmail: email })
@@ -1174,7 +1259,8 @@ export default function AutorisationPage() {
                 <Eyebrow>Nouvelle personne</Eyebrow>
                 <h2 className="mt-1 text-xl font-bold text-slate-900">Ouvrir un accès</h2>
                 <p className="mt-1 max-w-2xl text-sm text-slate-600">
-                  L’email doit être celui utilisé pour se connecter. Le périmètre géographique se règle après la création.
+                  Crée le compte de connexion (email + mot de passe) et ses droits dans le compagnon. Aucun mail n’est envoyé :
+                  communiquez vous-même le mot de passe. Le périmètre géographique se règle après la création.
                 </p>
 
                 <div className="mt-5 grid grid-cols-1 gap-4 md:grid-cols-2">
@@ -1192,6 +1278,13 @@ export default function AutorisationPage() {
                       onChange={(value) => setNewUser((current) => ({ ...current, display_name: value }))}
                       placeholder="Prénom Nom"
                     />
+                  </Field>
+                  <Field
+                    label="Mot de passe de connexion"
+                    className="md:col-span-2"
+                    hint={`Au moins ${MOT_DE_PASSE_MIN} caractères. Si un compte de connexion existe déjà pour cet email, son mot de passe n’est pas modifié.`}
+                  >
+                    <MotDePasseField value={newUserPassword} onChange={setNewUserPassword} />
                   </Field>
                   <Field label="Profil principal" hint="Détermine les écrans visibles et la page ouverte à la connexion.">
                     <SelectField
@@ -1384,6 +1477,13 @@ export default function AutorisationPage() {
                       .filter((profile): profile is AccessProfile => Boolean(profile))}
                   />
                 </div>
+
+                <CompteConnexionPanel
+                  key={userDraft.email}
+                  email={userDraft.email}
+                  displayName={userDraft.display_name}
+                  onToast={setToast}
+                />
 
                 <div className="rounded-2xl border border-[#E2DFD8] bg-white">
                   <SectionHeader
@@ -1846,6 +1946,163 @@ function ToggleCard({
         )}
       </span>
     </label>
+  )
+}
+
+function MotDePasseField({ value, onChange }: { value: string; onChange: (value: string) => void }) {
+  const [visible, setVisible] = useState(false)
+  const [copie, setCopie] = useState(false)
+
+  async function copier() {
+    if (!value) return
+    try {
+      await navigator.clipboard.writeText(value)
+      setCopie(true)
+      window.setTimeout(() => setCopie(false), 1800)
+    } catch {
+      setVisible(true)
+    }
+  }
+
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      <div className="min-w-[220px] flex-1">
+        <input
+          type={visible ? 'text' : 'password'}
+          value={value}
+          autoComplete="new-password"
+          onChange={(event) => onChange(event.target.value)}
+          placeholder="Saisir ou générer"
+          className="h-[42px] w-full rounded-xl border border-[#D8D3C8] bg-white px-3 font-mono text-sm text-slate-900 outline-none transition placeholder:font-sans placeholder:text-slate-400 focus:border-[#B4761A] focus:ring-2 focus:ring-[#B4761A]/25"
+        />
+      </div>
+      <button
+        type="button"
+        onClick={() => {
+          onChange(genererMotDePasse())
+          setVisible(true)
+        }}
+        className="h-[42px] rounded-xl border border-[#D8D3C8] bg-white px-3 text-sm font-semibold text-slate-700 hover:bg-[#F4F3F0]"
+      >
+        Générer
+      </button>
+      <button
+        type="button"
+        onClick={() => setVisible((v) => !v)}
+        className="h-[42px] rounded-xl border border-[#D8D3C8] bg-white px-3 text-sm font-semibold text-slate-700 hover:bg-[#F4F3F0]"
+      >
+        {visible ? 'Masquer' : 'Afficher'}
+      </button>
+      <button
+        type="button"
+        onClick={() => void copier()}
+        disabled={!value}
+        className="h-[42px] rounded-xl border border-[#D8D3C8] bg-white px-3 text-sm font-semibold text-slate-700 hover:bg-[#F4F3F0] disabled:opacity-40"
+      >
+        {copie ? 'Copié ✓' : 'Copier'}
+      </button>
+    </div>
+  )
+}
+
+function CompteConnexionPanel({
+  email,
+  displayName,
+  onToast,
+}: {
+  email: string
+  displayName: string
+  onToast: (toast: ToastState) => void
+}) {
+  const [statut, setStatut] = useState<ReponseComptes | null>(null)
+  const [ouvert, setOuvert] = useState(false)
+  const [motDePasse, setMotDePasse] = useState('')
+  const [enCours, setEnCours] = useState(false)
+
+  useEffect(() => {
+    let actif = true
+    void appelerComptes({ action: 'status', email }).then((reponse) => {
+      if (actif) setStatut(reponse)
+    })
+    return () => {
+      actif = false
+    }
+  }, [email])
+
+  async function enregistrer() {
+    if (motDePasse.length < MOT_DE_PASSE_MIN) {
+      onToast({ tone: 'error', text: `Le mot de passe doit contenir au moins ${MOT_DE_PASSE_MIN} caractères.` })
+      return
+    }
+    setEnCours(true)
+    const reponse = await appelerComptes({ action: 'set_password', email, password: motDePasse, display_name: displayName.trim() })
+    setEnCours(false)
+    if (reponse.error) {
+      onToast({ tone: 'error', text: `Mot de passe non enregistré : ${reponse.error}` })
+      return
+    }
+    onToast({
+      tone: 'success',
+      text: reponse.cree ? `Compte de connexion créé pour ${email}.` : `Nouveau mot de passe enregistré pour ${email}.`,
+    })
+    setMotDePasse('')
+    setOuvert(false)
+    setStatut(await appelerComptes({ action: 'status', email }))
+  }
+
+  const formatDate = (iso?: string | null) =>
+    iso ? new Date(iso).toLocaleString('fr-FR', { dateStyle: 'short', timeStyle: 'short' }) : null
+
+  return (
+    <div className="rounded-2xl border border-[#E2DFD8] bg-white p-5">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <Eyebrow>Compte de connexion</Eyebrow>
+          <p className="mt-1 text-sm text-slate-700">
+            {statut === null ? (
+              'Vérification…'
+            ) : statut.error ? (
+              <span className="text-[#A32C2C]">Statut indisponible : {statut.error}</span>
+            ) : statut.existe ? (
+              <>
+                <span className="font-semibold text-[#2F6B3A]">Compte actif</span>
+                {' · '}
+                {formatDate(statut.derniere_connexion) ? `dernière connexion le ${formatDate(statut.derniere_connexion)}` : 'jamais connecté'}
+              </>
+            ) : (
+              <span className="font-semibold text-[#A32C2C]">Aucun compte de connexion : cette personne ne peut pas se connecter</span>
+            )}
+          </p>
+        </div>
+        {!ouvert && (
+          <GhostButton onClick={() => setOuvert(true)}>
+            {statut && !statut.error && !statut.existe ? 'Créer le compte de connexion' : 'Définir un nouveau mot de passe'}
+          </GhostButton>
+        )}
+      </div>
+
+      {ouvert && (
+        <div className="mt-4 space-y-3">
+          <MotDePasseField value={motDePasse} onChange={setMotDePasse} />
+          <p className="text-xs text-slate-500">
+            Remplace immédiatement l’ancien mot de passe. Aucun mail n’est envoyé : communiquez-le vous-même.
+          </p>
+          <div className="flex gap-2">
+            <PrimaryButton onClick={() => void enregistrer()} disabled={enCours}>
+              {enCours ? 'Enregistrement…' : 'Enregistrer le mot de passe'}
+            </PrimaryButton>
+            <GhostButton
+              onClick={() => {
+                setOuvert(false)
+                setMotDePasse('')
+              }}
+            >
+              Annuler
+            </GhostButton>
+          </div>
+        </div>
+      )}
+    </div>
   )
 }
 
