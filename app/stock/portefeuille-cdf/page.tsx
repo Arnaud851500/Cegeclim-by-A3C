@@ -50,6 +50,9 @@
  *  - alertes par bloc : « Date dépassée » dès qu'un bloc est passé (montant concerné), « CDC attendent »
  *    sur les blocs dus sous N jours ;
  *  - vue « Par échéance » (lecture) : une ligne par CDF × date, triée par date, pour préparer les réceptions FMS.
+ *  - (13/11/2026) filtres par colonne façon Excel : entonnoir dans chaque en-tête → valeurs à cocher
+ *    (recherche, tout / rien), cumulables entre colonnes et avec les filtres du haut ; s'appliquent
+ *    aussi à la vue « Par échéance » et à l'export Excel.
  *
  * 02/11/2026 — code couleur des containers : bateau arrivé au port = bleu, container déchargé = sarcelle,
  *  livré FMS = vert (n° de container, colonne « Bateau · ETA », badge de marge qui affiche l'étape et
@@ -82,7 +85,8 @@
  * Migration requise : supabase/sql/20261023_portefeuille_cdf.sql.
  */
 
-import React, { Suspense, useCallback, useEffect, useMemo, useState } from 'react'
+import React, { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { useRouter, useSearchParams } from 'next/navigation'
 import ExcelJS from 'exceljs'
 import { supabase } from '@/lib/supabaseClient'
@@ -1043,6 +1047,8 @@ function PortefeuilleCdf() {
   const [alerteF, setAlerteF] = useState<CodeAlerte | ''>(() => (params.get('alerte') as CodeAlerte) || '')
   const [seulementAlertes, setSeulementAlertes] = useState(true)
   const [tri, setTri] = useState<{ k: CleTri; dir: 1 | -1 }>({ k: 'date_livraison', dir: 1 })
+  // Filtres par colonne : colonne → valeurs retenues (colonne absente = pas de filtre)
+  const [filtresCol, setFiltresCol] = useState<Partial<Record<ColFiltre, string[]>>>({})
   const [exportEnCours, setExportEnCours] = useState(false)
   const cdfOuverte = params.get('cdf')
   const [prefill, setPrefill] = useState<{ cdf: string; lu: SuiviLu } | null>(null)
@@ -1186,9 +1192,23 @@ function PortefeuilleCdf() {
     return c
   }, [base])
 
+  const colsActives = useMemo(() => (Object.entries(filtresCol) as Array<[ColFiltre, string[]]>).filter(([, v]) => v), [filtresCol])
+
+  // Valeurs proposées dans chaque filtre de colonne : lignes passant tous les AUTRES filtres de colonne
+  const valeursCol = useCallback((col: ColFiltre) => {
+    const autres = colsActives.filter(([c]) => c !== col)
+    const compteur = new Map<string, number>()
+    base.forEach((r) => {
+      if (!autres.every(([c, v]) => valeursFiltre(c, r).some((x) => v.includes(x)))) return
+      valeursFiltre(col, r).forEach((x) => compteur.set(x, (compteur.get(x) || 0) + 1))
+    })
+    return Array.from(compteur.entries()).sort((a, b) => ordreValeur(col, a[0], b[0]))
+  }, [base, colsActives])
+
   const filtres = useMemo(() => {
     const termes = normaliser(search.trim()).split(/[\s,;]+/).filter(Boolean)
     const list = base.filter((r) => {
+      if (!colsActives.every(([c, v]) => valeursFiltre(c, r).some((x) => v.includes(x)))) return false
       if (alerteF && !r.alertes.includes(alerteF)) return false
       if (!alerteF && seulementAlertes && r.alertes.length === 0) return false
       if (termes.length) {
@@ -1212,7 +1232,7 @@ function PortefeuilleCdf() {
       if (typeof va === 'number' && typeof vb === 'number') return (va - vb) * tri.dir
       return String(va).localeCompare(String(vb), 'fr') * tri.dir
     })
-  }, [base, search, alerteF, seulementAlertes, tri])
+  }, [base, search, alerteF, seulementAlertes, tri, colsActives])
 
   // Vue « Par échéance » : une ligne par CDF × date de livraison, triée par date
   const echeances = useMemo(() => filtres.flatMap((r) => (r.blocs || []).map((b) => ({ r, b })))
@@ -1233,10 +1253,19 @@ function PortefeuilleCdf() {
   const ligneOuverte = cdfOuverte ? rows.find((r) => r.numero === cdfOuverte) || null : null
 
   function trier(k: CleTri) { setTri((t) => (t.k === k ? { k, dir: (t.dir === 1 ? -1 : 1) as 1 | -1 } : { k, dir: 1 })) }
-  function Th({ k, children, cls = '' }: { k?: CleTri; children: React.ReactNode; cls?: string }) {
+  function Th({ k, f, children, cls = '' }: { k?: CleTri; f?: ColFiltre; children: React.ReactNode; cls?: string }) {
+    const actif = f ? Boolean(filtresCol[f]) : false
     return (
-      <th onClick={k ? () => trier(k) : undefined} className={`whitespace-nowrap px-2 py-1.5 text-left text-[10.5px] font-bold uppercase tracking-wide text-[#8A8474] ${k ? 'cursor-pointer hover:text-[#3A362E]' : ''} ${cls}`}>
+      <th onClick={k ? () => trier(k) : undefined} className={`whitespace-nowrap px-2 py-1.5 text-left text-[10.5px] font-bold uppercase tracking-wide ${actif ? 'text-[#1D5C86]' : 'text-[#8A8474]'} ${k ? 'cursor-pointer hover:text-[#3A362E]' : ''} ${cls}`}>
         {children}{k && tri.k === k ? (tri.dir === 1 ? ' ▲' : ' ▼') : ''}
+        {f && (
+          <FiltreColonne
+            titre={typeof children === 'string' ? children : String(f)}
+            valeurs={valeursCol(f)}
+            selection={filtresCol[f] || null}
+            onChange={(v) => setFiltresCol((cur) => { const n = { ...cur }; if (v) n[f] = v; else delete n[f]; return n })}
+          />
+        )}
       </th>
     )
   }
@@ -1379,6 +1408,17 @@ function PortefeuilleCdf() {
             <button type="button" onClick={() => { setVue('echeance'); setSeulementAlertes(false) }} title="Une ligne par CDF et par date de livraison, triée par date : préparation des réceptions FMS"
               className={`rounded-md px-3 py-1 ${vue === 'echeance' ? 'bg-[#111820] text-white' : 'text-[#8A8474]'}`}>Par échéance</button>
           </div>
+          {colsActives.length > 0 && (
+            <span className="flex flex-wrap items-center gap-1.5 text-[11.5px]">
+              {colsActives.map(([c, v]) => (
+                <button key={c} type="button" onClick={() => setFiltresCol((cur) => { const n = { ...cur }; delete n[c]; return n })}
+                  className="rounded-full bg-[#1D5C86]/10 px-2 py-0.5 font-semibold text-[#1D5C86] hover:bg-[#1D5C86]/20" title="Retirer ce filtre">
+                  {LIBELLE_COL[c]} : {v.length === 1 ? v[0] : `${v.length} valeurs`} ✕
+                </button>
+              ))}
+              <button type="button" onClick={() => setFiltresCol({})} className="font-semibold text-[#8A8474] underline">Effacer les filtres de colonnes</button>
+            </span>
+          )}
           {vue === 'echeance' && <span className="text-[11.5px] text-[#8A8474]">{fmtNum(echeances.length)} échéances · {fmtNum(echeances.reduce((s, e) => s + Number(e.b.montant_ht || 0), 0) / 1000)} k€ HT — vue de lecture, les relances se font par commande</span>}
         </div>
 
@@ -1420,10 +1460,10 @@ function PortefeuilleCdf() {
           <table className="w-full text-[12px]">
             <thead className="sticky top-0 z-10 bg-white">
               <tr className="border-b border-[#E5E1D8]">
-                <Th k="numero">CDF</Th><Th k="fournisseur">Fournisseur</Th><Th>Référence</Th>
-                <Th k="date_commande">Commande</Th><Th k="date_livraison">Livraison</Th><Th>Statut</Th>
-                <Th>Container</Th><Th k="eta_port">Bateau · ETA</Th><Th k="marge_jours">Marge</Th><Th k="rdv">RDV FMS</Th>
-                <Th k="nb_cdc" cls="text-right">CDC</Th><Th k="montant_ht" cls="text-right">Montant HT</Th><Th k="alertes">Alertes</Th><Th>Dernière action</Th>
+                <Th k="numero" f="numero">CDF</Th><Th k="fournisseur" f="fournisseur">Fournisseur</Th><Th f="reference">Référence</Th>
+                <Th k="date_commande" f="commande">Commande</Th><Th k="date_livraison" f="livraison">Livraison</Th><Th f="statut">Statut</Th>
+                <Th f="container">Container</Th><Th k="eta_port" f="bateau">Bateau · ETA</Th><Th k="marge_jours" f="marge">Marge</Th><Th k="rdv" f="rdv">RDV FMS</Th>
+                <Th k="nb_cdc" f="cdc" cls="text-right">CDC</Th><Th k="montant_ht" f="montant" cls="text-right">Montant HT</Th><Th k="alertes" f="alertes">Alertes</Th><Th f="action">Dernière action</Th>
               </tr>
             </thead>
             <tbody>
@@ -1494,6 +1534,150 @@ function PortefeuilleCdf() {
           onSaved={(patch) => majLigne(ligneOuverte.numero, patch)} onRdv={majRdv} />
       )}
     </main>
+  )
+}
+
+// ── Filtres par colonne (13/11/2026) ─────────────────────────────────────────
+type ColFiltre = 'numero' | 'fournisseur' | 'reference' | 'commande' | 'livraison' | 'statut' | 'container' | 'bateau' | 'marge' | 'rdv' | 'cdc' | 'montant' | 'alertes' | 'action'
+
+const LIBELLE_COL: Record<ColFiltre, string> = {
+  numero: 'CDF', fournisseur: 'Fournisseur', reference: 'Référence', commande: 'Commande', livraison: 'Livraison', statut: 'Statut',
+  container: 'Container', bateau: 'Bateau', marge: 'Marge', rdv: 'RDV FMS', cdc: 'CDC', montant: 'Montant HT', alertes: 'Alertes', action: 'Dernière action',
+}
+
+const VIDE = '(vide)'
+const TRANCHES_MONTANT = ['< 1 k€', '1 à 10 k€', '10 à 50 k€', '50 à 100 k€', '≥ 100 k€']
+
+function moisDe(d: string | null | undefined) {
+  if (!d) return VIDE
+  return new Date(`${d.slice(0, 10)}T12:00:00`).toLocaleDateString('fr-FR', { month: 'long', year: 'numeric' })
+}
+
+/** Valeur(s) d'une ligne pour une colonne filtrable (plusieurs pour les alertes). */
+function valeursFiltre(col: ColFiltre, r: Ligne): string[] {
+  switch (col) {
+    case 'numero': return [r.numero]
+    case 'fournisseur': return [r.fournisseur_nom || r.fournisseur_code || VIDE]
+    case 'reference': return [r.reference || VIDE]
+    case 'commande': return [moisDe(r.date_commande)]
+    case 'livraison': {
+      if (!r.date_livraison) return ['Sans date']
+      const j = r.jours_avant_livraison
+      if (j !== null && j < 0) return ['Date dépassée']
+      if (j === 0) return ["Aujourd'hui"]
+      if (j !== null && j <= 7) return ['Sous 7 jours']
+      if (j !== null && j <= 30) return ['Sous 30 jours']
+      return [`Au-delà : ${moisDe(r.date_livraison)}`]
+    }
+    case 'statut': return [r.statut_libelle || VIDE]
+    case 'container': return [r.container ? (r.container_valide ? 'Avec n° valide' : 'N° invalide') : r.est_cont ? 'À obtenir' : VIDE]
+    case 'bateau': return [r.navire || r.armateur || VIDE]
+    case 'marge': {
+      const etape = r.statut_suivi ? ETAPE_BATEAU[r.statut_suivi] : undefined
+      if (etape) return [etape.label]
+      return [r.verdict ? VERDICT[r.verdict].label : VIDE]
+    }
+    case 'rdv': return [r.rdv?.rdv_date ? fmtDate(r.rdv.rdv_date) : 'Sans RDV']
+    case 'cdc': return [!r.nb_cdc ? 'Aucune CDC' : r.nb_cdc_tardives ? 'Avec CDC en retard' : 'CDC à l’heure']
+    case 'montant': {
+      const m = Number(r.montant_ht || 0)
+      return [m < 1000 ? TRANCHES_MONTANT[0] : m < 10000 ? TRANCHES_MONTANT[1] : m < 50000 ? TRANCHES_MONTANT[2] : m < 100000 ? TRANCHES_MONTANT[3] : TRANCHES_MONTANT[4]]
+    }
+    case 'alertes': return r.alertes.length ? r.alertes.map((a) => ALERTE[a].label) : ['Sans alerte']
+    case 'action': return [!r.derniere_action ? 'Aucune' : r.derniere_action.action === 'confirme' ? 'Confirmé' : r.derniere_action.action === 'relance' ? 'Relancé' : 'Commentaire']
+  }
+}
+
+function ordreValeur(col: ColFiltre, a: string, b: string) {
+  if (a === VIDE) return 1
+  if (b === VIDE) return -1
+  if (col === 'montant') return TRANCHES_MONTANT.indexOf(a) - TRANCHES_MONTANT.indexOf(b)
+  if (col === 'livraison') {
+    const ordre = ['Date dépassée', "Aujourd'hui", 'Sous 7 jours', 'Sous 30 jours']
+    const ia = ordre.indexOf(a), ib = ordre.indexOf(b)
+    if (ia >= 0 || ib >= 0) return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib)
+  }
+  if (col === 'rdv' && /^\d{2}\/\d{2}\/\d{4}$/.test(a) && /^\d{2}\/\d{2}\/\d{4}$/.test(b)) return a.split('/').reverse().join('').localeCompare(b.split('/').reverse().join(''))
+  return a.localeCompare(b, 'fr', { numeric: true })
+}
+
+/** Entonnoir d'en-tête : liste des valeurs à cocher (fenêtre en position fixe, hors du tableau défilant). */
+function FiltreColonne({ titre, valeurs, selection, onChange }: {
+  titre: string
+  valeurs: Array<[string, number]>
+  selection: string[] | null
+  onChange: (v: string[] | null) => void
+}) {
+  const [ouvert, setOuvert] = useState(false)
+  const [pos, setPos] = useState<{ top: number; left: number } | null>(null)
+  const [q, setQ] = useState('')
+  const [coches, setCoches] = useState<Set<string>>(new Set())
+  const bouton = useRef<HTMLButtonElement>(null)
+
+  function ouvrir(e: React.MouseEvent) {
+    e.stopPropagation()
+    const r = bouton.current?.getBoundingClientRect()
+    if (r) setPos({ top: r.bottom + 4, left: Math.max(8, Math.min(r.left - 120, window.innerWidth - 300)) })
+    setCoches(new Set(selection || valeurs.map(([v]) => v)))
+    setQ('')
+    setOuvert(true)
+  }
+
+  useEffect(() => {
+    if (!ouvert) return
+    const fermer = (e: KeyboardEvent) => { if (e.key === 'Escape') setOuvert(false) }
+    window.addEventListener('keydown', fermer)
+    return () => window.removeEventListener('keydown', fermer)
+  }, [ouvert])
+
+  const visibles = valeurs.filter(([v]) => !q.trim() || normaliser(v).includes(normaliser(q.trim())))
+  const actif = Boolean(selection)
+
+  function appliquer() {
+    const tout = valeurs.every(([v]) => coches.has(v))
+    onChange(tout ? null : Array.from(coches))
+    setOuvert(false)
+  }
+
+  return (
+    <>
+      <button ref={bouton} type="button" onClick={ouvrir} title={`Filtrer ${titre}`}
+        className={`ml-1 inline-flex h-4 w-4 items-center justify-center rounded align-middle text-[10px] ${actif ? 'bg-[#1D5C86] text-white' : 'text-[#B5AE9E] hover:bg-[#EFECE4] hover:text-[#3A362E]'}`}>
+        ⏷
+      </button>
+      {ouvert && pos && createPortal(
+        <div className="fixed inset-0 z-[80]" onClick={() => setOuvert(false)}>
+          <div onClick={(e) => e.stopPropagation()} style={{ top: pos.top, left: pos.left }}
+            className="absolute w-[290px] rounded-xl border border-[#E5E1D8] bg-white p-2.5 text-[12px] normal-case tracking-normal text-[#3A362E] shadow-xl">
+            <div className="mb-1.5 font-bold">Filtrer : {titre}</div>
+            <input autoFocus value={q} onChange={(e) => setQ(e.target.value)} placeholder="Rechercher une valeur…"
+              className="mb-1.5 h-8 w-full rounded-lg border border-[#E5E1D8] px-2 text-[12px] outline-none focus:border-[#1D5C86]" />
+            <div className="mb-1 flex gap-3 text-[11px] font-semibold text-[#1D5C86]">
+              <button type="button" onClick={() => setCoches((c) => new Set([...c, ...visibles.map(([v]) => v)]))}>Tout cocher</button>
+              <button type="button" onClick={() => setCoches((c) => { const n = new Set(c); visibles.forEach(([v]) => n.delete(v)); return n })}>Tout décocher</button>
+            </div>
+            <div className="max-h-[260px] space-y-0.5 overflow-y-auto pr-1">
+              {visibles.map(([v, n]) => (
+                <label key={v} className="flex cursor-pointer items-center gap-2 rounded px-1 py-0.5 hover:bg-[#FAF8F3]">
+                  <input type="checkbox" checked={coches.has(v)} onChange={(e) => setCoches((c) => { const s2 = new Set(c); if (e.target.checked) s2.add(v); else s2.delete(v); return s2 })} className="accent-[#1D5C86]" />
+                  <span className="min-w-0 flex-1 truncate" title={v}>{v}</span>
+                  <span className="tabular-nums text-[#8A8474]">{n}</span>
+                </label>
+              ))}
+              {!visibles.length && <div className="px-1 py-2 text-[#8A8474]">Aucune valeur.</div>}
+            </div>
+            <div className="mt-2 flex justify-between gap-2 border-t border-[#F0EDE6] pt-2">
+              <button type="button" onClick={() => { onChange(null); setOuvert(false) }} className="text-[11.5px] font-semibold text-[#8A8474] underline">Effacer</button>
+              <span className="flex gap-2">
+                <button type="button" onClick={() => setOuvert(false)} className="rounded-lg border border-[#E5E1D8] px-3 py-1 font-semibold">Annuler</button>
+                <button type="button" disabled={coches.size === 0} onClick={appliquer} className="rounded-lg bg-[#111820] px-3 py-1 font-semibold text-white disabled:opacity-40">OK</button>
+              </span>
+            </div>
+          </div>
+        </div>,
+        document.body,
+      )}
+    </>
   )
 }
 
