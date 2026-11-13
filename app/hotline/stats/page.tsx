@@ -39,6 +39,8 @@ type Stats = {
   top_preconisations: Array<{ libelle: string; n: number }>
   top_clients: Array<{ numero_tiers: string; intitule: string | null; n: number }>
   par_semaine: Array<{ semaine: string; PV: number; THERMIQUE: number }>
+  /** (13/11/2026) Tickets par semaine et par personne qui a créé le ticket. */
+  par_semaine_createur?: Array<{ semaine: string; createur: string; nom: string; n: number }>
   // Classification (08/11/2026)
   par_nature?: Record<string, number>
   par_symptome?: Record<string, number>
@@ -98,7 +100,6 @@ export default function HotlineStatsPage() {
   }, [debut, fin, filiere, expert])
 
 
-  const maxSemaine = useMemo(() => Math.max(1, ...(stats?.par_semaine || []).map((s) => s.PV + s.THERMIQUE)), [stats])
 
   if (!expert) {
     return (
@@ -187,7 +188,7 @@ export default function HotlineStatsPage() {
               ))}
             </div>
 
-            <div className="grid grid-cols-1 gap-4 lg:grid-cols-2 xl:grid-cols-4">
+            <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4">
               <Repartition
                 titre="Par filière"
                 lignes={Object.entries(stats.par_filiere).map(([k, n]) => ({ label: libelleFiliere(k), n, couleur: COULEUR_FILIERE[k] || NEUTRE }))}
@@ -201,52 +202,7 @@ export default function HotlineStatsPage() {
             </div>
 
             <div className="mt-4 grid grid-cols-1 gap-4 xl:grid-cols-3">
-              <section className="rounded-2xl border border-[#E2DFD8] bg-white xl:col-span-2">
-                <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#EFEDE8] px-4 py-3">
-                  <span className="text-[14px] font-bold text-slate-900">Tickets par semaine</span>
-                  <span className="flex gap-3 text-[12px] text-slate-600">
-                    {Object.entries(COULEUR_FILIERE).map(([k, c]) => (
-                      <span key={k} className="flex items-center gap-1.5">
-                        <span className="inline-block h-2.5 w-2.5 rounded-sm" style={{ background: c }} />
-                        {libelleFiliere(k)}
-                      </span>
-                    ))}
-                  </span>
-                </div>
-                <div className="overflow-x-auto p-4">
-                  {stats.par_semaine.length ? (
-                    <table className="w-full text-[12px]">
-                      <thead className="text-[11px] uppercase tracking-[0.05em] text-slate-500">
-                        <tr>
-                          <th className="pb-2 text-left">Semaine du</th>
-                          <th className="pb-2 text-right">PV</th>
-                          <th className="pb-2 text-right">Thermique</th>
-                          <th className="pb-2 pl-4 text-left" />
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {stats.par_semaine.map((s) => (
-                          <tr key={s.semaine} className="border-t border-[#EFEDE8]">
-                            <td className="py-1.5 text-slate-700">{new Date(s.semaine).toLocaleDateString('fr-FR')}</td>
-                            <td className="py-1.5 text-right tabular-nums text-slate-900">{s.PV}</td>
-                            <td className="py-1.5 text-right tabular-nums text-slate-900">{s.THERMIQUE}</td>
-                            <td className="w-[55%] py-1.5 pl-4">
-                              <div className="flex h-3 gap-[2px]" title={`PV ${s.PV} · Thermique ${s.THERMIQUE}`}>
-                                {s.PV ? <div className="rounded-l-[4px]" style={{ width: `${(100 * s.PV) / maxSemaine}%`, background: COULEUR_FILIERE.PV }} /> : null}
-                                {s.THERMIQUE ? (
-                                  <div className="rounded-r-[4px]" style={{ width: `${(100 * s.THERMIQUE) / maxSemaine}%`, background: COULEUR_FILIERE.THERMIQUE }} />
-                                ) : null}
-                              </div>
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  ) : (
-                    <p className="text-[13px] text-slate-500">Aucun ticket sur la période.</p>
-                  )}
-                </div>
-              </section>
+              <HistogrammeSemaines semaines={stats.par_semaine.map((x) => x.semaine)} lignes={stats.par_semaine_createur || []} />
 
               <div className="space-y-4">
                 <Classement titre="Préconisations les plus données" lignes={stats.top_preconisations.map((p) => ({ label: p.libelle, n: p.n }))} />
@@ -263,26 +219,105 @@ export default function HotlineStatsPage() {
   )
 }
 
+// (13/11/2026) Répartitions en pastilles compactes.
 function Repartition({ titre, lignes }: { titre: string; lignes: Array<{ label: string; n: number; couleur?: string }> }) {
   const total = lignes.reduce((s, l) => s + l.n, 0)
-  const max = Math.max(1, ...lignes.map((l) => l.n))
   return (
-    <section className="rounded-2xl border border-[#E2DFD8] bg-white">
-      <div className="border-b border-[#EFEDE8] px-4 py-3 text-[14px] font-bold text-slate-900">{titre}</div>
-      <div className="space-y-2.5 p-4">
+    <section className="rounded-xl border border-[#E2DFD8] bg-white px-3 py-2">
+      <div className="mb-1.5 text-[11px] font-bold uppercase tracking-[0.05em] text-slate-500">{titre}</div>
+      <div className="flex flex-wrap gap-1.5">
         {lignes.map((l) => (
-          <div key={l.label} title={`${l.label} : ${l.n} ticket(s)`}>
-            <div className="flex items-baseline justify-between text-[12px]">
-              <span className="text-slate-700">{l.label}</span>
-              <span className="tabular-nums text-slate-900">
-                {l.n} <span className="text-slate-400">{total ? `· ${Math.round((100 * l.n) / total)} %` : ''}</span>
-              </span>
-            </div>
-            <div className="mt-1 h-2 rounded-full bg-[#F1EFEA]">
-              <div className="h-2 rounded-full" style={{ width: `${(100 * l.n) / max}%`, background: l.couleur || NEUTRE }} />
-            </div>
-          </div>
+          <span
+            key={l.label}
+            title={`${l.label} : ${l.n} ticket(s)`}
+            className="inline-flex items-center gap-1.5 rounded-full border border-[#E2DFD8] bg-[#FAF9F7] px-2 py-0.5 text-[11px] text-slate-700"
+          >
+            <span className="inline-block h-2 w-2 rounded-full" style={{ background: l.couleur || NEUTRE }} />
+            {l.label}
+            <span className="font-semibold tabular-nums text-slate-900">{l.n}</span>
+            {total ? <span className="tabular-nums text-slate-400">{Math.round((100 * l.n) / total)} %</span> : null}
+          </span>
         ))}
+      </div>
+    </section>
+  )
+}
+
+// (13/11/2026) Tickets par semaine : semaines en abscisse, histogramme empilé
+// par personne ayant créé le ticket (10 plus gros créateurs, le reste en « Autres »).
+const PALETTE_CREATEURS = ['#1E4E8C', '#C1683C', '#2F6B3A', '#7A5EA8', '#B4761A', '#0E7490', '#A32C2C', '#5B6B2F', '#BE185D', '#475569']
+
+function HistogrammeSemaines({ semaines, lignes }: { semaines: string[]; lignes: Array<{ semaine: string; createur: string; nom: string; n: number }> }) {
+  const { createurs, colonnes, max } = useMemo(() => {
+    const totaux = new Map<string, { nom: string; n: number }>()
+    lignes.forEach((l) => {
+      const c = totaux.get(l.createur) || { nom: l.nom, n: 0 }
+      c.n += l.n
+      totaux.set(l.createur, c)
+    })
+    const tries = Array.from(totaux.entries()).sort((a, b) => b[1].n - a[1].n)
+    const principaux = tries.slice(0, PALETTE_CREATEURS.length).map(([cle, v], i) => ({ cle, nom: v.nom, n: v.n, couleur: PALETTE_CREATEURS[i] }))
+    const autresN = tries.slice(PALETTE_CREATEURS.length).reduce((s, [, v]) => s + v.n, 0)
+    const liste = autresN ? [...principaux, { cle: '__autres', nom: 'Autres', n: autresN, couleur: '#CBD5E1' }] : principaux
+    const index = new Set(principaux.map((p) => p.cle))
+    const toutesSemaines = Array.from(new Set([...semaines, ...lignes.map((l) => l.semaine)])).sort()
+    const cols = toutesSemaines.map((sem) => {
+      const parCle = new Map<string, number>()
+      lignes
+        .filter((l) => l.semaine === sem)
+        .forEach((l) => {
+          const cle = index.has(l.createur) ? l.createur : '__autres'
+          parCle.set(cle, (parCle.get(cle) || 0) + l.n)
+        })
+      const total = Array.from(parCle.values()).reduce((a, b) => a + b, 0)
+      return { semaine: sem, total, segments: liste.map((c) => ({ ...c, v: parCle.get(c.cle) || 0 })).filter((x) => x.v > 0) }
+    })
+    return { createurs: liste, colonnes: cols, max: Math.max(1, ...cols.map((c) => c.total)) }
+  }, [semaines, lignes])
+
+  const HAUTEUR = 240
+  return (
+    <section className="rounded-2xl border border-[#E2DFD8] bg-white xl:col-span-2">
+      <div className="border-b border-[#EFEDE8] px-4 py-3">
+        <span className="text-[14px] font-bold text-slate-900">Tickets par semaine</span>
+        <span className="ml-2 text-[12px] text-slate-500">par personne ayant créé le ticket</span>
+      </div>
+      <div className="p-4">
+        {colonnes.length ? (
+          <>
+            <div className="flex items-end gap-1.5 overflow-x-auto pb-1" style={{ height: HAUTEUR + 40 }}>
+              {colonnes.map((c) => (
+                <div key={c.semaine} className="flex min-w-[34px] flex-1 flex-col items-center justify-end">
+                  <div className="mb-1 text-[11px] font-semibold tabular-nums text-slate-700">{c.total || ''}</div>
+                  <div className="flex w-full max-w-[56px] flex-col-reverse overflow-hidden rounded-t-[4px]" style={{ height: (HAUTEUR * c.total) / max }}>
+                    {c.segments.map((sg) => (
+                      <div
+                        key={sg.cle}
+                        title={`Semaine du ${new Date(c.semaine).toLocaleDateString('fr-FR')} · ${sg.nom} : ${sg.v} ticket(s)`}
+                        style={{ height: `${(100 * sg.v) / (c.total || 1)}%`, background: sg.couleur }}
+                        className="w-full border-t border-white/40"
+                      />
+                    ))}
+                  </div>
+                  <div className="mt-1 whitespace-nowrap text-[10px] text-slate-500">
+                    {new Date(c.semaine).toLocaleDateString('fr-FR', { day: '2-digit', month: '2-digit' })}
+                  </div>
+                </div>
+              ))}
+            </div>
+            <div className="mt-3 flex flex-wrap gap-x-3 gap-y-1.5 border-t border-[#EFEDE8] pt-3 text-[11px] text-slate-700">
+              {createurs.map((c) => (
+                <span key={c.cle} className="inline-flex items-center gap-1.5">
+                  <span className="inline-block h-2.5 w-2.5 rounded-sm" style={{ background: c.couleur }} />
+                  {c.nom}
+                  <span className="tabular-nums text-slate-400">{c.n}</span>
+                </span>
+              ))}
+            </div>
+          </>
+        ) : (
+          <p className="text-[13px] text-slate-500">Aucun ticket sur la période.</p>
+        )}
       </div>
     </section>
   )
