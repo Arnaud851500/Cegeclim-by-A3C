@@ -538,7 +538,8 @@ function FicheTicket({
   }
 
   const actif = !estResolu(ticket)
-  const n1 = collaborateurs.liste.filter((c) => c.niveau === 1)
+  // (13/11/2026) Seuls les N1 de l'environnement du ticket ou sans environnement.
+  const n1 = collaborateurs.liste.filter((c) => c.niveau === 1 && (!c.filiere || c.filiere === ticket.filiere))
   const bouton = 'rounded-lg px-3 py-2 text-[13px] font-semibold disabled:opacity-40'
 
   return (

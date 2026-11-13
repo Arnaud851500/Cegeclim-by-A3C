@@ -968,7 +968,9 @@ function HotlineConsole() {
   }
 
   const statut = ticket ? styleStatut(ticket.statut) : null
-  const collaborateursN1 = collaborateurs.liste.filter((c) => c.niveau === 1)
+  // (13/11/2026) Seuls les N1 de l'environnement du ticket (Thermie / Soleil) ou sans environnement.
+  const filiereCourante = ticket?.filiere || form.filiere
+  const collaborateursN1 = collaborateurs.liste.filter((c) => c.niveau === 1 && (!c.filiere || !filiereCourante || c.filiere === filiereCourante))
 
   return (
     <div className="min-h-screen bg-[#F4F3F0] pb-16">
