@@ -19,6 +19,10 @@
     {
       "path": "/api/hiparts/sync",
       "schedule": "*/5 * * * *"
+    },
+    {
+      "path": "/api/hotline/export-auto",
+      "schedule": "30 3 * * *"
     }
   ]
 }

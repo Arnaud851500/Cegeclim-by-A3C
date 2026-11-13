@@ -68,6 +68,7 @@ export default function ClassificationTicket({
   issueObligatoire,
   source,
   disabled,
+  mode = 'complet',
 }: {
   valeurs: ValeursClassif
   onChange: (v: ValeursClassif) => void
@@ -77,14 +78,19 @@ export default function ClassificationTicket({
   /** classif_source du ticket : signale une classification déduite de l'historique. */
   source?: string | null
   disabled?: boolean
+  /** (13/11/2026) 'detail' = symptôme, organe, actions ; 'issue' = issue seule ; 'complet' = tout. */
+  mode?: 'complet' | 'detail' | 'issue'
 }) {
   const patch = (p: Partial<ValeursClassif>) => onChange({ ...valeurs, ...p })
   const basculerAction = (code: string) =>
     patch({ actions: valeurs.actions.includes(code) ? valeurs.actions.filter((a) => a !== code) : [...valeurs.actions, code] })
   const manqueIssue = issueObligatoire && !valeurs.issue
+  const avecDetail = mode !== 'issue'
+  const avecIssue = mode !== 'detail'
 
   return (
     <div className="space-y-2 rounded-lg border border-[#EFEDE8] bg-[#FAF9F7] p-2.5">
+      {avecDetail ? (
       <div className="flex items-center justify-between text-[10px] font-bold uppercase tracking-[0.06em] text-slate-500">
         Classification
         {source === 'AUTO_2026_11' ? (
@@ -93,6 +99,9 @@ export default function ClassificationTicket({
           </span>
         ) : null}
       </div>
+      ) : null}
+      {avecDetail ? (
+      <>
       <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
         <label className="text-[11px] font-semibold text-slate-500">
           Symptôme principal
@@ -137,6 +146,9 @@ export default function ClassificationTicket({
           })}
         </div>
       </div>
+      </>
+      ) : null}
+      {avecIssue ? (
       <label className={`block text-[11px] font-semibold ${manqueIssue ? 'text-[#A32C2C]' : 'text-slate-500'}`}>
         Issue {issueObligatoire ? '(obligatoire pour résoudre)' : ''}
         <select
@@ -153,6 +165,7 @@ export default function ClassificationTicket({
           ))}
         </select>
       </label>
+      ) : null}
     </div>
   )
 }

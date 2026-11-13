@@ -18,7 +18,7 @@ import { supabase } from '@/lib/supabaseClient'
 export type Filiere = 'PV' | 'THERMIQUE'
 export type Motif = 'MISE_EN_SERVICE' | 'EXPLOITATION'
 /** (12/11/2026) Plus d'état « Clos » : un ticket résolu est clos. */
-export type Statut = 'OUVERT' | 'EN_COURS' | 'ESCALADE' | 'RESOLU'
+export type Statut = 'OUVERT' | 'EN_COURS' | 'ATTENTE_CLIENT' | 'ESCALADE' | 'RESOLU'
 export type TypeEtape =
   | 'OUVERTURE'
   | 'IDENTIFICATION'
@@ -75,11 +75,18 @@ export const MOTIFS: Array<{ value: Motif; label: string }> = [
   { value: 'EXPLOITATION', label: 'Problème en exploitation' },
 ]
 
-export const STATUTS: Record<Statut, { label: string; tone: string; bg: string }> = {
-  OUVERT: { label: 'Ouvert', tone: '#1E4E8C', bg: '#E6EEF9' },
-  EN_COURS: { label: 'En cours', tone: '#8A5A11', bg: '#FDF2DD' },
-  ESCALADE: { label: 'Escaladé', tone: '#A32C2C', bg: '#FCE9E6' },
-  RESOLU: { label: 'Résolu', tone: '#2F6B3A', bg: '#E5F2E7' },
+/**
+ * (13/11/2026, retours ergonomie) Code couleur repris de l'ancien outil, lisible
+ * par les malvoyants : rose = appel non pris, vert = pris / en cours,
+ * orange = en attente côté client, violet = escaladé, gris = résolu.
+ * `row` = fond de ligne dans la liste des tickets.
+ */
+export const STATUTS: Record<Statut, { label: string; tone: string; bg: string; row: string }> = {
+  OUVERT: { label: 'Non pris', tone: '#A3245E', bg: '#FBE4EF', row: '#FDF0F6' },
+  EN_COURS: { label: 'En cours', tone: '#2F6B3A', bg: '#DDF0E0', row: '#EEF8F0' },
+  ATTENTE_CLIENT: { label: 'Attente client', tone: '#9A4D06', bg: '#FDE6CC', row: '#FEF3E6' },
+  ESCALADE: { label: 'Escaladé', tone: '#5B3A9E', bg: '#ECE5F8', row: '#F5F1FC' },
+  RESOLU: { label: 'Résolu', tone: '#5F6670', bg: '#ECEEF1', row: '#FFFFFF' },
 }
 
 /** Statut d'un ticket lu en base ou dans un export ancien (« CLOS » = résolu). */
@@ -224,6 +231,11 @@ export type Ticket = {
   resolved_at: string | null
   closed_at: string | null
   updated_at: string
+  /** (13/11/2026) Présence : hotliner qui a le ticket ouvert dans la console (rafraîchi chaque minute). */
+  consulte_par?: string | null
+  consulte_le?: string | null
+  /** (13/11/2026) Ticket de test, numéroté TEST… et supprimable. */
+  est_test?: boolean
 }
 
 export type Etape = {
@@ -729,6 +741,93 @@ export async function rappelEffectue(ticketId: string, qui: string, commentaire?
 export async function noteRapide(ticketId: string, texte: string, modification = false) {
   if (!texte.trim()) return
   await ajouterEtape(ticketId, 'NOTE_RAPIDE', texte.trim(), { details: modification ? { modification: true } : null })
+}
+
+// ----------------------------------------------------------------------------
+// Retours d'ergonomie V1 (13/11/2026)
+// ----------------------------------------------------------------------------
+
+/** Le client doit revenir vers nous (relevé, photo, rappel…) : ligne orange. */
+export async function mettreEnAttenteClient(ticketId: string, precision?: string) {
+  await majTicket(ticketId, { statut: 'ATTENTE_CLIENT' })
+  await ajouterEtape(ticketId, 'COMMENTAIRE', `En attente du client${precision ? ` : ${precision}` : ''}`, { details: { attente_client: true } })
+}
+
+/** Journalisation rapide : appel tombé sur la messagerie (hotliner et heure enregistrés). */
+export async function messagerieTelephonique(ticket: Pick<Ticket, 'id' | 'statut'>) {
+  await ajouterEtape(ticket.id, 'COMMENTAIRE', '📞 Messagerie téléphonique : message laissé au client', { details: { messagerie: true } })
+  if (ticket.statut !== 'RESOLU' && ticket.statut !== 'ESCALADE') await majTicket(ticket.id, { statut: 'ATTENTE_CLIENT' })
+}
+
+/** Présence : le ticket est ouvert dans la console de `email` (null = libéré). Sans toucher updated_at. */
+export async function signalerConsultation(ticketId: string, email: string | null) {
+  await supabase
+    .from('hotline_tickets')
+    .update({ consulte_par: email, consulte_le: email ? new Date().toISOString() : null })
+    .eq('id', ticketId)
+}
+
+/** Ticket ouvert par un autre hotliner il y a moins de 3 minutes. */
+export function consulteParUnAutre(t: Pick<Ticket, 'consulte_par' | 'consulte_le'>, email: string | null | undefined) {
+  if (!t.consulte_par || !t.consulte_le) return false
+  if (email && t.consulte_par.toLowerCase() === email.toLowerCase()) return false
+  return Date.now() - new Date(t.consulte_le).getTime() < 3 * 60 * 1000
+}
+
+const CHAMPS_DUPLIQUES = [
+  'filiere', 'motif', 'gamme', 'telephone_appelant', 'ligne_appelee', 'numero_tiers', 'intitule_tiers', 'contact_nom', 'contact_email',
+  'chantier', 'numero_serie', 'reference_article', 'modele_ge', 'serie_ge', 'nature', 'code_defaut', 'date_mes', 'description', 'arbre_id',
+  'pv_marque', 'pv_equipement', 'onduleur_modele', 'onduleur_serie', 'batterie_modele', 'batterie_serie', 'severite', 'est_test',
+] as const
+
+/** Nouveau ticket reprenant les caractéristiques d'un ticket clos (le ticket clos reste verrouillé). */
+export async function dupliquerTicket(source: Ticket, email: string | null): Promise<Ticket> {
+  const copie: Record<string, unknown> = {}
+  for (const c of CHAMPS_DUPLIQUES) copie[c] = (source as Record<string, unknown>)[c] ?? null
+  if (copie.est_test === null) copie.est_test = false
+  const { data, error } = await supabase
+    .from('hotline_tickets')
+    .insert({ ...copie, source: 'MANUEL', statut: 'EN_COURS', niveau: 1, assigne_a: email })
+    .select('*')
+    .single()
+  if (error) throw error
+  const t = data as Ticket
+  await ajouterEtape(t.id, 'OUVERTURE', `Ticket ${t.numero} ouvert · Repris du ticket clos ${source.numero}`, { details: { repris_de: source.id, repris_de_numero: source.numero } })
+  await noteRapide(t.id, `Repris du ticket clos ${source.numero}${source.description ? `\n${source.description}` : ''}`)
+  return t
+}
+
+/** Paramètres hotline (console d'administration). */
+export type ParametresHotline = {
+  cloture_auto_jours: number | null
+  export_auto_jours: number | null
+  diagnostic_guide_actif: boolean
+  classification_detaillee_active: boolean
+}
+export const PARAMETRES_DEFAUT: ParametresHotline = {
+  cloture_auto_jours: null,
+  export_auto_jours: null,
+  diagnostic_guide_actif: false,
+  classification_detaillee_active: false,
+}
+
+export async function chargerParametres(): Promise<ParametresHotline> {
+  const { data, error } = await supabase.from('hotline_parametres').select('cle, valeur')
+  if (error) throw error
+  const p: Record<string, unknown> = { ...PARAMETRES_DEFAUT }
+  for (const r of (data || []) as Array<{ cle: string; valeur: unknown }>) p[r.cle] = r.valeur
+  return p as ParametresHotline
+}
+
+export async function majParametre<K extends keyof ParametresHotline>(cle: K, valeur: ParametresHotline[K]) {
+  const { error } = await supabase.from('hotline_parametres').update({ valeur, updated_at: new Date().toISOString() }).eq('cle', cle)
+  if (error) throw error
+}
+
+export async function supprimerTicketsTest(): Promise<number> {
+  const { data, error } = await supabase.rpc('hotline_supprimer_tickets_test')
+  if (error) throw error
+  return Number(data) || 0
 }
 
 /** Commentaire visible de l'appelant (fiche PDF) ou purement interne. */

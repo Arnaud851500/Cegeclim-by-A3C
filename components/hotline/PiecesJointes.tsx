@@ -24,7 +24,7 @@ import {
   type PieceJointe,
 } from '@/lib/hotline'
 
-export default function PiecesJointes({ ticketId, onChange }: { ticketId: string; onChange?: () => void }) {
+export default function PiecesJointes({ ticketId, onChange, lectureSeule = false }: { ticketId: string; onChange?: () => void; lectureSeule?: boolean }) {
   const { email, rights } = useAccess()
   const expert = Boolean(rights.can_hotline_expert || rights.can_autorisation)
   const [pieces, setPieces] = useState<PieceJointe[]>([])
@@ -82,6 +82,7 @@ export default function PiecesJointes({ ticketId, onChange }: { ticketId: string
   // (le collage de texte dans les champs n'est pas touché).
   useEffect(() => {
     function coller(e: ClipboardEvent) {
+      if (lectureSeule) return
       const fichiers = Array.from(e.clipboardData?.files || [])
       if (!fichiers.length) return
       e.preventDefault()
@@ -93,7 +94,7 @@ export default function PiecesJointes({ ticketId, onChange }: { ticketId: string
     }
     window.addEventListener('paste', coller)
     return () => window.removeEventListener('paste', coller)
-  }, [deposer])
+  }, [deposer, lectureSeule])
 
   async function retirer(p: PieceJointe) {
     if (!window.confirm(`Retirer « ${p.mail_objet || p.nom} » du ticket ?`)) return
@@ -108,6 +109,9 @@ export default function PiecesJointes({ ticketId, onChange }: { ticketId: string
 
   return (
     <div className="space-y-2">
+      {lectureSeule ? (
+        !pieces.length ? <p className="text-[12px] text-slate-500">Aucune pièce jointe.</p> : null
+      ) : (
       <div
         onDragOver={(e) => {
           e.preventDefault()
@@ -154,6 +158,7 @@ export default function PiecesJointes({ ticketId, onChange }: { ticketId: string
           }}
         />
       </div>
+      )}
 
       {erreur ? (
         <div className="flex items-start justify-between gap-2 rounded-lg border border-[#F0C5BE] bg-[#FCEFEC] px-3 py-2 text-[12px] text-[#7F1D1D]">
@@ -170,7 +175,7 @@ export default function PiecesJointes({ ticketId, onChange }: { ticketId: string
             const lien = liens[p.chemin]
             const image = estImage(p.nom, p.type_mime)
             const mail = estMail(p.nom, p.type_mime)
-            const peutRetirer = expert || p.ajoute_par === email
+            const peutRetirer = !lectureSeule && (expert || p.ajoute_par === email)
             return (
               <div key={p.id} className="flex items-center gap-2 rounded-lg border border-[#E2DFD8] bg-white p-2 text-[12px]">
                 {image && lien ? (

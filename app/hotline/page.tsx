@@ -52,6 +52,7 @@ import VueHiParts from '@/components/hotline/VueHiParts'
 import HistoriqueTicket from '@/components/hotline/HistoriqueTicket'
 import FenetreNiveau from '@/components/hotline/FenetreNiveau'
 import ChampSerie from '@/components/hotline/ChampSerie'
+import ZoneTexte from '@/components/hotline/ZoneTexte'
 import { telechargerFicheTicket } from '@/lib/hotlineFiche'
 import ClassificationTicket, { CLASSIF_FORM_VIDE, patchClassif, useClassification, valeursDepuisTicket, type ValeursClassif } from '@/components/hotline/ClassificationTicket'
 import {
@@ -115,6 +116,13 @@ import {
   resoudre,
   issueRequise,
   telCle,
+  chargerParametres,
+  PARAMETRES_DEFAUT,
+  signalerConsultation,
+  messagerieTelephonique,
+  mettreEnAttenteClient,
+  dupliquerTicket,
+  type ParametresHotline,
   type Appelant,
   type Arbre,
   type Choix,
@@ -298,6 +306,28 @@ function HotlineConsole() {
   // Ticket de l'historique affiché en fenêtre flottante (04/11/2026).
   const [ticketHisto, setTicketHisto] = useState<string | null>(null)
   const fermerTicketHisto = useCallback(() => setTicketHisto(null), [])
+  // (13/11/2026) Paramètres hotline : diagnostic guidé et classification détaillée masqués en V1.
+  const [parametres, setParametres] = useState<ParametresHotline>(PARAMETRES_DEFAUT)
+  useEffect(() => {
+    chargerParametres().then(setParametres).catch(() => undefined)
+  }, [])
+  // Ticket de test (numéroté TEST…), choisi avant l'ouverture.
+  const [estTest, setEstTest] = useState(false)
+  // Présence : le ticket ouvert ici est signalé aux autres hotliners (n° en rouge dans leur liste).
+  const ticketIdPresence = ticket && !estResolu(ticket) ? ticket.id : null
+  useEffect(() => {
+    if (!ticketIdPresence || !email) return
+    const id = ticketIdPresence
+    void signalerConsultation(id, email)
+    const h = window.setInterval(() => void signalerConsultation(id, email), 60_000)
+    const liberer = () => void signalerConsultation(id, null)
+    window.addEventListener('pagehide', liberer)
+    return () => {
+      window.clearInterval(h)
+      window.removeEventListener('pagehide', liberer)
+      liberer()
+    }
+  }, [ticketIdPresence, email])
 
   const patch = (p: Partial<Formulaire>) => setForm((f) => ({ ...f, ...p }))
 
@@ -445,13 +475,19 @@ function HotlineConsole() {
           aRejouer.current = null
           setArbreId('')
         }
-        // Reprise = prise en charge par la personne qui rouvre la console.
-        // Un ticket résolu ou clos rouvert depuis la liste repart « en cours ».
-        const statut = 'EN_COURS' as const
+        // (13/11/2026) Un ticket résolu est verrouillé : consultation seule,
+        // « Dupliquer » pour reprendre le dossier.
+        if (estResolu(t)) {
+          setTicket(t)
+          setEtapes(liste)
+          return
+        }
+        // Reprise = prise en charge par la personne qui ouvre la console
+        // (« en attente client » reste en attente jusqu'à la prochaine action).
+        const statut = t.statut === 'ATTENTE_CLIENT' ? t.statut : ('EN_COURS' as const)
         const qui = String(email || '').split('@')[0]
         await majTicket(t.id, { assigne_a: email || t.assigne_a, statut })
-        if (estResolu(t)) await ajouterEtape(t.id, 'REOUVERTURE', `Ticket rouvert dans la console par ${qui} (niveau ${t.niveau})`)
-        else await ajouterEtape(t.id, 'COMMENTAIRE', `Repris dans la console par ${qui} (niveau ${t.niveau})`)
+        await ajouterEtape(t.id, 'COMMENTAIRE', `Repris dans la console par ${qui} (niveau ${t.niveau})`)
         setTicket({ ...t, assigne_a: email || t.assigne_a, statut })
         setEtapes(await chargerEtapes(t.id))
       } catch (e) {
@@ -684,6 +720,7 @@ function HotlineConsole() {
           rappel_demande_le: form.rappel_par ? new Date().toISOString() : null,
           rappel_demande_par: form.rappel_par ? email || null : null,
           ...patchSoleil(form),
+          est_test: estTest,
         })
         .select('*')
         .single()
@@ -691,7 +728,7 @@ function HotlineConsole() {
       const t = data as Ticket
       const soleil = t.filiere === 'PV' && t.pv_marque ? ` · ${marqueSoleil(t.pv_marque)?.label}${t.pv_equipement ? ` › ${libelleEquipementSoleil(t.pv_marque, t.pv_equipement)}` : ''}` : ''
       const sev = t.severite ? ` · ${SEVERITES.find((x) => x.value === t.severite)?.label}` : ''
-      await ajouterEtape(t.id, 'OUVERTURE', `Ticket ${t.numero} ouvert · ${libelleFiliere(t.filiere)}${t.gamme ? ` ${libelleGamme(t.gamme)}` : ''} · ${libelleMotif(t.motif)}${soleil}${sev}`, {
+      await ajouterEtape(t.id, 'OUVERTURE', `${t.est_test ? 'TICKET TEST · ' : ''}Ticket ${t.numero} ouvert · ${libelleFiliere(t.filiere)}${t.gamme ? ` ${libelleGamme(t.gamme)}` : ''} · ${libelleMotif(t.motif)}${soleil}${sev}`, {
         details: { telephone: telephone || null, ligne: ligneAppelee || null },
       })
       if (form.numero_tiers) {
@@ -819,6 +856,10 @@ function HotlineConsole() {
       // Les commentaires en cours de saisie sont enregistrés avant l'action.
       if (commentaire.trim()) await ajouterEtape(ticket.id, 'COMMENTAIRE', commentaire.trim())
       if (commentaireInterne.trim()) await ajouterEtape(ticket.id, 'COMMENTAIRE_INTERNE', commentaireInterne.trim())
+      if (nom === 'commentaire' && classifModifiee) {
+        await majTicket(ticket.id, patchClassif(classifForm))
+        await ajouterEtape(ticket.id, 'COMMENTAIRE', 'Issue / classification mise à jour')
+      }
       if (nom === 'commentaire' && ticket.filiere === 'PV' && repriseSaisie) {
         const pourEmail = reprise.pour || email || ''
         await planifierReprise(
@@ -834,6 +875,30 @@ function HotlineConsole() {
         await resoudre(ticket.id, fin?.preconisation || commentaire.trim() || '')
         patch({ rappel_par: '' })
       }
+      setCommentaire('')
+      setCommentaireInterne('')
+      await rafraichirEtapes(ticket.id)
+    } catch (e) {
+      setErreur(messageErreur(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  // (13/11/2026) Actions rapides : messagerie téléphonique, attente client, duplication.
+  async function actionRapide(nom: 'messagerie' | 'attente' | 'dupliquer') {
+    if (!ticket) return
+    setBusy(true)
+    try {
+      if (nom === 'dupliquer') {
+        const t = await dupliquerTicket(ticket, email || null)
+        window.location.assign(`/hotline?ticket=${t.id}`)
+        return
+      }
+      if (commentaire.trim()) await ajouterEtape(ticket.id, 'COMMENTAIRE', commentaire.trim())
+      if (commentaireInterne.trim()) await ajouterEtape(ticket.id, 'COMMENTAIRE_INTERNE', commentaireInterne.trim())
+      if (nom === 'messagerie') await messagerieTelephonique(ticket)
+      else await mettreEnAttenteClient(ticket.id)
       setCommentaire('')
       setCommentaireInterne('')
       await rafraichirEtapes(ticket.id)
@@ -963,11 +1028,17 @@ function HotlineConsole() {
     setFenetreNiveau(null)
     setErreur(null)
     setVueOuverte(null)
+    setEstTest(false)
     dernierRepris.current = ''
     window.history.replaceState(null, '', '/hotline')
   }
 
   const statut = ticket ? styleStatut(ticket.statut) : null
+  const verrouille = Boolean(ticket && estResolu(ticket))
+  // « Sauvegarder état » actif dès qu'on tape un commentaire (ou qu'on change l'issue / la reprise).
+  const classifModifiee = Boolean(ticket && ticket.filiere === 'THERMIQUE' && JSON.stringify(patchClassif(classifForm)) !== JSON.stringify(patchClassif(valeursDepuisTicket(ticket))))
+  const etatModifie = Boolean(commentaire.trim() || commentaireInterne.trim() || classifModifiee || (ticket?.filiere === 'PV' && repriseSaisie))
+  const diagnosticActif = parametres.diagnostic_guide_actif
   // (13/11/2026) Seuls les N1 de l'environnement du ticket (Thermie / Soleil) ou sans environnement.
   const filiereCourante = ticket?.filiere || form.filiere
   const collaborateursN1 = collaborateurs.liste.filter((c) => c.niveau === 1 && (!c.filiere || !filiereCourante || c.filiere === filiereCourante))
@@ -988,6 +1059,7 @@ function HotlineConsole() {
             {ticket ? (
               <span className="flex items-center gap-2 rounded-lg border border-[color:var(--cg-hdr-line)] px-3 py-1.5 text-sm font-semibold text-[color:var(--cg-hdr-ink)]">
                 {ticket.numero} · N{ticket.niveau} {statut ? <Pastille {...statut} /> : null}
+                {ticket.est_test ? <span className="rounded bg-[#5F6670] px-1.5 py-px text-[10px] font-bold text-white">TEST</span> : null}
                 <span className="text-[12px] font-normal text-[color:var(--cg-hdr-muted)]">créé le {fmtDateHeure(ticket.opened_at)}</span>
               </span>
             ) : null}
@@ -1212,10 +1284,10 @@ function HotlineConsole() {
               )}
               <label className="block text-[11px] font-semibold text-slate-500">
                 Motif de l’appel
-                <textarea
+                <ZoneTexte
                   value={form.description}
                   onChange={(e) => patch({ description: e.target.value })}
-                  rows={3}
+                  minRows={3}
                   className="w-full rounded-lg border border-[#D8D3C8] bg-white px-2.5 py-2 text-[13px] text-slate-900 outline-none focus:border-[#B4761A]"
                 />
                 <span className="font-normal text-slate-400">Repris en tête des commentaires (« Note rapide ») et dans la liste des tickets.</span>
@@ -1246,7 +1318,7 @@ function HotlineConsole() {
                   onChange={(e) => patch({ rappel_par: e.target.value })}
                   className={`${champ} ${form.rappel_par ? 'border-[#7A5EA8] font-semibold text-[#5B3F8C]' : ''}`}
                 >
-                  <option value="">— Pas de rappel —</option>
+                  <option value="">— sans préférence —</option>
                   {collaborateursN1.map((c) => (
                     <option key={c.email} value={c.email}>
                       {c.nom}
@@ -1290,7 +1362,7 @@ function HotlineConsole() {
                 </>
               )}
 
-              {ticket ? (
+              {verrouille ? null : ticket ? (
                 <button
                   type="button"
                   onClick={enregistrerInfos}
@@ -1300,6 +1372,11 @@ function HotlineConsole() {
                   Mettre à jour le ticket
                 </button>
               ) : (
+                <>
+                <label className="flex items-center gap-2 text-[12px] text-slate-600" title="Ticket fictif (formation, essai) : numéroté TEST…, exclu des statistiques et supprimable">
+                  <input type="checkbox" checked={estTest} onChange={(e) => setEstTest(e.target.checked)} className="h-3.5 w-3.5 accent-[#5F6670]" />
+                  Ticket de test (numéro TEST…)
+                </label>
                 <button
                   type="button"
                   onClick={ouvrirTicket}
@@ -1308,6 +1385,7 @@ function HotlineConsole() {
                 >
                   Ouvrir le ticket
                 </button>
+                </>
               )}
             </div>
 
@@ -1316,8 +1394,8 @@ function HotlineConsole() {
           {/* ── Diagnostic guidé ─────────────────────────────────────── */}
           <section className={`${carte} xl:col-span-5`}>
             <div className={`${titreCarte} flex flex-wrap items-center justify-between gap-2`}>
-              <span>Diagnostic guidé</span>
-              {arbresPossibles.length > 1 ? (
+              <span>{diagnosticActif ? 'Diagnostic guidé' : 'Ticket'}</span>
+              {!diagnosticActif ? null : arbresPossibles.length > 1 ? (
                 <select value={arbreId} onChange={(e) => setArbreId(e.target.value)} className="h-8 rounded-lg border border-[#D8D3C8] px-2 text-[12px] font-normal">
                   <option value="">Choisir le parcours…</option>
                   {arbresPossibles.map((a) => (
@@ -1333,6 +1411,16 @@ function HotlineConsole() {
               ) : null}
             </div>
             <div className="p-5">
+              {ticket && verrouille ? (
+                <div className="mb-5 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-[#D5D9DE] bg-[#F3F4F6] px-4 py-3 text-[13px] text-slate-700">
+                  <span>
+                    🔒 <span className="font-semibold">Ticket résolu : verrouillé</span> (consultation seule). Pour reprendre le dossier, dupliquer le ticket.
+                  </span>
+                  <button type="button" disabled={busy} onClick={() => void actionRapide('dupliquer')} className="rounded-lg bg-[#0B1220] px-3 py-2 text-[13px] font-bold text-white disabled:opacity-40">
+                    ⧉ Dupliquer le ticket
+                  </button>
+                </div>
+              ) : null}
               {ticket ? (
                 <div className="mb-5 rounded-xl border border-[#E2DFD8] bg-[#FAF9F7]">
                   <div className="flex items-center justify-between gap-2 border-b border-[#EFEDE8] px-4 py-2 text-[12px] font-bold uppercase tracking-[0.05em] text-slate-500">
@@ -1346,11 +1434,22 @@ function HotlineConsole() {
                       Fiche ticket PDF
                     </button>
                   </div>
+                  {ticket.est_test ? (
+                    <div className="border-b border-[#EFEDE8] bg-[#ECEEF1] px-4 py-1.5 text-[12px] font-bold tracking-[0.04em] text-[#3F4650]">🧪 TICKET TEST — exclu des statistiques, supprimable</div>
+                  ) : null}
                   <div className="px-3 py-3">
                     <HistoriqueTicket ticket={ticket} etapes={etapes} hauteurMax={420} />
                   </div>
                 </div>
               ) : null}
+              <div className="mb-5">
+                <div className="mb-2 text-[12px] font-bold uppercase tracking-[0.05em] text-slate-500">Pièces jointes</div>
+                {ticket ? (
+                  <PiecesJointes ticketId={ticket.id} onChange={() => void rafraichirEtapes(ticket.id)} lectureSeule={verrouille} />
+                ) : (
+                  <p className="text-[12px] text-slate-500">Ouvrir le ticket pour y joindre photos, mails et fichiers.</p>
+                )}
+              </div>
               {form.filiere === 'PV' ? (
                 <div className="mb-5 rounded-xl border border-[#E2DFD8] bg-white p-4">
                   <div className="text-[11px] font-bold uppercase tracking-[0.06em] text-slate-500">Niveau 2 · marque de l’onduleur</div>
@@ -1401,6 +1500,8 @@ function HotlineConsole() {
                   )}
                 </div>
               ) : null}
+              {diagnosticActif ? (
+                <div className="mb-5">
               {!form.filiere ? (
                 <p className="text-[13px] text-slate-500">Choisir la filière pour afficher le parcours de diagnostic.</p>
               ) : form.filiere === 'THERMIQUE' && !form.gamme && !arbreId ? (
@@ -1482,45 +1583,27 @@ function HotlineConsole() {
                 </div>
               )}
 
-              {ticket ? (
-                <div className="mt-6 space-y-2 border-t border-[#EFEDE8] pt-4">
-                  {ticket.filiere === 'THERMIQUE' ? (
-                    <div className="space-y-1.5">
-                      <ClassificationTicket
-                        valeurs={classifForm}
-                        onChange={setClassifForm}
-                        classif={classif}
-                        issueObligatoire={issueRequise(ticket)}
-                        source={ticket.classif_source}
-                        disabled={busy}
-                      />
-                      <button
-                        type="button"
-                        onClick={async () => {
-                          setBusy(true)
-                          try {
-                            await majTicket(ticket.id, patchClassif(classifForm))
-                            await ajouterEtape(ticket.id, 'COMMENTAIRE', 'Classification mise à jour')
-                            await rafraichirEtapes(ticket.id)
-                          } catch (e) {
-                            setErreur(messageErreur(e))
-                          } finally {
-                            setBusy(false)
-                          }
-                        }}
-                        disabled={busy}
-                        className="text-[12px] font-semibold text-[#1E4E8C] underline disabled:opacity-40"
-                      >
-                        Enregistrer la classification
-                      </button>
-                    </div>
+                </div>
+              ) : !form.filiere ? (
+                <p className="mb-4 text-[13px] text-slate-500">Choisir la filière (Thermie ou Soleil) à gauche.</p>
+              ) : null}
+              {ticket && !verrouille ? (
+                <div className="mt-2 space-y-3 border-t border-[#EFEDE8] pt-4">
+                  {ticket.filiere === 'THERMIQUE' && parametres.classification_detaillee_active ? (
+                    <ClassificationTicket
+                      valeurs={classifForm}
+                      onChange={setClassifForm}
+                      classif={classif}
+                      source={ticket.classif_source}
+                      disabled={busy}
+                      mode="detail"
+                    />
                   ) : null}
                   <label className="block text-[11px] font-semibold text-slate-500">
                     Commentaire
-                    <textarea
+                    <ZoneTexte
                       value={commentaire}
                       onChange={(e) => setCommentaire(e.target.value)}
-                      rows={2}
                       placeholder="Commentaire, code défaut relevé, solution apportée… (repris dans la fiche ticket)"
                       className="w-full rounded-lg border border-[#D8D3C8] bg-white px-2.5 py-2 text-[13px] font-normal text-slate-900 outline-none focus:border-[#B4761A]"
                     />
@@ -1535,52 +1618,63 @@ function HotlineConsole() {
                       planifiee={reprisePlanifiee}
                     />
                   ) : (
-                  <label className="block text-[11px] font-semibold text-[#8A5A11]">
-                    Commentaire interne <span className="font-normal text-slate-400">— jamais repris dans la fiche ticket PDF</span>
-                    <textarea
-                      value={commentaireInterne}
-                      onChange={(e) => setCommentaireInterne(e.target.value)}
-                      rows={2}
-                      placeholder="Information purement interne (client, contexte commercial, consigne…)"
-                      className="w-full rounded-lg border border-[#EBD8AE] bg-[#FFFCF5] px-2.5 py-2 text-[13px] font-normal text-slate-900 outline-none focus:border-[#B4761A]"
-                    />
-                  </label>
+                    <label className="block text-[11px] font-semibold text-[#8A5A11]">
+                      Commentaire interne <span className="font-normal text-slate-400">— jamais repris dans la fiche ticket PDF</span>
+                      <ZoneTexte
+                        value={commentaireInterne}
+                        onChange={(e) => setCommentaireInterne(e.target.value)}
+                        placeholder="Information purement interne (client, contexte commercial, consigne…)"
+                        className="w-full rounded-lg border border-[#EBD8AE] bg-[#FFFCF5] px-2.5 py-2 text-[13px] font-normal text-slate-900 outline-none focus:border-[#B4761A]"
+                      />
+                    </label>
                   )}
+                  <button
+                    type="button"
+                    onClick={() => action('commentaire')}
+                    disabled={busy || !etatModifie}
+                    title="Enregistre le commentaire, le commentaire interne et l’issue dans l’historique du ticket"
+                    className="h-10 w-full rounded-lg bg-[#0B1220] text-[14px] font-bold text-white hover:bg-[#1C2A44] disabled:bg-[#D8D3C8] disabled:text-slate-500"
+                  >
+                    💾 Sauvegarder état
+                  </button>
                   <div className="flex flex-wrap gap-2">
-                    <button
-                      type="button"
-                      onClick={() => action('commentaire')}
-                      disabled={busy || (!commentaire.trim() && !commentaireInterne.trim() && !(ticket.filiere === 'PV' && repriseSaisie))}
-                      className="rounded-lg border border-[#D8D3C8] px-3 py-2 text-[13px] font-semibold text-slate-700 disabled:opacity-40"
-                    >
-                      {ticket.filiere === 'PV' ? 'Enregistrer (commentaire + reprise)' : 'Ajouter le commentaire'}
-                    </button>
-                    <button type="button" onClick={() => setFenetreNiveau('escalade')} disabled={busy || ticket.niveau >= 3 || estResolu(ticket)} className="rounded-lg bg-[#C1683C] px-3 py-2 text-[13px] font-semibold text-white disabled:opacity-40">
+                    <button type="button" onClick={() => setFenetreNiveau('escalade')} disabled={busy || ticket.niveau >= 3} className="rounded-lg bg-[#C1683C] px-3 py-2 text-[13px] font-semibold text-white disabled:opacity-40">
                       Escalader au niveau {Math.min(3, ticket.niveau + 1)}
                     </button>
                     {ticket.niveau >= 2 ? (
-                      <button type="button" onClick={() => setFenetreNiveau('redescente')} disabled={busy || estResolu(ticket)} className="rounded-lg bg-[#1E4E8C] px-3 py-2 text-[13px] font-semibold text-white disabled:opacity-40">
+                      <button type="button" onClick={() => setFenetreNiveau('redescente')} disabled={busy} className="rounded-lg bg-[#1E4E8C] px-3 py-2 text-[13px] font-semibold text-white disabled:opacity-40">
                         Redescendre au niveau {ticket.niveau - 1}
                       </button>
                     ) : null}
-                    <button type="button" onClick={() => action('resoudre')} disabled={busy || estResolu(ticket) || (issueRequise(ticket) && !classifForm.issue)} title={issueRequise(ticket) && !classifForm.issue ? 'Choisir d’abord l’issue dans le bloc Classification' : 'Un ticket résolu est clos'} className="rounded-lg bg-[#2F6B3A] px-3 py-2 text-[13px] font-semibold text-white disabled:opacity-40">
+                    <button type="button" onClick={() => action('resoudre')} disabled={busy || (issueRequise(ticket) && !classifForm.issue)} title={issueRequise(ticket) && !classifForm.issue ? 'Choisir d’abord l’issue ci-dessous' : 'Un ticket résolu est clos et verrouillé'} className="rounded-lg bg-[#2F6B3A] px-3 py-2 text-[13px] font-semibold text-white disabled:opacity-40">
                       Marquer résolu
                     </button>
-                    <Link href={`/hotline/tickets?id=${ticket.id}`} className="ml-auto self-center text-[12px] font-semibold text-slate-500 underline">
+                    <button type="button" onClick={() => void actionRapide('messagerie')} disabled={busy} title="Note dans l’historique (hotliner et heure) que l’appel est tombé sur la messagerie ; le ticket passe en attente client" className="rounded-lg border border-[#E8A35C] bg-[#FEF3E6] px-3 py-2 text-[13px] font-semibold text-[#9A4D06] disabled:opacity-40">
+                      📞 Messagerie téléphonique
+                    </button>
+                    {ticket.statut !== 'ATTENTE_CLIENT' ? (
+                      <button type="button" onClick={() => void actionRapide('attente')} disabled={busy} title="Le client doit revenir vers nous (relevé, photo, information…)" className="rounded-lg border border-[#E8A35C] px-3 py-2 text-[13px] font-semibold text-[#9A4D06] disabled:opacity-40">
+                        ⏳ En attente client
+                      </button>
+                    ) : null}
+                  </div>
+                  {ticket.filiere === 'THERMIQUE' ? (
+                    <ClassificationTicket
+                      valeurs={classifForm}
+                      onChange={setClassifForm}
+                      classif={classif}
+                      issueObligatoire={issueRequise(ticket)}
+                      disabled={busy}
+                      mode="issue"
+                    />
+                  ) : null}
+                  <div className="text-right">
+                    <Link href={`/hotline/tickets?id=${ticket.id}`} className="text-[12px] font-semibold text-slate-500 underline">
                       Ouvrir dans la liste des tickets
                     </Link>
                   </div>
                 </div>
               ) : null}
-
-              <div className="mt-6 border-t border-[#EFEDE8] pt-4">
-                <div className="mb-2 text-[12px] font-bold uppercase tracking-[0.05em] text-slate-500">Pièces jointes</div>
-                {ticket ? (
-                  <PiecesJointes ticketId={ticket.id} onChange={() => void rafraichirEtapes(ticket.id)} />
-                ) : (
-                  <p className="text-[12px] text-slate-500">Ouvrir le ticket pour y joindre photos, mails et fichiers.</p>
-                )}
-              </div>
             </div>
           </section>
 
@@ -1604,6 +1698,7 @@ function HotlineConsole() {
               afficherClient
               afficherChantier
               onOuvrir={setTicketHisto}
+              societe={{ numero_tiers: form.numero_tiers, intitule: form.intitule_tiers }}
             />
             <div className={carte}>
               <div className={titreCarte}>Documents à envoyer</div>
@@ -1779,6 +1874,7 @@ function PaveHistorique({
   afficherClient,
   afficherChantier,
   onOuvrir,
+  societe,
 }: {
   titre: string
   precision?: string
@@ -1788,7 +1884,17 @@ function PaveHistorique({
   afficherClient?: boolean
   afficherChantier?: boolean
   onOuvrir: (id: string) => void
+  /** (13/11/2026) Société de l'appel en cours : un ticket d'une autre société s'affiche en rouge. */
+  societe?: { numero_tiers: string; intitule: string }
 }) {
+  const norm = (v: string | null | undefined) => String(v || '').trim().toUpperCase()
+  const autreSociete = (t: TicketHistorique) => {
+    if (!societe) return false
+    if (norm(societe.numero_tiers) && norm(t.numero_tiers)) return norm(societe.numero_tiers) !== norm(t.numero_tiers)
+    if (norm(societe.intitule) && norm(t.intitule_tiers)) return norm(societe.intitule) !== norm(t.intitule_tiers)
+    return false
+  }
+  const nbAutres = tickets.filter(autreSociete).length
   return (
     <div className={carte}>
       <div className={`${titreCarte} flex items-center justify-between gap-2`}>
@@ -1799,6 +1905,11 @@ function PaveHistorique({
         <span className="shrink-0 text-[11px] font-normal text-slate-400">{chargement ? 'mise à jour…' : tickets.length ? `${tickets.length} appel${tickets.length > 1 ? 's' : ''}` : ''}</span>
       </div>
       <div className="p-4">
+        {nbAutres ? (
+          <div className="mb-2 rounded-lg border border-[#F0C5BE] bg-[#FCEFEC] px-3 py-1.5 text-[12px] font-semibold text-[#C81E1E]">
+            ⚠ {nbAutres} appel{nbAutres > 1 ? 's' : ''} sur cette machine par une autre société que l’appelant
+          </div>
+        ) : null}
         {tickets.length ? (
           <ListeRepliable
             items={trierTickets(tickets)}
@@ -1812,7 +1923,7 @@ function PaveHistorique({
               className="block w-full rounded-lg border border-[#E2DFD8] px-3 py-2 text-left text-[12px] hover:border-[#B4761A] hover:bg-[#FDF7EA]"
             >
               <div className="flex items-center justify-between gap-2">
-                <span className="font-semibold text-slate-900">
+                <span className={autreSociete(t) ? 'font-extrabold text-[#C81E1E]' : 'font-semibold text-slate-900'} title={autreSociete(t) ? 'Appel d’une autre société que l’appelant actuel' : undefined}>
                   {t.numero} · {fmtDateHeure(t.opened_at)}
                 </span>
                 <Pastille {...styleStatut(t.statut)} />

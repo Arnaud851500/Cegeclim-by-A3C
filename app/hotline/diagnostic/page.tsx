@@ -22,6 +22,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { supabase } from '@/lib/supabaseClient'
 import { useAccess } from '@/components/AccessContext'
 import HotlineHeader, { HotlineErreur } from '@/components/hotline/HotlineHeader'
+import ParametresHotlineAdmin from '@/components/hotline/ParametresHotlineAdmin'
 import DocumentsSoleilAdmin from '@/components/hotline/DocumentsSoleilAdmin'
 import { exporterParcoursExcel, importerParcours, lireExcelParcours, type BilanImport, type ParcoursImport } from '@/lib/hotlineExcel'
 import {
@@ -60,7 +61,7 @@ export default function HotlineDiagnosticPage() {
   const [erreur, setErreur] = useState<string | null>(null)
   const [info, setInfo] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
-  const [onglet, setOnglet] = useState<'parcours' | 'soleil'>('parcours')
+  const [onglet, setOnglet] = useState<'parcours' | 'soleil' | 'parametres'>('parcours')
   const [importEnCours, setImportEnCours] = useState<{ fichier: string; parcours: ParcoursImport[]; bilan: BilanImport | null; erreurs: string[] } | null>(null)
   const [nouveau, setNouveau] = useState<{ filiere: Filiere; motif: Motif; gamme: Gamme | ''; nom: string; famille: string }>({
     filiere: 'THERMIQUE',
@@ -342,6 +343,7 @@ export default function HotlineDiagnosticPage() {
         {[
           { cle: 'parcours' as const, label: 'Parcours de diagnostic' },
           { cle: 'soleil' as const, label: '☀️ Documents Soleil' },
+          { cle: 'parametres' as const, label: '⚙️ Paramètres' },
         ].map((o) => (
           <button
             key={o.cle}
@@ -354,7 +356,19 @@ export default function HotlineDiagnosticPage() {
         ))}
       </div>
 
-      {onglet === 'soleil' ? (
+      {onglet === 'parametres' ? (
+        <main className="mx-auto w-full max-w-[1100px] px-4 py-5 md:px-8">
+          {erreur ? <HotlineErreur message={erreur} onClose={() => setErreur(null)} /> : null}
+          {info ? <div className="mb-2 rounded-xl border border-[#CDE5D1] bg-[#EEF7EF] px-4 py-2 text-[13px] text-[#2F6B3A]">{info}</div> : null}
+          <ParametresHotlineAdmin
+            onErreur={setErreur}
+            onInfo={(m) => {
+              setInfo(m)
+              window.setTimeout(() => setInfo(null), 2500)
+            }}
+          />
+        </main>
+      ) : onglet === 'soleil' ? (
         <main className="mx-auto w-full max-w-[1100px] px-4 py-5 md:px-8">
           {erreur ? <HotlineErreur message={erreur} onClose={() => setErreur(null)} /> : null}
           {info ? <div className="mb-2 rounded-xl border border-[#CDE5D1] bg-[#EEF7EF] px-4 py-2 text-[13px] text-[#2F6B3A]">{info}</div> : null}

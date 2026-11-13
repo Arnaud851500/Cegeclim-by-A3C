@@ -13,6 +13,11 @@
  * de l'appel » (note rapide), rappels confiés à un N1 (filtre « Mes rappels »,
  * ?rappels=1), escalade vers un collaborateur N2 choisi, retour au niveau
  * inférieur, commentaire interne, historique complet et fiche ticket PDF.
+ * Retours d'ergonomie du 13/11/2026 : colonne Statut en premier, en-têtes
+ * triables, lignes colorées par statut (rose non pris, vert en cours, orange
+ * attente client, violet escaladé), n° en rouge gras quand un autre hotliner a
+ * le ticket ouvert, « Messagerie téléphonique », « En attente client »,
+ * ticket résolu verrouillé + « Dupliquer », export CSV, tickets de test.
  */
 
 import { Suspense, useCallback, useEffect, useMemo, useState } from 'react'
@@ -24,7 +29,9 @@ import HotlineHeader, { HotlineErreur, Pastille } from '@/components/hotline/Hot
 import PiecesJointes from '@/components/hotline/PiecesJointes'
 import HistoriqueTicket from '@/components/hotline/HistoriqueTicket'
 import FenetreNiveau from '@/components/hotline/FenetreNiveau'
+import ZoneTexte from '@/components/hotline/ZoneTexte'
 import { telechargerFicheTicket } from '@/lib/hotlineFiche'
+import { construireCsv, nomFichierExport, regrouperCommentaires } from '@/lib/hotlineCsv'
 import FiltresClassification, { FILTRE_CLASSIF_VIDE, type FiltreClassif } from '@/components/hotline/FiltresClassification'
 import ClassificationTicket, { patchClassif, useClassification, valeursDepuisTicket, type ValeursClassif } from '@/components/hotline/ClassificationTicket'
 import {
@@ -59,7 +66,10 @@ import {
   majTicket,
   messageErreur,
   resoudre,
-  rouvrir,
+  consulteParUnAutre,
+  dupliquerTicket,
+  messagerieTelephonique,
+  mettreEnAttenteClient,
   type Collaborateurs,
   type Etape,
   type Filiere,
@@ -68,6 +78,20 @@ import {
 } from '@/lib/hotline'
 
 type FiltreStatut = 'ACTIFS' | Statut | 'TOUS'
+
+/** (13/11/2026) Colonnes triables de la liste. */
+type ColTri = 'statut' | 'numero' | 'opened_at' | 'filiere' | 'classif' | 'client' | 'description' | 'chantier' | 'niveau' | 'assigne' | 'duree'
+const RANG_STATUT: Record<string, number> = { OUVERT: 0, EN_COURS: 1, ATTENTE_CLIENT: 2, ESCALADE: 3, RESOLU: 4, CLOS: 4 }
+const STATUTS_ACTIFS: Statut[] = ['OUVERT', 'EN_COURS', 'ATTENTE_CLIENT', 'ESCALADE']
+
+function telecharger(nom: string, contenu: string) {
+  const url = URL.createObjectURL(new Blob([contenu], { type: 'text/csv;charset=utf-8' }))
+  const a = document.createElement('a')
+  a.href = url
+  a.download = nom
+  a.click()
+  window.setTimeout(() => URL.revokeObjectURL(url), 2000)
+}
 
 export default function HotlineTicketsWrapper() {
   return (
@@ -129,7 +153,7 @@ function HotlineTickets() {
       for (let debut = 0; debut < MAX; debut += PAGE) {
         let query = supabase.from('hotline_tickets').select('*').order('opened_at', { ascending: false }).order('id').range(debut, debut + PAGE - 1)
         if (filiere !== 'TOUTES') query = query.eq('filiere', filiere)
-        if (statut === 'ACTIFS') query = query.in('statut', ['OUVERT', 'EN_COURS', 'ESCALADE'])
+        if (statut === 'ACTIFS') query = query.in('statut', STATUTS_ACTIFS)
         else if (statut !== 'TOUS') query = query.eq('statut', statut)
         if (niveau) query = query.eq('niveau', niveau)
         if (mesTickets && email) query = query.eq('assigne_a', email)
@@ -160,15 +184,109 @@ function HotlineTickets() {
     void charger()
   }, [charger])
 
+  // Tri par clic sur l'en-tête (2e clic = ordre inverse, 3e = ordre par défaut).
+  const [tri, setTri] = useState<{ col: ColTri; sens: 1 | -1 } | null>(null)
+  function trierPar(col: ColTri) {
+    setTri((t) => (!t || t.col !== col ? { col, sens: 1 } : t.sens === 1 ? { col, sens: -1 } : null))
+  }
+
   const filtres = useMemo(() => {
     const q = recherche.trim().toLowerCase()
-    if (!q) return tickets
-    return tickets.filter((t) =>
-      [t.numero, t.intitule_tiers, t.numero_tiers, t.contact_nom, t.chantier, t.numero_serie, t.serie_ge, t.modele_ge, t.reference_article, t.code_defaut, t.telephone_appelant, t.description]
-        .filter(Boolean)
-        .some((v) => String(v).toLowerCase().includes(q)),
-    )
-  }, [tickets, recherche])
+    const liste = !q
+      ? tickets
+      : tickets.filter((t) =>
+          [t.numero, t.intitule_tiers, t.numero_tiers, t.contact_nom, t.chantier, t.numero_serie, t.serie_ge, t.modele_ge, t.reference_article, t.code_defaut, t.telephone_appelant, t.description]
+            .filter(Boolean)
+            .some((v) => String(v).toLowerCase().includes(q)),
+        )
+    if (!tri) return liste
+    const maintenant = Date.now()
+    const cle = (t: Ticket): string | number => {
+      switch (tri.col) {
+        case 'statut':
+          return RANG_STATUT[t.statut] ?? 9
+        case 'numero':
+          return t.numero
+        case 'opened_at':
+          return t.opened_at
+        case 'filiere':
+          return `${libelleFiliere(t.filiere)} ${libelleMotif(t.motif)}`
+        case 'classif':
+          return [libelleClassif(classif, 'symptome', t.symptome), libelleClassif(classif, 'organe', t.organe), libelleClassif(classif, 'issue', t.issue)].filter(Boolean).join(' ')
+        case 'client':
+          return (t.intitule_tiers || t.numero_tiers || '').toLowerCase()
+        case 'description':
+          return (t.description || '').toLowerCase()
+        case 'chantier':
+          return [t.chantier, t.numero_serie].filter(Boolean).join(' ').toLowerCase()
+        case 'niveau':
+          return t.niveau
+        case 'assigne':
+          return nomCollaborateur(t.assigne_a, collaborateurs).toLowerCase()
+        case 'duree':
+          return new Date(t.resolved_at || t.closed_at || maintenant).getTime() - new Date(t.opened_at).getTime()
+      }
+    }
+    return [...liste].sort((a, b) => {
+      const va = cle(a)
+      const vb = cle(b)
+      // Valeurs vides toujours en fin de liste.
+      if (va === '' && vb !== '') return 1
+      if (vb === '' && va !== '') return -1
+      const r = typeof va === 'number' && typeof vb === 'number' ? va - vb : String(va).localeCompare(String(vb), 'fr', { numeric: true })
+      return r * tri.sens || String(b.opened_at).localeCompare(String(a.opened_at))
+    })
+  }, [tickets, recherche, tri, classif, collaborateurs])
+
+  // Présence (13/11/2026) : tickets ouverts dans la console d'un hotliner,
+  // relus toutes les 30 s sans recharger toute la liste.
+  const [presences, setPresences] = useState<Map<string, { consulte_par: string; consulte_le: string }>>(new Map())
+  useEffect(() => {
+    let actif = true
+    const lire = async () => {
+      const { data } = await supabase
+        .from('hotline_tickets')
+        .select('id, consulte_par, consulte_le')
+        .gt('consulte_le', new Date(Date.now() - 3 * 60 * 1000).toISOString())
+      if (actif) setPresences(new Map(((data || []) as Array<{ id: string; consulte_par: string; consulte_le: string }>).map((r) => [r.id, r])))
+    }
+    void lire()
+    const h = window.setInterval(lire, 30_000)
+    return () => {
+      actif = false
+      window.clearInterval(h)
+    }
+  }, [])
+  const autreHotliner = (t: Ticket) => {
+    const p = presences.get(t.id)
+    return p && consulteParUnAutre(p, email) ? p.consulte_par : null
+  }
+
+  // Export CSV manuel (13/11/2026) : les tickets affichés, commentaires visibles compris.
+  const [exportEnCours, setExportEnCours] = useState(false)
+  async function exporterCsv() {
+    setExportEnCours(true)
+    try {
+      const ids = filtres.map((t) => t.id)
+      const etapes: Array<{ ticket_id: string; at: string; auteur: string; type: string; libelle: string }> = []
+      for (let i = 0; i < ids.length; i += 200) {
+        const { data, error } = await supabase
+          .from('hotline_ticket_etapes')
+          .select('ticket_id, at, auteur, type, libelle')
+          .in('ticket_id', ids.slice(i, i + 200))
+          .in('type', ['NOTE_RAPIDE', 'COMMENTAIRE', 'RESOLUTION'])
+          .order('at')
+          .limit(20_000)
+        if (error) throw error
+        etapes.push(...((data || []) as typeof etapes))
+      }
+      telecharger(nomFichierExport(), construireCsv(filtres as unknown as Record<string, unknown>[], regrouperCommentaires(etapes)))
+    } catch (e) {
+      setErreur(messageErreur(e))
+    } finally {
+      setExportEnCours(false)
+    }
+  }
 
   const compteurs = useMemo(() => {
     const c = { n1: 0, n2: 0, n3: 0, escalades: 0, rappels: 0 }
@@ -192,11 +310,22 @@ function HotlineTickets() {
         titre="Tickets"
         sousTitre="Suivi des tickets ouverts, escalades niveau 2 / niveau 3 et historique"
         actions={
-          ['valancha@gmail.com', 'a.valanchauskas@cegeclim-energies.com'].includes(String(email || '').toLowerCase()) ? (
-            <Link href="/hotline/import" className="h-9 rounded-lg border border-[color:var(--cg-hdr-line)] px-3 py-1.5 text-sm font-semibold text-[color:var(--cg-hdr-ink-2)] hover:border-[#B4761A]">
-              Reprendre l’historique
-            </Link>
-          ) : null
+          <>
+            <button
+              type="button"
+              onClick={exporterCsv}
+              disabled={exportEnCours || loading || !filtres.length}
+              title="Exporte les tickets affichés (filtres appliqués), commentaires visibles compris"
+              className="h-9 rounded-lg border border-[color:var(--cg-hdr-line)] px-3 py-1.5 text-sm font-semibold text-[color:var(--cg-hdr-ink-2)] hover:border-[#B4761A] disabled:opacity-50"
+            >
+              {exportEnCours ? 'Export…' : `⬇ Export CSV (${filtres.length})`}
+            </button>
+            {['valancha@gmail.com', 'a.valanchauskas@cegeclim-energies.com'].includes(String(email || '').toLowerCase()) ? (
+              <Link href="/hotline/import" className="h-9 rounded-lg border border-[color:var(--cg-hdr-line)] px-3 py-1.5 text-sm font-semibold text-[color:var(--cg-hdr-ink-2)] hover:border-[#B4761A]">
+                Import CSV (reprise)
+              </Link>
+            ) : null}
+          </>
         }
       />
 
@@ -210,7 +339,7 @@ function HotlineTickets() {
             ))}
           </div>
           <select value={statut} onChange={(e) => setStatut(e.target.value as FiltreStatut)} className="h-8 rounded-lg border border-[#D8D3C8] bg-white px-2 text-[13px]">
-            <option value="ACTIFS">Non résolus (ouverts, en cours, escaladés)</option>
+            <option value="ACTIFS">Non résolus (non pris, en cours, attente client, escaladés)</option>
             {(Object.keys(STATUTS) as Statut[]).map((s) => (
               <option key={s} value={s}>
                 {STATUTS[s].label}
@@ -345,21 +474,46 @@ function HotlineTickets() {
 
         <div className={`grid grid-cols-1 gap-4 ${selectedId ? 'xl:grid-cols-[minmax(0,1fr)_520px]' : ''}`}>
           <section className="min-w-0 rounded-2xl border border-[#E2DFD8] bg-white">
+            <div className="flex flex-wrap items-center gap-3 border-b border-[#EFEDE8] px-3 py-2 text-[11px] text-slate-600">
+              {STATUTS_ACTIFS.map((s) => (
+                <span key={s} className="flex items-center gap-1.5">
+                  <span className="inline-block h-3 w-5 rounded-sm border" style={{ background: STATUTS[s].row, borderColor: STATUTS[s].tone }} />
+                  {STATUTS[s].label}
+                </span>
+              ))}
+              <span className="font-extrabold text-[#C81E1E]">TICK… en rouge = ouvert par un autre hotliner</span>
+            </div>
             <div className="overflow-x-auto">
               <table className="w-full min-w-[1400px] text-[13px]">
                 <thead className="bg-[#FAF9F7] text-[11px] uppercase tracking-[0.05em] text-slate-500">
                   <tr>
-                    <th className="px-3 py-2 text-left">Ticket</th>
-                    <th className="px-3 py-2 text-left">Ouvert</th>
-                    <th className="px-3 py-2 text-left">Filière · motif</th>
-                    <th className="px-3 py-2 text-left">Classification</th>
-                    <th className="px-3 py-2 text-left">Client</th>
-                    <th className="px-3 py-2 text-left">Motif de l’appel</th>
-                    <th className="px-3 py-2 text-left">Chantier / n° série</th>
-                    <th className="px-3 py-2 text-center">Niv.</th>
-                    <th className="px-3 py-2 text-left">Statut</th>
-                    <th className="px-3 py-2 text-left">Assigné</th>
-                    <th className="px-3 py-2 text-right">Durée</th>
+                    {(
+                      [
+                        ['statut', 'Statut', 'text-left'],
+                        ['numero', 'Ticket', 'text-left'],
+                        ['opened_at', 'Ouvert', 'text-left'],
+                        ['filiere', 'Filière · motif', 'text-left'],
+                        ['classif', 'Classification', 'text-left'],
+                        ['client', 'Client', 'text-left'],
+                        ['description', 'Motif de l’appel', 'text-left'],
+                        ['chantier', 'Chantier / n° série', 'text-left'],
+                        ['niveau', 'Niv.', 'text-center'],
+                        ['assigne', 'Assigné', 'text-left'],
+                        ['duree', 'Durée', 'text-right'],
+                      ] as Array<[ColTri, string, string]>
+                    ).map(([col, label, align]) => (
+                      <th key={col} className={`px-3 py-2 ${align}`}>
+                        <button
+                          type="button"
+                          onClick={() => trierPar(col)}
+                          title="Trier (cliquer à nouveau pour inverser)"
+                          className={`inline-flex items-center gap-1 uppercase tracking-[0.05em] hover:text-slate-900 ${tri?.col === col ? 'font-bold text-slate-900' : ''}`}
+                        >
+                          {label}
+                          <span className="text-[10px]">{tri?.col === col ? (tri.sens === 1 ? '▲' : '▼') : '↕'}</span>
+                        </button>
+                      </th>
+                    ))}
                   </tr>
                 </thead>
                 <tbody>
@@ -376,14 +530,27 @@ function HotlineTickets() {
                       </td>
                     </tr>
                   ) : (
-                    filtres.map((t) => (
+                    filtres.map((t) => {
+                      const autre = autreHotliner(t)
+                      return (
                       <tr
                         key={t.id}
                         onClick={() => ouvrir(t.id)}
-                        className={`cursor-pointer border-t border-[#EFEDE8] hover:bg-[#FDF7EA] ${t.id === selectedId ? 'bg-[#FDF7EA]' : ''}`}
+                        style={{ background: t.id === selectedId ? '#FDF7EA' : styleStatut(t.statut).row }}
+                        className={`cursor-pointer border-t border-[#EFEDE8] hover:brightness-[0.97] ${t.id === selectedId ? 'outline outline-2 -outline-offset-2 outline-[#B4761A]' : ''}`}
                       >
-                        <td className="px-3 py-2 font-semibold text-slate-900">
+                        <td className="px-3 py-2">
+                          <Pastille {...styleStatut(t.statut)} />
+                          {styleSeverite(t.severite) ? (
+                            <div className="mt-1">
+                              <Pastille label={styleSeverite(t.severite)!.label} tone={styleSeverite(t.severite)!.tone} bg={styleSeverite(t.severite)!.bg} />
+                            </div>
+                          ) : null}
+                        </td>
+                        <td className={`px-3 py-2 ${autre ? 'font-extrabold text-[#C81E1E]' : 'font-semibold text-slate-900'}`} title={autre ? `Ouvert en ce moment par ${nomCollaborateur(autre, collaborateurs)}` : undefined}>
                           {t.numero}
+                          {t.est_test ? <span className="ml-1.5 rounded bg-[#5F6670] px-1 py-px text-[10px] font-bold text-white">TEST</span> : null}
+                          {autre ? <div className="text-[11px] font-bold text-[#C81E1E]">● {nomCollaborateur(autre, collaborateurs)}</div> : null}
                           {t.rappel_par ? (
                             <div className="text-[11px] font-semibold text-[#5B3F8C]" title="Client à rappeler">
                               📞 {nomCollaborateur(t.rappel_par, collaborateurs)}
@@ -416,18 +583,11 @@ function HotlineTickets() {
                         </td>
                         <td className="px-3 py-2 text-slate-600">{[t.chantier, t.numero_serie].filter(Boolean).join(' · ') || '—'}</td>
                         <td className="px-3 py-2 text-center font-semibold">N{t.niveau}</td>
-                        <td className="px-3 py-2">
-                          <Pastille {...styleStatut(t.statut)} />
-                          {styleSeverite(t.severite) ? (
-                            <div className="mt-1">
-                              <Pastille label={styleSeverite(t.severite)!.label} tone={styleSeverite(t.severite)!.tone} bg={styleSeverite(t.severite)!.bg} />
-                            </div>
-                          ) : null}
-                        </td>
                         <td className="px-3 py-2 text-[12px] text-slate-500">{t.assigne_a ? nomCollaborateur(t.assigne_a, collaborateurs) : '—'}</td>
                         <td className="px-3 py-2 text-right text-slate-600">{fmtDuree(t.opened_at, t.resolved_at || t.closed_at || new Date().toISOString())}</td>
                       </tr>
-                    ))
+                      )
+                    })
                   )}
                 </tbody>
               </table>
@@ -468,6 +628,7 @@ function FicheTicket({
   onSupprime: () => void
 }) {
   const { email } = useAccess()
+  const router = useRouter()
   const [confirmerSuppression, setConfirmerSuppression] = useState(false)
   const peutSupprimer = SUPPRESSION_AUTORISEE.includes(String(email || '').toLowerCase())
   const [ticket, setTicket] = useState<Ticket | null>(null)
@@ -538,6 +699,18 @@ function FicheTicket({
   }
 
   const actif = !estResolu(ticket)
+  async function dupliquer() {
+    if (!ticket) return
+    setBusy(true)
+    try {
+      const t = await dupliquerTicket(ticket, email || null)
+      onChange()
+      router.push(`/hotline?ticket=${t.id}`)
+    } catch (e) {
+      setErreur(messageErreur(e))
+      setBusy(false)
+    }
+  }
   // (13/11/2026) Seuls les N1 de l'environnement du ticket ou sans environnement.
   const n1 = collaborateurs.liste.filter((c) => c.niveau === 1 && (!c.filiere || c.filiere === ticket.filiere))
   const bouton = 'rounded-lg px-3 py-2 text-[13px] font-semibold disabled:opacity-40'
@@ -548,6 +721,7 @@ function FicheTicket({
         <div>
           <div className="flex items-center gap-2 text-[16px] font-bold text-slate-900">
             {ticket.numero} <Pastille {...styleStatut(ticket.statut)} /> <span className="text-[13px] text-slate-500">N{ticket.niveau}</span>
+            {ticket.est_test ? <span className="rounded bg-[#5F6670] px-1.5 py-px text-[10px] font-bold text-white">TICKET TEST</span> : null}
           </div>
           <div className="text-[12px] text-slate-500">
             {libelleFiliere(ticket.filiere)} · {libelleMotif(ticket.motif)} · ouvert {fmtDateHeure(ticket.opened_at)} par {ticket.ouvert_par.split('@')[0]}
@@ -613,6 +787,18 @@ function FicheTicket({
           ))}
         </dl>
 
+        {!actif ? (
+          <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-[#D5D9DE] bg-[#F3F4F6] px-3 py-2 text-[12px] text-slate-700">
+            <span>
+              🔒 <span className="font-semibold">Ticket résolu : verrouillé.</span> Pour reprendre le dossier, dupliquer le ticket (nouveau ticket « Repris du ticket clos {ticket.numero} »).
+            </span>
+            <button type="button" disabled={busy} onClick={dupliquer} className="rounded-lg bg-[#0B1220] px-3 py-1.5 text-[12px] font-bold text-white disabled:opacity-40">
+              ⧉ Dupliquer le ticket
+            </button>
+          </div>
+        ) : null}
+
+        {actif ? (
         <div className="flex flex-wrap items-center gap-2 rounded-lg border border-[#D9CCEB] bg-[#F4F0FA] px-3 py-2 text-[12px] text-[#5B3F8C]">
           <span className="font-semibold">📞 Client à rappeler par</span>
           <select
@@ -624,7 +810,7 @@ function FicheTicket({
             }}
             className="h-8 rounded-lg border border-[#D9CCEB] bg-white px-2 text-[12px] text-slate-800"
           >
-            <option value="">— Pas de rappel —</option>
+            <option value="">— sans préférence —</option>
             {n1.map((c) => (
               <option key={c.email} value={c.email}>
                 {c.nom}
@@ -638,6 +824,7 @@ function FicheTicket({
             </button>
           ) : null}
         </div>
+        ) : null}
         {ticket.preconisation ? (
           <div className="rounded-lg border border-[#CDE5D1] bg-[#EEF7EF] p-3 text-[13px] text-slate-800">
             <span className="font-semibold">Préconisation :</span> {ticket.preconisation}
@@ -658,11 +845,11 @@ function FicheTicket({
           className="flex h-10 w-full items-center justify-center rounded-lg bg-[#B4761A] text-[14px] font-bold text-white hover:bg-[#9A6414]"
           title="Recharge le ticket dans la console : documents de vente, historiques, envoi de documents et diagnostic là où il s'était arrêté"
         >
-          {actif ? 'Reprendre dans la console' : 'Rouvrir dans la console'}
+          {actif ? 'Reprendre dans la console' : 'Consulter dans la console'}
         </a>
 
         <div className="flex flex-wrap gap-2">
-          {ticket.assigne_a !== email ? (
+          {actif && ticket.assigne_a !== email ? (
             <button
               type="button"
               disabled={busy}
@@ -703,12 +890,31 @@ function FicheTicket({
               </button>
             </>
           ) : null}
-          {!actif ? (
-            <button type="button" disabled={busy} onClick={() => run(() => rouvrir(ticket.id))} className={`${bouton} border border-[#D8D3C8] text-slate-700`}>
-              Rouvrir
-            </button>
-          ) : null}
         </div>
+        {actif ? (
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => run(() => messagerieTelephonique(ticket))}
+              title="Note dans l'historique (hotliner et heure) que l'appel est tombé sur la messagerie ; le ticket passe en attente client"
+              className={`${bouton} border border-[#E8A35C] bg-[#FEF3E6] text-[#9A4D06]`}
+            >
+              📞 Messagerie téléphonique
+            </button>
+            {ticket.statut !== 'ATTENTE_CLIENT' ? (
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => run(() => mettreEnAttenteClient(ticket.id, commentaire.trim()))}
+                title="Le client doit revenir vers nous (relevé, photo, information…)"
+                className={`${bouton} border border-[#E8A35C] text-[#9A4D06]`}
+              >
+                ⏳ En attente client
+              </button>
+            ) : null}
+          </div>
+        ) : null}
 
         {ticket.filiere === 'THERMIQUE' ? (
           <div className="space-y-1.5">
@@ -718,8 +924,9 @@ function FicheTicket({
               classif={classif}
               issueObligatoire={issueRequise(ticket) && actif}
               source={ticket.classif_source}
-              disabled={busy}
+              disabled={busy || !actif}
             />
+            {actif ? (
             <button
               type="button"
               disabled={busy || JSON.stringify(classifForm) === JSON.stringify(valeursDepuisTicket(ticket))}
@@ -733,21 +940,21 @@ function FicheTicket({
             >
               Enregistrer la classification
             </button>
+            ) : null}
           </div>
         ) : null}
 
+        {actif ? (
         <div className="space-y-2">
-          <textarea
+          <ZoneTexte
             value={commentaire}
             onChange={(e) => setCommentaire(e.target.value)}
-            rows={2}
             placeholder="Commentaire (sert aussi de motif d’escalade ou de solution) — repris dans la fiche ticket"
             className="w-full rounded-lg border border-[#D8D3C8] bg-white px-2.5 py-2 text-[13px] outline-none focus:border-[#B4761A]"
           />
-          <textarea
+          <ZoneTexte
             value={commentaireInterne}
             onChange={(e) => setCommentaireInterne(e.target.value)}
-            rows={2}
             placeholder="Commentaire interne — jamais repris dans la fiche ticket PDF"
             className="w-full rounded-lg border border-[#EBD8AE] bg-[#FFFCF5] px-2.5 py-2 text-[13px] outline-none focus:border-[#B4761A]"
           />
@@ -765,10 +972,11 @@ function FicheTicket({
             Ajouter le commentaire
           </button>
         </div>
+        ) : null}
 
         <div>
           <div className="mb-2 text-[12px] font-bold uppercase tracking-[0.05em] text-slate-500">Pièces jointes</div>
-          <PiecesJointes key={ticket.id} ticketId={ticket.id} onChange={() => void charger()} />
+          <PiecesJointes key={ticket.id} ticketId={ticket.id} onChange={() => void charger()} lectureSeule={!actif} />
         </div>
 
         <div>
