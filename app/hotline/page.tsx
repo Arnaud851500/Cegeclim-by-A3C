@@ -484,7 +484,8 @@ function HotlineConsole() {
 
   useEffect(() => {
     const id = ticketParam
-    if (!id || !arbresCharges || dernierRepris.current === id) return
+    // Attendre l'e-mail de session : la reprise est notée au nom du hotliner.
+    if (!id || !arbresCharges || !email || dernierRepris.current === id) return
     dernierRepris.current = id
     void (async () => {
       try {
@@ -1143,7 +1144,26 @@ function HotlineConsole() {
         <div className="grid grid-cols-1 gap-4 xl:grid-cols-12">
           {/* ── Appelant et ticket ───────────────────────────────────── */}
           <section className={`${ZONES.appel.cadre} xl:col-span-3`}>
-            <div className={ZONES.appel.bandeau}>1 · Appel {ticket ? `· ${ticket.numero}` : '· création du ticket'}</div>
+            <div className={`${ZONES.appel.bandeau} flex flex-wrap items-center justify-between gap-2`}>
+              <span>1 · Appel {ticket ? `· ${ticket.numero}` : '· création du ticket'}</span>
+              {ticket && statut ? (
+                <span className="flex items-center gap-1.5">
+                  <span className="rounded-md bg-white px-1 py-0.5">
+                    <Pastille {...statut} />
+                  </span>
+                  <span className="rounded-md bg-white/15 px-1.5 py-0.5 text-[12px]">N{ticket.niveau}</span>
+                  {ticket.est_test ? <span className="rounded bg-[#5F6670] px-1.5 py-px text-[10px] font-bold text-white">TEST</span> : null}
+                </span>
+              ) : null}
+            </div>
+            {ticket && statut ? (
+              <div className="flex items-center justify-between gap-2 border-b-2 px-4 py-2 text-[13px] font-bold" style={{ background: statut.bg, color: statut.tone, borderColor: statut.tone }}>
+                <span>Statut : {statut.label}</span>
+                <span className="text-[11px] font-semibold">
+                  {ticket.assigne_a ? `pris par ${nomCollaborateur(ticket.assigne_a, collaborateurs)}` : 'non pris'}
+                </span>
+              </div>
+            ) : null}
             <div className="space-y-3 p-4">
               {form.contact_nom || form.intitule_tiers || form.numero_tiers ? (
                 <div className="rounded-xl border-2 border-[#1E4E8C] bg-white px-3 py-2.5 shadow-sm">
