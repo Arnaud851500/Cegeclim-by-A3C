@@ -71,6 +71,7 @@ import {
   messagerieTelephonique,
   mettreEnAttenteClient,
   serieOnduleurCourt,
+  relancerRappel,
   serieBatterieCourt,
   type Collaborateurs,
   type Etape,
@@ -823,6 +824,17 @@ function FicheTicket({
           {ticket.rappel_par ? (
             <button type="button" disabled={busy} onClick={() => run(() => rappelEffectue(ticket.id, String(email || '').split('@')[0], commentaire.trim()))} className="font-semibold underline disabled:opacity-40">
               Rappel effectué
+            </button>
+          ) : null}
+          {actif ? (
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => run(() => relancerRappel(ticket, String(email || '').split('@')[0], ticket.rappel_par ? nomCollaborateur(ticket.rappel_par, collaborateurs) : undefined, commentaire.trim()))}
+              title="Le client a rappelé : noté dans l'historique, la demande de rappel est relancée"
+              className="ml-auto rounded-md border border-[#7A5EA8] bg-white px-2 py-1 font-semibold disabled:opacity-40"
+            >
+              🔁 Le client rappelle
             </button>
           ) : null}
         </div>

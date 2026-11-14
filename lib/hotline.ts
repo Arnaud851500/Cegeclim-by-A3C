@@ -739,6 +739,63 @@ export async function rappelEffectue(ticketId: string, qui: string, commentaire?
   await ajouterEtape(ticketId, 'RAPPEL', `Client rappelé par ${qui}${commentaire ? ` : ${commentaire}` : ''}`, { details: { fait: true } })
 }
 
+/** (14/11/2026) Le client rappelle : la demande de rappel est relancée (horodatée, hotliner noté). */
+export async function relancerRappel(ticket: Pick<Ticket, 'id' | 'rappel_par'>, qui: string, nomRappel?: string, commentaire?: string) {
+  if (ticket.rappel_par) await majTicket(ticket.id, { rappel_demande_le: new Date().toISOString() })
+  await ajouterEtape(
+    ticket.id,
+    'RAPPEL',
+    `Le client a rappelé (pris par ${qui})${ticket.rappel_par ? ` · demande de rappel relancée${nomRappel ? ` à ${nomRappel}` : ''}` : ''}${commentaire ? ` : ${commentaire}` : ''}`,
+    { details: { relance: true, rappel_par: ticket.rappel_par || null } },
+  )
+}
+
+/** (14/11/2026) Modèles GE / UI connus commençant par la saisie (catalogue Hi-Parts + tickets). */
+export type ModeleConnu = { modele: string; type: 'GE' | 'UI' | 'AUTRE'; source: string; n: number }
+export async function chargerModelesConnus(q: string): Promise<ModeleConnu[]> {
+  const { data, error } = await supabase.rpc('hotline_modeles_connus', { p_q: q, p_limite: 12 })
+  if (error) throw error
+  return ((data || []) as Array<Record<string, unknown>>).map((r) => ({ modele: String(r.modele), type: (r.type as ModeleConnu['type']) || 'AUTRE', source: String(r.source || ''), n: Number(r.n) || 0 }))
+}
+
+/** (14/11/2026) Tickets résolus proches, avec la solution apportée (colonne d'aide de la console). */
+export type CasSimilaire = {
+  id: string
+  numero: string
+  opened_at: string
+  intitule_tiers: string | null
+  code_defaut: string | null
+  modele: string | null
+  description: string | null
+  solution: string | null
+  raisons: string[]
+  score: number
+}
+export async function chargerCasSimilaires(p: {
+  filiere: string
+  code_defaut?: string
+  modele_ge?: string
+  modele_ui?: string
+  onduleur?: string
+  marque?: string
+  equipement?: string
+  exclure?: string | null
+}): Promise<CasSimilaire[]> {
+  const { data, error } = await supabase.rpc('hotline_cas_similaires', {
+    p_filiere: p.filiere,
+    p_code_defaut: p.code_defaut || null,
+    p_modele_ge: p.modele_ge || null,
+    p_modele_ui: p.modele_ui || null,
+    p_onduleur: p.onduleur || null,
+    p_marque: p.marque || null,
+    p_equipement: p.equipement || null,
+    p_exclure: p.exclure || null,
+    p_limite: 6,
+  })
+  if (error) throw error
+  return (data || []) as CasSimilaire[]
+}
+
 /** (12/11/2026) Motif de l'appel repris en tête des commentaires. */
 export async function noteRapide(ticketId: string, texte: string, modification = false) {
   if (!texte.trim()) return

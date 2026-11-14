@@ -52,6 +52,7 @@ import VueHiParts from '@/components/hotline/VueHiParts'
 import HistoriqueTicket from '@/components/hotline/HistoriqueTicket'
 import FenetreNiveau from '@/components/hotline/FenetreNiveau'
 import ChampSerie from '@/components/hotline/ChampSerie'
+import ChampModele from '@/components/hotline/ChampModele'
 import ZoneTexte from '@/components/hotline/ZoneTexte'
 import { telechargerFicheTicket } from '@/lib/hotlineFiche'
 import ClassificationTicket, { CLASSIF_FORM_VIDE, patchClassif, useClassification, valeursDepuisTicket, type ValeursClassif } from '@/components/hotline/ClassificationTicket'
@@ -125,6 +126,9 @@ import {
   messagerieTelephonique,
   mettreEnAttenteClient,
   dupliquerTicket,
+  relancerRappel,
+  chargerCasSimilaires,
+  type CasSimilaire,
   type ParametresHotline,
   type Appelant,
   type Arbre,
@@ -241,6 +245,13 @@ function natureParDefaut(motif: Motif | null): Nature {
 const champ =
   'h-9 w-full rounded-lg border border-[#D8D3C8] bg-white px-2.5 text-[13px] text-slate-900 outline-none focus:border-[#B4761A]'
 const carte = 'rounded-2xl border border-[#E2DFD8] bg-white'
+// (14/11/2026) Trois zones nettement distinctes : 1 · appel et création du ticket
+// (bleu), 2 · déroulé du ticket (ambre), 3 · aide au traitement (vert).
+const ZONES = {
+  appel: { cadre: 'rounded-2xl border-2 border-[#9DB6D9] bg-[#F4F7FC]', bandeau: 'rounded-t-[14px] bg-[#1E4E8C] px-4 py-2.5 text-[14px] font-bold text-white' },
+  ticket: { cadre: 'rounded-2xl border-2 border-[#E0B872] bg-white', bandeau: 'rounded-t-[14px] bg-[#B4761A] px-4 py-2.5 text-[14px] font-bold text-white' },
+  aide: { cadre: 'rounded-2xl border-2 border-[#A9CDB0] bg-[#F2F8F3] p-3', bandeau: '-mx-3 -mt-3 mb-3 rounded-t-[14px] bg-[#2F6B3A] px-4 py-2.5 text-[14px] font-bold text-white' },
+}
 const titreCarte = 'border-b border-[#EFEDE8] px-4 py-3 text-[14px] font-bold text-slate-900'
 
 export default function HotlineConsoleWrapper() {
@@ -309,6 +320,48 @@ function HotlineConsole() {
   // Ticket de l'historique affiché en fenêtre flottante (04/11/2026).
   const [ticketHisto, setTicketHisto] = useState<string | null>(null)
   const fermerTicketHisto = useCallback(() => setTicketHisto(null), [])
+  // (14/11/2026) Cas similaires résolus (même code défaut, même modèle…) avec leur solution.
+  const [casSimilaires, setCasSimilaires] = useState<CasSimilaire[]>([])
+  const cleCas = JSON.stringify([
+    form.filiere,
+    form.code_defaut.trim(),
+    form.modele_ge.trim(),
+    form.reference_article.trim(),
+    form.onduleur_modele.trim(),
+    form.pv_marque,
+    form.pv_equipement,
+    ticket?.id || null,
+  ])
+  useEffect(() => {
+    const [filiere, code_defaut, modele_ge, modele_ui, onduleur, marque, equipement, exclure] = JSON.parse(cleCas) as Array<string | null>
+    let actif = true
+    const h = window.setTimeout(async () => {
+      if (!filiere) {
+        if (actif) setCasSimilaires([])
+        return
+      }
+      try {
+        const liste = await chargerCasSimilaires({
+          filiere,
+          code_defaut: code_defaut || undefined,
+          modele_ge: modele_ge || undefined,
+          modele_ui: modele_ui || undefined,
+          onduleur: onduleur || undefined,
+          marque: marque || undefined,
+          equipement: equipement || undefined,
+          exclure,
+        })
+        if (actif) setCasSimilaires(liste)
+      } catch {
+        if (actif) setCasSimilaires([])
+      }
+    }, 500)
+    return () => {
+      actif = false
+      window.clearTimeout(h)
+    }
+  }, [cleCas])
+
   // (13/11/2026) Paramètres hotline : diagnostic guidé et classification détaillée masqués en V1.
   const [parametres, setParametres] = useState<ParametresHotline>(PARAMETRES_DEFAUT)
   useEffect(() => {
@@ -683,7 +736,8 @@ function HotlineConsole() {
     if (data) setTicket(data as Ticket)
   }, [])
 
-  async function ouvrirTicket() {
+  /** mode 'rappel' (ADV) : le ticket est seulement enregistré avec la demande de rappel, non pris, puis on bascule sur la liste des tickets. */
+  async function ouvrirTicket(mode: 'normal' | 'rappel' = 'normal') {
     if (!form.filiere) {
       setErreur('Choisir la filière (Soleil ou thermique) avant d’ouvrir le ticket.')
       return
@@ -718,7 +772,7 @@ function HotlineConsole() {
           description: form.description || null,
           ...patchClassif(classifForm),
           arbre_id: arbreId || null,
-          assigne_a: email || null,
+          assigne_a: mode === 'rappel' ? null : email || null,
           rappel_par: form.rappel_par || null,
           rappel_demande_le: form.rappel_par ? new Date().toISOString() : null,
           rappel_demande_par: form.rappel_par ? email || null : null,
@@ -740,6 +794,11 @@ function HotlineConsole() {
       // Motif de l'appel = premier commentaire du ticket (« Note rapide »).
       await noteRapide(t.id, form.description)
       if (form.rappel_par) await ajouterEtape(t.id, 'RAPPEL', `Client à rappeler par ${nomCollaborateur(form.rappel_par, collaborateurs)}`, { details: { rappel_par: form.rappel_par } })
+      if (mode === 'rappel') {
+        if (!form.rappel_par) await ajouterEtape(t.id, 'RAPPEL', 'Client à rappeler (sans préférence de technicien)', { details: { rappel_par: null } })
+        window.location.assign(`/hotline/tickets?id=${t.id}`)
+        return
+      }
       setTicket(t)
       await rafraichirEtapes(t.id)
     } catch (e) {
@@ -1083,9 +1142,22 @@ function HotlineConsole() {
 
         <div className="grid grid-cols-1 gap-4 xl:grid-cols-12">
           {/* ── Appelant et ticket ───────────────────────────────────── */}
-          <section className={`${carte} xl:col-span-3`}>
-            <div className={titreCarte}>Appelant</div>
+          <section className={`${ZONES.appel.cadre} xl:col-span-3`}>
+            <div className={ZONES.appel.bandeau}>1 · Appel {ticket ? `· ${ticket.numero}` : '· création du ticket'}</div>
             <div className="space-y-3 p-4">
+              {form.contact_nom || form.intitule_tiers || form.numero_tiers ? (
+                <div className="rounded-xl border-2 border-[#1E4E8C] bg-white px-3 py-2.5 shadow-sm">
+                  <div className="text-[10px] font-bold uppercase tracking-[0.08em] text-[#1E4E8C]">Qui appelle</div>
+                  <div className="truncate text-[18px] font-extrabold leading-tight text-slate-900">{form.contact_nom || form.intitule_tiers || form.numero_tiers}</div>
+                  {form.contact_nom && (form.intitule_tiers || form.numero_tiers) ? (
+                    <div className="truncate text-[14px] font-semibold text-slate-700">
+                      {form.intitule_tiers}
+                      {form.numero_tiers ? <span className="ml-1.5 font-mono text-[12px] text-slate-500">{form.numero_tiers}</span> : null}
+                    </div>
+                  ) : null}
+                  {telCle(telephone) ? <div className="text-[13px] text-slate-600">📞 {fmtTel(telephone)}</div> : null}
+                </div>
+              ) : null}
               <div className="flex gap-2">
                 <input
                   value={telephone}
@@ -1259,11 +1331,21 @@ function HotlineConsole() {
                   <BoutonHiParts modele={form.modele_ge} onClick={() => setHiParts({ modele: form.modele_ge.trim(), unite: 'GE' })} />
                 </div>
                 <div className="grid grid-cols-2 gap-2">
-                  <input value={form.modele_ge} onChange={(e) => patch({ modele_ge: e.target.value })} placeholder="Modèle GE" className={champ} />
+                  <ChampModele
+                    value={form.modele_ge}
+                    onChange={(v) => patch({ modele_ge: v })}
+                    onChoisir={(m) => (m.type === 'UI' ? patch({ reference_article: m.modele, modele_ge: '' }) : patch({ modele_ge: m.modele }))}
+                    typePrefere="GE"
+                    placeholder="Modèle GE"
+                    className={champ}
+                  />
                   <ChampSerie
                     value={form.serie_ge}
                     onChange={(v) => patch({ serie_ge: v })}
-                    onModele={(m) => patch({ modele_ge: m })}
+                    onModele={(m, type) =>
+                      // Modèle d'unité intérieure choisi depuis le champ GE : le n° part côté UI.
+                      type === 'UI' ? patch({ reference_article: m, numero_serie: form.serie_ge, serie_ge: '' }) : patch({ modele_ge: m })
+                    }
                     typePrefere="GE"
                     placeholder="N° de série GE"
                     className={champ}
@@ -1281,11 +1363,21 @@ function HotlineConsole() {
                   </span>
                 </div>
                 <div className="grid grid-cols-2 gap-2">
-                  <input value={form.reference_article} onChange={(e) => patch({ reference_article: e.target.value })} placeholder="Modèle UI / référence" className={champ} />
+                  <ChampModele
+                    value={form.reference_article}
+                    onChange={(v) => patch({ reference_article: v })}
+                    onChoisir={(m) => (m.type === 'GE' ? patch({ modele_ge: m.modele, reference_article: '' }) : patch({ reference_article: m.modele }))}
+                    typePrefere="UI"
+                    placeholder="Modèle UI / référence"
+                    className={champ}
+                  />
                   <ChampSerie
                     value={form.numero_serie}
                     onChange={(v) => patch({ numero_serie: v })}
-                    onModele={(m) => patch({ reference_article: m })}
+                    onModele={(m, type) =>
+                      // Modèle de groupe extérieur choisi depuis le champ UI : le n° part côté GE.
+                      type === 'GE' ? patch({ modele_ge: m, serie_ge: form.numero_serie, numero_serie: '' }) : patch({ reference_article: m })
+                    }
                     typePrefere="UI"
                     placeholder="N° de série UI"
                     className={champ}
@@ -1374,6 +1466,28 @@ function HotlineConsole() {
                   </button>
                 </div>
               ) : null}
+              {ticket && !verrouille ? (
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={async () => {
+                    setBusy(true)
+                    try {
+                      await relancerRappel(ticket, String(email || '').split('@')[0], ticket.rappel_par ? nomCollaborateur(ticket.rappel_par, collaborateurs) : undefined)
+                      if (ticket.rappel_par) setTicket({ ...ticket, rappel_demande_le: new Date().toISOString() })
+                      await rafraichirEtapes(ticket.id)
+                    } catch (e) {
+                      setErreur(messageErreur(e))
+                    } finally {
+                      setBusy(false)
+                    }
+                  }}
+                  title="Le client a rappelé : noté dans l'historique, la demande de rappel est relancée"
+                  className="h-8 w-full rounded-lg border border-[#D9CCEB] bg-white text-[12px] font-semibold text-[#5B3F8C] hover:bg-[#F4F0FA] disabled:opacity-40"
+                >
+                  🔁 Le client rappelle : relancer la demande de rappel
+                </button>
+              ) : null}
                 </>
               )}
 
@@ -1394,12 +1508,23 @@ function HotlineConsole() {
                 </label>
                 <button
                   type="button"
-                  onClick={ouvrirTicket}
+                  onClick={() => void ouvrirTicket()}
                   disabled={busy || !form.filiere}
                   className="h-10 w-full rounded-lg bg-[#B4761A] text-[14px] font-bold text-white hover:bg-[#9A6414] disabled:opacity-50"
                 >
                   Ouvrir le ticket
                 </button>
+                {form.filiere === 'THERMIQUE' ? (
+                  <button
+                    type="button"
+                    onClick={() => void ouvrirTicket('rappel')}
+                    disabled={busy || !form.filiere}
+                    title="Pour l’ADV : enregistre le ticket (non pris) avec la demande de rappel, puis ouvre la liste des tickets"
+                    className="h-9 w-full rounded-lg border-2 border-[#7A5EA8] bg-white text-[13px] font-bold text-[#5B3F8C] hover:bg-[#F4F0FA] disabled:opacity-50"
+                  >
+                    📞 Enregistrer et demander un rappel
+                  </button>
+                ) : null}
                 </>
               )}
             </div>
@@ -1407,11 +1532,11 @@ function HotlineConsole() {
           </section>
 
           {/* ── Diagnostic guidé ─────────────────────────────────────── */}
-          <section className={`${carte} xl:col-span-5`}>
-            <div className={`${titreCarte} flex flex-wrap items-center justify-between gap-2`}>
-              <span>{diagnosticActif ? 'Diagnostic guidé' : 'Ticket'}</span>
+          <section className={`${ZONES.ticket.cadre} xl:col-span-5`}>
+            <div className={`${ZONES.ticket.bandeau} flex flex-wrap items-center justify-between gap-2`}>
+              <span>2 · {diagnosticActif ? 'Déroulé du ticket et diagnostic guidé' : 'Déroulé du ticket'}</span>
               {!diagnosticActif ? null : arbresPossibles.length > 1 ? (
-                <select value={arbreId} onChange={(e) => setArbreId(e.target.value)} className="h-8 rounded-lg border border-[#D8D3C8] px-2 text-[12px] font-normal">
+                <select value={arbreId} onChange={(e) => setArbreId(e.target.value)} className="h-8 rounded-lg border border-[#D8D3C8] px-2 text-[12px] font-normal text-slate-900">
                   <option value="">Choisir le parcours…</option>
                   {arbresPossibles.map((a) => (
                     <option key={a.id} value={a.id}>
@@ -1422,9 +1547,15 @@ function HotlineConsole() {
                   ))}
                 </select>
               ) : arbresPossibles[0] ? (
-                <span className="text-[12px] font-normal text-slate-500">{arbresPossibles[0].nom}</span>
+                <span className="text-[12px] font-normal text-white/80">{arbresPossibles[0].nom}</span>
               ) : null}
             </div>
+            {!ticket ? (
+              // (14/11/2026) Partie centrale vide tant que le ticket n'est pas ouvert.
+              <div className="flex min-h-[360px] items-center justify-center p-5 text-center text-[13px] text-slate-400">
+                Le déroulé du ticket s’affichera ici à l’ouverture du ticket.
+              </div>
+            ) : (
             <div className="p-5">
               {ticket && verrouille ? (
                 <div className="mb-5 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-[#D5D9DE] bg-[#F3F4F6] px-4 py-3 text-[13px] text-slate-700">
@@ -1691,10 +1822,13 @@ function HotlineConsole() {
                 </div>
               ) : null}
             </div>
+            )}
           </section>
 
           {/* ── Contexte et documents ────────────────────────────────── */}
-          <section className="space-y-4 xl:col-span-4">
+          <section className={`${ZONES.aide.cadre} space-y-4 self-start xl:col-span-4`}>
+            <div className={ZONES.aide.bandeau}>3 · Aide au traitement</div>
+            <PaveCasSimilaires cas={casSimilaires} onOuvrir={setTicketHisto} />
             <PaveHistorique
               titre="HOTLINE Historique Contact"
               precision={form.contact_nom || (telCle(telephone) ? fmtTel(telephone) : '')}
@@ -1805,7 +1939,7 @@ function HotlineConsole() {
         </div>
       </main>
 
-      {ticketHisto ? <FenetreTicket id={ticketHisto} onFermer={fermerTicketHisto} /> : null}
+      {ticketHisto ? <FenetreTicket id={ticketHisto} onFermer={fermerTicketHisto} email={email || ''} collaborateurs={collaborateurs} /> : null}
 
       {ticket && fenetreNiveau ? (
         <FenetreNiveau
@@ -1880,6 +2014,47 @@ function BoutonHiParts({ modele, onClick }: { modele: string; onClick: () => voi
 }
 
 // ── Historique (client / contact / chantier-machine) ─────────────────────────
+// ── Cas similaires (14/11/2026) : tickets résolus proches et leur solution ──
+function PaveCasSimilaires({ cas, onOuvrir }: { cas: CasSimilaire[]; onOuvrir: (id: string) => void }) {
+  return (
+    <div className={carte}>
+      <div className={`${titreCarte} flex items-center justify-between gap-2`}>
+        <span>💡 Cas similaires résolus</span>
+        <span className="text-[11px] font-normal text-slate-400">{cas.length ? `${cas.length} cas` : ''}</span>
+      </div>
+      <div className="p-4">
+        {cas.length ? (
+          <ListeRepliable
+            items={cas}
+            cle={(c) => c.id}
+            render={(c) => (
+              <button
+                key={c.id}
+                type="button"
+                onClick={() => onOuvrir(c.id)}
+                title="Voir le ticket"
+                className="block w-full rounded-lg border border-[#CDE5D1] bg-[#FAFDF9] px-3 py-2 text-left text-[12px] hover:border-[#2F6B3A]"
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <span className="font-semibold text-slate-900">
+                    {c.numero} · {fmtDate(c.opened_at)}
+                  </span>
+                  <span className="truncate text-[11px] font-semibold text-[#2F6B3A]">{c.raisons.join(' · ')}</span>
+                </div>
+                <div className="truncate text-slate-600">{[c.code_defaut ? `Défaut ${c.code_defaut}` : '', c.modele, c.intitule_tiers].filter(Boolean).join(' · ')}</div>
+                {c.description ? <div className="truncate text-slate-500">{c.description}</div> : null}
+                {c.solution ? <div className="line-clamp-3 whitespace-pre-line font-semibold text-[#2F6B3A]">→ {c.solution}</div> : null}
+              </button>
+            )}
+          />
+        ) : (
+          <p className="text-[12px] text-slate-500">Saisir le code défaut, le modèle (GE, UI, onduleur) ou l’équipement pour voir les cas déjà résolus et leur solution.</p>
+        )}
+      </div>
+    </div>
+  )
+}
+
 function PaveHistorique({
   titre,
   precision,
@@ -1996,8 +2171,21 @@ function ListeRepliable<T>({ items, cle, render }: { items: T[]; cle: (item: T, 
 }
 
 // ── Fenêtre flottante d'un ticket de l'historique (04/11/2026) ─────────────────
-function FenetreTicket({ id, onFermer }: { id: string; onFermer: () => void }) {
+function FenetreTicket({ id, onFermer, email, collaborateurs }: { id: string; onFermer: () => void; email: string; collaborateurs: Collaborateurs }) {
   const [t, setT] = useState<Ticket | null>(null)
+  const [relance, setRelance] = useState<'non' | 'encours' | 'faite'>('non')
+  async function relancer() {
+    if (!t) return
+    setRelance('encours')
+    try {
+      await relancerRappel(t, email.split('@')[0], t.rappel_par ? nomCollaborateur(t.rappel_par, collaborateurs) : undefined)
+      setEtapesFenetre(await chargerEtapes(t.id))
+      setRelance('faite')
+    } catch (e) {
+      setErreurFenetre(messageErreur(e))
+      setRelance('non')
+    }
+  }
   const [etapes, setEtapesFenetre] = useState<Etape[]>([])
   const [erreurFenetre, setErreurFenetre] = useState<string | null>(null)
 
@@ -2076,7 +2264,18 @@ function FenetreTicket({ id, onFermer }: { id: string; onFermer: () => void }) {
           </div>
         ) : null}
         {t ? (
-          <div className="flex flex-wrap justify-end gap-3 border-t border-[#EFEDE8] px-5 py-3">
+          <div className="flex flex-wrap items-center justify-end gap-3 border-t border-[#EFEDE8] px-5 py-3">
+            {!estResolu(t) ? (
+              <button
+                type="button"
+                disabled={relance !== 'non'}
+                onClick={() => void relancer()}
+                title="Le client a rappelé : noté dans l'historique, la demande de rappel est relancée"
+                className="rounded-lg border border-[#7A5EA8] px-3 py-1.5 text-[13px] font-semibold text-[#5B3F8C] hover:bg-[#F4F0FA] disabled:opacity-50"
+              >
+                {relance === 'faite' ? '✓ Rappel relancé' : '🔁 Le client rappelle : relancer'}
+              </button>
+            ) : null}
             <Link href={`/hotline/tickets?id=${t.id}`} target="_blank" className="text-[13px] font-semibold text-slate-500 underline">
               Fiche complète (nouvel onglet)
             </Link>
