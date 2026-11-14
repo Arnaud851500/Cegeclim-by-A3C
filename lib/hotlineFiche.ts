@@ -29,6 +29,8 @@ import {
   libelleEquipementSoleil,
   styleSeverite,
   type Ticket,
+  serieOnduleurCourt,
+  serieBatterieCourt,
 } from '@/lib/hotline'
 
 /** Polices standard jsPDF : pas d'espace fine, de tiret long ni de points de suspension. */
@@ -93,8 +95,8 @@ export async function telechargerFicheTicket(ticketId: string) {
       ? [
           ['Onduleur', [marqueSoleil(t.pv_marque)?.label, libelleEquipementSoleil(t.pv_marque, t.pv_equipement)].filter(Boolean).join(' > ')],
           ['Sévérité', styleSeverite(t.severite)?.label || ''],
-          ['Modèle onduleur', [t.onduleur_modele, t.onduleur_serie && `n° ${t.onduleur_serie}`].filter(Boolean).join(' - ')],
-          ['Batterie', [t.batterie_modele, t.batterie_serie && `n° ${t.batterie_serie}`].filter(Boolean).join(' - ')],
+          ['Modèle onduleur', [t.onduleur_modele, serieOnduleurCourt(t)].filter(Boolean).join(' - ')],
+          ['Batterie', [t.batterie_modele, serieBatterieCourt(t)].filter(Boolean).join(' - ')],
         ]
       : [
           ['Groupe extérieur (GE)', [t.modele_ge, t.serie_ge && `n° ${t.serie_ge}`].filter(Boolean).join(' - ')],

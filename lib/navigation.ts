@@ -259,7 +259,7 @@ export const NAV_BLOCS: NavBloc[] = [
       { label: 'Console d’appel', path: '/hotline', activeLabel: 'Hotline – console d’appel', accessKey: 'can_hotline', description: 'Appel entrant (3CX) : identification du client SAGE / BLG, ticket pré-rempli, diagnostic guidé, documents à envoyer.' },
       { label: 'Tickets', path: '/hotline/tickets', activeLabel: 'Hotline – tickets', accessKey: 'can_hotline', description: 'Tickets ouverts, en cours et escaladés (niveaux 1, 2, 3), chronologie horodatée, prise en charge.' },
       { label: 'Synthèse N2 / N3', path: '/hotline/escalades', activeLabel: 'Hotline – synthèse niveau 2 / 3', accessKey: 'can_hotline_expert', description: 'Tickets escaladés au niveau 2 et 3 en attente, ancienneté, prise en charge, demandes de pièces au SAV.' },
-      { label: 'Éditeur de diagnostic', path: '/hotline/diagnostic', activeLabel: 'Hotline – éditeur de diagnostic', accessKey: 'can_hotline_expert', description: 'Parcours de questions-réponses par filière et motif, documents à proposer, préconisations, lignes 3CX.' },
+      { label: 'Éditeur de diagnostic', path: '/hotline/diagnostic', activeLabel: 'Hotline – éditeur de diagnostic', accessKey: 'can_hotline_editeur', description: 'Parcours de questions-réponses par filière et motif, documents à proposer, préconisations, lignes 3CX.' },
       { label: 'Statistiques hotline', path: '/hotline/stats', activeLabel: 'Hotline – statistiques', accessKey: 'can_hotline_expert', description: 'Origine des appels, mise en service vs exploitation, délais de prise en charge et de résolution, escalades.' },
     ],
   },

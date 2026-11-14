@@ -51,7 +51,8 @@ const petitBouton = 'rounded-lg border border-[#D8D3C8] px-2.5 py-1 text-[12px] 
 
 export default function HotlineDiagnosticPage() {
   const { rights, email } = useAccess()
-  const expert = Boolean(rights.can_hotline_expert || rights.can_autorisation)
+  // (14/11/2026) Réservé au droit « Hotline – expert (éditeur) », plus au niveau 2.
+  const expert = Boolean(rights.can_hotline_editeur || rights.can_autorisation)
 
   const [arbres, setArbres] = useState<Arbre[]>([])
   const [arbreId, setArbreId] = useState<string>('')
@@ -111,6 +112,31 @@ export default function HotlineDiagnosticPage() {
 
   function patchDoc(n: Noeud, index: number, p: Partial<DocumentLien>) {
     patchNoeud(n.id, { documents: n.documents.map((d, i) => (i === index ? { ...d, ...p } : d)) })
+  }
+
+  // (14/11/2026) Document déposé depuis le PC : stocké dans le bucket
+  // hotline-documents, le lien public est renseigné automatiquement.
+  const [depot, setDepot] = useState<string | null>(null)
+  async function deposerDoc(n: Noeud, index: number, fichier: File) {
+    const cle = `${n.id}:${index}`
+    setDepot(cle)
+    try {
+      const propre = fichier.name.normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^\w.-]+/g, '_')
+      const chemin = `diagnostic/${arbreId || 'sans-parcours'}/${Date.now()}_${propre}`
+      const { error } = await supabase.storage.from('hotline-documents').upload(chemin, fichier, { contentType: fichier.type || undefined, upsert: false })
+      if (error) throw error
+      const url = supabase.storage.from('hotline-documents').getPublicUrl(chemin).data.publicUrl
+      const ext = (fichier.name.split('.').pop() || '').toLowerCase()
+      const type = ext === 'pdf' ? 'PDF' : ['xls', 'xlsx', 'csv'].includes(ext) ? 'XLS' : ['mp4', 'mov', 'webm'].includes(ext) ? 'VIDEO' : ['bin', 'hex', 'zip'].includes(ext) ? 'FIRMWARE' : ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg'].includes(ext) ? 'SCHEMA' : 'PDF'
+      const d = n.documents[index]
+      patchDoc(n, index, { url, chemin, type, titre: d?.titre?.trim() ? d.titre : fichier.name.replace(/\.[^.]+$/, '') })
+      setInfo('Fichier déposé — penser à « Enregistrer les questions ».')
+      window.setTimeout(() => setInfo(null), 3000)
+    } catch (e) {
+      setErreur(messageErreur(e))
+    } finally {
+      setDepot(null)
+    }
   }
 
   async function run(fn: () => Promise<unknown>, message?: string) {
@@ -329,7 +355,7 @@ export default function HotlineDiagnosticPage() {
       <div className="min-h-screen bg-[#F4F3F0]">
         <HotlineHeader titre="Éditeur de diagnostic" />
         <main className="mx-auto max-w-[1760px] px-4 py-6 md:px-8">
-          <HotlineErreur message="Écran réservé aux experts hotline : demander le droit « Hotline – expert » (Admin › Profils et autorisations)." />
+          <HotlineErreur message="Écran réservé aux experts hotline : demander le profil « Hotline expert » ou le droit « Hotline – expert (éditeur) » (Admin › Profils et autorisations)." />
         </main>
       </div>
     )
@@ -690,7 +716,36 @@ export default function HotlineDiagnosticPage() {
                                 ✕
                               </button>
                             </div>
-                            <input value={d.url || ''} onChange={(e) => patchDoc(n, i, { url: e.target.value })} placeholder={d.type === 'VUE_ECLATEE' ? 'vue:RÉFÉRENCE (ex. vue:RAK-DJ35RHAE)' : 'Lien (Documents, SharePoint, site fabricant…)'} className={champ} />
+                            <div
+                              className="flex gap-1"
+                              onDragOver={(e) => e.preventDefault()}
+                              onDrop={(e) => {
+                                e.preventDefault()
+                                const f = e.dataTransfer.files?.[0]
+                                if (f) void deposerDoc(n, i, f)
+                              }}
+                            >
+                              <input value={d.url || ''} onChange={(e) => patchDoc(n, i, { url: e.target.value, chemin: undefined })} placeholder={d.type === 'VUE_ECLATEE' ? 'vue:RÉFÉRENCE (ex. vue:RAK-DJ35RHAE)' : 'Lien SharePoint / internet, ou déposer un fichier →'} className={champ} />
+                              {d.type !== 'VUE_ECLATEE' ? (
+                                <label className={`${petitBouton} shrink-0 cursor-pointer whitespace-nowrap`} title="Déposer le fichier depuis le PC (stocké dans le compagnon) — on peut aussi le glisser sur cette ligne">
+                                  {depot === `${n.id}:${i}` ? 'Envoi…' : '📎 Fichier'}
+                                  <input
+                                    type="file"
+                                    className="hidden"
+                                    onChange={(e) => {
+                                      const f = e.target.files?.[0]
+                                      if (f) void deposerDoc(n, i, f)
+                                      e.target.value = ''
+                                    }}
+                                  />
+                                </label>
+                              ) : null}
+                            </div>
+                            {d.chemin && d.url ? (
+                              <a href={d.url} target="_blank" rel="noreferrer" className="block truncate text-[11px] font-semibold text-[#2F6B3A] underline">
+                                ✓ Fichier stocké : {String(d.chemin).split('/').pop()?.replace(/^\d+_/, '')}
+                              </a>
+                            ) : null}
                           </div>
                         ))}
                         <button type="button" onClick={() => patchNoeud(n.id, { documents: [...n.documents, { titre: '', type: 'PDF', url: '' }] })} className={petitBouton}>

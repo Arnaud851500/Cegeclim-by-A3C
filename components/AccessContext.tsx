@@ -29,6 +29,7 @@ export type AccessRights = {
   /** (2026-11-02) Hotline technique : console + tickets ; expert = niveaux 2/3, éditeur, statistiques. */
   can_hotline: boolean
   can_hotline_expert: boolean
+  can_hotline_editeur: boolean
   /** (2026-11-03) Bloc « Guides BLG » : modes opératoires BLG Cloud (HTML déposés). */
   can_guides_blg: boolean
   can_change_scope: boolean
@@ -109,6 +110,7 @@ type AccessProfileRow = {
   can_paiement?: boolean | null
   can_hotline?: boolean | null
   can_hotline_expert?: boolean | null
+  can_hotline_editeur?: boolean | null
   can_guides_blg?: boolean | null
   can_change_scope?: boolean | null
   default_landing_page?: string | null
@@ -180,6 +182,7 @@ export const defaultRights: AccessRights = {
   can_paiement: false,
   can_hotline: false,
   can_hotline_expert: false,
+  can_hotline_editeur: false,
   can_guides_blg: false,
   can_change_scope: false,
   allowed_scopes: ['Global'],
@@ -259,7 +262,7 @@ const PAGE_ACCESS_CHECKS: Array<[string, keyof AccessRights]> = [
   ['/financement', 'can_financement'],
   ['/suivi-agences', 'can_suivi_agences'],
   ['/objectifs', 'can_objectifs'],
-  ['/hotline/diagnostic', 'can_hotline_expert'],
+  ['/hotline/diagnostic', 'can_hotline_editeur'],
   ['/hotline/stats', 'can_hotline_expert'],
   ['/hotline/escalades', 'can_hotline_expert'],
   ['/hotline/import', 'can_hotline_expert'],
@@ -329,6 +332,7 @@ const PROFILE_FLAG_KEYS = [
   'can_paiement',
   'can_hotline',
   'can_hotline_expert',
+  'can_hotline_editeur',
   'can_guides_blg',
   'can_change_scope',
   'show_alert_cerfa_ko',

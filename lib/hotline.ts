@@ -127,6 +127,8 @@ export type DocumentLien = {
   titre: string
   type?: string
   url?: string
+  /** (14/11/2026) Fichier déposé dans le bucket hotline-documents. */
+  chemin?: string
   /** Texte du mail proposé à la place du message standard (fiche pièce d'une vue éclatée). */
   message?: string
 }
@@ -453,7 +455,7 @@ export function normaliserNoeud(row: Record<string, unknown>): Noeud {
     arbre_id: String(row.arbre_id),
     question: String(row.question || ''),
     aide: (row.aide as string | null) ?? null,
-    documents: docs.map((d) => ({ titre: String(d?.titre || ''), type: d?.type || 'PDF', url: d?.url || '' })),
+    documents: docs.map((d) => ({ titre: String(d?.titre || ''), type: d?.type || 'PDF', url: d?.url || '', ...(d?.chemin ? { chemin: String(d.chemin) } : {}) })),
     choix: choix.map((c) => ({
       libelle: String(c?.libelle || ''),
       suivant: c?.suivant ? String(c.suivant) : null,
@@ -741,6 +743,26 @@ export async function rappelEffectue(ticketId: string, qui: string, commentaire?
 export async function noteRapide(ticketId: string, texte: string, modification = false) {
   if (!texte.trim()) return
   await ajouterEtape(ticketId, 'NOTE_RAPIDE', texte.trim(), { details: modification ? { modification: true } : null })
+}
+
+// (14/11/2026, retours Soleil de Jean LABARRÈRE) Identifiant demandé selon le
+// matériel : SOLIS, Hoymiles, Solar Edge → ID centrale (supervision) au lieu
+// du n° de série onduleur ; batterie Soluna → n° de série du dongle.
+export function idCentraleOnduleur(t: { onduleur_modele?: string | null; pv_marque?: string | null; pv_equipement?: string | null }) {
+  return /SOLIS|HOYMILES|SOLAR\s*-?\s*EDGE/i.test(t.onduleur_modele || '') || t.pv_marque === 'SOLIS' || t.pv_marque === 'HOYMILES' || t.pv_equipement === 'SOLAR_EDGE'
+}
+export function libelleSerieOnduleur(t: { onduleur_modele?: string | null; pv_marque?: string | null; pv_equipement?: string | null }) {
+  return idCentraleOnduleur(t) ? 'ID centrale' : 'N° de série onduleur'
+}
+export function libelleSerieBatterie(t: { batterie_modele?: string | null }) {
+  return /SOLUNA/i.test(t.batterie_modele || '') ? 'N° de série dongle' : 'N° de série batterie'
+}
+/** Libellé court pour les fiches : « ID centrale X » / « dongle X » / « n° X ». */
+export function serieOnduleurCourt(t: { onduleur_modele?: string | null; onduleur_serie?: string | null; pv_marque?: string | null; pv_equipement?: string | null }) {
+  return t.onduleur_serie ? `${idCentraleOnduleur(t) ? 'ID centrale' : 'n°'} ${t.onduleur_serie}` : ''
+}
+export function serieBatterieCourt(t: { batterie_modele?: string | null; batterie_serie?: string | null }) {
+  return t.batterie_serie ? `${/SOLUNA/i.test(t.batterie_modele || '') ? 'dongle n°' : 'n°'} ${t.batterie_serie}` : ''
 }
 
 // ----------------------------------------------------------------------------

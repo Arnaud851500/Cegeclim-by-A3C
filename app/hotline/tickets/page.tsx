@@ -70,6 +70,8 @@ import {
   dupliquerTicket,
   messagerieTelephonique,
   mettreEnAttenteClient,
+  serieOnduleurCourt,
+  serieBatterieCourt,
   type Collaborateurs,
   type Etape,
   type Filiere,
@@ -766,8 +768,8 @@ function FicheTicket({
               ? [
                   ['Onduleur (NIV 2-3)', [marqueSoleil(ticket.pv_marque)?.label, libelleEquipementSoleil(ticket.pv_marque, ticket.pv_equipement)].filter(Boolean).join(' › ')],
                   ['Sévérité', styleSeverite(ticket.severite)?.label || ''],
-                  ['Onduleur', [ticket.onduleur_modele, ticket.onduleur_serie && `n° ${ticket.onduleur_serie}`].filter(Boolean).join(' · ')],
-                  ['Batterie', [ticket.batterie_modele, ticket.batterie_serie && `n° ${ticket.batterie_serie}`].filter(Boolean).join(' · ')],
+                  ['Onduleur', [ticket.onduleur_modele, serieOnduleurCourt(ticket)].filter(Boolean).join(' · ')],
+                  ['Batterie', [ticket.batterie_modele, serieBatterieCourt(ticket)].filter(Boolean).join(' · ')],
                   ['Reprise', ticket.reprise_le ? `${new Date(ticket.reprise_le).toLocaleDateString('fr-FR')} → ${nomCollaborateur(ticket.reprise_par, collaborateurs)}` : ''],
                 ]
               : [

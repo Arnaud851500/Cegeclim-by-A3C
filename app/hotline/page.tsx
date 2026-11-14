@@ -74,6 +74,9 @@ import {
   MARQUES_SOLEIL,
   marqueSoleil,
   libelleEquipementSoleil,
+  idCentraleOnduleur,
+  libelleSerieOnduleur,
+  libelleSerieBatterie,
   SEVERITES,
   ACTIONS_REPRISE,
   CATEGORIES_DOC_SOLEIL,
@@ -1222,15 +1225,27 @@ function HotlineConsole() {
               </div>
               {form.filiere === 'PV' ? (
                 <div className="rounded-lg border border-[#EFEDE8] bg-[#FAF9F7] p-2">
-                  <div className="mb-1 text-[10px] font-bold uppercase tracking-[0.06em] text-slate-500">Onduleur</div>
+                  <div className="mb-1 grid grid-cols-2 gap-2 text-[10px] font-bold uppercase tracking-[0.06em] text-slate-500">
+                    <span>Onduleur</span>
+                    <span className={idCentraleOnduleur(form) ? 'text-[#B4761A]' : ''}>{libelleSerieOnduleur(form)}</span>
+                  </div>
                   <div className="grid grid-cols-2 gap-2">
                     <input value={form.onduleur_modele} onChange={(e) => patch({ onduleur_modele: e.target.value })} placeholder="Modèle onduleur" className={champ} />
-                    <input value={form.onduleur_serie} onChange={(e) => patch({ onduleur_serie: e.target.value.toUpperCase() })} placeholder="N° de série onduleur" className={champ} />
+                    <input
+                      value={form.onduleur_serie}
+                      onChange={(e) => patch({ onduleur_serie: e.target.value.toUpperCase() })}
+                      placeholder={libelleSerieOnduleur(form)}
+                      title={idCentraleOnduleur(form) ? 'SOLIS, Hoymiles, Solar Edge : demander l’ID de la centrale (supervision) plutôt que le n° de série' : undefined}
+                      className={champ}
+                    />
                   </div>
-                  <div className="mb-1 mt-2 text-[10px] font-bold uppercase tracking-[0.06em] text-slate-500">Batterie</div>
+                  <div className="mb-1 mt-2 grid grid-cols-2 gap-2 text-[10px] font-bold uppercase tracking-[0.06em] text-slate-500">
+                    <span>Batterie</span>
+                    <span className={/SOLUNA/i.test(form.batterie_modele) ? 'text-[#B4761A]' : ''}>{libelleSerieBatterie(form)}</span>
+                  </div>
                   <div className="grid grid-cols-2 gap-2">
                     <input value={form.batterie_modele} onChange={(e) => patch({ batterie_modele: e.target.value })} placeholder="Modèle batterie" className={champ} />
-                    <input value={form.batterie_serie} onChange={(e) => patch({ batterie_serie: e.target.value.toUpperCase() })} placeholder="N° de série batterie" className={champ} />
+                    <input value={form.batterie_serie} onChange={(e) => patch({ batterie_serie: e.target.value.toUpperCase() })} placeholder={libelleSerieBatterie(form)} className={champ} />
                   </div>
                   <label className="mt-2 flex items-center gap-2 text-[11px] font-semibold text-slate-500">
                     Mise en service le
@@ -1472,7 +1487,7 @@ function HotlineConsole() {
                   {form.pv_marque ? (
                     <>
                       <div className="mt-4 text-[11px] font-bold uppercase tracking-[0.06em] text-slate-500">
-                        Niveau 3 · équipement {marqueSoleil(form.pv_marque)?.label}
+                        Niveau 3 · équipement {marqueSoleil(form.pv_marque)?.label} concerné par l’appel
                       </div>
                       <div className="mt-2 flex flex-wrap gap-2">
                         {marqueSoleil(form.pv_marque)?.equipements.map((e) => {

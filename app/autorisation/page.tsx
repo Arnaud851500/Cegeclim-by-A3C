@@ -30,6 +30,7 @@ type PermissionKey =
   | 'can_paiement'
   | 'can_hotline'
   | 'can_hotline_expert'
+  | 'can_hotline_editeur'
   | 'can_guides_blg'
 
 type AlertKey =
@@ -178,7 +179,8 @@ const PERMISSION_GROUPS: Array<{
     hint: 'SAV photovoltaïque et thermique (bloc « Hotline technique »)',
     items: [
       { key: 'can_hotline', label: 'Hotline – niveau 1', description: 'Console d’appel (3CX), ouverture et suivi des tickets, diagnostic guidé.' },
-      { key: 'can_hotline_expert', label: 'Hotline – expert', description: 'Niveaux 2 / 3, éditeur des parcours de diagnostic et des lignes 3CX, statistiques. Donne aussi la console et les tickets.' },
+      { key: 'can_hotline_expert', label: 'Hotline – niveau 2 / 3', description: 'Synthèse des tickets escaladés N2 / N3, statistiques. Donne aussi la console et les tickets.' },
+      { key: 'can_hotline_editeur', label: 'Hotline – expert (éditeur)', description: 'Éditeur des parcours de diagnostic et de leurs documents, documents Soleil, lignes 3CX, paramètres hotline (clôture et export automatiques), tickets de test.' },
     ],
   },
   {
@@ -286,6 +288,7 @@ const EMPTY_PROFILE: AccessProfile = {
   can_paiement: false,
   can_hotline: false,
   can_hotline_expert: false,
+  can_hotline_editeur: false,
   can_guides_blg: false,
   show_alert_cerfa_ko: false,
   show_alert_cdc_liv_avant_2026: false,

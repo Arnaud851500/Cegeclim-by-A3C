@@ -11,11 +11,11 @@ import type React from 'react'
 import { useAccess } from '@/components/AccessContext'
 import { supabase } from '@/lib/supabaseClient'
 
-const ONGLETS: Array<{ href: string; label: string; expert?: boolean }> = [
+const ONGLETS: Array<{ href: string; label: string; expert?: boolean; editeur?: boolean }> = [
   { href: '/hotline', label: 'Console d’appel' },
   { href: '/hotline/tickets', label: 'Tickets' },
   { href: '/hotline/escalades', label: 'Synthèse N2 / N3', expert: true },
-  { href: '/hotline/diagnostic', label: 'Éditeur de diagnostic', expert: true },
+  { href: '/hotline/diagnostic', label: 'Éditeur de diagnostic', expert: true, editeur: true },
   { href: '/hotline/stats', label: 'Statistiques', expert: true },
 ]
 
@@ -31,6 +31,7 @@ export default function HotlineHeader({
   const pathname = usePathname()
   const { rights, email } = useAccess()
   const expert = Boolean(rights.can_hotline_expert || rights.can_autorisation)
+  const editeur = Boolean(rights.can_hotline_editeur || rights.can_autorisation)
   // (12/11/2026) Clients que l'utilisateur doit rappeler (tickets non résolus).
   const [rappels, setRappels] = useState(0)
   useEffect(() => {
@@ -75,7 +76,7 @@ export default function HotlineHeader({
         ) : null}
       </div>
       <nav className="mx-auto mt-3 flex w-full max-w-[1760px] gap-1 overflow-x-auto px-4 md:px-8">
-        {ONGLETS.filter((o) => !o.expert || expert).map((o) => {
+        {ONGLETS.filter((o) => (!o.expert || expert) && (!o.editeur || editeur)).map((o) => {
           const actif = o.href === '/hotline' ? pathname === '/hotline' : pathname === o.href || pathname.startsWith(`${o.href}/`)
           return (
             <Link
