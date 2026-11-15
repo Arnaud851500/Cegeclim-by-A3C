@@ -49,6 +49,8 @@
 // ajouté au bloc Projet BLG (droit can_projetblg). Migration 20261029_activite_sage_blg_statuts.sql.
 // ÉVOLUTION (2026-10-30) : « Portefeuille BLG – SAGE » (/controle-sage-blg/portefeuille-blg-sage),
 // bloc Projet BLG (can_projetblg). Migration 20261029d_portefeuille_blg_sage.sql.
+// ÉVOLUTION (2026-11-15) : « Flux de données » (/admin/flux-donnees, can_autorisation) ajouté au bloc Admin —
+// schéma en couches sources → Supabase → Vercel avec état des synchronisations (migration 20261115a_admin_flux_donnees.sql).
 // ÉVOLUTION (2026-11-01) : « Inventaire – pilotage achats » (/stock/inventaire, can_appro) et
 // « Inventaire – saisie dépôt » (/stock/inventaire/saisie, can_stocks, dépôt de l'agence).
 // Migration 20261101_inventaire_annuel.sql.
@@ -304,6 +306,7 @@ export const NAV_BLOCS: NavBloc[] = [
       { label: 'MAJ données activité', path: '/Import', activeLabel: 'MAJ Données Activité', accessKey: 'can_autorisation', description: 'Imports, contrôles des agrégats et cohérence des données.' },
       { label: 'Planification des jobs', path: '/admin/planification', activeLabel: 'Job scheduling', accessKey: 'can_autorisation', description: 'Planification des synchronisations et recalculs.' },
       { label: 'Performance des extractions', path: '/admin/performance-extraction', activeLabel: 'Performance des extractions', accessKey: 'can_superuser', description: 'Durée des exports SAGE (TSE) par lancement, historique et journal d’exécution.' },
+      { label: 'Flux de données', path: '/admin/flux-donnees', activeLabel: 'Flux de données', accessKey: 'can_autorisation', description: 'Schéma des sources, de Supabase et des blocs du compagnon, avec l’état de chaque synchronisation.' },
       { label: 'Cycle de synchronisation', path: '/cycle-synchronisation', activeLabel: 'Cycle Synchronisation data', accessKey: 'can_superuser', description: 'État et historique des cycles de synchronisation SAGE → Supabase.' },
       { label: 'MAJ retards paiement', path: '/retards-paiement', activeLabel: 'Retards de paiements', accessKey: 'can_paiement', description: 'Intégration du fichier des retards de paiemnets.' },
       { label: 'Statistiques usage', path: '/admin/statistiques-usage', activeLabel: 'Statistiques usage', accessKey: 'can_superuser', description: 'Suivi de l utilisation de l outil pour accompagnement' },
