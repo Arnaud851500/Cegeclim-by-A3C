@@ -36,16 +36,38 @@ const CACHE_MAX = 500
 type Verdict = { ok: boolean; email: string | null; admin: boolean | null; at: number }
 const cache = new Map<string, Verdict>()
 
+// CORRECTIF (15/11/2026) : les secrets de moins de 16 caractères étaient
+// ignorés. CLIENT_MAINTENANCE_SECRET est dans ce cas : depuis le 10/11, tous
+// les appels internes du planificateur (Sirene, RGE, capacité gaz →
+// /api/client-maintenance/start et le worker) étaient refusés ici avec
+// « Non authentifié : session requise », alors que les routes elles-mêmes
+// acceptent ce secret. Un secret configuré est désormais accepté quelle que
+// soit sa longueur ; un avertissement est écrit dans les logs Vercel pour
+// rappeler de le remplacer par une valeur longue (32 caractères ou plus).
+const SECRETS_MACHINE = [
+  'CRON_SECRET',
+  'CLIENT_MAINTENANCE_SECRET',
+  'REPORT_PDF_RENDER_SECRET',
+  'INTERNAL_API_SECRET',
+  'BLG_SYNC_TRIGGER_SECRET',
+] as const
+
+let secretsCourtsSignales = false
+
 function secretsConnus(): string[] {
-  return [
-    process.env.CRON_SECRET,
-    process.env.CLIENT_MAINTENANCE_SECRET,
-    process.env.REPORT_PDF_RENDER_SECRET,
-    process.env.INTERNAL_API_SECRET,
-    process.env.BLG_SYNC_TRIGGER_SECRET,
-  ]
-    .map((value) => String(value || '').trim())
-    .filter((value) => value.length >= 16)
+  const secrets: string[] = []
+  const courts: string[] = []
+  for (const nom of SECRETS_MACHINE) {
+    const valeur = String(process.env[nom] || '').trim()
+    if (!valeur) continue
+    if (valeur.length < 16) courts.push(nom)
+    secrets.push(valeur)
+  }
+  if (courts.length && !secretsCourtsSignales) {
+    secretsCourtsSignales = true
+    console.warn(`[proxy] secret(s) trop court(s), à remplacer par 32 caractères ou plus : ${courts.join(', ')}`)
+  }
+  return secrets
 }
 
 /** Comparaison à durée constante (évite de deviner un secret caractère par caractère). */
