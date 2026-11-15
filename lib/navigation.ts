@@ -72,6 +72,10 @@
 // La page reste ouvrable par URL.
 // ÉVOLUTION (2026-11-03, suite) : nouveau bloc « Guides BLG » (/guides-blg, droit can_guides_blg) —
 // chapitres HTML des modes opératoires BLG Cloud déposés tels quels (migration 20261103g_guides_blg.sql).
+// ÉVOLUTION (2026-11-15) : le bloc « Guides BLG » devient « Guide utilisateur Compagnon & BLG » :
+// sa fenêtre propose le guide BLG (/guides-blg) ou le guide du compagnon (/guides-compagnon,
+// chapitres HTML rangés par pavé dans guides-compagnon/<id du pavé>/, migration
+// 20261115a_guides_compagnon.sql). Même droit can_guides_blg pour les deux.
 // Le bloc « Mes alertes » de l'accueil n'est pas ici : il n'a pas de page, il
 // ouvre le Centre d'alertes (components/AlertsContext.tsx + ClientRootShell).
 
@@ -284,13 +288,15 @@ export const NAV_BLOCS: NavBloc[] = [
   },
   {
     id: 'guides',
-    label: 'Guides BLG',
-    subtitle: 'Modes opératoires BLG Cloud',
+    label: 'Guide utilisateur Compagnon & BLG',
+    subtitle: 'Mon Compagnon · BLG Cloud',
     icon: '📘',
+    icons: ['🧭', '📘'],
     gradient: ['#2E6E66', '#173C3A'],
     iconBg: 'rgba(255,255,255,0.18)',
     pages: [
-      { label: 'Guides BLG', path: '/guides-blg', activeLabel: 'Guides BLG — modes opératoires', accessKey: 'can_guides_blg', description: 'Chapitres des modes opératoires BLG Cloud : fiches clients, contacts, adresses de livraison, blocage, archivage, recherches…' },
+      { label: 'Guide utilisateur BLG', path: '/guides-blg', activeLabel: 'Guide utilisateur BLG — modes opératoires', accessKey: 'can_guides_blg', description: 'Chapitres des modes opératoires BLG Cloud : fiches clients, contacts, adresses de livraison, blocage, archivage, recherches…' },
+      { label: 'Guide utilisateur « Mon Compagnon »', path: '/guides-compagnon', activeLabel: 'Guide utilisateur — Mon Compagnon', accessKey: 'can_guides_blg', description: 'Mode d’emploi des écrans du compagnon, pavé par pavé : captures commentées pas à pas (Hotline technique…).' },
     ],
   },
   {

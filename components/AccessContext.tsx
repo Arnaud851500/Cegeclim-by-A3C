@@ -268,6 +268,7 @@ const PAGE_ACCESS_CHECKS: Array<[string, keyof AccessRights]> = [
   ['/hotline/import', 'can_hotline_expert'],
   ['/hotline', 'can_hotline'],
   ['/guides-blg', 'can_guides_blg'],
+  ['/guides-compagnon', 'can_guides_blg'],
 ]
 
 function isPathAllowed(path: string, rights: AccessRights) {

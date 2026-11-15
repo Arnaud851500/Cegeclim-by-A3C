@@ -27,6 +27,8 @@ const nextConfig: NextConfig = {
     '/api/reports/focus-mensuel-pdf': [
       './node_modules/@sparticuz/chromium/bin/**/*',
     ],
+    // 15/11/2026 : chapitres du guide utilisateur « Mon Compagnon » (dossier du dépôt)
+    '/api/admin/guides-compagnon': ['./guides-compagnon/**/*'],
   },
 }
 

@@ -191,10 +191,10 @@ const PERMISSION_GROUPS: Array<{
     ],
   },
   {
-    family: 'Guides BLG',
-    hint: 'Bloc « Guides BLG » : modes opératoires BLG Cloud',
+    family: 'Guides utilisateur',
+    hint: 'Bloc « Guide utilisateur Compagnon & BLG » : modes opératoires BLG Cloud et guide du compagnon',
     items: [
-      { key: 'can_guides_blg', label: 'Guides BLG', description: 'Lecture des chapitres de modes opératoires BLG Cloud (clients, commandes…). Le dépôt des chapitres reste réservé aux administrateurs.' },
+      { key: 'can_guides_blg', label: 'Guides utilisateur (BLG et Mon Compagnon)', description: 'Lecture des chapitres de modes opératoires BLG Cloud et du guide utilisateur du compagnon. Le dépôt et la publication des chapitres restent réservés aux administrateurs.' },
     ],
   },
   {
