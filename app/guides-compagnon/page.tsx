@@ -107,9 +107,12 @@ const s = themed({
   resultMeta: { fontSize: 12, color: 'rgba(245,243,236,0.6)', marginTop: 2 },
   resultStep: { fontSize: 12, color: '#8FC7DA', marginTop: 3 },
   tiles: { display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(230px, 1fr))', gap: 16 },
-  tile: { position: 'relative', borderRadius: 18, padding: '22px 18px 18px', minHeight: 200, display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 8, cursor: 'pointer', color: '#ffffff', border: '1px solid rgba(255,255,255,0.10)', boxShadow: '0 6px 18px rgba(0,0,0,0.25)', textAlign: 'left' },
-  tileIcons: { display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 6 },
-  tileIcon: { fontSize: 30, lineHeight: 1, width: 54, height: 54, borderRadius: 14, display: 'flex', alignItems: 'center', justifyContent: 'center' },
+  tile: { position: 'relative', minWidth: 0, borderRadius: 18, padding: '22px 18px 18px', minHeight: 200, display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 8, cursor: 'pointer', color: '#ffffff', border: '1px solid rgba(255,255,255,0.10)', boxShadow: '0 6px 18px rgba(0,0,0,0.25)', textAlign: 'left' },
+  // 15/11/2026 : les icônes d'un pavé à plusieurs univers (ex. Hotline 🎧 ☀️ 🔥)
+  // débordaient de la tuile — la rangée prend la largeur de la tuile et les
+  // carrés rétrécissent au besoin (54 px au plus, toujours carrés).
+  tileIcons: { display: 'flex', flexWrap: 'nowrap', gap: 6, marginBottom: 6, width: '100%', minWidth: 0 },
+  tileIcon: { fontSize: 28, lineHeight: 1, flex: '0 1 54px', minWidth: 0, maxWidth: 54, aspectRatio: '1 / 1', borderRadius: 14, display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden', boxSizing: 'border-box' },
   tileTitle: { fontFamily: '"Space Grotesk", system-ui, sans-serif', fontSize: 21, fontWeight: 700, color: '#ffffff', margin: 0 },
   tileSub: { fontSize: 12, color: 'rgba(255,255,255,0.78)' },
   tileBadge: { position: 'absolute', top: 12, right: 12, fontSize: 11, padding: '3px 9px', borderRadius: 999, background: 'rgba(224,122,78,0.85)', color: '#ffffff', fontWeight: 600 },
