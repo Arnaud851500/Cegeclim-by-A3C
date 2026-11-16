@@ -241,6 +241,7 @@ const PAGE_ACCESS_CHECKS: Array<[string, keyof AccessRights]> = [
   ['/agences', 'can_agences'],
   ['/autorisation', 'can_autorisation'],
   ['/admin/planification', 'can_autorisation'],
+  ['/admin/requeteur', 'can_autorisation'],
   ['/admin/performance-extraction', 'can_superuser'],
   ['/admin/statistiques-usage', 'can_superuser'],
   ['/cycle-synchronisation', 'can_superuser'],
