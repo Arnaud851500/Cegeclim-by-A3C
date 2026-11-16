@@ -544,7 +544,11 @@ function HotlineConsole() {
         const statut = t.statut === 'ATTENTE_CLIENT' ? t.statut : ('EN_COURS' as const)
         const qui = String(email || '').split('@')[0]
         await majTicket(t.id, { assigne_a: email || t.assigne_a, statut })
-        await ajouterEtape(t.id, 'COMMENTAIRE', `Repris dans la console par ${qui} (niveau ${t.niveau})`)
+        // (16/11/2026) Pas de nouvelle ligne « Repris dans la console » si la même
+        // personne a déjà agi sur le ticket dans l'heure.
+        const ilYaUneHeure = Date.now() - 60 * 60 * 1000
+        const dejaLa = liste.some((e) => String(e.auteur || '').split('@')[0].toLowerCase() === qui.toLowerCase() && new Date(e.at).getTime() > ilYaUneHeure)
+        if (!dejaLa || t.assigne_a !== email) await ajouterEtape(t.id, 'COMMENTAIRE', `Repris dans la console par ${qui} (niveau ${t.niveau})`)
         setTicket({ ...t, assigne_a: email || t.assigne_a, statut })
         setEtapes(await chargerEtapes(t.id))
       } catch (e) {

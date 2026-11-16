@@ -19,10 +19,11 @@ import { useMemo, useState } from 'react'
 import Link from 'next/link'
 import { useAccess } from '@/components/AccessContext'
 import HotlineHeader, { HotlineErreur } from '@/components/hotline/HotlineHeader'
-import { fmtDateHeure, libelleGamme, libelleNature, messageErreur } from '@/lib/hotline'
+import { COMPTES_IMPORT_HISTORIQUE, fmtDateHeure, libelleGamme, libelleNature, messageErreur } from '@/lib/hotline'
 import { METHODES, exporterControle, lireFichierHistorique, traiterHistorique, type LigneHistorique, type ResultatLigne, type Stats } from '@/lib/hotlineImport'
 
-const COMPTES = ['valancha@gmail.com', 'a.valanchauskas@cegeclim-energies.com']
+// (16/11/2026) Ouvert à Philippe VERGES.
+const COMPTES = COMPTES_IMPORT_HISTORIQUE
 const carte = 'rounded-2xl border border-[#E2DFD8] bg-white'
 
 export default function HotlineImport() {

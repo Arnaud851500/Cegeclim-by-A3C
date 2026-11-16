@@ -823,6 +823,9 @@ export function serieBatterieCourt(t: { batterie_modele?: string | null; batteri
   return t.batterie_serie ? `${/SOLUNA/i.test(t.batterie_modele || '') ? 'dongle n°' : 'n°'} ${t.batterie_serie}` : ''
 }
 
+/** Comptes autorisés à l'import CSV de l'ancien outil (contrôle aussi en base : hotline_importer_historique). */
+export const COMPTES_IMPORT_HISTORIQUE = ['valancha@gmail.com', 'a.valanchauskas@cegeclim-energies.com', 'p.verges@cegeclim-energies.com']
+
 // ----------------------------------------------------------------------------
 // Retours d'ergonomie V1 (13/11/2026)
 // ----------------------------------------------------------------------------

@@ -72,6 +72,7 @@ import {
   mettreEnAttenteClient,
   serieOnduleurCourt,
   relancerRappel,
+  COMPTES_IMPORT_HISTORIQUE,
   serieBatterieCourt,
   type Collaborateurs,
   type Etape,
@@ -323,7 +324,7 @@ function HotlineTickets() {
             >
               {exportEnCours ? 'Export…' : `⬇ Export CSV (${filtres.length})`}
             </button>
-            {['valancha@gmail.com', 'a.valanchauskas@cegeclim-energies.com'].includes(String(email || '').toLowerCase()) ? (
+            {COMPTES_IMPORT_HISTORIQUE.includes(String(email || '').toLowerCase()) ? (
               <Link href="/hotline/import" className="h-9 rounded-lg border border-[color:var(--cg-hdr-line)] px-3 py-1.5 text-sm font-semibold text-[color:var(--cg-hdr-ink-2)] hover:border-[#B4761A]">
                 Import CSV (reprise)
               </Link>
