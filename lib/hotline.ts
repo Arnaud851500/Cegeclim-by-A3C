@@ -764,6 +764,7 @@ export type CasSimilaire = {
   numero: string
   opened_at: string
   intitule_tiers: string | null
+  chantier: string | null
   code_defaut: string | null
   modele: string | null
   description: string | null

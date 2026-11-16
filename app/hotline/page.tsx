@@ -2034,6 +2034,17 @@ function BoutonHiParts({ modele, onClick }: { modele: string; onClick: () => voi
 }
 
 // ── Historique (client / contact / chantier-machine) ─────────────────────────
+// (16/11/2026) Nom du chantier en orange gras, juste après le n° de ticket / de pièce.
+function NomChantier({ nom }: { nom?: string | null }) {
+  if (!nom?.trim()) return null
+  return (
+    <>
+      <span className="text-slate-400"> · </span>
+      <span className="font-bold text-[#D9480F]">{nom.trim()}</span>
+    </>
+  )
+}
+
 // ── Cas similaires (14/11/2026) : tickets résolus proches et leur solution ──
 function PaveCasSimilaires({ cas, onOuvrir }: { cas: CasSimilaire[]; onOuvrir: (id: string) => void }) {
   return (
@@ -2056,12 +2067,14 @@ function PaveCasSimilaires({ cas, onOuvrir }: { cas: CasSimilaire[]; onOuvrir: (
                 className="block w-full rounded-lg border border-[#CDE5D1] bg-[#FAFDF9] px-3 py-2 text-left text-[12px] hover:border-[#2F6B3A]"
               >
                 <div className="flex items-center justify-between gap-2">
-                  <span className="font-semibold text-slate-900">
-                    {c.numero} · {fmtDate(c.opened_at)}
+                  <span className="min-w-0 truncate">
+                    <span className="font-semibold text-slate-900">{c.numero}</span>
+                    <NomChantier nom={c.chantier} />
+                    {c.intitule_tiers ? <span className="text-slate-600"> · {c.intitule_tiers}</span> : null}
                   </span>
-                  <span className="truncate text-[11px] font-semibold text-[#2F6B3A]">{c.raisons.join(' · ')}</span>
+                  <span className="shrink-0 truncate text-[11px] font-semibold text-[#2F6B3A]">{c.raisons.join(' · ')}</span>
                 </div>
-                <div className="truncate text-slate-600">{[c.code_defaut ? `Défaut ${c.code_defaut}` : '', c.modele, c.intitule_tiers].filter(Boolean).join(' · ')}</div>
+                <div className="truncate text-slate-600">{[fmtDate(c.opened_at), c.code_defaut ? `Défaut ${c.code_defaut}` : '', c.modele].filter(Boolean).join(' · ')}</div>
                 {c.description ? <div className="truncate text-slate-500">{c.description}</div> : null}
                 {c.solution ? <div className="line-clamp-3 whitespace-pre-line font-semibold text-[#2F6B3A]">→ {c.solution}</div> : null}
               </button>
@@ -2133,22 +2146,25 @@ function PaveHistorique({
               className="block w-full rounded-lg border border-[#E2DFD8] px-3 py-2 text-left text-[12px] hover:border-[#B4761A] hover:bg-[#FDF7EA]"
             >
               <div className="flex items-center justify-between gap-2">
-                <span className={autreSociete(t) ? 'font-extrabold text-[#C81E1E]' : 'font-semibold text-slate-900'} title={autreSociete(t) ? 'Appel d’une autre société que l’appelant actuel' : undefined}>
-                  {t.numero} · {fmtDateHeure(t.opened_at)}
+                <span className="min-w-0 truncate">
+                  <span className={autreSociete(t) ? 'font-extrabold text-[#C81E1E]' : 'font-semibold text-slate-900'} title={autreSociete(t) ? 'Appel d’une autre société que l’appelant actuel' : undefined}>
+                    {t.numero}
+                  </span>
+                  <NomChantier nom={t.chantier} />
+                  {afficherClient && (t.intitule_tiers || t.contact_nom) ? (
+                    <span className="text-slate-600"> · {[t.intitule_tiers || t.numero_tiers, t.contact_nom].filter(Boolean).join(' · ')}</span>
+                  ) : null}
                 </span>
                 <Pastille {...styleStatut(t.statut)} />
               </div>
               <div className="truncate text-slate-600">
-                {t.nature ? `${libelleNature(t.nature)} · ` : ''}
+                {fmtDateHeure(t.opened_at)} · {t.nature ? `${libelleNature(t.nature)} · ` : ''}
                 {libelleFiliere(t.filiere)} · {libelleMotif(t.motif)} · N{t.niveau}
                 {t.source === 'IMPORT' ? <span className="ml-1 text-[10px] font-bold text-slate-400">HISTORIQUE</span> : null}
               </div>
-              {afficherClient && (t.intitule_tiers || t.contact_nom) ? (
-                <div className="truncate text-slate-600">{[t.intitule_tiers || t.numero_tiers, t.contact_nom].filter(Boolean).join(' · ')}</div>
-              ) : null}
-              {afficherChantier && (t.chantier || t.numero_serie || t.serie_ge) ? (
+              {afficherChantier && (t.numero_serie || t.serie_ge) ? (
                 <div className="truncate text-slate-600">
-                  {[t.chantier, t.serie_ge ? `GE ${t.serie_ge}` : '', t.numero_serie ? `UI ${t.numero_serie}` : ''].filter(Boolean).join(' · ')}
+                  {[t.serie_ge ? `GE ${t.serie_ge}` : '', t.numero_serie ? `UI ${t.numero_serie}` : ''].filter(Boolean).join(' · ')}
                 </div>
               ) : null}
               {t.description ? <div className="truncate text-slate-500">{t.description}</div> : null}
@@ -2678,9 +2694,11 @@ function PaveLivraisons({
             <div className="rounded-lg border border-[#E2DFD8] text-[12px]">
               <div className="space-y-0.5 border-b border-[#EFEDE8] bg-[#FAF9F7] px-3 py-2">
                 <div className="flex flex-wrap items-baseline justify-between gap-x-3">
-                  <span className="font-semibold text-slate-900">
-                    Commande {l.numero_cdc || '—'}
-                    {l.date_cdc ? <span className="font-normal text-slate-500"> du {fmtDate(l.date_cdc)}</span> : null}
+                  <span className="min-w-0">
+                    <span className="font-semibold text-slate-900">Commande {l.numero_cdc || '—'}</span>
+                    <NomChantier nom={l.chantier} />
+                    {l.intitule || l.numero_tiers ? <span className="text-slate-600"> · {l.intitule || l.numero_tiers}</span> : null}
+                    {l.date_cdc ? <span className="font-normal text-slate-500"> · du {fmtDate(l.date_cdc)}</span> : null}
                   </span>
                   <span className="font-semibold text-[#2F6B3A]">
                     Expédiée le {fmtDate(l.date_bl)}
@@ -2688,7 +2706,7 @@ function PaveLivraisons({
                   </span>
                 </div>
                 <div className="truncate text-slate-600">
-                  {[l.intitule || l.numero_tiers, l.chantier, l.projet, l.depot ? `dépôt ${l.depot}` : '', l.factures?.length ? `facture ${l.factures.join(', ')}` : '']
+                  {[l.projet, l.depot ? `dépôt ${l.depot}` : '', l.factures?.length ? `facture ${l.factures.join(', ')}` : '']
                     .filter(Boolean)
                     .join(' · ')}
                 </div>
@@ -2782,7 +2800,10 @@ function PaveDossiers({
                 className="block w-full rounded-lg border border-[#E2DFD8] px-3 py-2 text-left text-[12px] hover:border-[#B4761A] hover:bg-[#FDF7EA]"
               >
                 <div className="flex items-center justify-between gap-2">
-                  <span className="min-w-0 truncate font-semibold text-slate-900">{d.reference || 'Sans référence chantier'}</span>
+                  <span className="min-w-0 truncate">
+                    <span className="font-semibold text-slate-900">{d.cdc?.piece || d.devis[0]?.piece || d.bls[0]?.piece || d.factures[0]?.piece || 'Dossier'}</span>
+                    {d.reference ? <NomChantier nom={d.reference} /> : <span className="text-slate-400"> · sans référence chantier</span>}
+                  </span>
                   <span className="shrink-0 rounded-full px-2 py-0.5 text-[10px] font-bold" style={{ color: ETAPE_STYLE[d.etape].tone, background: ETAPE_STYLE[d.etape].bg }}>
                     {d.etape}
                   </span>
