@@ -103,8 +103,16 @@ export const TRANCHES: Record<Tranche, string> = {
   t20: 'Clients 20 – 50 k€',
 }
 
-/** Taux de transformation devis → commande à 120 j en CA (lecture « à âge égal » de l'écran Analyse devis). */
+/**
+ * Délai de transformation des devis (jours) : base unique des contrats d'objectifs et de
+ * l'écran Mes agences depuis le 17/11/2026 (auparavant 120 j pour les contrats).
+ */
+export const DELAI_TRANSFO_DEVIS = 60
+
+/** Taux de transformation devis → commande à 60 j en CA (lecture « à âge égal » : devis assez anciens, mêmes dates N-1). */
 export type TransfoResultat = {
+  /** Délai en jours renvoyé par get_obj_contrat (60 depuis la migration 20261117b). */
+  delai?: number
   taux: number | null
   taux_n1: number | null
   ca_devis: number
@@ -452,7 +460,7 @@ export function etatPrime(p: Prime, f: FicheContrat, calc: CalculContrat): EtatP
     projection = ecart
     if (!r) {
       statut = 'gris'
-      texte = 'Pas encore de devis de l’année âgés de 120 jours'
+      texte = `Pas encore de devis de l’année âgés de ${DELAI_TRANSFO_DEVIS} jours`
     } else {
       if (p.mode === 'paliers') {
         aDate = projete = ecart == null ? 0 : palierAtteint(p.paliers, ecart)
@@ -464,7 +472,7 @@ export function etatPrime(p: Prime, f: FicheContrat, calc: CalculContrat): EtatP
       }
       const d1 = new Date(r.date_debut).toLocaleDateString('fr-FR')
       const d2 = new Date(r.date_limite).toLocaleDateString('fr-FR')
-      texte = `Taux de transfo à 120 j ${p.base_ca === 'agence' ? `agence ${f.agence || ''}` : 'perso'} (devis du ${d1} au ${d2}) : ${
+      texte = `Taux de transfo à ${r.delai ?? DELAI_TRANSFO_DEVIS} j ${p.base_ca === 'agence' ? `agence ${f.agence || ''}` : 'perso'} (devis du ${d1} au ${d2}) : ${
         r.taux == null ? '—' : `${r.taux.toLocaleString('fr-FR')} %`
       } vs ${r.taux_n1 == null ? '—' : `${r.taux_n1.toLocaleString('fr-FR')} %`} en N-1 · ${fmtPts(ecart)}${p.mode === 'forfait' ? ` · cible ${fmtPts(Number(p.cible_evol ?? 0), 0)}` : ''}`
     }

@@ -46,6 +46,15 @@
  *     transformation des devis à 60 j (RPC get_suivi_transfo_devis) avec écarts
  *     vs N-1 et vs entreprise ; croix de positionnement fermée par défaut.
  *
+ * 17/11/2026 (suite, demandé par Arnaud) :
+ *   - en-têtes de colonnes et colonne Agence / collaborateur figés (le tableau
+ *     défile dans son propre cadre, comme des volets figés Excel) ;
+ *   - vue Agences : toutes les lignes « · hors contrats » sont regroupées en une
+ *     seule ligne « Hors contrats » placée en fin de liste, quel que soit le tri ;
+ *     son développement liste directement les collaborateurs, avec leur agence
+ *     en abrégé (ex. « ANBERTHELOT Nicolas sommeil (Mér.) »), sans passer par
+ *     un sous-niveau par agence.
+ *
  * Droits (13/10/2026) : écran ouvert par can_suivi_agences (profil). Le
  * périmètre agences / collaborateurs de la personne (user_page_access) est
  * appliqué côté base par suivi_perimetre() dans chaque RPC — migration
@@ -131,8 +140,32 @@ type ContratSuivi = { code: string; agence: string; perimetre: 'perso' | 'agence
 type TransfoAgg = { caN: number; trN: number; caN1: number; trN1: number }
 type TransfoData = { delai: number; dateLimite: string | null; maj: string | null; rows: Array<{ code: string; famille: string } & TransfoAgg>; ref: Array<{ famille: string } & TransfoAgg> }
 const HORS_CONTRATS = ' · hors contrats'
+/** Ligne unique regroupant tous les collaborateurs hors contrats (vue Agences, en fin de liste). */
+const HORS_GLOBAL = 'Hors contrats'
+const estHors = (groupe: string) => groupe === HORS_GLOBAL || groupe.endsWith(HORS_CONTRATS)
+
+/**
+ * Abréviation d'agence la plus courte (3 lettres minimum) qui reste unique parmi
+ * les agences connues : MERIGNAC → « Mér. », ANGLET / ANGOULEME → « Angl. » / « Ango. ».
+ */
+function abregerAgences(noms: string[]): Map<string, string> {
+  const uniques = Array.from(new Set(noms.filter(Boolean)))
+  const plat = (x: string) => x.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toUpperCase()
+  const out = new Map<string, string>()
+  uniques.forEach((nom) => {
+    const n = plat(nom)
+    let len = Math.min(3, n.length)
+    while (len < n.length && uniques.some((o) => o !== nom && plat(o).startsWith(n.slice(0, len)))) len++
+    const pref = nom.slice(0, len)
+    const joli = pref.charAt(0).toUpperCase() + pref.slice(1).toLowerCase()
+    out.set(nom, len >= nom.length ? joli : `${joli}.`)
+  })
+  return out
+}
 /** Séparateur vertical des zones du tableau (CA, Marge, Transfo devis, Comptes, Position). */
 const ZONE = 'border-l-2 border-[#E2DFD8]'
+/** 1re colonne figée (volets figés) : reste visible au défilement horizontal. */
+const FIGE = 'sticky left-0 z-20 shadow-[1px_0_0_#E2DFD8]'
 const DELAI_TRANSFO = 60
 
 function tauxTransfo(a: TransfoAgg | null, n1 = false): number | null {
@@ -395,8 +428,20 @@ function SuiviAgencesPage() {
     },
     [contratsParAgence]
   )
-  const groupeDeCode = useCallback((code: string) => groupeDe(code, collabByCode.get(code)?.agence || ''), [groupeDe, collabByCode])
-  const agenceReelle = (groupe: string) => (groupe.endsWith(HORS_CONTRATS) ? groupe.slice(0, -HORS_CONTRATS.length) : groupe)
+  /** Ligne du tableau en vue Agences : les « <AGENCE> · hors contrats » sont fondues dans « Hors contrats ». */
+  const ligneDe = useCallback((code: string, agence: string) => {
+    const g = groupeDe(code, agence)
+    return g.endsWith(HORS_CONTRATS) ? HORS_GLOBAL : g
+  }, [groupeDe])
+  const ligneDeCode = useCallback((code: string) => ligneDe(code, collabByCode.get(code)?.agence || ''), [ligneDe, collabByCode])
+  /** Une ligne agence (ou ancienne clé « <AGENCE> · hors contrats ») contient-elle ce collaborateur ? */
+  const dansGroupe = useCallback(
+    (groupe: string, code: string, agence: string) =>
+      groupe === HORS_GLOBAL ? ligneDe(code, agence) === HORS_GLOBAL : groupeDe(code, agence) === groupe,
+    [groupeDe, ligneDe]
+  )
+  const abrevAgence = useMemo(() => abregerAgences(collaborateurs.map((c) => c.agence)), [collaborateurs])
+  const agenceReelle = (groupe: string) => (groupe === HORS_GLOBAL ? '' : groupe.endsWith(HORS_CONTRATS) ? groupe.slice(0, -HORS_CONTRATS.length) : groupe)
 
   const { seriesByCode, seriesByAgence, serieTotal } = useMemo(() => {
     const byCode = new Map<string, Serie>()
@@ -407,7 +452,7 @@ function SuiviAgencesPage() {
       if (agSet && !agSet.has(r.agence)) return
       if (coSet && !coSet.has(r.code)) return
       const y = r.annee - (annee - 2)
-      const g = groupeDe(r.code, r.agence)
+      const g = ligneDe(r.code, r.agence)
       if (!byCode.has(r.code)) byCode.set(r.code, emptySerie())
       if (!byAgence.has(g)) byAgence.set(g, emptySerie())
       addToSerie(byCode.get(r.code)!, y, r.mois, r.ca, r.marge)
@@ -415,7 +460,7 @@ function SuiviAgencesPage() {
       addToSerie(total, y, r.mois, r.ca, r.marge)
     })
     return { seriesByCode: byCode, seriesByAgence: byAgence, serieTotal: total }
-  }, [rows, famSet, agSet, coSet, annee, groupeDe])
+  }, [rows, famSet, agSet, coSet, annee, ligneDe])
 
   // ------------------------------------------------------- transfo devis 60 j
   const transfoByCode = useMemo(() => {
@@ -470,6 +515,10 @@ function SuiviAgencesPage() {
   const creationsEntite = useCallback(
     (entity: Entity): CreationsEntite | null => {
       if (entity.kind === 'collaborateur') return creationsPour(creations, (r) => r.code === entity.id.toUpperCase(), annee, partAnnee)
+      if (entity.kind === 'agence' && entity.horsContrats) {
+        const codes = new Set(entity.codes.map((c) => c.toUpperCase()))
+        return creationsPour(creations, (r) => codes.has(r.code), annee, partAnnee)
+      }
       if (entity.kind === 'agence') return creationsPour(creations, (r) => r.agence === entity.id && (!coSet || coSet.has(r.code)), annee, partAnnee)
       if (entity.id === 'entreprise') return creationsPour(creations, () => true, annee, partAnnee)
       return creationsPour(creations, (r) => (!agSet || agSet.has(r.agence)) && (!coSet || coSet.has(r.code)), annee, partAnnee)
@@ -571,12 +620,11 @@ function SuiviAgencesPage() {
   const lignesAgence = useMemo(() => {
     const out: Ligne[] = []
     seriesByAgence.forEach((serie, groupe) => {
-      const codes = Array.from(seriesByCode.keys()).filter((code) => groupeDeCode(code) === groupe)
-      const hors = groupe.endsWith(HORS_CONTRATS)
-      out.push(buildLigne({ key: `A:${groupe}`, kind: 'agence', id: groupe, label: groupe, agence: agenceReelle(groupe), codes, horsContrats: hors }, serie))
+      const codes = Array.from(seriesByCode.keys()).filter((code) => ligneDeCode(code) === groupe)
+      out.push(buildLigne({ key: `A:${groupe}`, kind: 'agence', id: groupe, label: groupe, agence: agenceReelle(groupe), codes, horsContrats: estHors(groupe) }, serie))
     })
     return out
-  }, [seriesByAgence, seriesByCode, groupeDeCode, buildLigne])
+  }, [seriesByAgence, seriesByCode, ligneDeCode, buildLigne])
 
   const sorter = useCallback(
     (a: Ligne, b: Ligne) => {
@@ -592,10 +640,12 @@ function SuiviAgencesPage() {
     [sort]
   )
 
-  const topLignes = useMemo(
-    () => [...(filtres.vue === 'agences' ? lignesAgence : lignesCollab)].sort(sorter),
-    [filtres.vue, lignesAgence, lignesCollab, sorter]
-  )
+  // 17/11/2026 : en vue Agences, la ligne « Hors contrats » reste en fin de liste quel que soit le tri.
+  const topLignes = useMemo(() => {
+    if (filtres.vue !== 'agences') return [...lignesCollab].sort(sorter)
+    const normales = lignesAgence.filter((l) => !l.entity.horsContrats).sort(sorter)
+    return [...normales, ...lignesAgence.filter((l) => l.entity.horsContrats)]
+  }, [filtres.vue, lignesAgence, lignesCollab, sorter])
 
   const totalLigne = useMemo(() => {
     const l = buildLigne({ key: 'T', kind: 'entreprise', id: 'total', label: 'Total sélection', agence: '', codes: Array.from(seriesByCode.keys()) }, serieTotal)
@@ -660,9 +710,12 @@ function SuiviAgencesPage() {
   const ficheHorsPerimetre = useMemo(() => {
     if (!ficheKey || loading || !perimetre.restreint) return false
     if (ficheKey.startsWith('C:')) return !collabByCode.has(ficheKey.slice(2))
-    if (ficheKey.startsWith('A:')) return !collaborateurs.some((c) => c.agence === agenceReelle(ficheKey.slice(2)))
+    if (ficheKey.startsWith('A:')) {
+      const g = ficheKey.slice(2)
+      return g === HORS_GLOBAL ? !collaborateurs.some((c) => ligneDeCode(c.code) === HORS_GLOBAL) : !collaborateurs.some((c) => c.agence === agenceReelle(g))
+    }
     return true
-  }, [ficheKey, loading, perimetre.restreint, collabByCode, collaborateurs])
+  }, [ficheKey, loading, perimetre.restreint, collabByCode, collaborateurs, ligneDeCode])
 
   // 17/11/2026 : la fiche est calculée sur toutes les lignes de l'entité (seul le filtre
   // familles s'applique) — elle ne dépend plus des filtres Agences / Collaborateurs du
@@ -683,15 +736,15 @@ function SuiviAgencesPage() {
     }
     if (ficheKey.startsWith('A:')) {
       const groupe = ficheKey.slice(2)
-      const codes = Array.from(new Set(rows.filter((r) => groupeDe(r.code, r.agence) === groupe).map((r) => r.code)))
-      const serie = serieDe((r) => groupeDe(r.code, r.agence) === groupe)
+      const codes = Array.from(new Set(rows.filter((r) => dansGroupe(groupe, r.code, r.agence)).map((r) => r.code)))
+      const serie = serieDe((r) => dansGroupe(groupe, r.code, r.agence))
       return {
-        entity: { key: ficheKey, kind: 'agence' as const, id: groupe, label: groupe, agence: agenceReelle(groupe), codes, horsContrats: groupe.endsWith(HORS_CONTRATS) },
+        entity: { key: ficheKey, kind: 'agence' as const, id: groupe, label: groupe, agence: agenceReelle(groupe), codes, horsContrats: estHors(groupe) },
         serie,
       }
     }
     return null
-  }, [ficheKey, loading, ficheHorsPerimetre, rows, famSet, annee, groupeDe, collabEntity])
+  }, [ficheKey, loading, ficheHorsPerimetre, rows, famSet, annee, dansGroupe, collabEntity])
 
   const ficheRows = useMemo(() => {
     if (!fiche) return []
@@ -704,10 +757,10 @@ function SuiviAgencesPage() {
     // Agence : tous les collaborateurs rattachés à l'agence (même sans CA sur la sélection).
     const codes =
       fiche.entity.kind === 'agence'
-        ? Array.from(new Set([...fiche.entity.codes, ...collaborateurs.filter((c) => groupeDeCode(c.code) === fiche.entity.id).map((c) => c.code)]))
+        ? Array.from(new Set([...fiche.entity.codes, ...collaborateurs.filter((c) => dansGroupe(fiche.entity.id, c.code, c.agence)).map((c) => c.code)]))
         : fiche.entity.codes
     return impayesPourCodes(impayes, codes)
-  }, [fiche, impayes, collaborateurs, groupeDeCode])
+  }, [fiche, impayes, collaborateurs, dansGroupe])
 
   const ficheObjectifs = useMemo((): ObjectifsEntite => {
     if (!fiche) return { propres: [], familles: [], zeroImpaye: null, herites: [], heritesDe: null }
@@ -948,12 +1001,13 @@ function SuiviAgencesPage() {
                     </button>
                   )}
                 </div>
-                <div className="overflow-x-auto">
-                  <table className="w-full min-w-[1360px] text-[13px]">
-                    <thead className="bg-[#FAF9F7] text-[11px] uppercase tracking-[0.05em] text-slate-500">
+                {/* 17/11/2026 : volets figés — le tableau défile dans son cadre, en-têtes et 1re colonne restent visibles */}
+                <div className="max-h-[calc(100vh-110px)] overflow-auto">
+                  <table className="w-full min-w-[1360px] border-separate border-spacing-0 text-[13px]">
+                    <thead className="sticky top-0 z-30 bg-[#FAF9F7] text-[11px] uppercase tracking-[0.05em] text-slate-500 shadow-[0_1px_0_#E2DFD8,0_2px_4px_rgba(17,24,32,0.06)]">
                       {/* 17/11/2026 : zones CA / Marge / Transfo devis / Comptes / Position */}
-                      <tr className="border-b border-[#E2DFD8] text-[10px] tracking-[0.12em]">
-                        <th className="px-2 pt-2" />
+                      <tr className="text-[10px] tracking-[0.12em]">
+                        <th className={`${FIGE} bg-[#FAF9F7] px-2 pt-2`} />
                         <th colSpan={9} className={`${ZONE} bg-[#EEF3F8] px-2 pt-2 pb-1 text-center font-bold text-[#245A9E]`}>Chiffre d’affaires</th>
                         <th colSpan={3} className={`${ZONE} bg-[#F1F6EF] px-2 pt-2 pb-1 text-center font-bold text-[#2F6B3A]`}>Marge</th>
                         <th colSpan={3} className={`${ZONE} bg-[#F7F2FA] px-2 pt-2 pb-1 text-center font-bold text-[#6B4E8A]`} title={libTransfo}>
@@ -963,7 +1017,7 @@ function SuiviAgencesPage() {
                         <th className={`${ZONE} px-2 pt-2 pb-1 text-left font-bold`}>Position</th>
                       </tr>
                       <tr>
-                        {header('label', filtres.vue === 'agences' ? 'Agence / collaborateur' : 'Collaborateur', 'left')}
+                        {header('label', filtres.vue === 'agences' ? 'Agence / collaborateur' : 'Collaborateur', 'left', undefined, `${FIGE} bg-[#FAF9F7]`)}
                         {header('caN1', `CA ${annee - 1}`, 'right', undefined, ZONE)}
                         {header('caN1Date', `${annee - 1} à date`)}
                         {header('caNDate', `${annee} à date`)}
@@ -995,7 +1049,7 @@ function SuiviAgencesPage() {
                         const isAgence = l.entity.kind === 'agence'
                         const open = isAgence && expanded.has(l.entity.id)
                         const enfants = open
-                          ? lignesCollab.filter((c) => groupeDeCode(c.entity.id) === l.entity.id).sort(sorter)
+                          ? lignesCollab.filter((c) => ligneDeCode(c.entity.id) === l.entity.id).sort(sorter)
                           : []
                         return (
                           <LigneGroupe
@@ -1006,6 +1060,7 @@ function SuiviAgencesPage() {
                             onToggle={isAgence ? () => toggleExpand(l.entity.id) : undefined}
                             onOpen={(key) => openFiche(key)}
                             showAgence={filtres.vue === 'collaborateurs'}
+                            agenceEnfants={l.entity.horsContrats ? abrevAgence : undefined}
                             avecCreations={!!creations}
                           />
                         )
@@ -1086,6 +1141,7 @@ function LigneGroupe({
   onToggle,
   onOpen,
   showAgence,
+  agenceEnfants,
   avecCreations,
 }: {
   ligne: Ligne
@@ -1094,13 +1150,15 @@ function LigneGroupe({
   onToggle?: () => void
   onOpen: (key: string) => void
   showAgence: boolean
+  /** Ligne « Hors contrats » : agence de chaque collaborateur en abrégé (nom complet → abréviation). */
+  agenceEnfants?: Map<string, string>
   avecCreations: boolean
 }) {
   return (
     <>
       <LigneRow ligne={ligne} open={open} onToggle={onToggle} onOpen={onOpen} showAgence={showAgence} avecCreations={avecCreations} />
       {enfants.map((e) => (
-        <LigneRow key={e.entity.key} ligne={e} child onOpen={onOpen} avecCreations={avecCreations} />
+        <LigneRow key={e.entity.key} ligne={e} child onOpen={onOpen} agenceCourte={agenceEnfants ? agenceEnfants.get(e.entity.agence) || e.entity.agence : undefined} avecCreations={avecCreations} />
       ))}
     </>
   )
@@ -1115,9 +1173,12 @@ function LigneRow({
   showAgence,
   variant,
   masquerMontants,
+  agenceCourte,
   avecCreations = false,
 }: {
   ligne: Ligne
+  /** Agence abrégée affichée après le nom (collaborateurs de la ligne « Hors contrats »). */
+  agenceCourte?: string
   avecCreations?: boolean
   open?: boolean
   onToggle?: () => void
@@ -1133,17 +1194,19 @@ function LigneRow({
   const quadrant = quadrantOf(last)
   const rowClass =
     variant === 'total'
-      ? 'border-t-2 border-[#111820] bg-[#FAF9F7] font-bold'
+      ? 'bg-[#FAF9F7] font-bold [&>td]:border-t-2 [&>td]:border-[#111820]'
       : variant === 'ref'
       ? 'bg-[#FDF7EA] text-[#6B470E]'
       : child
-      ? 'border-t border-[#F1EFEA] bg-[#FCFBF9] hover:bg-[#F7F5F0]'
-      : 'border-t border-[#EFEDE8] hover:bg-[#FAF9F7]'
+      ? 'bg-[#FCFBF9] hover:bg-[#F7F5F0] [&>td]:border-t [&>td]:border-[#F1EFEA]'
+      : l.entity.horsContrats
+      ? 'bg-[#F7F5F0] hover:bg-[#F1EFEA] [&>td]:border-t-2 [&>td]:border-[#D8D3C8]'
+      : 'bg-white hover:bg-[#FAF9F7] [&>td]:border-t [&>td]:border-[#EFEDE8]'
 
   // 17/11/2026 : valeur et unité toujours sur une seule ligne (whitespace-nowrap)
   return (
     <tr className={`${rowClass} whitespace-nowrap`}>
-      <td className="px-2 py-2">
+      <td className={`${FIGE} bg-inherit px-2 py-2`}>
         <div className={`flex items-center gap-1.5 ${child ? 'pl-7' : ''}`}>
           {onToggle && (
             <button type="button" onClick={onToggle} className="flex h-6 w-6 items-center justify-center rounded text-slate-400 hover:bg-[#EDEAE3] hover:text-slate-700" aria-label={open ? 'Replier' : 'Déplier'}>
@@ -1159,6 +1222,11 @@ function LigneRow({
           )}
           {showAgence && <span className="shrink-0 rounded bg-[#EDEAE3] px-1.5 text-[10px] font-semibold text-slate-500">{l.entity.agence}</span>}
           {l.entity.sommeil && <span className="shrink-0 text-[10px] text-slate-400">sommeil</span>}
+          {agenceCourte && (
+            <span className="shrink-0 text-[11px] text-slate-500" title={l.entity.agence}>
+              ({agenceCourte})
+            </span>
+          )}
         </div>
       </td>
       {/* 17/11/2026 : montants en k€ / M€ (détail exact au survol) */}

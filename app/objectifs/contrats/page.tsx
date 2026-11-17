@@ -28,8 +28,9 @@
  * macro-familles / familles au choix, base CA perso ou agence, comparaison N vs
  * N-1 sur les mêmes mois, résultat automatique (forfait avec cible % ou paliers %).
  * Primes « évolution du taux de transformation » (03/11/2026, migration 20261103e) :
- * taux devis → commande à 120 j en CA (lecture à âge égal de l'écran Analyse devis),
- * devis du 01/01 au dernier jour mûr vs mêmes dates N-1, cible en points.
+ * taux devis → commande en CA, devis du 01/01 au dernier jour mûr vs mêmes dates N-1,
+ * cible en points. Délai : 60 j depuis le 17/11/2026 (migration 20261117b, même base
+ * que l'écran Mes agences) — 120 j auparavant.
  * Primes « nombre de clients par tranche de CA 12 mois glissants » (03/11/2026,
  * migration 20261103f) ; ces contrats alimentent aussi les objectifs de l'écran
  * Suivi agences – commerciaux (get_suivi_objectifs), agence = somme.
@@ -57,6 +58,7 @@ import {
   SECTION_LIBELLES,
   TRANCHES,
   TRIMESTRES,
+  DELAI_TRANSFO_DEVIS,
   apparier,
   avanceTheorique,
   caObjectif,
@@ -902,7 +904,7 @@ function EvolFamilles({ prime, evol, enPoints = false }: { prime: Prime; evol: n
   return (
     <div className="mt-2.5">
       <div className="mb-1.5 flex flex-wrap gap-1">
-        {enPoints && <span className="rounded bg-[#E8F0F3] px-1.5 py-0.5 text-[10px] font-semibold text-[#18465A]">Devis → commande à 120 j</span>}
+        {enPoints && <span className="rounded bg-[#E8F0F3] px-1.5 py-0.5 text-[10px] font-semibold text-[#18465A]">Devis → commande à {DELAI_TRANSFO_DEVIS} j</span>}
         {[...(enPoints ? [] : prime.familles_macro || []).map((x) => ({ x, macro: true })), ...(enPoints ? [] : prime.familles || []).map((x) => ({ x, macro: false }))].map(({ x, macro }) => (
           <span key={x} className={`rounded px-1.5 py-0.5 text-[10px] font-semibold ${macro ? 'bg-[#E8F0F3] text-[#18465A]' : 'bg-[#F1EFE8] text-[#5B6370]'}`}>
             {x}
@@ -1996,7 +1998,7 @@ function DocumentContrat({ fiche, calc }: { fiche: FicheContrat; calc: ReturnTyp
     p.indicateur === 'nb_clients'
       ? `${p.tranche ? TRANCHES[p.tranche] : 'Tranche ?'} (12 mois glissants, ${p.base_ca === 'agence' ? 'agence' : 'perso'}) : au moins ${Number(p.cible_nb ?? 0)}`
       : p.indicateur === 'evol_transfo'
-      ? `Taux de transfo devis à 120 j ${p.base_ca === 'agence' ? 'agence' : 'perso'} vs N-1 : ${
+      ? `Taux de transfo devis à ${DELAI_TRANSFO_DEVIS} j ${p.base_ca === 'agence' ? 'agence' : 'perso'} vs N-1 : ${
           p.mode === 'paliers' ? p.paliers.map((x) => `≥ ${fmtPts(x.seuil, 0)} : ${fmtE(x.montant)}`).join(' · ') : `≥ ${fmtPts(Number(p.cible_evol ?? 0), 0)}`
         }`
       : p.indicateur === 'evol_familles'
