@@ -20,6 +20,11 @@
 // chapitre dont le fichier a été retiré du dépôt est retiré du guide.
 // Droits : lecture can_guides_blg (ou administration), publication réservée aux
 // administrateurs (peut_lire_guides_blg / peut_gerer_guides_blg).
+// Filtrage par droits (17/11/2026) : un mode opératoire qui décrit des écrans
+// (data-ecran sur sa section.intro, repris dans le sommaire) n'est montré qu'aux
+// utilisateurs ayant accès à l'un de ces écrans ; un chapitre sans aucun écran
+// accessible disparaît (pavé compris) ; la page lue est expurgée des MODOP masqués
+// et renumérotée. Les gestionnaires du guide voient tout.
 // URL : ?chapitre=<slug>&ancre=<id d'étape ou de mode opératoire>
 // Migration : 20261115a_guides_compagnon.sql
 // ============================================================================
@@ -28,7 +33,8 @@ import React, { Suspense, useCallback, useEffect, useMemo, useRef, useState } fr
 import { useRouter, useSearchParams } from 'next/navigation'
 import { supabase } from '@/lib/supabaseClient'
 import { themed, tc } from '@/lib/theme'
-import { NAV_BLOCS, type NavBloc } from '@/lib/navigation'
+import { NAV_BLOCS, isPathAllowed, type NavBloc } from '@/lib/navigation'
+import { useAccess } from '@/components/AccessContext'
 import {
   GUIDES_BUCKET,
   GUIDES_URL_TTL,
@@ -36,8 +42,11 @@ import {
   construireGuide,
   formatTaille,
   indexerGuide,
+  modopsMasques,
   preparerGuide,
   rechercherModops,
+  renumeroter,
+  retirerModops,
   slugDepuisFichier,
   type GuideModopIndex,
   type GuideSommaireItem,
@@ -69,6 +78,14 @@ type GuideRow = {
   source_hash: string | null
   updated_at: string
   updated_by: string | null
+}
+
+type Filtre = { masques: Set<string>; chapitreMasque: boolean }
+const SANS_FILTRE: Filtre = { masques: new Set(), chapitreMasque: false }
+
+/** Sommaire visible (MODOP masqués retirés, numéros recalculés). */
+function sommaireVisible(g: GuideRow, f: Filtre): GuideSommaireItem[] {
+  return (g.sommaire ?? []).filter((m) => !f.masques.has(m.id)).map((m, i) => ({ ...m, numero: renumeroter(m.numero, i + 1) }))
 }
 
 type FichierDepot = { chemin: string; bloc: string; fichier: string; taille: number; hash: string }
@@ -175,8 +192,10 @@ function GuidesCompagnonContent() {
   const ancre = searchParams.get('ancre')
 
   const [guides, setGuides] = useState<GuideRow[]>([])
-  const [loading, setLoading] = useState(true)
+  const [catalogueLoading, setLoading] = useState(true)
   const [gestion, setGestion] = useState(false)
+  const { rights, loading: accesLoading } = useAccess()
+  const loading = catalogueLoading || accesLoading
   const [error, setError] = useState<string | null>(null)
   const [message, setMessage] = useState<string | null>(null)
   const [busy, setBusy] = useState<string | null>(null)
@@ -353,9 +372,18 @@ function GuidesCompagnonContent() {
   }, [loading, gestion, chapitre, guides, synchroniser])
 
   // ── Catalogue ──────────────────────────────────────────────────────────────
-  const visibles = useMemo(() => guides.filter((g) => g.actif || gestion), [guides, gestion])
-  const lisibles = useMemo(() => guides.filter((g) => g.actif), [guides])
-  const courant = useMemo(() => (chapitre ? guides.find((g) => g.slug === chapitre) ?? null : null), [guides, chapitre])
+  const filtres = useMemo(() => {
+    const m = new Map<string, Filtre>()
+    if (gestion) return m
+    const autorise = (chemin: string) => isPathAllowed(chemin, rights)
+    for (const g of guides) m.set(g.slug, modopsMasques(g.sommaire ?? [], autorise))
+    return m
+  }, [guides, gestion, rights])
+  const filtreDe = useCallback((slug: string) => filtres.get(slug) ?? SANS_FILTRE, [filtres])
+
+  const visibles = useMemo(() => guides.filter((g) => (g.actif || gestion) && !filtreDe(g.slug).chapitreMasque), [guides, gestion, filtreDe])
+  const lisibles = useMemo(() => visibles.filter((g) => g.actif), [visibles])
+  const courant = useMemo(() => (chapitre ? visibles.find((g) => g.slug === chapitre) ?? null : null), [visibles, chapitre])
 
   const parBloc = useMemo(() => {
     const m = new Map<string, GuideRow[]>()
@@ -408,10 +436,16 @@ function GuidesCompagnonContent() {
   const resultats: ResultatRecherche[] = useMemo(() => {
     if (question.trim().length < 2) return []
     const corpus = lisibles
-      .map((g) => ({ slug: g.slug, titre: g.titre, icone: iconeBloc(BLOC_PAR_ID.get(g.bloc), g), modops: indexes.get(g.slug)?.modops ?? [] }))
+      .map((g) => {
+        const f = filtreDe(g.slug)
+        const modops = (indexes.get(g.slug)?.modops ?? [])
+          .filter((m) => !f.masques.has(m.id))
+          .map((m, i) => ({ ...m, numero: renumeroter(m.numero, i + 1) }))
+        return { slug: g.slug, titre: g.titre, icone: iconeBloc(BLOC_PAR_ID.get(g.bloc), g), modops }
+      })
       .filter((g) => g.modops.length)
     return rechercherModops(question, corpus, 8)
-  }, [question, lisibles, indexes])
+  }, [question, lisibles, indexes, filtreDe])
 
   useEffect(() => {
     if (!blocOuvert) return
@@ -436,7 +470,7 @@ function GuidesCompagnonContent() {
         {loading ? (
           <div style={s.muted}>Chargement…</div>
         ) : courant ? (
-          <Lecteur guide={courant} ancre={ancre} onRetour={() => naviguer(null)} onAncre={(a) => naviguer(courant.slug, a)} />
+          <Lecteur guide={courant} filtre={filtreDe(courant.slug)} ancre={ancre} onRetour={() => naviguer(null)} onAncre={(a) => naviguer(courant.slug, a)} />
         ) : (
           <div style={s.info}>
             Ce chapitre n’existe pas ou n’est plus publié.{' '}
@@ -536,8 +570,9 @@ function GuidesCompagnonContent() {
         <div style={s.tiles}>
           {blocsAvecGuide.map((b) => {
             const liste = parBloc.get(b.id) ?? []
-            const nbModop = liste.reduce((n, g) => n + (g.nb_modop || 0), 0)
-            const nbEtapes = liste.reduce((n, g) => n + (g.nb_etapes || 0), 0)
+            const sommaires = liste.map((g) => (gestion ? null : sommaireVisible(g, filtreDe(g.slug))))
+            const nbModop = liste.reduce((n, g, i) => n + (sommaires[i] ? sommaires[i].length : g.nb_modop || 0), 0)
+            const nbEtapes = liste.reduce((n, g, i) => n + (sommaires[i] ? sommaires[i].reduce((t, m) => t + (m.nb_etapes || 0), 0) : g.nb_etapes || 0), 0)
             const toutMasque = liste.every((g) => !g.actif)
             const icones = b.icons && b.icons.length ? b.icons : [b.icon]
             return (
@@ -592,10 +627,15 @@ function GuidesCompagnonContent() {
             </div>
             {guidesBlocOuvert.map((g) => {
               const idx = indexes.get(g.slug)
-              const modops: Array<GuideSommaireItem & { resume?: string }> =
+              const f = filtreDe(g.slug)
+              const modops: Array<GuideSommaireItem & { resume?: string }> = (
                 idx?.prefixe === g.prefixe && idx.modops.length
                   ? idx.modops.map((m) => ({ id: m.id, numero: m.numero, titre: m.titre, nb_etapes: m.etapes.length, resume: m.resume }))
                   : g.sommaire ?? []
+              )
+                .filter((m) => !f.masques.has(m.id))
+                .map((m, i) => (f.masques.size ? { ...m, numero: renumeroter(m.numero, i + 1) } : m))
+              const nbEtapesVisibles = modops.reduce((t, m) => t + (m.nb_etapes || 0), 0)
               return (
                 <div key={g.slug} style={s.chapitre}>
                   <div style={s.chapitreHead}>
@@ -603,7 +643,7 @@ function GuidesCompagnonContent() {
                     {!g.actif && <span style={{ ...s.tileBadge, position: 'static' }}>Masqué</span>}
                     <span style={s.muted}>
                       {g.sous_titre ? `${g.sous_titre} · ` : ''}
-                      {g.nb_modop} modes opératoires · {g.nb_etapes} étapes · MAJ {new Date(g.updated_at).toLocaleDateString('fr-FR')}
+                      {modops.length} mode{modops.length > 1 ? 's' : ''} opératoire{modops.length > 1 ? 's' : ''} · {nbEtapesVisibles} étapes · MAJ {new Date(g.updated_at).toLocaleDateString('fr-FR')}
                     </span>
                     <span style={{ flex: 1 }} />
                     {gestion && (
@@ -649,11 +689,13 @@ function GuidesCompagnonContent() {
 // ── Lecteur (même principe que le guide BLG) ────────────────────────────────
 function Lecteur({
   guide,
+  filtre,
   ancre,
   onRetour,
   onAncre,
 }: {
   guide: GuideRow
+  filtre: Filtre
   ancre: string | null
   onRetour: () => void
   onAncre: (ancre: string | null) => void
@@ -695,7 +737,10 @@ function Lecteur({
   }, [guide.prefixe, key])
 
   const pret = source?.key === key ? source : null
-  const srcDoc = useMemo(() => (pret?.html ? construireGuide(pret.html, pret.urls, ancre) : null), [pret, ancre])
+  const srcDoc = useMemo(
+    () => (pret?.html ? construireGuide(retirerModops(pret.html, filtre.masques), pret.urls, ancre) : null),
+    [pret, ancre, filtre],
+  )
 
   useEffect(() => {
     if (!pleinEcran) return
@@ -706,7 +751,7 @@ function Lecteur({
     return () => window.removeEventListener('keydown', onKey)
   }, [pleinEcran])
 
-  const sommaire = guide.sommaire ?? []
+  const sommaire = sommaireVisible(guide, filtre)
   const modopCourant = ancre ? sommaire.find((m) => ancre === m.id || ancre.startsWith(`${m.id}-`))?.id ?? '' : ''
 
   const conteneur: React.CSSProperties = pleinEcran

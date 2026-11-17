@@ -138,15 +138,7 @@ body{margin:0;background:var(--fond);color:var(--texte);font:15px/1.55 "Helvetic
     <div class="tags"><span class="tag">5 écrans</span><span class="tag">Niveaux N1 · N2 · N3</span><span class="tag">Captures du 15/11/2026</span></div>
   </header>
   <div class="carte vue">
-    <h3><span class="num">i</span>Le circuit d’un appel</h3>
-    <ol class="circuit">
-      <li><b>Appel entrant</b>3CX ouvre la console avec le numéro de l’appelant ; la ligne appelée propose la filière.</li>
-      <li><b>Niveau 1</b>Identifie, qualifie, s’appuie sur l’historique, les cas similaires et Hi-Parts, puis résout ou escalade.</li>
-      <li><b>Niveau 2 / 3</b>Reçoit un bandeau violet, prend en charge depuis la synthèse, peut redescendre le ticket au N1.</li>
-      <li><b>Résolution</b>Issue obligatoire ; le ticket résolu est clos et verrouillé. Classification et statistiques en découlent.</li>
-    </ol>
-    <h3><span class="num">i</span>Les statuts d’un ticket</h3>
-    <ul class="statuts"><li><span class="statut" style="color:#A3245E;background:#FBE4EF">Non pris</span>Ticket créé, personne ne l’a encore traité.</li><li><span class="statut" style="color:#2F6B3A;background:#DDF0E0">En cours</span>Un hotliner a pris le ticket.</li><li><span class="statut" style="color:#9A4D06;background:#FDE6CC">Attente client</span>Message laissé ou retour du client attendu.</li><li><span class="statut" style="color:#5B3A9E;background:#ECE5F8">Escaladé</span>Transmis au niveau 2 ou 3.</li><li><span class="statut" style="color:#5F6670;background:#ECEEF1">Résolu</span>Clos (résolu = clos), verrouillé ; « Dupliquer » pour reprendre.</li></ul>
+    <h3><span class="num">i</span>Le circuit d’un appel</h3><ol class="circuit"><li><b>Appel entrant</b>3CX ouvre la console avec le numéro de l’appelant ; la ligne appelée propose la filière.</li><li><b>Niveau 1</b>Identifie, qualifie, s’appuie sur l’historique, les cas similaires et Hi-Parts, puis résout ou escalade.</li><li><b>Niveau 2 / 3</b>Reçoit un bandeau violet, prend en charge depuis la synthèse, peut redescendre le ticket au N1.</li><li><b>Résolution</b>Issue obligatoire ; le ticket résolu est clos et verrouillé. Classification et statistiques en découlent.</li></ol><h3><span class="num">i</span>Les statuts d’un ticket</h3><ul class="statuts"><li><span class="statut" style="color:#A3245E;background:#FBE4EF">Non pris</span>Ticket créé, personne ne l’a encore traité.</li><li><span class="statut" style="color:#2F6B3A;background:#DDF0E0">En cours</span>Un hotliner a pris le ticket.</li><li><span class="statut" style="color:#9A4D06;background:#FDE6CC">Attente client</span>Message laissé ou retour du client attendu.</li><li><span class="statut" style="color:#5B3A9E;background:#ECE5F8">Escaladé</span>Transmis au niveau 2 ou 3.</li><li><span class="statut" style="color:#5F6670;background:#ECEEF1">Résolu</span>Clos (résolu = clos), verrouillé ; « Dupliquer » pour reprendre.</li></ul>
     <h3><span class="num">i</span>Les modes opératoires de ce chapitre</h3>
     <div class="cartes-modops"><a class="carte-modop" href="#acces"><span>MODOP N° 1</span><b>Accéder au pavé Hotline technique</b>Ouvrir le pavé depuis l’accueil du compagnon et repérer ses cinq écrans.</a><a class="carte-modop" href="#console"><span>MODOP N° 2</span><b>Prendre un appel dans la console</b>Identifier l’appelant, qualifier l’appel, s’aider de l’historique et des cas similaires, puis ouvrir le ticket.</a><a class="carte-modop" href="#tickets"><span>MODOP N° 3</span><b>Suivre les tickets</b>Retrouver un ticket, filtrer par filière, statut, niveau ou classification, et agir depuis la fiche.</a><a class="carte-modop" href="#escalades"><span>MODOP N° 4</span><b>Piloter les escalades (niveau 2 / 3)</b>Voir les tickets escaladés en attente, leur ancienneté, et traiter les demandes de pièces au SAV.</a><a class="carte-modop" href="#diagnostic"><span>MODOP N° 5</span><b>Construire les parcours de diagnostic</b>Créer des arbres de questions-réponses par filière et motif, y attacher des documents, et régler les paramètres de la hotline.</a><a class="carte-modop" href="#stats"><span>MODOP N° 6</span><b>Analyser l’activité de la hotline</b>Mesurer volumes, délais et escalades, comprendre les pannes récurrentes et repérer les parcours à créer.</a></div>
     <p class="nb"><b>Également disponibles, non illustrés ici :</b> le bloc mobile « Hotline – Ticketing » (recherche par téléphone, n° de série, GE, code défaut) et le bandeau violet d’escalade affiché au collaborateur N2 concerné. Le diagnostic guidé (questions-réponses dans la console) est masqué en V1 : il s’active dans Éditeur de diagnostic › Paramètres.</p>
@@ -200,7 +192,7 @@ body{margin:0;background:var(--fond);color:var(--texte);font:15px/1.55 "Helvetic
 </section></div>
 </article>
 <article class="modop" data-modop="console">
-  <section class="carte entete intro" id="console">
+  <section class="carte entete intro" id="console" data-ecran="/hotline">
     <div class="sur-titre k">MODOP N° 2 · 14 écrans commentés</div>
     <h2>Prendre un appel dans la console</h2>
     <p class="resume sub">Identifier l’appelant, qualifier l’appel, s’aider de l’historique et des cas similaires, puis ouvrir le ticket.</p>
@@ -513,7 +505,7 @@ body{margin:0;background:var(--fond);color:var(--texte);font:15px/1.55 "Helvetic
 </section></div>
 </article>
 <article class="modop" data-modop="tickets">
-  <section class="carte entete intro" id="tickets">
+  <section class="carte entete intro" id="tickets" data-ecran="/hotline/tickets">
     <div class="sur-titre k">MODOP N° 3 · 4 écrans commentés</div>
     <h2>Suivre les tickets</h2>
     <p class="resume sub">Retrouver un ticket, filtrer par filière, statut, niveau ou classification, et agir depuis la fiche.</p>
@@ -625,7 +617,7 @@ body{margin:0;background:var(--fond);color:var(--texte);font:15px/1.55 "Helvetic
 </section></div>
 </article>
 <article class="modop" data-modop="escalades">
-  <section class="carte entete intro" id="escalades">
+  <section class="carte entete intro" id="escalades" data-ecran="/hotline/escalades">
     <div class="sur-titre k">MODOP N° 4 · 2 écrans commentés</div>
     <h2>Piloter les escalades (niveau 2 / 3)</h2>
     <p class="resume sub">Voir les tickets escaladés en attente, leur ancienneté, et traiter les demandes de pièces au SAV.</p>
@@ -687,7 +679,7 @@ body{margin:0;background:var(--fond);color:var(--texte);font:15px/1.55 "Helvetic
 </section></div>
 </article>
 <article class="modop" data-modop="diagnostic">
-  <section class="carte entete intro" id="diagnostic">
+  <section class="carte entete intro" id="diagnostic" data-ecran="/hotline/diagnostic">
     <div class="sur-titre k">MODOP N° 5 · 4 écrans commentés</div>
     <h2>Construire les parcours de diagnostic</h2>
     <p class="resume sub">Créer des arbres de questions-réponses par filière et motif, y attacher des documents, et régler les paramètres de la hotline.</p>
@@ -792,7 +784,7 @@ body{margin:0;background:var(--fond);color:var(--texte);font:15px/1.55 "Helvetic
 </section></div>
 </article>
 <article class="modop" data-modop="stats">
-  <section class="carte entete intro" id="stats">
+  <section class="carte entete intro" id="stats" data-ecran="/hotline/stats">
     <div class="sur-titre k">MODOP N° 6 · 3 écrans commentés</div>
     <h2>Analyser l’activité de la hotline</h2>
     <p class="resume sub">Mesurer volumes, délais et escalades, comprendre les pannes récurrentes et repérer les parcours à créer.</p>

@@ -22,6 +22,10 @@ export type GuideSommaireItem = {
   numero: string
   titre: string
   nb_etapes: number
+  /** Écrans du compagnon décrits par le mode opératoire (attribut data-ecran de
+   * section.intro, 17/11/2026) : le guide n'affiche le MODOP qu'aux utilisateurs
+   * ayant accès à l'un d'eux. Absent = MODOP général (accès, lecture…). */
+  ecrans?: string[]
 }
 
 export type GuideAsset = { nom: string; mime: string; blob: Blob }
@@ -66,6 +70,68 @@ function sansAccents(v: string): string {
 }
 
 /** CHAPITRE-Clients.html → clients */
+/** Liste des écrans (chemins) portée par data-ecran="/a,/b" d'une section.intro. */
+export function lireEcrans(sec: Element): string[] {
+  return (sec.getAttribute('data-ecran') ?? '')
+    .split(',')
+    .map((x) => x.trim())
+    .filter((x) => x.startsWith('/'))
+}
+
+/**
+ * Modes opératoires à masquer pour un utilisateur (17/11/2026) : un MODOP qui
+ * décrit des écrans n'est montré que si l'un d'eux est ouvert à l'utilisateur ;
+ * un MODOP général (sans écran) est montré si le chapitre garde au moins un MODOP
+ * d'écran visible — sinon tout le chapitre est masqué. Chapitre sans aucun écran
+ * déclaré : tout est montré.
+ */
+export function modopsMasques(
+  items: Array<{ id: string; ecrans?: string[] }>,
+  autorise: (chemin: string) => boolean,
+): { masques: Set<string>; chapitreMasque: boolean } {
+  const avecEcrans = items.filter((m) => m.ecrans && m.ecrans.length)
+  if (!avecEcrans.length) return { masques: new Set(), chapitreMasque: false }
+  const interdits = avecEcrans.filter((m) => !(m.ecrans ?? []).some(autorise))
+  if (interdits.length === avecEcrans.length) return { masques: new Set(items.map((m) => m.id)), chapitreMasque: true }
+  return { masques: new Set(interdits.map((m) => m.id)), chapitreMasque: false }
+}
+
+/** Renumérote « MODOP N° x » après masquage. */
+export function renumeroter(numero: string, rang: number): string {
+  return /MODOP\s*N°\s*\d+/i.test(numero) ? numero.replace(/(MODOP\s*N°\s*)\d+/i, `$1${rang}`) : numero
+}
+
+/**
+ * Retire d'une page de chapitre les modes opératoires masqués (article, entrée de
+ * sommaire, carte de la vue d'ensemble) et renumérote les MODOP restants.
+ * Navigateur uniquement (DOMParser).
+ */
+export function retirerModops(html: string, masques: Set<string>): string {
+  if (!masques.size) return html
+  const doc = new DOMParser().parseFromString(html, 'text/html')
+  const esc = (v: string) => (typeof CSS !== 'undefined' && CSS.escape ? CSS.escape(v) : v.replace(/["\\]/g, '\\$&'))
+  masques.forEach((id) => {
+    doc.querySelectorAll(`[data-modop="${esc(id)}"]`).forEach((e) => e.remove())
+    doc.querySelectorAll(`section.intro[id="${esc(id)}"], section.step[data-m="${esc(id)}"]`).forEach((e) => e.remove())
+    doc.querySelectorAll(`a.som-titre[href="#${esc(id)}"]`).forEach((a) => (a.closest('.som-modop') ?? a).remove())
+    doc.querySelectorAll(`a.carte-modop[href="#${esc(id)}"]`).forEach((a) => a.remove())
+  })
+  let n = 0
+  doc.querySelectorAll('section.intro[id]').forEach((sec) => {
+    n++
+    const k = sec.querySelector('.k')
+    if (k?.textContent) k.textContent = renumeroter(k.textContent, n)
+  })
+  doc.querySelectorAll('.som-num').forEach((e, i) => {
+    if (e.textContent) e.textContent = renumeroter(e.textContent, i + 1)
+  })
+  doc.querySelectorAll('a.carte-modop > span:first-child').forEach((e, i) => {
+    if (e.textContent) e.textContent = renumeroter(e.textContent, i + 1)
+  })
+  const doctype = /^\s*<!doctype[^>]*>/i.exec(html)?.[0] ?? '<!DOCTYPE html>'
+  return `${doctype}\n${doc.documentElement.outerHTML}`
+}
+
 export function slugDepuisFichier(nomFichier: string): string {
   const base = nomFichier.replace(/\.[^.]+$/, '').replace(/^chapitre[-_ ]*/i, '')
   const slug = sansAccents(base).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')
@@ -112,7 +178,8 @@ export async function preparerGuide(file: File): Promise<GuidePrepare> {
     doc.querySelectorAll('section.step[data-m]').forEach((st) => {
       if (st.getAttribute('data-m') === id) nbEtapes++
     })
-    sommaire.push({ id, numero, titre: titreModop, nb_etapes: nbEtapes })
+    const ecrans = lireEcrans(sec)
+    sommaire.push({ id, numero, titre: titreModop, nb_etapes: nbEtapes, ...(ecrans.length ? { ecrans } : {}) })
   })
   const nbEtapesTotal = doc.querySelectorAll('section.step').length
 
@@ -231,6 +298,7 @@ export type GuideModopIndex = {
   resume: string
   texte: string
   etapes: GuideEtapeIndex[]
+  ecrans?: string[]
 }
 
 export function indexerGuide(html: string): GuideModopIndex[] {
@@ -248,6 +316,7 @@ export function indexerGuide(html: string): GuideModopIndex[] {
         resume: texte(sec.querySelector('.sub')),
         texte: [texte(sec.querySelector('.sub')), texte(sec.querySelector('.cas'))].filter(Boolean).join(' '),
         etapes: [],
+        ecrans: lireEcrans(sec),
       }
       modops.push(courant)
       parId.set(id, courant)
