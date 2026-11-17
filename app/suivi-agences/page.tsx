@@ -30,6 +30,22 @@
  *   - créations de comptes clients (bilan, complété par les fiches SAGE au-delà
  *     du dernier mois du bilan) : colonne et KPI, comparées à N-1 au prorata.
  *
+ * 17/11/2026 (demandé par Arnaud) :
+ *   - agence avec contrats d'objectifs : son CA = CA des seuls collaborateurs sous
+ *     contrat (ex. ANGLET = AACHATO + AALARTEGUY + AAMENA) ; les autres
+ *     collaborateurs de l'agence sont regroupés sur une ligne « <AGENCE> · hors
+ *     contrats ». Objectif de l'agence = objectif « CA agence » d'un contrat s'il
+ *     existe, sinon somme des objectifs CA perso (RPC get_suivi_contrats) ;
+ *     collaborateur sous contrat = objectif de son contrat (aucun s'il est sur le
+ *     CA agence) ; sans contrat, objectif du bilan commercial comme avant ;
+ *   - fiche : calculée sur toutes les lignes de l'entité, indépendamment des
+ *     filtres Agences / Collaborateurs du tableau (une fiche affichait 0 €) ;
+ *   - tableau : montants en k€ / M€, zones CA / Marge / Transfo devis /
+ *     Comptes / Position, « Obj. à date » après le CA à date, « Évol. vs N-1 »
+ *     puis « Réal. / obj. » ; marge : écart vs N-1 et vs entreprise ; taux de
+ *     transformation des devis à 60 j (RPC get_suivi_transfo_devis) avec écarts
+ *     vs N-1 et vs entreprise ; croix de positionnement fermée par défaut.
+ *
  * Droits (13/10/2026) : écran ouvert par can_suivi_agences (profil). Le
  * périmètre agences / collaborateurs de la personne (user_page_access) est
  * appliqué côté base par suivi_perimetre() dans chaque RPC — migration
@@ -57,6 +73,7 @@ import {
   fmtK,
   fmtPct,
   fmtPts,
+  normAgence,
   creationsPour,
   impayesPourCodes,
   objectifsPourEntite,
@@ -81,6 +98,7 @@ import {
   type ImpayesData,
   type Entity,
   type Objectif,
+  type ObjectifsEntite,
   type RefRow,
   type Serie,
 } from '@/lib/suiviAgences'
@@ -105,7 +123,28 @@ const PERIMETRE_LIBRE: Perimetre = { restreint: false, agences: [], collaborateu
 
 type SortKey =
   | 'label' | 'caN1' | 'caN1Date' | 'caNDate' | 'evol' | 'ecart' | 'marge' | 'margeDelta' | 'vsEntreprise'
-  | 'objectifADate' | 'realisation' | 'creationsN'
+  | 'objectifADate' | 'realisation' | 'creationsN' | 'margeVsEntr' | 'transfo' | 'transfoDelta' | 'transfoVsEntr'
+
+/** Contrat d'objectifs de l'année (RPC get_suivi_contrats). */
+type ContratSuivi = { code: string; agence: string; perimetre: 'perso' | 'agence'; objectif: number | null }
+/** Agrégat de devis pour le taux de transformation : CA devisé et CA transformé en commande dans le délai. */
+type TransfoAgg = { caN: number; trN: number; caN1: number; trN1: number }
+type TransfoData = { delai: number; dateLimite: string | null; maj: string | null; rows: Array<{ code: string; famille: string } & TransfoAgg>; ref: Array<{ famille: string } & TransfoAgg> }
+const HORS_CONTRATS = ' · hors contrats'
+/** Séparateur vertical des zones du tableau (CA, Marge, Transfo devis, Comptes, Position). */
+const ZONE = 'border-l-2 border-[#E2DFD8]'
+const DELAI_TRANSFO = 60
+
+function tauxTransfo(a: TransfoAgg | null, n1 = false): number | null {
+  if (!a) return null
+  const ca = n1 ? a.caN1 : a.caN
+  if (!ca || ca <= 0) return null
+  return ((n1 ? a.trN1 : a.trN) / ca) * 100
+}
+function addTransfo(t: TransfoAgg, x: TransfoAgg) {
+  t.caN += x.caN; t.trN += x.trN; t.caN1 += x.caN1; t.trN1 += x.trN1
+}
+const transfoVide = (): TransfoAgg => ({ caN: 0, trN: 0, caN1: 0, trN1: 0 })
 
 type Ligne = {
   entity: Entity
@@ -128,6 +167,12 @@ type Ligne = {
   creations: CreationsEntite | null
   creationsN: number | null
   positions: ReturnType<typeof positionsTrimestrielles>
+  /** Taux de marge − taux de marge entreprise, en points. */
+  margeVsEntr: number | null
+  /** Taux de transformation des devis à 60 j (en CA), N à date. */
+  transfo: number | null
+  transfoDelta: number | null
+  transfoVsEntr: number | null
 }
 
 export default function SuiviAgencesPageWrapper() {
@@ -157,12 +202,15 @@ function SuiviAgencesPage() {
   const [repartition, setRepartition] = useState<Repartition>(null)
   const [creations, setCreations] = useState<CreationsData | null>(null)
   const [perimetre, setPerimetre] = useState<Perimetre>(PERIMETRE_LIBRE)
+  const [contrats, setContrats] = useState<ContratSuivi[]>([])
+  const [transfoData, setTransfoData] = useState<TransfoData | null>(null)
 
   const [filtres, setFiltres] = useState<Filtres>({ ...FILTRES_VIDES, vue: searchParams.get('vue') === 'collaborateurs' ? 'collaborateurs' : 'agences' })
   const [activeVarianteId, setActiveVarianteId] = useState<string | null>(null)
   const [defaultApplied, setDefaultApplied] = useState(false)
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
-  const [showCross, setShowCross] = useState(true)
+  // 17/11/2026 : croix de positionnement fermée par défaut.
+  const [showCross, setShowCross] = useState(false)
   const [sort, setSort] = useState<{ key: SortKey; dir: 1 | -1 }>({ key: 'caNDate', dir: -1 })
 
   const variantesApi = useVariantes<Filtres>(ECRAN)
@@ -171,13 +219,38 @@ function SuiviAgencesPage() {
   const load = useCallback(async (targetAnnee: number) => {
     setLoading(true)
     setError(null)
-    const [dataRes, refRes, objRes, impRes, creRes] = await Promise.all([
+    const [dataRes, refRes, objRes, impRes, creRes, ctrRes, trRes] = await Promise.all([
       supabase.rpc('get_suivi_agences_data', { p_annee: targetAnnee }),
       supabase.rpc('get_suivi_agences_reference', { p_annee: targetAnnee }),
       supabase.rpc('get_suivi_objectifs', { p_annee: targetAnnee }),
       supabase.rpc('get_suivi_impayes', { p_annee: targetAnnee }),
       supabase.rpc('get_suivi_creations_comptes', { p_annee: targetAnnee }),
+      supabase.rpc('get_suivi_contrats', { p_annee: targetAnnee }),
+      supabase.rpc('get_suivi_transfo_devis', { p_annee: targetAnnee, p_delai: DELAI_TRANSFO }),
     ])
+    // Contrats d'objectifs et transfo devis : facultatifs (migration 20261117 non appliquée → règles d'avant).
+    setContrats(
+      ctrRes.error || !Array.isArray(ctrRes.data)
+        ? []
+        : (ctrRes.data as any[]).map((c) => ({
+            code: String(c.code || '').toUpperCase(),
+            agence: String(c.agence || ''),
+            perimetre: c.perimetre === 'agence' ? 'agence' : 'perso',
+            objectif: c.objectif === null || c.objectif === undefined ? null : Number(c.objectif),
+          }))
+    )
+    if (trRes.error || !trRes.data) setTransfoData(null)
+    else {
+      const t = trRes.data as any
+      const num = (v: any) => Number(v) || 0
+      setTransfoData({
+        delai: Number(t.delai) || DELAI_TRANSFO,
+        dateLimite: t.date_limite ? String(t.date_limite) : null,
+        maj: t.maj ? String(t.maj) : null,
+        rows: ((t.rows || []) as any[]).map((r) => ({ code: String(r[0]), famille: String(r[1]), caN: num(r[2]), trN: num(r[3]), caN1: num(r[4]), trN1: num(r[5]) })),
+        ref: ((t.ref || []) as any[]).map((r) => ({ famille: String(r[0]), caN: num(r[1]), trN: num(r[2]), caN1: num(r[3]), trN1: num(r[4]) })),
+      })
+    }
     // Créations de comptes : facultatif (migration 20261015 non appliquée → pas de colonne).
     setCreations(creRes.error ? null : parseCreations(creRes.data))
     // Impayés : facultatif (migration 20261011 non appliquée → pas de pavé).
@@ -289,6 +362,42 @@ function SuiviAgencesPage() {
   const agSet = useMemo(() => (filtres.agences.length ? new Set(filtres.agences) : null), [filtres.agences])
   const coSet = useMemo(() => (filtres.collaborateurs.length ? new Set(filtres.collaborateurs) : null), [filtres.collaborateurs])
 
+  // ---------------------------------------------------------------- contrats
+  // 17/11/2026 : une agence qui a des contrats d'objectifs = ses collaborateurs sous contrat ;
+  // les autres collaborateurs de l'agence forment une ligne « <AGENCE> · hors contrats ».
+  const contratParCode = useMemo(() => new Map(contrats.map((c) => [c.code, c])), [contrats])
+  const contratsParAgence = useMemo(() => {
+    const m = new Map<string, { codes: Set<string>; objectif: number | null; agenceObjectif: boolean }>()
+    contrats.forEach((c) => {
+      const k = normAgence(c.agence)
+      if (!k) return
+      if (!m.has(k)) m.set(k, { codes: new Set(), objectif: null, agenceObjectif: false })
+      m.get(k)!.codes.add(c.code)
+    })
+    m.forEach((v, k) => {
+      const ag = contrats.filter((c) => normAgence(c.agence) === k)
+      const surAgence = ag.filter((c) => c.perimetre === 'agence' && c.objectif !== null)
+      if (surAgence.length) {
+        v.objectif = Math.max(...surAgence.map((c) => c.objectif || 0))
+        v.agenceObjectif = true
+      } else {
+        const perso = ag.filter((c) => c.objectif !== null)
+        v.objectif = perso.length ? perso.reduce((s, c) => s + (c.objectif || 0), 0) : null
+      }
+    })
+    return m
+  }, [contrats])
+  /** Ligne agence d'un collaborateur : son agence, ou « <AGENCE> · hors contrats ». */
+  const groupeDe = useCallback(
+    (code: string, agence: string) => {
+      const ct = contratsParAgence.get(normAgence(agence))
+      return !ct || ct.codes.has(code.toUpperCase()) ? agence : `${agence}${HORS_CONTRATS}`
+    },
+    [contratsParAgence]
+  )
+  const groupeDeCode = useCallback((code: string) => groupeDe(code, collabByCode.get(code)?.agence || ''), [groupeDe, collabByCode])
+  const agenceReelle = (groupe: string) => (groupe.endsWith(HORS_CONTRATS) ? groupe.slice(0, -HORS_CONTRATS.length) : groupe)
+
   const { seriesByCode, seriesByAgence, serieTotal } = useMemo(() => {
     const byCode = new Map<string, Serie>()
     const byAgence = new Map<string, Serie>()
@@ -298,14 +407,46 @@ function SuiviAgencesPage() {
       if (agSet && !agSet.has(r.agence)) return
       if (coSet && !coSet.has(r.code)) return
       const y = r.annee - (annee - 2)
+      const g = groupeDe(r.code, r.agence)
       if (!byCode.has(r.code)) byCode.set(r.code, emptySerie())
-      if (!byAgence.has(r.agence)) byAgence.set(r.agence, emptySerie())
+      if (!byAgence.has(g)) byAgence.set(g, emptySerie())
       addToSerie(byCode.get(r.code)!, y, r.mois, r.ca, r.marge)
-      addToSerie(byAgence.get(r.agence)!, y, r.mois, r.ca, r.marge)
+      addToSerie(byAgence.get(g)!, y, r.mois, r.ca, r.marge)
       addToSerie(total, y, r.mois, r.ca, r.marge)
     })
     return { seriesByCode: byCode, seriesByAgence: byAgence, serieTotal: total }
-  }, [rows, famSet, agSet, coSet, annee])
+  }, [rows, famSet, agSet, coSet, annee, groupeDe])
+
+  // ------------------------------------------------------- transfo devis 60 j
+  const transfoByCode = useMemo(() => {
+    const m = new Map<string, TransfoAgg>()
+    ;(transfoData?.rows || []).forEach((r) => {
+      if (famSet && !famSet.has(r.famille)) return
+      if (!m.has(r.code)) m.set(r.code, transfoVide())
+      addTransfo(m.get(r.code)!, r)
+    })
+    return m
+  }, [transfoData, famSet])
+  const transfoRef = useMemo(() => {
+    if (!transfoData) return null
+    const t = transfoVide()
+    transfoData.ref.forEach((r) => {
+      if (!famSet || famSet.has(r.famille)) addTransfo(t, r)
+    })
+    return t
+  }, [transfoData, famSet])
+  const transfoPour = useCallback(
+    (codes: string[]): TransfoAgg | null => {
+      if (!transfoData) return null
+      const t = transfoVide()
+      codes.forEach((c) => {
+        const x = transfoByCode.get(c)
+        if (x) addTransfo(t, x)
+      })
+      return t
+    },
+    [transfoData, transfoByCode]
+  )
 
   const refSerie = useMemo(() => {
     const s = emptySerie()
@@ -317,6 +458,8 @@ function SuiviAgencesPage() {
   }, [refRows, famSet, annee])
 
   const refEvol = evolPct(sumMonths(refSerie.ca[2], 1, moisClos), sumMonths(refSerie.ca[1], 1, moisClos))
+  const refMarge = tauxMarge(sumMonths(refSerie.mg[2], 1, moisClos), sumMonths(refSerie.ca[2], 1, moisClos))
+  const refTransfo = tauxTransfo(transfoRef)
 
   // Objectif à date : part de l'objectif annuel attendue à fin du dernier mois clos.
   const partADate = useMemo(() => partObjectifADate(repartition, moisClos), [repartition, moisClos])
@@ -332,6 +475,24 @@ function SuiviAgencesPage() {
       return creationsPour(creations, (r) => (!agSet || agSet.has(r.agence)) && (!coSet || coSet.has(r.code)), annee, partAnnee)
     },
     [creations, annee, partAnnee, agSet, coSet]
+  )
+
+  /** Objectif CA issu des contrats : undefined = pas de contrat (règle bilan), null = aucun objectif propre. */
+  const objectifContrat = useCallback(
+    (entity: Entity): number | null | undefined => {
+      if (entity.kind === 'agence') {
+        if (entity.horsContrats) return null
+        const ct = contratsParAgence.get(normAgence(entity.agence))
+        return ct ? ct.objectif : undefined
+      }
+      if (entity.kind === 'collaborateur') {
+        const c = contratParCode.get(entity.id.toUpperCase())
+        if (!c) return undefined
+        return c.perimetre === 'perso' ? c.objectif : null
+      }
+      return undefined
+    },
+    [contratsParAgence, contratParCode]
   )
 
   const buildLigne = useCallback(
@@ -350,8 +511,12 @@ function SuiviAgencesPage() {
       const tN1 = tauxMarge(sumMonths(serie.mg[1], 1, moisClos), caN1Date)
       const objs = objectifsPourEntite(entity, objectifs, commerciaux, agenceDeCode)
       const objCaRow = objs.propres.find((o) => o.type_objectif === 'ca_valeur' && !o.famille_macro)
+      const objContrat = objectifContrat(entity)
       // Un filtre familles rend la comparaison à l'objectif global sans objet.
-      const objCa = famSet ? null : objCaRow ? objCaRow.valeur_cible : null
+      const objCa = famSet ? null : objContrat !== undefined ? objContrat : objCaRow ? objCaRow.valeur_cible : null
+      const tr = entity.id === 'entreprise' && entity.kind === 'entreprise' ? transfoRef : transfoPour(entity.codes)
+      const trN = tauxTransfo(tr)
+      const trN1 = tauxTransfo(tr, true)
       const objADate = objCa !== null ? objCa * partADate : null
       const cre = creationsEntite(entity)
       return {
@@ -372,9 +537,13 @@ function SuiviAgencesPage() {
         creations: cre,
         creationsN: cre ? cre.n : null,
         positions: positionsTrimestrielles(serie, moisClos),
+        margeVsEntr: tN !== null && refMarge !== null ? tN - refMarge : null,
+        transfo: trN,
+        transfoDelta: trN !== null && trN1 !== null ? trN - trN1 : null,
+        transfoVsEntr: trN !== null && refTransfo !== null ? trN - refTransfo : null,
       }
     },
-    [moisClos, objectifs, commerciaux, refEvol, agenceDeCode, famSet, partADate, creationsEntite]
+    [moisClos, objectifs, commerciaux, refEvol, refMarge, refTransfo, transfoRef, transfoPour, agenceDeCode, famSet, partADate, creationsEntite, objectifContrat]
   )
 
   const isPetit = useCallback(
@@ -401,12 +570,13 @@ function SuiviAgencesPage() {
 
   const lignesAgence = useMemo(() => {
     const out: Ligne[] = []
-    seriesByAgence.forEach((serie, agence) => {
-      const codes = Array.from(seriesByCode.keys()).filter((code) => (collabByCode.get(code)?.agence || '') === agence)
-      out.push(buildLigne({ key: `A:${agence}`, kind: 'agence', id: agence, label: agence, agence, codes }, serie))
+    seriesByAgence.forEach((serie, groupe) => {
+      const codes = Array.from(seriesByCode.keys()).filter((code) => groupeDeCode(code) === groupe)
+      const hors = groupe.endsWith(HORS_CONTRATS)
+      out.push(buildLigne({ key: `A:${groupe}`, kind: 'agence', id: groupe, label: groupe, agence: agenceReelle(groupe), codes, horsContrats: hors }, serie))
     })
     return out
-  }, [seriesByAgence, seriesByCode, collabByCode, buildLigne])
+  }, [seriesByAgence, seriesByCode, groupeDeCode, buildLigne])
 
   const sorter = useCallback(
     (a: Ligne, b: Ligne) => {
@@ -490,25 +660,38 @@ function SuiviAgencesPage() {
   const ficheHorsPerimetre = useMemo(() => {
     if (!ficheKey || loading || !perimetre.restreint) return false
     if (ficheKey.startsWith('C:')) return !collabByCode.has(ficheKey.slice(2))
-    if (ficheKey.startsWith('A:')) return !collaborateurs.some((c) => c.agence === ficheKey.slice(2))
+    if (ficheKey.startsWith('A:')) return !collaborateurs.some((c) => c.agence === agenceReelle(ficheKey.slice(2)))
     return true
   }, [ficheKey, loading, perimetre.restreint, collabByCode, collaborateurs])
 
+  // 17/11/2026 : la fiche est calculée sur toutes les lignes de l'entité (seul le filtre
+  // familles s'applique) — elle ne dépend plus des filtres Agences / Collaborateurs du
+  // tableau, qui pouvaient la vider (« 0 collaborateur », 0 €).
   const fiche = useMemo(() => {
     if (!ficheKey || loading || ficheHorsPerimetre) return null
+    const serieDe = (keep: (r: DataRow) => boolean) => {
+      const s = emptySerie()
+      rows.forEach((r) => {
+        if (famSet && !famSet.has(r.famille)) return
+        if (keep(r)) addToSerie(s, r.annee - (annee - 2), r.mois, r.ca, r.marge)
+      })
+      return s
+    }
     if (ficheKey.startsWith('C:')) {
       const code = ficheKey.slice(2)
-      const serie = seriesByCode.get(code) || emptySerie()
-      return { entity: collabEntity(code), serie }
+      return { entity: collabEntity(code), serie: serieDe((r) => r.code === code) }
     }
     if (ficheKey.startsWith('A:')) {
-      const agence = ficheKey.slice(2)
-      const serie = seriesByAgence.get(agence) || emptySerie()
-      const codes = Array.from(seriesByCode.keys()).filter((code) => (collabByCode.get(code)?.agence || '') === agence)
-      return { entity: { key: ficheKey, kind: 'agence' as const, id: agence, label: agence, agence, codes }, serie }
+      const groupe = ficheKey.slice(2)
+      const codes = Array.from(new Set(rows.filter((r) => groupeDe(r.code, r.agence) === groupe).map((r) => r.code)))
+      const serie = serieDe((r) => groupeDe(r.code, r.agence) === groupe)
+      return {
+        entity: { key: ficheKey, kind: 'agence' as const, id: groupe, label: groupe, agence: agenceReelle(groupe), codes, horsContrats: groupe.endsWith(HORS_CONTRATS) },
+        serie,
+      }
     }
     return null
-  }, [ficheKey, loading, ficheHorsPerimetre, seriesByCode, seriesByAgence, collabByCode, collabEntity])
+  }, [ficheKey, loading, ficheHorsPerimetre, rows, famSet, annee, groupeDe, collabEntity])
 
   const ficheRows = useMemo(() => {
     if (!fiche) return []
@@ -521,15 +704,28 @@ function SuiviAgencesPage() {
     // Agence : tous les collaborateurs rattachés à l'agence (même sans CA sur la sélection).
     const codes =
       fiche.entity.kind === 'agence'
-        ? Array.from(new Set([...fiche.entity.codes, ...collaborateurs.filter((c) => c.agence === fiche.entity.id).map((c) => c.code)]))
+        ? Array.from(new Set([...fiche.entity.codes, ...collaborateurs.filter((c) => groupeDeCode(c.code) === fiche.entity.id).map((c) => c.code)]))
         : fiche.entity.codes
     return impayesPourCodes(impayes, codes)
-  }, [fiche, impayes, collaborateurs])
+  }, [fiche, impayes, collaborateurs, groupeDeCode])
 
-  const ficheObjectifs = useMemo(
-    () => (fiche ? objectifsPourEntite(fiche.entity, objectifs, commerciaux, agenceDeCode) : { propres: [], familles: [], zeroImpaye: null, herites: [], heritesDe: null }),
-    [fiche, objectifs, commerciaux, agenceDeCode]
-  )
+  const ficheObjectifs = useMemo((): ObjectifsEntite => {
+    if (!fiche) return { propres: [], familles: [], zeroImpaye: null, herites: [], heritesDe: null }
+    const o = objectifsPourEntite(fiche.entity, objectifs, commerciaux, agenceDeCode)
+    // Objectif CA : celui des contrats d'objectifs quand il y en a (17/11/2026).
+    const val = objectifContrat(fiche.entity)
+    if (val === undefined) return o
+    const propres = o.propres.filter((x) => !(x.type_objectif === 'ca_valeur' && !x.famille_macro))
+    if (val !== null)
+      propres.push({
+        perimetre_type: fiche.entity.kind === 'agence' ? 'agence' : 'collaborateur',
+        perimetre_ref: fiche.entity.id,
+        type_objectif: 'ca_valeur',
+        famille_macro: null,
+        valeur_cible: val,
+      })
+    return { ...o, propres }
+  }, [fiche, objectifs, commerciaux, agenceDeCode, objectifContrat])
   const ficheCreations = useMemo(() => (fiche ? creationsEntite(fiche.entity) : null), [fiche, creationsEntite])
 
   // ------------------------------------------------------------------ rendu
@@ -544,11 +740,11 @@ function SuiviAgencesPage() {
 
   const allExpanded = filtres.vue === 'agences' && lignesAgence.length > 0 && lignesAgence.every((l) => expanded.has(l.entity.id))
 
-  function header(key: SortKey, label: string, align: 'left' | 'right' = 'right', title?: string) {
+  function header(key: SortKey, label: string, align: 'left' | 'right' = 'right', title?: string, extra = '') {
     const active = sort.key === key
     return (
       <th
-        className={`cursor-pointer select-none whitespace-nowrap px-2 py-2.5 font-semibold ${align === 'left' ? 'text-left' : 'text-right'} ${active ? 'text-slate-900' : ''}`}
+        className={`cursor-pointer select-none whitespace-nowrap px-2 py-2.5 font-semibold ${align === 'left' ? 'text-left' : 'text-right'} ${active ? 'text-slate-900' : ''} ${extra}`}
         onClick={() => setSort((s) => ({ key, dir: s.key === key ? ((s.dir * -1) as 1 | -1) : key === 'label' ? 1 : -1 }))}
         title={title}
       >
@@ -559,6 +755,10 @@ function SuiviAgencesPage() {
   }
 
   const filtresActifs = filtres.agences.length + filtres.collaborateurs.length + filtres.familles.length
+  const fmtJour = (d: string | null) => (d ? new Date(d).toLocaleDateString('fr-FR') : '—')
+  const libTransfo = transfoData
+    ? `Transfo devis ${transfoData.delai} j = CA des devis du 1er janvier au ${fmtJour(transfoData.dateLimite)} transformé en commande dans les ${transfoData.delai} jours / CA devisé, comparé à la même fenêtre ${annee - 1} (cycle des documents mis à jour le ${fmtJour(transfoData.maj)})`
+    : 'Transfo devis : donnée indisponible'
 
   return (
     <div className="min-h-screen bg-[#F4F3F0] pb-16">
@@ -749,25 +949,45 @@ function SuiviAgencesPage() {
                   )}
                 </div>
                 <div className="overflow-x-auto">
-                  <table className="w-full min-w-[1280px] text-[13px]">
+                  <table className="w-full min-w-[1360px] text-[13px]">
                     <thead className="bg-[#FAF9F7] text-[11px] uppercase tracking-[0.05em] text-slate-500">
+                      {/* 17/11/2026 : zones CA / Marge / Transfo devis / Comptes / Position */}
+                      <tr className="border-b border-[#E2DFD8] text-[10px] tracking-[0.12em]">
+                        <th className="px-2 pt-2" />
+                        <th colSpan={9} className={`${ZONE} bg-[#EEF3F8] px-2 pt-2 pb-1 text-center font-bold text-[#245A9E]`}>Chiffre d’affaires</th>
+                        <th colSpan={3} className={`${ZONE} bg-[#F1F6EF] px-2 pt-2 pb-1 text-center font-bold text-[#2F6B3A]`}>Marge</th>
+                        <th colSpan={3} className={`${ZONE} bg-[#F7F2FA] px-2 pt-2 pb-1 text-center font-bold text-[#6B4E8A]`} title={libTransfo}>
+                          Transfo devis {transfoData?.delai || DELAI_TRANSFO} j
+                        </th>
+                        {creations && <th className={`${ZONE} px-2 pt-2 pb-1 text-center font-bold`}>Comptes</th>}
+                        <th className={`${ZONE} px-2 pt-2 pb-1 text-left font-bold`}>Position</th>
+                      </tr>
                       <tr>
                         {header('label', filtres.vue === 'agences' ? 'Agence / collaborateur' : 'Collaborateur', 'left')}
-                        {header('caN1', `CA ${annee - 1}`)}
+                        {header('caN1', `CA ${annee - 1}`, 'right', undefined, ZONE)}
                         {header('caN1Date', `${annee - 1} à date`)}
                         {header('caNDate', `${annee} à date`)}
-                        {header('evol', 'Évol.')}
-                        {header('ecart', 'Écart €')}
+                        {header(
+                          'objectifADate',
+                          'Obj. à date',
+                          'right',
+                          `Objectif annuel × répartition mensuelle du bilan, janvier → ${MOIS_LONGS[moisClos] || '—'} (${fmtPct(partADate * 100, 1, false)} de l’année). Objectif annuel = contrat d’objectifs quand il existe (agence : objectif « CA agence » d’un contrat, sinon somme des objectifs CA perso), sinon bilan commercial.`
+                        )}
+                        {header('evol', 'Évol. vs N-1', 'right', `CA ${annee} à date vs mêmes mois ${annee - 1}`)}
+                        {header('realisation', 'Réal. / obj.', 'right', 'CA à date / objectif à date')}
+                        {header('ecart', 'Écart €', 'right', `CA ${annee} à date − CA ${annee - 1} à date`)}
                         <th className="whitespace-nowrap px-2 py-2.5 text-center font-semibold" title="Évolution de chaque trimestre vs le même trimestre N-1">
                           T1 · T2 · T3 · T4
                         </th>
                         {header('vsEntreprise', 'vs entr.', 'right', `Évolution − évolution entreprise ${exclusionsLibelle}`)}
-                        {header('marge', 'Marge %')}
-                        {header('margeDelta', 'Δ marge')}
-                        {header('objectifADate', 'Obj. à date', 'right', `Objectif annuel × répartition mensuelle du bilan, janvier → ${MOIS_LONGS[moisClos] || '—'} (${fmtPct(partADate * 100, 1, false)} de l’année)`)}
-                        {header('realisation', 'Réal. / obj.', 'right', 'CA à date / objectif à date')}
-                        {creations && header('creationsN', 'Comptes créés', 'right', `Comptes clients créés en ${annee} (à ce jour), comparés à ${annee - 1} au prorata de l’année écoulée`)}
-                        <th className="whitespace-nowrap px-2 py-2.5 text-left font-semibold">Position</th>
+                        {header('marge', 'Taux', 'right', `Taux de marge ${annee} à date`, ZONE)}
+                        {header('margeDelta', 'vs N-1', 'right', `Taux de marge − taux de marge ${annee - 1} sur les mêmes mois, en points`)}
+                        {header('margeVsEntr', 'vs entr.', 'right', `Taux de marge − taux de marge entreprise ${exclusionsLibelle}, en points`)}
+                        {header('transfo', 'Taux', 'right', libTransfo, ZONE)}
+                        {header('transfoDelta', 'vs N-1', 'right', `Taux ${annee} − taux ${annee - 1} sur la même fenêtre de devis, en points`)}
+                        {header('transfoVsEntr', 'vs entr.', 'right', `Taux − taux entreprise ${exclusionsLibelle}, en points`)}
+                        {creations && header('creationsN', 'Créés', 'right', `Comptes clients créés en ${annee} (à ce jour), comparés à ${annee - 1} au prorata de l’année écoulée`, ZONE)}
+                        <th className={`whitespace-nowrap px-2 py-2.5 text-left font-semibold ${ZONE}`}>Position</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -775,7 +995,7 @@ function SuiviAgencesPage() {
                         const isAgence = l.entity.kind === 'agence'
                         const open = isAgence && expanded.has(l.entity.id)
                         const enfants = open
-                          ? lignesCollab.filter((c) => c.entity.agence === l.entity.id).sort(sorter)
+                          ? lignesCollab.filter((c) => groupeDeCode(c.entity.id) === l.entity.id).sort(sorter)
                           : []
                         return (
                           <LigneGroupe
@@ -792,7 +1012,7 @@ function SuiviAgencesPage() {
                       })}
                       {topLignes.length === 0 && (
                         <tr>
-                          <td colSpan={15} className="px-4 py-10 text-center text-sm text-slate-500">
+                          <td colSpan={20} className="px-4 py-10 text-center text-sm text-slate-500">
                             Aucune ligne pour cette sélection.
                           </td>
                         </tr>
@@ -809,6 +1029,8 @@ function SuiviAgencesPage() {
                   {repartition ? 'répartition mensuelle du bilan commercial (saisonnalité de l’année passée)' : 'prorata des mois clos'} ; Réal. / obj. = CA à date / objectif à date
                   {filtres.familles.length > 0 && ' (masqué : filtre familles actif)'}.
                   {creations && ` Comptes créés = bilan commercial${creations.moisBilan[annee] ? ` jusqu’à ${MOIS_LONGS[creations.moisBilan[annee] || 0]}` : ''}, puis fiches clients SAGE ; N-1 comparé au prorata de l’année écoulée.`}
+                  {contrats.length > 0 && ' Agence avec contrats d’objectifs = collaborateurs sous contrat ; les autres collaborateurs de l’agence sont sur la ligne « · hors contrats ».'}
+                  {` ${libTransfo}.`}
                 </div>
               </section>
 
@@ -938,10 +1160,26 @@ function LigneRow({
           {l.entity.sommeil && <span className="shrink-0 text-[10px] text-slate-400">sommeil</span>}
         </div>
       </td>
-      <td className="px-2 py-2 text-right tabular-nums text-slate-600">{mask(fmtEuro(l.caN1))}</td>
-      <td className="px-2 py-2 text-right tabular-nums">{mask(fmtEuro(l.caN1Date))}</td>
-      <td className="px-2 py-2 text-right font-semibold tabular-nums text-slate-900">{mask(fmtEuro(l.caNDate))}</td>
+      {/* 17/11/2026 : montants en k€ / M€ (détail exact au survol) */}
+      <td className={`px-2 py-2 text-right tabular-nums text-slate-600 ${ZONE}`} title={masquerMontants ? undefined : fmtEuro(l.caN1)}>{mask(fmtK(l.caN1))}</td>
+      <td className="px-2 py-2 text-right tabular-nums" title={masquerMontants ? undefined : fmtEuro(l.caN1Date)}>{mask(fmtK(l.caN1Date))}</td>
+      <td className="px-2 py-2 text-right font-semibold tabular-nums text-slate-900" title={masquerMontants ? undefined : fmtEuro(l.caNDate)}>{mask(fmtK(l.caNDate))}</td>
+      <td className="px-2 py-2 text-right tabular-nums text-slate-600" title={l.objectifCa !== null ? `Objectif annuel ${fmtEuro(l.objectifCa)}` : undefined}>
+        {l.objectifADate === null ? <span className="text-slate-300">—</span> : mask(fmtK(l.objectifADate))}
+      </td>
       <td className={`px-2 py-2 text-right font-semibold tabular-nums ${toneOf(l.evol)}`}>{fmtPct(l.evol)}</td>
+      <td
+        className="px-2 py-2 text-right tabular-nums"
+        title={l.objectifADate !== null ? `${fmtEuro(l.caNDate)} / ${fmtEuro(l.objectifADate)} (écart ${l.caNDate - l.objectifADate >= 0 ? '+' : ''}${fmtK(l.caNDate - l.objectifADate)})` : undefined}
+      >
+        {l.realisation === null ? (
+          <span className="text-slate-300">—</span>
+        ) : (
+          <span className={`rounded px-1.5 py-0.5 text-[12px] font-semibold ${l.realisation >= 100 ? 'bg-[#E5F2E8] text-[#1F6B3A]' : l.realisation >= 90 ? 'bg-[#FBF1DC] text-[#8A5A11]' : 'bg-[#FBE6E3] text-[#A32C2C]'}`}>
+            {Math.round(l.realisation)} %
+          </span>
+        )}
+      </td>
       <td className={`px-2 py-2 text-right tabular-nums ${masquerMontants ? '' : toneOf(l.ecart, 1)}`}>{mask(`${l.ecart > 0 ? '+' : ''}${fmtK(l.ecart)}`)}</td>
       <td className="px-2 py-2">
         <div className="flex justify-center gap-1">
@@ -965,26 +1203,15 @@ function LigneRow({
         </div>
       </td>
       <td className={`px-2 py-2 text-right tabular-nums ${variant === 'ref' ? '' : toneOf(l.vsEntreprise)}`}>{variant === 'ref' ? '—' : fmtPts(l.vsEntreprise)}</td>
-      <td className="px-2 py-2 text-right tabular-nums">{fmtPct(l.marge, 1, false)}</td>
+      <td className={`px-2 py-2 text-right tabular-nums ${ZONE}`}>{fmtPct(l.marge, 1, false)}</td>
       <td className={`px-2 py-2 text-right tabular-nums ${toneOf(l.margeDelta, 0.1)}`}>{fmtPts(l.margeDelta)}</td>
-      <td className="px-2 py-2 text-right tabular-nums text-slate-600" title={l.objectifCa !== null ? `Objectif annuel ${fmtEuro(l.objectifCa)}` : undefined}>
-        {l.objectifADate === null ? <span className="text-slate-300">—</span> : mask(fmtK(l.objectifADate))}
-      </td>
-      <td
-        className="px-2 py-2 text-right tabular-nums"
-        title={l.objectifADate !== null ? `${fmtEuro(l.caNDate)} / ${fmtEuro(l.objectifADate)} (écart ${l.caNDate - l.objectifADate >= 0 ? '+' : ''}${fmtK(l.caNDate - l.objectifADate)})` : undefined}
-      >
-        {l.realisation === null ? (
-          <span className="text-slate-300">—</span>
-        ) : (
-          <span className={`rounded px-1.5 py-0.5 text-[12px] font-semibold ${l.realisation >= 100 ? 'bg-[#E5F2E8] text-[#1F6B3A]' : l.realisation >= 90 ? 'bg-[#FBF1DC] text-[#8A5A11]' : 'bg-[#FBE6E3] text-[#A32C2C]'}`}>
-            {Math.round(l.realisation)} %
-          </span>
-        )}
-      </td>
+      <td className={`px-2 py-2 text-right tabular-nums ${variant === 'ref' ? '' : toneOf(l.margeVsEntr, 0.1)}`}>{variant === 'ref' ? '—' : fmtPts(l.margeVsEntr)}</td>
+      <td className={`px-2 py-2 text-right tabular-nums ${ZONE}`}>{fmtPct(l.transfo, 1, false)}</td>
+      <td className={`px-2 py-2 text-right tabular-nums ${toneOf(l.transfoDelta, 0.1)}`}>{fmtPts(l.transfoDelta)}</td>
+      <td className={`px-2 py-2 text-right tabular-nums ${variant === 'ref' ? '' : toneOf(l.transfoVsEntr, 0.1)}`}>{variant === 'ref' ? '—' : fmtPts(l.transfoVsEntr)}</td>
       {avecCreations && (
         <td
-          className="px-2 py-2 text-right tabular-nums"
+          className={`px-2 py-2 text-right tabular-nums ${ZONE}`}
           title={l.creations ? `${l.creations.n} en N à ce jour · N-1 : ${l.creations.n1} sur l’année (prorata ${l.creations.n1Prorata.toFixed(1)})${l.creations.avecSage ? ' · derniers mois : fiches SAGE' : ''}` : undefined}
         >
           {!l.creations || (l.creations.n === 0 && l.creations.n1 === 0) ? (
@@ -997,7 +1224,7 @@ function LigneRow({
           )}
         </td>
       )}
-      <td className="px-2 py-2">
+      <td className={`px-2 py-2 ${ZONE}`}>
         {quadrant ? (
           <div className="flex items-center gap-1">
             <span className="whitespace-nowrap rounded-full px-2 py-0.5 text-[11px] font-semibold" style={{ background: QUADRANT_LIBELLES[quadrant].bg, color: QUADRANT_LIBELLES[quadrant].tone }}>

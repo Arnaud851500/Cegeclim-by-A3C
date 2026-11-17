@@ -39,7 +39,12 @@ const PASTILLE: Record<string, string> = {
 
 export default function ContratsSuivi({ entity, annee }: { entity: Entity; annee: number }) {
   if (entity.kind === 'collaborateur') return <ContratCollaborateur code={entity.id} annee={annee} />
-  if (entity.kind === 'agence') return <ContratsAgence agence={entity.agence || entity.label} annee={annee} />
+  if (entity.kind === 'agence') {
+    // 17/11/2026 : la ligne « · hors contrats » regroupe les collaborateurs sans contrat.
+    if (entity.horsContrats)
+      return <div className="text-[12px] text-slate-500">Collaborateurs de l’agence sans contrat d’objectifs {annee} : hors périmètre des contrats.</div>
+    return <ContratsAgence agence={entity.agence || entity.label} annee={annee} />
+  }
   return null
 }
 
@@ -198,11 +203,22 @@ function ContratsAgence({ agence, annee }: { agence: string; annee: number }) {
   if (!rows) return <div className="text-[12px] text-slate-500">Chargement des contrats…</div>
   if (rows.length === 0) return <div className="text-[12px] text-slate-500">Aucun contrat d’objectifs {annee} pour les collaborateurs de cette agence.</div>
 
-  const somme = rows.filter((r) => r.perimetre_objectif === 'perso').reduce((s, r) => s + (r.objectif_caht || 0), 0)
+  // 17/11/2026 : objectif de l'agence = objectif « CA agence » d'un contrat s'il existe (comparé
+  // au CA des seuls collaborateurs sous contrat), sinon somme des objectifs CA perso.
+  const surAgence = rows.filter((r) => r.perimetre_objectif === 'agence' && r.objectif_caht)
+  const ref = surAgence.length ? surAgence.reduce((a, b) => ((b.objectif_caht || 0) > (a.objectif_caht || 0) ? b : a)) : null
+  const perso = rows.filter((r) => r.perimetre_objectif === 'perso')
+  const objectif = ref ? ref.objectif_caht || 0 : perso.reduce((s, r) => s + (r.objectif_caht || 0), 0)
+  const ca = ref ? ref.ca_objectif || 0 : perso.reduce((s, r) => s + (r.ca_objectif || 0), 0)
+  const avancement = objectif ? ca / objectif : null
   return (
     <div className="space-y-2">
       <div className="text-[12px] text-slate-600">
-        Objectif de l’agence = somme des objectifs CA perso des contrats : <b className="tabular-nums">{fmtK(somme)}</b>
+        {ref ? 'Objectif de l’agence (contrat « CA agence ») : ' : 'Objectif de l’agence = somme des objectifs CA perso des contrats : '}
+        <b className="tabular-nums">{fmtK(objectif)}</b>
+        {' · CA à date des '}
+        {rows.length} collaborateur{rows.length > 1 ? 's' : ''} sous contrat : <b className="tabular-nums">{fmtK(ca)}</b>
+        {avancement !== null && <> ({fmtPct(avancement, 0)})</>}
       </div>
       <div className="overflow-x-auto rounded-lg border border-[#E2DFD8]">
         <table className="w-full min-w-[720px] text-[12px]">

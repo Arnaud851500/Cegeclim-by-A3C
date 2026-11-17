@@ -66,6 +66,8 @@ export type Entity = {
   agence: string
   sommeil?: boolean
   codes: string[]
+  /** 17/11/2026 : ligne « <AGENCE> · hors contrats » (collaborateurs d'une agence à contrats, sans contrat). */
+  horsContrats?: boolean
 }
 
 export type Dynamique = 'acceleration' | 'stable' | 'ralentissement'
