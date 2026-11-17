@@ -14,6 +14,10 @@
 -- Filtrable par fournisseur principal, statut de l'article (Actif / Archivé),
 -- type de prix, liste de tarif. Source = miroir BLG (schéma blg, synchronisé).
 --
+-- 18/11/2026 : lecture via les vues miroir public.article_* (les tables blg.*
+-- sont sous RLS réservée au rôle de synchronisation : la vue en security_invoker
+-- renvoyait 0 ligne aux utilisateurs).
+--
 -- Limite connue : le type de commande d'appro éventuellement rattaché à un prix
 -- fournisseur dans BLG n'est pas présent dans le miroir.
 -- ============================================================================
@@ -26,14 +30,14 @@ with art as (
          case when ap.label like '{%' then (ap.label::jsonb ->> 'fr_FR') else ap.label end as designation,
          case ap.status_fk when 70 then 'Actif' when 7 then 'Archivé' else coalesce(ap.status_fk::text, '—') end as statut_article,
          fp.title as fournisseur_principal
-  from blg.article_part ap
-  left join blg.article_supplier fp on fp.id = ap.supplier_fk
+  from public.article_part ap
+  left join public.article_supplier fp on fp.id = ap.supplier_fk
 ),
 prix_four as (
   select sp.*,
          row_number() over (partition by sp.article_fk, sp.supplier_fk
                             order by sp.created_at desc nulls last, sp.id desc) as rang
-  from blg.article_supplier_price sp
+  from public.article_supplier_price sp
 )
 select
   a.id                                   as blg_id,
@@ -60,8 +64,8 @@ select
   case when p.manual_add_date is not null then 'Import / ajout manuel' else 'Reprise / saisie' end as origine
 from prix_four p
 join art a on a.id = p.article_fk
-left join blg.article_supplier sf on sf.id = p.supplier_fk
-left join blg.article_supplier_price_list l on l.id = p.supplier_price_list_fk
+left join public.article_supplier sf on sf.id = p.supplier_fk
+left join public.article_supplier_price_list l on l.id = p.supplier_price_list_fk
 union all
 select
   a.id,
@@ -89,10 +93,10 @@ select
   null,
   s.last_update,
   case when s.global then 'Tous clients' else 'Restreint (client / tag)' end
-from blg.article_sale_price s
+from public.article_sale_price s
 join art a on a.id = s.part_fk
-left join blg.article_sale_price_type t on t.id = s.sale_price_type_fk
-left join blg.article_supplier sf on sf.id = s.supplier_fk;
+left join public.article_sale_price_type t on t.id = s.sale_price_type_fk
+left join public.article_supplier sf on sf.id = s.supplier_fk;
 
 grant select on public.v_req_tarifs_articles_blg to authenticated;
 
@@ -110,17 +114,17 @@ insert into public.requeteur_champs (source, code, libelle, groupe, type, ordre,
   ('tarifs_articles_blg', 'reference_fournisseur_principal', 'Référence fournisseur principal', 'Article', 'texte', 30, false, null, null),
   ('tarifs_articles_blg', 'designation', 'Désignation', 'Article', 'texte', 40, true, null, null),
   ('tarifs_articles_blg', 'fournisseur_principal', 'Fournisseur principal', 'Article', 'liste', 50, true, null,
-   $L$select distinct title from blg.article_supplier where title is not null$L$),
+   $L$select distinct title from public.article_supplier where title is not null$L$),
   ('tarifs_articles_blg', 'statut_article', 'Statut article', 'Article', 'liste', 60, true, 'Actif ou Archivé dans BLG.',
    $L$select unnest(array['Actif','Archivé'])$L$),
   ('tarifs_articles_blg', 'type_prix', 'Type de prix', 'Prix', 'liste', 70, true, 'Prix fournisseur (achat), Prix public Cegeclim, Prix promo…',
    $L$select distinct type_prix from public.v_req_tarifs_articles_blg$L$),
   ('tarifs_articles_blg', 'fournisseur_du_prix', 'Fournisseur du prix', 'Prix', 'liste', 80, true, null,
-   $L$select distinct title from blg.article_supplier where title is not null$L$),
+   $L$select distinct title from public.article_supplier where title is not null$L$),
   ('tarifs_articles_blg', 'dernier_prix_fournisseur', 'Dernier prix du fournisseur', 'Prix', 'liste', 90, true,
    'Oui = ligne de prix la plus récente de ce fournisseur sur l''article.', $L$select unnest(array['Oui','Non'])$L$),
   ('tarifs_articles_blg', 'liste_tarif', 'Liste de tarif importée', 'Prix', 'liste', 100, true, null,
-   $L$select distinct title from blg.article_supplier_price_list where title is not null$L$),
+   $L$select distinct title from public.article_supplier_price_list where title is not null$L$),
   ('tarifs_articles_blg', 'debut_validite', 'Début de validité', 'Prix', 'date', 110, true, null, null),
   ('tarifs_articles_blg', 'fin_validite', 'Fin de validité', 'Prix', 'date', 120, true, null, null),
   ('tarifs_articles_blg', 'prix_tarif', 'Prix tarif', 'Achat', 'montant', 130, true, null, null),
