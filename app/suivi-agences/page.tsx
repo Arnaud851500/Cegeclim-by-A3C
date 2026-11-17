@@ -1140,8 +1140,9 @@ function LigneRow({
       ? 'border-t border-[#F1EFEA] bg-[#FCFBF9] hover:bg-[#F7F5F0]'
       : 'border-t border-[#EFEDE8] hover:bg-[#FAF9F7]'
 
+  // 17/11/2026 : valeur et unité toujours sur une seule ligne (whitespace-nowrap)
   return (
-    <tr className={rowClass}>
+    <tr className={`${rowClass} whitespace-nowrap`}>
       <td className="px-2 py-2">
         <div className={`flex items-center gap-1.5 ${child ? 'pl-7' : ''}`}>
           {onToggle && (
