@@ -28,7 +28,7 @@ type AlerteHotline = {
   id: string
   ticket_id: string
   numero: string
-  type: 'ESCALADE' | 'REDESCENTE' | 'RAPPEL'
+  type: 'ESCALADE' | 'REDESCENTE' | 'RAPPEL' | 'TRANSFERT'
   niveau: number | null
   statut: string | null
   filiere: string | null
@@ -46,6 +46,7 @@ const POLL_MS = 60_000
 function titre(a: AlerteHotline) {
   const qui = a.auteur_nom || 'Quelqu’un'
   if (a.type === 'RAPPEL') return `📞 ${qui} vous demande de rappeler un client — ticket ${a.numero}`
+  if (a.type === 'TRANSFERT') return `☀️ ${qui} vous a transféré le ticket ${a.numero}`
   if (a.type === 'REDESCENTE') return `↩️ ${qui} vous a renvoyé le ticket ${a.numero} (niveau ${a.niveau ?? 1})`
   return `🎧 ${qui} vous a escaladé le ticket ${a.numero} (niveau ${a.niveau ?? 2})`
 }

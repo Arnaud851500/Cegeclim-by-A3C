@@ -26,7 +26,7 @@ export function estDiagnosticRepris(e: Etape) {
   return e.type === 'COMMENTAIRE' && Boolean(e.details && (e.details as Record<string, unknown>).import) && e.libelle.startsWith('Diagnostic : ')
 }
 
-const COMMENTAIRES = new Set(['COMMENTAIRE', 'COMMENTAIRE_INTERNE', 'PRECONISATION', 'RESOLUTION', 'ESCALADE', 'REDESCENTE', 'RAPPEL', 'REPRISE'])
+const COMMENTAIRES = new Set(['COMMENTAIRE', 'COMMENTAIRE_INTERNE', 'PRECONISATION', 'RESOLUTION', 'ESCALADE', 'REDESCENTE', 'RAPPEL', 'REPRISE', 'TRANSFERT'])
 
 const TONS: Partial<Record<Etape['type'], { bord: string; fond: string; titre: string }>> = {
   COMMENTAIRE: { bord: '#E2DFD8', fond: '#FFFFFF', titre: '#334155' },
@@ -35,6 +35,7 @@ const TONS: Partial<Record<Etape['type'], { bord: string; fond: string; titre: s
   REDESCENTE: { bord: '#C9D8EE', fond: '#EEF3FA', titre: '#1E4E8C' },
   RAPPEL: { bord: '#D9CCEB', fond: '#F4F0FA', titre: '#5B3F8C' },
   REPRISE: { bord: '#D9CCEB', fond: '#F4F0FA', titre: '#5B3F8C' },
+  TRANSFERT: { bord: '#D9CCEB', fond: '#F4F0FA', titre: '#5B3F8C' },
   PRECONISATION: { bord: '#CDE5D1', fond: '#EEF7EF', titre: '#2F6B3A' },
   RESOLUTION: { bord: '#CDE5D1', fond: '#EEF7EF', titre: '#2F6B3A' },
 }

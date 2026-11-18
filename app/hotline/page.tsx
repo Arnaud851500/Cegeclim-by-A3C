@@ -79,7 +79,6 @@ import {
   libelleSerieOnduleur,
   libelleSerieBatterie,
   SEVERITES,
-  ACTIONS_REPRISE,
   CATEGORIES_DOC_SOLEIL,
   chargerDocsSoleil,
   chargerMonEnvironnement,
@@ -127,6 +126,7 @@ import {
   mettreEnAttenteClient,
   dupliquerTicket,
   relancerRappel,
+  transfererTicket,
   chargerCasSimilaires,
   type CasSimilaire,
   type ParametresHotline,
@@ -905,15 +905,12 @@ function HotlineConsole() {
 
   // (13/11/2026) Soleil : un ticket non résolu doit avoir une reprise du
   // traitement planifiée (date + action) ; elle crée une tâche pour le collaborateur.
+  // (18/11/2026) Soleil : « Transférer le ticket vers » remplace la reprise du traitement.
+  const [transfertVers, setTransfertVers] = useState('')
   const repriseSaisie = Boolean(reprise.date && reprise.action && (reprise.action !== 'AUTRE' || reprise.precision.trim()))
-  const reprisePlanifiee = Boolean(ticket?.reprise_le && ticket.reprise_le >= new Date().toISOString().slice(0, 10))
 
   async function action(nom: 'resoudre' | 'commentaire') {
     if (!ticket) return
-    if (nom === 'commentaire' && ticket.filiere === 'PV' && !estResolu(ticket) && !repriseSaisie && !reprisePlanifiee) {
-      setErreur('Ticket non résolu : indiquer la reprise du traitement (date et action) avant d’enregistrer.')
-      return
-    }
     if (nom === 'commentaire' && reprise.action === 'AUTRE' && reprise.date && !reprise.precision.trim()) {
       setErreur('Action « Autre » : préciser l’action à mener.')
       return
@@ -926,6 +923,11 @@ function HotlineConsole() {
       if (nom === 'commentaire' && classifModifiee) {
         await majTicket(ticket.id, patchClassif(classifForm))
         await ajouterEtape(ticket.id, 'COMMENTAIRE', 'Issue / classification mise à jour')
+      }
+      if (nom === 'commentaire' && ticket.filiere === 'PV' && transfertVers && transfertVers !== ticket.assigne_a) {
+        await transfererTicket(ticket, { email: transfertVers, nom: nomCollaborateur(transfertVers, collaborateurs) })
+        setTicket({ ...ticket, assigne_a: transfertVers, statut: ticket.statut === 'OUVERT' ? 'EN_COURS' : ticket.statut })
+        setTransfertVers('')
       }
       if (nom === 'commentaire' && ticket.filiere === 'PV' && repriseSaisie) {
         const pourEmail = reprise.pour || email || ''
@@ -1104,8 +1106,163 @@ function HotlineConsole() {
   const verrouille = Boolean(ticket && estResolu(ticket))
   // « Sauvegarder état » actif dès qu'on tape un commentaire (ou qu'on change l'issue / la reprise).
   const classifModifiee = Boolean(ticket && ticket.filiere === 'THERMIQUE' && JSON.stringify(patchClassif(classifForm)) !== JSON.stringify(patchClassif(valeursDepuisTicket(ticket))))
-  const etatModifie = Boolean(commentaire.trim() || commentaireInterne.trim() || classifModifiee || (ticket?.filiere === 'PV' && repriseSaisie))
+  const etatModifie = Boolean(commentaire.trim() || commentaireInterne.trim() || classifModifiee || (ticket?.filiere === 'PV' && (repriseSaisie || Boolean(transfertVers))))
   const diagnosticActif = parametres.diagnostic_guide_actif
+
+  // (18/11/2026) Colonne centrale : blocs nommés pour les ordonner selon la filière.
+  // Soleil : commentaire et actions en haut, commentaires du plus récent au plus
+  // ancien, historique complet du ticket en bas.
+  const collaborateursTransfert = collaborateurs.liste
+    .filter((c) => c.email !== email && c.filiere !== 'THERMIQUE')
+    .sort((a, b) => a.nom.localeCompare(b.nom, 'fr'))
+  const commentairesSoleil = etapes
+    .filter((e) => (e.type === 'COMMENTAIRE' || e.type === 'NOTE_RAPIDE' || e.type === 'TRANSFERT' || e.type === 'RESOLUTION') && !e.libelle.startsWith('Repris dans la console'))
+    .sort((a, b) => String(b.at).localeCompare(String(a.at)))
+  const blocHistoriqueTicket = ticket ? (
+                <div className={ticket.filiere === 'PV' ? 'mt-5 rounded-xl border border-[#E2DFD8] bg-[#FAF9F7]' : 'mb-5 rounded-xl border border-[#E2DFD8] bg-[#FAF9F7]'}>
+                  <div className="flex items-center justify-between gap-2 border-b border-[#EFEDE8] px-4 py-2 text-[12px] font-bold uppercase tracking-[0.05em] text-slate-500">
+                    <span>Historique du ticket{ticket.source === 'IMPORT' ? ' · repris de l’ancien outil' : ''}</span>
+                    <button
+                      type="button"
+                      onClick={() => telechargerFicheTicket(ticket.id).catch((e) => setErreur(messageErreur(e)))}
+                      title="Tout l’historique du ticket, sans les commentaires internes"
+                      className="text-[11px] font-semibold normal-case tracking-normal text-[#B4761A] underline"
+                    >
+                      Fiche ticket PDF
+                    </button>
+                  </div>
+                  {ticket.est_test ? (
+                    <div className="border-b border-[#EFEDE8] bg-[#ECEEF1] px-4 py-1.5 text-[12px] font-bold tracking-[0.04em] text-[#3F4650]">🧪 TICKET TEST — exclu des statistiques, supprimable</div>
+                  ) : null}
+                  <div className="px-3 py-3">
+                    <HistoriqueTicket ticket={ticket} etapes={etapes} hauteurMax={420} />
+                  </div>
+                </div>
+              ) : null
+  const blocActions = ticket && !verrouille ? (
+                <div className={ticket.filiere === 'PV' ? 'mb-5 space-y-3' : 'mt-2 space-y-3 border-t border-[#EFEDE8] pt-4'}>
+                  {ticket.filiere === 'THERMIQUE' && parametres.classification_detaillee_active ? (
+                    <ClassificationTicket
+                      valeurs={classifForm}
+                      onChange={setClassifForm}
+                      classif={classif}
+                      source={ticket.classif_source}
+                      disabled={busy}
+                      mode="detail"
+                    />
+                  ) : null}
+                  <label className="block text-[11px] font-semibold text-slate-500">
+                    Commentaire
+                    <ZoneTexte
+                      value={commentaire}
+                      onChange={(e) => setCommentaire(e.target.value)}
+                      placeholder="Commentaire, code défaut relevé, solution apportée… (repris dans la fiche ticket)"
+                      className="w-full rounded-lg border border-[#D8D3C8] bg-white px-2.5 py-2 text-[13px] font-normal text-slate-900 outline-none focus:border-[#B4761A]"
+                    />
+                  </label>
+                  {ticket.filiere === 'PV' ? (
+                    <label className="block text-[11px] font-semibold text-slate-500">
+                      Transférer le ticket vers <span className="font-normal text-slate-400">— facultatif</span>
+                      <select
+                        value={transfertVers}
+                        onChange={(e) => setTransfertVers(e.target.value)}
+                        className="mt-1 h-9 w-full rounded-lg border border-[#D8D3C8] bg-white px-2 text-[13px] font-normal text-slate-900"
+                      >
+                        <option value="">— pas de transfert —</option>
+                        {collaborateursTransfert.map((c) => (
+                          <option key={c.email} value={c.email}>
+                            {c.nom}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  ) : (
+                    <label className="block text-[11px] font-semibold text-[#8A5A11]">
+                      Commentaire interne <span className="font-normal text-slate-400">— jamais repris dans la fiche ticket PDF</span>
+                      <ZoneTexte
+                        value={commentaireInterne}
+                        onChange={(e) => setCommentaireInterne(e.target.value)}
+                        placeholder="Information purement interne (client, contexte commercial, consigne…)"
+                        className="w-full rounded-lg border border-[#EBD8AE] bg-[#FFFCF5] px-2.5 py-2 text-[13px] font-normal text-slate-900 outline-none focus:border-[#B4761A]"
+                      />
+                    </label>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => action('commentaire')}
+                    disabled={busy || !etatModifie}
+                    title={ticket.filiere === 'PV' ? 'Enregistre le commentaire et, le cas échéant, transfère le ticket' : 'Enregistre le commentaire, le commentaire interne et l’issue dans l’historique du ticket'}
+                    className="h-10 w-full rounded-lg bg-[#0B1220] text-[14px] font-bold text-white hover:bg-[#1C2A44] disabled:bg-[#D8D3C8] disabled:text-slate-500"
+                  >
+                    💾 Sauvegarder état
+                  </button>
+                  <div className="flex flex-wrap gap-2">
+                    <button type="button" onClick={() => setFenetreNiveau('escalade')} disabled={busy || ticket.niveau >= 3} className="rounded-lg bg-[#C1683C] px-3 py-2 text-[13px] font-semibold text-white disabled:opacity-40">
+                      Escalader au niveau {Math.min(3, ticket.niveau + 1)}
+                    </button>
+                    {ticket.niveau >= 2 ? (
+                      <button type="button" onClick={() => setFenetreNiveau('redescente')} disabled={busy} className="rounded-lg bg-[#1E4E8C] px-3 py-2 text-[13px] font-semibold text-white disabled:opacity-40">
+                        Redescendre au niveau {ticket.niveau - 1}
+                      </button>
+                    ) : null}
+                    <button type="button" onClick={() => action('resoudre')} disabled={busy || (issueRequise(ticket) && !classifForm.issue)} title={issueRequise(ticket) && !classifForm.issue ? 'Choisir d’abord l’issue ci-dessous' : 'Un ticket résolu est clos et verrouillé'} className="rounded-lg bg-[#2F6B3A] px-3 py-2 text-[13px] font-semibold text-white disabled:opacity-40">
+                      Marquer résolu
+                    </button>
+                    <button type="button" onClick={() => void actionRapide('messagerie')} disabled={busy} title="Note dans l’historique (hotliner et heure) que l’appel est tombé sur la messagerie ; le ticket passe en attente client" className="rounded-lg border border-[#E8A35C] bg-[#FEF3E6] px-3 py-2 text-[13px] font-semibold text-[#9A4D06] disabled:opacity-40">
+                      📞 Messagerie téléphonique
+                    </button>
+                    {ticket.statut !== 'ATTENTE_CLIENT' ? (
+                      <button type="button" onClick={() => void actionRapide('attente')} disabled={busy} title="Le client doit revenir vers nous (relevé, photo, information…)" className="rounded-lg border border-[#E8A35C] px-3 py-2 text-[13px] font-semibold text-[#9A4D06] disabled:opacity-40">
+                        ⏳ En attente client
+                      </button>
+                    ) : null}
+                  </div>
+                  {ticket.filiere === 'THERMIQUE' ? (
+                    <ClassificationTicket
+                      valeurs={classifForm}
+                      onChange={setClassifForm}
+                      classif={classif}
+                      issueObligatoire={issueRequise(ticket)}
+                      disabled={busy}
+                      mode="issue"
+                    />
+                  ) : null}
+                  <div className="text-right">
+                    <Link href={`/hotline/tickets?id=${ticket.id}`} className="text-[12px] font-semibold text-slate-500 underline">
+                      Ouvrir dans la liste des tickets
+                    </Link>
+                  </div>
+                </div>
+              ) : null
+  const blocCommentairesSoleil = ticket ? (
+    <div className="mb-5 rounded-xl border border-[#E2DFD8] bg-white">
+      <div className="border-b border-[#EFEDE8] px-4 py-2 text-[12px] font-bold uppercase tracking-[0.05em] text-slate-500">
+        Commentaires <span className="font-normal normal-case tracking-normal text-slate-400">— du plus récent au plus ancien</span>
+      </div>
+      {ticket.est_test ? (
+        <div className="border-b border-[#EFEDE8] bg-[#ECEEF1] px-4 py-1.5 text-[12px] font-bold tracking-[0.04em] text-[#3F4650]">🧪 TICKET TEST — exclu des statistiques, supprimable</div>
+      ) : null}
+      {commentairesSoleil.length ? (
+        <ul className="max-h-[420px] divide-y divide-[#F1EFEA] overflow-auto">
+          {commentairesSoleil.map((e) => (
+            <li key={e.id} className={`px-4 py-2 text-[13px] ${e.type === 'NOTE_RAPIDE' ? 'bg-[#FDF7EA]' : e.type === 'TRANSFERT' ? 'bg-[#F4F0FA]' : e.type === 'RESOLUTION' ? 'bg-[#EEF7EF]' : ''}`}>
+              <div className="flex items-center justify-between gap-2 text-[11px] text-slate-500">
+                <span className="font-semibold uppercase tracking-[0.04em]">
+                  {e.type === 'NOTE_RAPIDE' ? 'Motif de l’appel' : e.type === 'TRANSFERT' ? 'Transfert' : e.type === 'RESOLUTION' ? 'Résolution' : 'Commentaire'}
+                </span>
+                <span>
+                  {fmtDateHeure(e.at)} · {String(e.auteur || '').split('@')[0]}
+                </span>
+              </div>
+              <div className="whitespace-pre-line text-slate-900">{e.libelle}</div>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="px-4 py-3 text-[12px] text-slate-500">Aucun commentaire pour l’instant.</p>
+      )}
+    </div>
+  ) : null
   // (13/11/2026) Seuls les N1 de l'environnement du ticket (Thermie / Soleil) ou sans environnement.
   const filiereCourante = ticket?.filiere || form.filiere
   const collaborateursN1 = collaborateurs.liste.filter((c) => c.niveau === 1 && (!c.filiere || !filiereCourante || c.filiere === filiereCourante))
@@ -1263,6 +1420,56 @@ function HotlineConsole() {
                   </button>
                 ))}
               </div>
+              {form.filiere === 'PV' ? (
+                <div className="rounded-xl border border-[#E2DFD8] bg-white p-3">
+                  <div className="text-[11px] font-bold uppercase tracking-[0.06em] text-slate-500">Niveau 2 · marque de l’onduleur</div>
+                  <div className="mt-2 flex flex-wrap gap-2">
+                    {MARQUES_SOLEIL.map((m) => {
+                      const actif = form.pv_marque === m.value
+                      return (
+                        <button
+                          key={m.value}
+                          type="button"
+                          onClick={() => void choisirSoleil(actif ? null : m.value, '')}
+                          className="flex-1 rounded-lg border-2 px-2 py-1.5 text-[13px] font-bold"
+                          style={{ borderColor: m.couleur, background: actif ? m.couleur : '#fff', color: actif ? '#fff' : m.couleur }}
+                        >
+                          {m.label}
+                        </button>
+                      )
+                    })}
+                  </div>
+                  {form.pv_marque ? (
+                    <>
+                      <div className="mt-3 text-[11px] font-bold uppercase tracking-[0.06em] text-slate-500">
+                        Niveau 3 · équipement {marqueSoleil(form.pv_marque)?.label} concerné par l’appel
+                      </div>
+                      <div className="mt-2 flex flex-wrap gap-2">
+                        {marqueSoleil(form.pv_marque)?.equipements.map((e) => {
+                          const m = marqueSoleil(form.pv_marque)!
+                          const actif = form.pv_equipement === e.value
+                          return (
+                            <button
+                              key={e.value}
+                              type="button"
+                              onClick={() => void choisirSoleil(form.pv_marque, actif ? '' : e.value)}
+                              className="rounded-lg border px-2.5 py-1.5 text-[12px] font-semibold"
+                              style={{ borderColor: m.couleur, background: actif ? m.fond : '#fff', color: '#0F172A', boxShadow: actif ? `inset 0 0 0 1px ${m.couleur}` : undefined }}
+                            >
+                              {e.label}
+                            </button>
+                          )
+                        })}
+                      </div>
+                      <p className="mt-2 text-[11px] text-slate-500">
+                        La marque affiche les notices CEGECLIM ; l’équipement ajoute les fiches techniques et notices fabricant (colonne de droite).
+                      </p>
+                    </>
+                  ) : (
+                    <p className="mt-2 text-[11px] text-slate-500">Choisir la marque pour afficher les notices CEGECLIM correspondantes.</p>
+                  )}
+                </div>
+              ) : null}
 
               <div className="grid grid-cols-2 gap-2">
                 <ChampTiers
@@ -1581,6 +1788,7 @@ function HotlineConsole() {
               </div>
             ) : (
             <div className="p-5">
+              {ticket.filiere === 'PV' ? blocActions : null}
               {ticket && verrouille ? (
                 <div className="mb-5 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-[#D5D9DE] bg-[#F3F4F6] px-4 py-3 text-[13px] text-slate-700">
                   <span>
@@ -1591,27 +1799,7 @@ function HotlineConsole() {
                   </button>
                 </div>
               ) : null}
-              {ticket ? (
-                <div className="mb-5 rounded-xl border border-[#E2DFD8] bg-[#FAF9F7]">
-                  <div className="flex items-center justify-between gap-2 border-b border-[#EFEDE8] px-4 py-2 text-[12px] font-bold uppercase tracking-[0.05em] text-slate-500">
-                    <span>Historique du ticket{ticket.source === 'IMPORT' ? ' · repris de l’ancien outil' : ''}</span>
-                    <button
-                      type="button"
-                      onClick={() => telechargerFicheTicket(ticket.id).catch((e) => setErreur(messageErreur(e)))}
-                      title="Tout l’historique du ticket, sans les commentaires internes"
-                      className="text-[11px] font-semibold normal-case tracking-normal text-[#B4761A] underline"
-                    >
-                      Fiche ticket PDF
-                    </button>
-                  </div>
-                  {ticket.est_test ? (
-                    <div className="border-b border-[#EFEDE8] bg-[#ECEEF1] px-4 py-1.5 text-[12px] font-bold tracking-[0.04em] text-[#3F4650]">🧪 TICKET TEST — exclu des statistiques, supprimable</div>
-                  ) : null}
-                  <div className="px-3 py-3">
-                    <HistoriqueTicket ticket={ticket} etapes={etapes} hauteurMax={420} />
-                  </div>
-                </div>
-              ) : null}
+              {ticket.filiere !== 'PV' ? blocHistoriqueTicket : blocCommentairesSoleil}
               <div className="mb-5">
                 <div className="mb-2 text-[12px] font-bold uppercase tracking-[0.05em] text-slate-500">Pièces jointes</div>
                 {ticket ? (
@@ -1620,56 +1808,6 @@ function HotlineConsole() {
                   <p className="text-[12px] text-slate-500">Ouvrir le ticket pour y joindre photos, mails et fichiers.</p>
                 )}
               </div>
-              {form.filiere === 'PV' ? (
-                <div className="mb-5 rounded-xl border border-[#E2DFD8] bg-white p-4">
-                  <div className="text-[11px] font-bold uppercase tracking-[0.06em] text-slate-500">Niveau 2 · marque de l’onduleur</div>
-                  <div className="mt-2 flex flex-wrap gap-2">
-                    {MARQUES_SOLEIL.map((m) => {
-                      const actif = form.pv_marque === m.value
-                      return (
-                        <button
-                          key={m.value}
-                          type="button"
-                          onClick={() => void choisirSoleil(actif ? null : m.value, '')}
-                          className="min-w-[120px] rounded-lg border-2 px-4 py-2 text-[14px] font-bold"
-                          style={{ borderColor: m.couleur, background: actif ? m.couleur : '#fff', color: actif ? '#fff' : m.couleur }}
-                        >
-                          {m.label}
-                        </button>
-                      )
-                    })}
-                  </div>
-                  {form.pv_marque ? (
-                    <>
-                      <div className="mt-4 text-[11px] font-bold uppercase tracking-[0.06em] text-slate-500">
-                        Niveau 3 · équipement {marqueSoleil(form.pv_marque)?.label} concerné par l’appel
-                      </div>
-                      <div className="mt-2 flex flex-wrap gap-2">
-                        {marqueSoleil(form.pv_marque)?.equipements.map((e) => {
-                          const m = marqueSoleil(form.pv_marque)!
-                          const actif = form.pv_equipement === e.value
-                          return (
-                            <button
-                              key={e.value}
-                              type="button"
-                              onClick={() => void choisirSoleil(form.pv_marque, actif ? '' : e.value)}
-                              className="min-w-[130px] rounded-lg border px-3 py-1.5 text-[13px] font-semibold"
-                              style={{ borderColor: m.couleur, background: actif ? m.fond : '#fff', color: '#0F172A', boxShadow: actif ? `inset 0 0 0 1px ${m.couleur}` : undefined }}
-                            >
-                              {e.label}
-                            </button>
-                          )
-                        })}
-                      </div>
-                      <p className="mt-2 text-[11px] text-slate-500">
-                        La marque affiche les notices CEGECLIM ; l’équipement ajoute les fiches techniques et notices fabricant (colonne de droite).
-                      </p>
-                    </>
-                  ) : (
-                    <p className="mt-2 text-[11px] text-slate-500">Choisir la marque pour afficher les notices CEGECLIM correspondantes.</p>
-                  )}
-                </div>
-              ) : null}
               {diagnosticActif ? (
                 <div className="mb-5">
               {!form.filiere ? (
@@ -1757,94 +1895,7 @@ function HotlineConsole() {
               ) : !form.filiere ? (
                 <p className="mb-4 text-[13px] text-slate-500">Choisir la filière (Thermie ou Soleil) à gauche.</p>
               ) : null}
-              {ticket && !verrouille ? (
-                <div className="mt-2 space-y-3 border-t border-[#EFEDE8] pt-4">
-                  {ticket.filiere === 'THERMIQUE' && parametres.classification_detaillee_active ? (
-                    <ClassificationTicket
-                      valeurs={classifForm}
-                      onChange={setClassifForm}
-                      classif={classif}
-                      source={ticket.classif_source}
-                      disabled={busy}
-                      mode="detail"
-                    />
-                  ) : null}
-                  <label className="block text-[11px] font-semibold text-slate-500">
-                    Commentaire
-                    <ZoneTexte
-                      value={commentaire}
-                      onChange={(e) => setCommentaire(e.target.value)}
-                      placeholder="Commentaire, code défaut relevé, solution apportée… (repris dans la fiche ticket)"
-                      className="w-full rounded-lg border border-[#D8D3C8] bg-white px-2.5 py-2 text-[13px] font-normal text-slate-900 outline-none focus:border-[#B4761A]"
-                    />
-                  </label>
-                  {ticket.filiere === 'PV' ? (
-                    <BlocReprise
-                      ticket={ticket}
-                      reprise={reprise}
-                      onChange={setReprise}
-                      collaborateurs={collaborateurs}
-                      email={email || ''}
-                      planifiee={reprisePlanifiee}
-                    />
-                  ) : (
-                    <label className="block text-[11px] font-semibold text-[#8A5A11]">
-                      Commentaire interne <span className="font-normal text-slate-400">— jamais repris dans la fiche ticket PDF</span>
-                      <ZoneTexte
-                        value={commentaireInterne}
-                        onChange={(e) => setCommentaireInterne(e.target.value)}
-                        placeholder="Information purement interne (client, contexte commercial, consigne…)"
-                        className="w-full rounded-lg border border-[#EBD8AE] bg-[#FFFCF5] px-2.5 py-2 text-[13px] font-normal text-slate-900 outline-none focus:border-[#B4761A]"
-                      />
-                    </label>
-                  )}
-                  <button
-                    type="button"
-                    onClick={() => action('commentaire')}
-                    disabled={busy || !etatModifie}
-                    title="Enregistre le commentaire, le commentaire interne et l’issue dans l’historique du ticket"
-                    className="h-10 w-full rounded-lg bg-[#0B1220] text-[14px] font-bold text-white hover:bg-[#1C2A44] disabled:bg-[#D8D3C8] disabled:text-slate-500"
-                  >
-                    💾 Sauvegarder état
-                  </button>
-                  <div className="flex flex-wrap gap-2">
-                    <button type="button" onClick={() => setFenetreNiveau('escalade')} disabled={busy || ticket.niveau >= 3} className="rounded-lg bg-[#C1683C] px-3 py-2 text-[13px] font-semibold text-white disabled:opacity-40">
-                      Escalader au niveau {Math.min(3, ticket.niveau + 1)}
-                    </button>
-                    {ticket.niveau >= 2 ? (
-                      <button type="button" onClick={() => setFenetreNiveau('redescente')} disabled={busy} className="rounded-lg bg-[#1E4E8C] px-3 py-2 text-[13px] font-semibold text-white disabled:opacity-40">
-                        Redescendre au niveau {ticket.niveau - 1}
-                      </button>
-                    ) : null}
-                    <button type="button" onClick={() => action('resoudre')} disabled={busy || (issueRequise(ticket) && !classifForm.issue)} title={issueRequise(ticket) && !classifForm.issue ? 'Choisir d’abord l’issue ci-dessous' : 'Un ticket résolu est clos et verrouillé'} className="rounded-lg bg-[#2F6B3A] px-3 py-2 text-[13px] font-semibold text-white disabled:opacity-40">
-                      Marquer résolu
-                    </button>
-                    <button type="button" onClick={() => void actionRapide('messagerie')} disabled={busy} title="Note dans l’historique (hotliner et heure) que l’appel est tombé sur la messagerie ; le ticket passe en attente client" className="rounded-lg border border-[#E8A35C] bg-[#FEF3E6] px-3 py-2 text-[13px] font-semibold text-[#9A4D06] disabled:opacity-40">
-                      📞 Messagerie téléphonique
-                    </button>
-                    {ticket.statut !== 'ATTENTE_CLIENT' ? (
-                      <button type="button" onClick={() => void actionRapide('attente')} disabled={busy} title="Le client doit revenir vers nous (relevé, photo, information…)" className="rounded-lg border border-[#E8A35C] px-3 py-2 text-[13px] font-semibold text-[#9A4D06] disabled:opacity-40">
-                        ⏳ En attente client
-                      </button>
-                    ) : null}
-                  </div>
-                  {ticket.filiere === 'THERMIQUE' ? (
-                    <ClassificationTicket
-                      valeurs={classifForm}
-                      onChange={setClassifForm}
-                      classif={classif}
-                      issueObligatoire={issueRequise(ticket)}
-                      disabled={busy}
-                      mode="issue"
-                    />
-                  ) : null}
-                  <div className="text-right">
-                    <Link href={`/hotline/tickets?id=${ticket.id}`} className="text-[12px] font-semibold text-slate-500 underline">
-                      Ouvrir dans la liste des tickets
-                    </Link>
-                  </div>
-                </div>
-              ) : null}
+              {ticket.filiere !== 'PV' ? blocActions : blocHistoriqueTicket}
             </div>
             )}
           </section>
@@ -2943,90 +2994,6 @@ function DetailDossier({ d, retour, nbDossiers, refsVues, onVue }: { d: Dossier;
           {d.factures.map((f) => `${f.piece} du ${fmtDate(f.date)} (${fmtEuro(f.ht)})`).join(' · ')}
         </div>
       ) : null}
-    </div>
-  )
-}
-
-// ── Soleil : reprise du traitement (13/11/2026) ─────────────────────────────────
-function BlocReprise({
-  ticket,
-  reprise,
-  onChange,
-  collaborateurs,
-  email,
-  planifiee,
-}: {
-  ticket: Ticket
-  reprise: Reprise
-  onChange: (r: Reprise) => void
-  collaborateurs: Collaborateurs
-  email: string
-  planifiee: boolean
-}) {
-  if (estResolu(ticket)) return null
-  const liste = collaborateurs.liste.filter((c) => !c.filiere || c.filiere === 'PV')
-  const pour = reprise.pour || email
-  const requis = !planifiee
-  const set = (p: Partial<Reprise>) => onChange({ ...reprise, ...p })
-  return (
-    <div className={`rounded-lg border p-3 ${requis ? 'border-[#C1683C] bg-[#FDF5F0]' : 'border-[#E2DFD8] bg-[#FAF9F7]'}`}>
-      <div className="flex flex-wrap items-baseline justify-between gap-2">
-        <div className="text-[11px] font-bold uppercase tracking-[0.05em] text-slate-600">
-          Reprise du traitement du ticket {requis ? <span className="text-[#C1683C]">* obligatoire</span> : null}
-        </div>
-        {ticket.reprise_le ? (
-          <div className="text-[11px] text-slate-500">
-            Prévue le <span className="font-semibold text-slate-800">{fmtDate(ticket.reprise_le)}</span> :{' '}
-            {ticket.reprise_action === 'AUTRE' ? ticket.reprise_precision : ACTIONS_REPRISE.find((a) => a.value === ticket.reprise_action)?.label}
-            {ticket.reprise_par ? ` → ${nomCollaborateur(ticket.reprise_par, collaborateurs)}` : ''}
-          </div>
-        ) : null}
-      </div>
-      <div className="mt-2 grid grid-cols-1 gap-2 md:grid-cols-[150px_1fr_1fr]">
-        <label className="text-[11px] font-semibold text-slate-500">
-          Reprise le
-          <input
-            type="date"
-            value={reprise.date}
-            min={new Date().toISOString().slice(0, 10)}
-            onChange={(e) => set({ date: e.target.value })}
-            className="h-9 w-full rounded-lg border border-[#D8D3C8] bg-white px-2 text-[13px] text-slate-900"
-          />
-        </label>
-        <label className="text-[11px] font-semibold text-slate-500">
-          Action
-          <select
-            value={reprise.action}
-            onChange={(e) => set({ action: e.target.value as ActionReprise | '' })}
-            className="h-9 w-full rounded-lg border border-[#D8D3C8] bg-white px-2 text-[13px] text-slate-900"
-          >
-            <option value="">— Choisir —</option>
-            {ACTIONS_REPRISE.map((a) => (
-              <option key={a.value} value={a.value}>
-                {a.label}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label className="text-[11px] font-semibold text-slate-500">
-          Tâche pour
-          <select value={pour} onChange={(e) => set({ pour: e.target.value })} className="h-9 w-full rounded-lg border border-[#D8D3C8] bg-white px-2 text-[13px] text-slate-900">
-            {!liste.some((c) => c.email === email) && email ? <option value={email}>Moi ({nomCollaborateur(email, collaborateurs)})</option> : null}
-            {liste.map((c) => (
-              <option key={c.email} value={c.email}>
-                {c.email === email ? `Moi (${c.nom})` : `${c.nom} · N${c.niveau}`}
-              </option>
-            ))}
-          </select>
-        </label>
-      </div>
-      <input
-        value={reprise.precision}
-        onChange={(e) => set({ precision: e.target.value })}
-        placeholder={reprise.action === 'AUTRE' ? 'Préciser l’action à mener (obligatoire)' : 'Précision (facultatif)'}
-        className={`mt-2 h-9 w-full rounded-lg border bg-white px-2.5 text-[13px] text-slate-900 ${reprise.action === 'AUTRE' && !reprise.precision.trim() ? 'border-[#C1683C]' : 'border-[#D8D3C8]'}`}
-      />
-      <p className="mt-1 text-[11px] text-slate-500">Une tâche est créée dans la Todo List du collaborateur choisi, à la date de reprise.</p>
     </div>
   )
 }

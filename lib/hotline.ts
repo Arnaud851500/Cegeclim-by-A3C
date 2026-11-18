@@ -31,6 +31,7 @@ export type TypeEtape =
   | 'REDESCENTE'
   | 'RAPPEL'
   | 'REPRISE'
+  | 'TRANSFERT'
   | 'PRECONISATION'
   | 'RESOLUTION'
   | 'CLOTURE'
@@ -115,6 +116,7 @@ export const ETAPE_LIBELLES: Record<TypeEtape, string> = {
   REDESCENTE: 'Retour au niveau inférieur',
   RAPPEL: 'Rappel client',
   REPRISE: 'Reprise du traitement',
+  TRANSFERT: 'Transfert',
   PRECONISATION: 'Préconisation',
   RESOLUTION: 'Résolution',
   CLOTURE: 'Clôture',
@@ -737,6 +739,14 @@ export async function demanderRappel(ticketId: string, destinataire: Destinatair
 export async function rappelEffectue(ticketId: string, qui: string, commentaire?: string) {
   await majTicket(ticketId, { rappel_par: null })
   await ajouterEtape(ticketId, 'RAPPEL', `Client rappelé par ${qui}${commentaire ? ` : ${commentaire}` : ''}`, { details: { fait: true } })
+}
+
+/** (18/11/2026) Soleil : transfert du ticket à un collaborateur (assigné + alerte du bandeau violet). */
+export async function transfererTicket(ticket: Pick<Ticket, 'id' | 'statut'>, destinataire: { email: string; nom: string }, motif?: string) {
+  await majTicket(ticket.id, { assigne_a: destinataire.email, ...(ticket.statut === 'OUVERT' ? { statut: 'EN_COURS' as const } : {}) })
+  await ajouterEtape(ticket.id, 'TRANSFERT', `Ticket transféré à ${destinataire.nom}${motif ? ` : ${motif}` : ''}`, {
+    details: { destinataire: destinataire.email },
+  })
 }
 
 /** (14/11/2026) Le client rappelle : la demande de rappel est relancée (horodatée, hotliner noté). */
