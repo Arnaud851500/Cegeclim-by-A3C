@@ -555,7 +555,7 @@ function EngagementHitachi() {
               </table>
             </section>
 
-            {/* Règles de lecture */}
+            {/* Règles de lecture — mises en commentaire à la demande d'Arnaud (19/11/2026), conservées pour mémoire :
             <section className="rounded-xl border border-[#E5E1D8] bg-white px-4 py-3 text-[11.5px] leading-relaxed text-[#5E5A44]">
               <p className="mb-1 text-[10.5px] font-bold uppercase tracking-[0.1em] text-[#8A8474]">Lecture</p>
               <ul className="list-disc space-y-0.5 pl-4">
@@ -573,6 +573,7 @@ function EngagementHitachi() {
                 )}
               </ul>
             </section>
+            */}
           </>
         )}
       </div>
