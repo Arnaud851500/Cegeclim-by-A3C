@@ -149,7 +149,7 @@ export default function PiliersPage() {
   const { email, loading: accessLoading } = useAccess()
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
-  const [tab, setTab] = useState<Tab>('reunion')
+  const [tab, setTab] = useState<Tab>('historique')
   const [membres, setMembres] = useState<Membre[]>([])
   const [sujets, setSujets] = useState<Sujet[]>([])
   const [porteurs, setPorteursState] = useState<Porteur[]>([])
@@ -378,16 +378,17 @@ export default function PiliersPage() {
 
   const joursAvant = prochaine ? daysBetween(today, prochaine.date_reunion) : null
 
+  // (19/11/2026) Ordre : Dernières réunions (par défaut) · Entre deux réunions · Prochaine réunion
   const TABS: { key: Tab; label: string; count?: number }[] = [
+    { key: 'historique', label: 'Dernières réunions', count: reunions.filter((r) => r.statut === 'cloturee').length },
+    { key: 'entre', label: 'Entre deux réunions' },
     { key: 'reunion', label: prochaine ? 'Prochaine réunion' : 'Réunion' },
     ...(AFFICHER_FEUILLE ? [{ key: 'feuille' as Tab, label: 'Feuille de route', count: ouverts.length + aAborder.length }] : []),
-    { key: 'entre', label: 'Entre deux réunions' },
-    { key: 'historique', label: 'Réunions passées', count: reunions.filter((r) => r.statut === 'cloturee').length },
   ]
 
   return (
     <PiliersCtx.Provider value={api}>
-      <div style={{ fontFamily: FONT_BODY, color: C.ink, padding: '20px 24px 80px', maxWidth: 1480, margin: '0 auto' }}>
+      <div style={{ fontFamily: FONT_BODY, color: C.ink, padding: '20px 24px 80px', width: '100%', boxSizing: 'border-box' }}>
         {/* En-tête */}
         <div style={{ display: 'flex', alignItems: 'flex-start', gap: 16, flexWrap: 'wrap', marginBottom: 18 }}>
           <div style={{ flex: '1 1 420px' }}>
@@ -594,7 +595,7 @@ function TabReunion() {
   if (sansPilote.length) groupes.push({ membre: null, items: sansPilote })
 
   return (
-    <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) 260px', gap: 20, alignItems: 'start' }}>
+    <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) 200px', gap: 16, alignItems: 'start' }}>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 22 }}>
         {/* Bandeau réunion */}
         <Card style={{ display: 'flex', alignItems: 'center', gap: 18, flexWrap: 'wrap', borderLeft: `5px solid ${C.accent}` }}>
@@ -900,14 +901,14 @@ function MeteoGrid({ reunion }: { reunion: Reunion }) {
 // Le porteur prépare sa proposition avant la réunion (onglet « Entre deux
 // réunions ») ; une fois le sujet revu, elle est versée au fil de suivi et
 // remise à vide.
-const REVUE_COLS = '26px minmax(200px, 1fr) 96px minmax(170px, 280px) 30px 124px 104px 236px 72px'
+const REVUE_COLS = '26px minmax(180px, 3fr) 96px minmax(160px, 2fr) 30px 124px 104px 236px 72px'
 
 function RevueListe({ sujets, reunion, issueOf }: { sujets: Sujet[]; reunion: Reunion | null; issueOf?: (id: string) => ReunionSujet | null }) {
   if (!sujets.length) return null
   const th: React.CSSProperties = { fontSize: 11, color: C.faint, textTransform: 'uppercase', letterSpacing: 0.6, whiteSpace: 'nowrap' }
   return (
-    <div style={{ border: `1px solid ${C.line}`, borderRadius: 12, background: C.card, overflowX: 'auto' }}>
-      <div style={{ minWidth: 1180 }}>
+    <div style={{ border: `1px solid ${C.line}`, borderRadius: 12, background: C.card }}>
+      <div>
         <div style={{ display: 'grid', gridTemplateColumns: REVUE_COLS, gap: 8, padding: '6px 10px', borderBottom: `1px solid ${C.line}`, alignItems: 'center' }}>
           <span />
           <span style={th}>Sujet</span>
@@ -1586,6 +1587,7 @@ function Cloture({
   const suisRedacteur = !!redacteur && redacteur.id === api.me?.id
   const nbStatut = blocages.filter((b) => b.statut).length
   const nbPrio = blocages.filter((b) => b.priorite).length
+  const [voirBlocages, setVoirBlocages] = useState(false)
 
   return (
     <Card>
@@ -1595,28 +1597,29 @@ function Cloture({
         <span>📥 Nouveaux traités : {stats.nouveauxFaits}/{stats.nouveauxTotal}</span>
       </div>
 
-      {blocages.length > 0 ? (
-        <div style={{ border: `1px solid ${C.alert}`, borderRadius: 12, padding: 12, marginBottom: 12 }}>
-          <div style={{ fontWeight: 700, color: C.alert, marginBottom: 6 }}>
-            Avant de clôturer : {nbStatut > 0 && `${nbStatut} sujet${nbStatut > 1 ? 's' : ''} à trancher`}
+      {voirBlocages && blocages.length > 0 && (
+        <Modal onClose={() => setVoirBlocages(false)} title="Impossible de clôturer pour l’instant" wide>
+          <div style={{ fontWeight: 700, color: C.alert, marginBottom: 8 }}>
+            {nbStatut > 0 && `${nbStatut} sujet${nbStatut > 1 ? 's' : ''} à trancher`}
             {nbStatut > 0 && nbPrio > 0 && ' · '}
             {nbPrio > 0 && `${nbPrio} priorité${nbPrio > 1 ? 's' : ''} à donner`}
           </div>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+          <div style={{ display: 'flex', flexDirection: 'column' }}>
             {blocages.map((b) => (
-              <div key={b.sujet.id} style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', padding: '4px 0', borderBottom: `1px solid ${C.line}` }}>
-                <SujetTitle sujet={b.sujet} small />
+              <div key={b.sujet.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 0', borderBottom: `1px solid ${C.line}` }}>
+                <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  <SujetTitle sujet={b.sujet} small />
+                </span>
                 <PorteursInline sujetId={b.sujet.id} small />
-                <span style={{ flex: 1 }} />
                 {b.statut && <Tag color={C.alert}>statut à trancher</Tag>}
                 {b.priorite && <PrioInline sujet={b.sujet} reunionId={reunion.id} />}
               </div>
             ))}
           </div>
-          {nbStatut > 0 && <div style={{ fontSize: 12, color: C.muted, marginTop: 6 }}>Les statuts se tranchent dans les étapes 2 et 3 (Fait, On continue, On lance, Pris pour info…).</div>}
-        </div>
-      ) : (
-        <div style={{ color: C.ok, fontSize: 14, marginBottom: 12, fontWeight: 600 }}>✓ Tous les sujets sont tranchés et priorisés.</div>
+          <div style={{ fontSize: 12, color: C.muted, marginTop: 10 }}>
+            Les statuts se tranchent dans les étapes 2 et 3 (Fait, Suite, Stop… ou le statut de la ligne). Un clic sur un sujet ouvre sa fiche.
+          </div>
+        </Modal>
       )}
 
       <textarea
@@ -1647,10 +1650,14 @@ function Cloture({
         <Btn
           primary
           big
-          disabled={busy || blocages.length > 0 || !suisRedacteur}
-          title={!suisRedacteur ? 'Réservé au rédacteur de la réunion' : blocages.length ? 'Tranchez et priorisez tous les sujets avant de clôturer' : undefined}
+          disabled={busy || !suisRedacteur}
+          title={!suisRedacteur ? 'Réservé au rédacteur de la réunion' : undefined}
           onClick={async () => {
-            if (!window.confirm('Clôturer la réunion ? Le compte rendu sera disponible dans « Réunions passées » (elle pourra être rouverte).')) return
+            if (blocages.length) {
+              setVoirBlocages(true)
+              return
+            }
+            if (!window.confirm('Clôturer la réunion ? Le compte rendu sera disponible dans « Dernières réunions » (elle pourra être rouverte).')) return
             setBusy(true)
             const up = await supabase
               .from('piliers_reunions')
@@ -2044,8 +2051,10 @@ function TabEntre({ onQuickAdd }: { onQuickAdd: () => void }) {
 // ============================================================================
 function TabHistorique() {
   const api = useApi()
-  const closed = api.reunions.filter((r) => r.statut === 'cloturee')
-  const [openId, setOpenId] = useState<string | null>(closed[0]?.id || null)
+  const closed = api.reunions.filter((r) => r.statut === 'cloturee').sort((a, b) => b.date_reunion.localeCompare(a.date_reunion))
+  // Par défaut : la réunion passée la plus proche d'aujourd'hui
+  const parDefaut = closed.find((r) => r.date_reunion <= todayIso()) || closed[0]
+  const [openId, setOpenId] = useState<string | null>(parDefaut?.id || null)
 
   if (!closed.length) return <Empty>Aucune réunion clôturée pour l’instant. Le compte rendu apparaîtra ici après la clôture.</Empty>
 
@@ -2314,7 +2323,7 @@ function SujetDrawer({ sujet, onClose }: { sujet: Sujet; onClose: () => void }) 
   const lbl: React.CSSProperties = { fontSize: 12, color: C.muted, marginBottom: 4 }
 
   return (
-    <div style={{ position: 'fixed', inset: 0, zIndex: 1200, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16 }}>
+    <div style={{ position: 'fixed', inset: 0, zIndex: 1270, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16 }}>
       <div onClick={close} style={{ position: 'absolute', inset: 0, background: 'rgba(6,10,18,0.5)' }} />
       <div
         style={{
