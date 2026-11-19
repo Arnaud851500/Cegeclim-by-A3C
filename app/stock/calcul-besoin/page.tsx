@@ -547,20 +547,64 @@ async function chargerFournisseurs(): Promise<FournRow[]> {
   return (data || []) as FournRow[]
 }
 
-async function chargerArticles(onProgress?: (n: number) => void): Promise<ArtRow[]> {
-  const acc: ArtRow[] = []
+/**
+ * 19/11/2026 — chargement des articles.
+ * La vue v_appro_controle_article_sage_blg se recalcule entièrement à chaque page (~2 s au calme,
+ * 20 s et plus pendant la synchro SAGE h+10 → h+15) : lue en 6 pages, l'écran restait bloqué sur
+ * « Chargement… 2 000 articles » puis tombait en timeout. Par défaut on lit donc le cache
+ * appro_articles_cache (rafraîchi toutes les 10 min par pg_cron, et par ligne après chaque
+ * enregistrement) ; la vue n'est relue en direct qu'après un recalcul / un changement de paramètres
+ * (source 'live'), puis le cache est rafraîchi en arrière-plan.
+ */
+const CACHE_AGE_MAX_MS = 2 * 60 * 60 * 1000
+
+/** Rafraîchit en arrière-plan le cache des lignes modifiées (ou tout le cache si refs absent). */
+function rafraichirCacheArticles(refs?: string[]) {
+  const appel = refs && refs.length
+    ? supabase.rpc('appro_articles_cache_maj_refs', { p_refs: refs })
+    : supabase.rpc('refresh_appro_articles_cache')
+  void Promise.resolve(appel).then(({ error }) => { if (error) console.warn('Cache calcul de besoin :', error.message) })
+}
+
+async function lirePages<T>(lire: (from: number, to: number) => PromiseLike<{ data: unknown[] | null; error: unknown }>, onProgress?: (n: number) => void): Promise<T[]> {
+  const acc: T[] = []
   const pageSize = 1000
   let from = 0
   while (true) {
-    const { data, error } = await supabase.from('v_appro_controle_article_sage_blg').select('*').order('reference_article').range(from, from + pageSize - 1)
-    if (error) throw error
-    const batch = (data || []) as ArtRow[]
+    let res = await lire(from, from + pageSize - 1)
+    if (res.error) res = await lire(from, from + pageSize - 1) // une seconde tentative (pic de charge)
+    if (res.error) throw res.error
+    const batch = (res.data || []) as T[]
     acc.push(...batch)
     onProgress?.(acc.length)
     if (batch.length < pageSize) break
     from += pageSize
   }
   return acc
+}
+
+async function chargerArticles(onProgress?: (n: number) => void, source: 'cache' | 'live' = 'cache'): Promise<{ rows: ArtRow[]; donneesDu: string | null }> {
+  if (source === 'cache') {
+    const { data: meta } = await supabase.from('appro_articles_cache_meta').select('refreshed_at, nb').eq('id', 1).maybeSingle()
+    const m = meta as { refreshed_at: string | null; nb: number | null } | null
+    if (m?.refreshed_at && Date.now() - new Date(m.refreshed_at).getTime() < CACHE_AGE_MAX_MS && (m.nb || 0) > 0) {
+      try {
+        const lignes = await lirePages<{ ligne: ArtRow }>(
+          (from, to) => supabase.from('appro_articles_cache').select('ligne').order('reference_article').range(from, to),
+          onProgress,
+        )
+        if (lignes.length) return { rows: lignes.map((l) => l.ligne), donneesDu: m.refreshed_at }
+      } catch (e) {
+        console.warn('Cache calcul de besoin illisible, lecture directe :', messageErreur(e))
+      }
+    }
+  }
+  const rows = await lirePages<ArtRow>(
+    (from, to) => supabase.from('v_appro_controle_article_sage_blg').select('*').order('reference_article').range(from, to),
+    onProgress,
+  )
+  rafraichirCacheArticles()
+  return { rows, donneesDu: new Date().toISOString() }
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -974,6 +1018,7 @@ function FicheFournisseurModal({ selected, strategies, articles, onRowChange, on
       const { data, error: err2 } = await supabase.from('v_appro_controle_fournisseur_sage_blg').select('*').eq('numero', selected.numero).maybeSingle()
       if (err2) throw err2
       if (data) onRowChange(data as FournRow)
+      rafraichirCacheArticles(articles.filter((a) => a.fournisseur_principal === selected.numero).map((a) => a.reference_article))
       onStrategieSaved?.()
       setSaveMsg('Stratégie enregistrée. Les propositions sont recalculées ; relance « Recalculer les stocks min » si tu as changé un délai ou le niveau de service.')
     } catch (e) {
@@ -2072,6 +2117,7 @@ function ArticleManuelModal({ article, fournisseur, prop, ctxProp, onClose, onSa
       }
       const { error } = await supabase.from('appro_article_stock_min').upsert(payload, { onConflict: 'reference_article' })
       if (error) throw error
+      rafraichirCacheArticles([article.reference_article])
       const { data, error: err2 } = await supabase.from('v_appro_controle_article_sage_blg').select('*').eq('reference_article', article.reference_article).maybeSingle()
       if (err2) throw err2
       if (data) onSaved(data as ArtRow)
@@ -3375,7 +3421,8 @@ function GroupeEditeurModal({ initial, selectionFiltree, articlesConnus, onAppli
 const cacheProposition = new WeakMap<ArtRow, { pr: ProfilConso | undefined; ctx: object; p: Proposition }>()
 const cacheTarif = new WeakMap<Proposition, { paliers: PalierTarif[]; lecture: LectureBornes; t: AnalyseTarif | null }>()
 
-function OngletCalculBesoin({ articles, fournisseurs, paramsFourn, profils, profilsOk, besoinsDepot, besoinsDepotOk, familleMacro, strategies, loading, loadProgress, error, parametres, onParametresChange, onArticleChange, onArticlePatch, onProfilPatch, onProfilSet, onFournisseurChange, onStrategieSaved, onRecharger }: {
+function OngletCalculBesoin({ articles, fournisseurs, paramsFourn, profils, profilsOk, besoinsDepot, besoinsDepotOk, familleMacro, strategies, loading, loadProgress, error, parametres, onParametresChange, onArticleChange, onArticlePatch, onProfilPatch, onProfilSet, onFournisseurChange, onStrategieSaved, onRecharger, donneesDu }: {
+  donneesDu?: string | null
   articles: ArtRow[]; fournisseurs: FournRow[]; paramsFourn: Map<string, ParamsFourn>; profils: Map<string, ProfilConso>; profilsOk: boolean
   strategies: StrategieRef[]; loading: boolean; loadProgress: number; error: string | null
   parametres: Parametre[]; onParametresChange: (p: Parametre[]) => void
@@ -3676,6 +3723,7 @@ function OngletCalculBesoin({ articles, fournisseurs, paramsFourn, profils, prof
     if (Object.keys(versProfil).length) onProfilPatch(ref, versProfil)
     void (async () => {
       const { error: err } = await supabase.from('appro_article_stock_min').upsert({ reference_article: ref, ...patch }, { onConflict: 'reference_article' })
+      if (!err) rafraichirCacheArticles([ref])
       if (err) {
         if (Object.keys(avantArticle).length) onArticlePatch(ref, avantArticle)
         if (Object.keys(avantProfil).length) onProfilPatch(ref, avantProfil)
@@ -3733,6 +3781,7 @@ function OngletCalculBesoin({ articles, fournisseurs, paramsFourn, profils, prof
     const { error: err } = await supabase.from('appro_parametres').upsert(next.map((p) => ({ cle: p.cle, valeur: p.valeur, description: p.description })), { onConflict: 'cle' })
     if (err) { setMessage({ type: 'ko', texte: 'Erreur : ' + err.message }); return }
     onParametresChange(next)
+    rafraichirCacheArticles()
     setMessage({ type: 'ok', texte: 'Paramètres enregistrés — relance « Recalculer les stocks min » pour les appliquer aux stocks min en base.' })
   }
 
@@ -4119,6 +4168,11 @@ function OngletCalculBesoin({ articles, fournisseurs, paramsFourn, profils, prof
         <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-1.5">
           <div className="text-[11px] font-bold uppercase tracking-wide text-[#8A8474]">
             {loading ? `Chargement… ${fmtNum(loadProgress)} articles` : `${fmtNum(filtres.length)} référence${filtres.length > 1 ? 's' : ''}${filtres.length > affichees.length ? ` · ${fmtNum(affichees.length)} affichées` : ''}`}
+            {!loading && donneesDu && (
+              <span className="ml-2 normal-case tracking-normal font-normal" title="Calcul mis en cache toutes les 10 min (et à chaque enregistrement) ; ↻ pour relire le calcul en direct">
+                · calcul du {new Date(donneesDu).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })}
+              </span>
+            )}
             {triCol && <span className="ml-2 normal-case tracking-normal text-[#B4761A]">· tri par colonne</span>}
           </div>
           <div className="flex items-center gap-3 text-[11px] text-[#8A8474]">
@@ -4294,6 +4348,7 @@ export default function CalculBesoinApproPage() {
   const [paramsFourn, setParamsFourn] = useState<Map<string, ParamsFourn>>(new Map())
   const [loading, setLoading] = useState(true)
   const [loadProgress, setLoadProgress] = useState(0)
+  const [donneesDu, setDonneesDu] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
 
   /** Paramètres d'appro par fournisseur (appro_fournisseur_strategie) — rechargés après enregistrement d'une fiche. */
@@ -4306,7 +4361,7 @@ export default function CalculBesoinApproPage() {
     }])))
   }, [])
 
-  const chargerTout = useCallback(async () => {
+  const chargerTout = useCallback(async (source: 'cache' | 'live' = 'cache') => {
     setLoading(true); setError(null); setLoadProgress(0)
     try {
       const [f, s, p] = await Promise.all([
@@ -4316,19 +4371,21 @@ export default function CalculBesoinApproPage() {
         chargerParamsFourn(),
       ])
       setFournisseurs(f); setStrategies(s); setParametres(p)
-      const [a, pr, bd, fm] = await Promise.all([chargerArticles(setLoadProgress), chargerProfils(), chargerBesoinsDepot(), chargerFamillesMacro()])
+      const [a, pr, bd, fm] = await Promise.all([chargerArticles(setLoadProgress, source), chargerProfils(), chargerBesoinsDepot(), chargerFamillesMacro()])
       setBesoinsDepotOk(bd !== null)
       setBesoinsDepot(new Map((bd || []).map((x) => [x.reference_article.toUpperCase(), x])))
       setFamilleMacro(fm)
       setProfilsOk(pr !== null)
       setProfils(new Map((pr || []).map((x) => [x.reference_article, x])))
-      setArticles(a)
+      setArticles(a.rows)
+      setDonneesDu(a.donneesDu)
     } catch (e) {
       setError(messageErreur(e))
     } finally { setLoading(false) }
   }, [chargerParamsFourn])
 
-  useEffect(() => { void chargerTout() }, [chargerTout])
+  useEffect(() => { void chargerTout('cache') }, [chargerTout])
+  const rechargerDirect = useCallback(() => chargerTout('live'), [chargerTout])
 
   const onArticleChange = useCallback((a: ArtRow) => setArticles((prev) => prev.map((x) => (x.reference_article === a.reference_article ? a : x))), [])
   const onArticlePatch = useCallback((ref: string, patch: Partial<ArtRow>) => setArticles((prev) => prev.map((x) => (x.reference_article === ref ? { ...x, ...patch } : x))), [])
@@ -4351,7 +4408,7 @@ export default function CalculBesoinApproPage() {
           <div className="flex flex-wrap items-center gap-2">
             <OngletTab active={onglet === 'fournisseurs'} onClick={() => setOnglet('fournisseurs')} label="Fournisseurs : liste & paramètres" />
             <OngletTab active={onglet === 'calcul'} onClick={() => setOnglet('calcul')} label="Calcul de besoin - Articles" />
-            <button type="button" onClick={() => void chargerTout()} disabled={loading} title="Recharger les données" className="h-10 rounded-lg border border-[#E5E1D8] bg-white px-3 text-[14px] font-bold text-[#3A362E] hover:bg-[#F4F3F0] disabled:opacity-50">{loading ? '…' : '↻'}</button>
+            <button type="button" onClick={() => void chargerTout('live')} disabled={loading} title="Recharger les données" className="h-10 rounded-lg border border-[#E5E1D8] bg-white px-3 text-[14px] font-bold text-[#3A362E] hover:bg-[#F4F3F0] disabled:opacity-50">{loading ? '…' : '↻'}</button>
           </div>
         </section>
 
@@ -4365,7 +4422,7 @@ export default function CalculBesoinApproPage() {
             strategies={strategies} loading={loading} loadProgress={loadProgress} error={error}
             parametres={parametres} onParametresChange={setParametres}
             onArticleChange={onArticleChange} onArticlePatch={onArticlePatch} onProfilPatch={onProfilPatch} onProfilSet={onProfilSet}
-            onFournisseurChange={onFournisseurChange} onStrategieSaved={() => void chargerParamsFourn()} onRecharger={chargerTout} />
+            onFournisseurChange={onFournisseurChange} onStrategieSaved={() => void chargerParamsFourn()} onRecharger={rechargerDirect} donneesDu={donneesDu} />
         )}
       </div>
     </main>
