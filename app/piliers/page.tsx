@@ -37,7 +37,9 @@ import {
   fmtDate,
   fmtDateLong,
   fmtDateTime,
+  estInfo,
   isOpen,
+  prioriteAttendue,
   isOverdue,
   refOf,
   scoreSujet,
@@ -96,6 +98,9 @@ type NewSujetInput = {
   parent_id?: string | null
   origine?: Origine
   prochain_point?: string | null
+  /** Membre qui met le sujet à l'ODJ (défaut : moi). */
+  propose_par?: string | null
+  confidentiel?: boolean
 }
 
 type Api = {
@@ -297,6 +302,8 @@ export default function PiliersPage() {
           parent_id: input.parent_id || null,
           origine: input.origine || 'remonte',
           prochain_point: input.prochain_point || null,
+          propose_par: input.propose_par === undefined ? me?.id || null : input.propose_par,
+          confidentiel: !!input.confidentiel,
         })
         .select('*')
         .single()
@@ -309,7 +316,7 @@ export default function PiliersPage() {
       }
       return data as Sujet
     },
-    [notify],
+    [notify, me],
   )
 
   const api: Api = {
@@ -537,11 +544,11 @@ function TabReunion() {
     // les actions nées pendant cette réunion seront revues à la suivante
     return OPEN_STATUTS.includes(s.statut) && s.reunion_origine !== R.id
   })
-  // 3. Nouveaux : remontés (à aborder) + ceux qualifiés dans cette réunion.
-  // Les actions saisies à la volée (météo, série d'actions d'un sujet) sont
-  // affichées là où elles ont été saisies, pas ici.
+  // 3. Nouveaux sujets proposés (demandes) : remontés entre deux réunions ou
+  // pendant le tour de météo, + ceux déjà tranchés dans cette réunion. Les
+  // actions tirées d'un sujet restent rattachées à leur sujet.
   const nouveaux = sujets.filter((s) => {
-    if (s.origine === 'meteo' || s.origine === 'action_liee') return false
+    if (s.origine === 'action_liee') return false
     const rs = issueOf(s.id)
     if (rs) return ['qualifie', 'pour_info'].includes(rs.issue) || (rs.issue === 'abandonne' && s.reunion_origine === R.id)
     return s.statut === 'a_aborder'
@@ -557,7 +564,7 @@ function TabReunion() {
     vus.add(s.id)
     const rs = issueOf(s.id)
     const statut = !rs && (revue.includes(s) || nouveaux.includes(s))
-    const priorite = isOpen(s) && s.nature !== 'info' && !s.priorite && rs?.issue !== 'abandonne'
+    const priorite = prioriteAttendue(s) && !s.priorite && rs?.issue !== 'abandonne'
     if (statut || priorite) blocages.push({ sujet: s, statut, priorite })
   })
   const nouveauxFaits = nouveaux.filter((s) => issueOf(s.id)).length
@@ -585,7 +592,33 @@ function TabReunion() {
             <div style={{ color: C.muted, fontSize: 13, marginTop: 2 }}>
               {R.statut === 'en_cours' ? '🟢 Réunion en cours' : '🗓️ En préparation — chacun peut remonter ses sujets jusqu’au jour J'}
             </div>
+            <div style={{ display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' }}>
+              <button onClick={() => document.getElementById('pil-nouveaux')?.scrollIntoView({ behavior: 'smooth' })} style={{ ...chipBase, borderColor: C.gold, color: C.ink, fontWeight: 700 }}>
+                📥 {nouveaux.length} nouveau{nouveaux.length > 1 ? 'x' : ''} sujet{nouveaux.length > 1 ? 's' : ''} proposé{nouveaux.length > 1 ? 's' : ''}
+              </button>
+              <button onClick={() => document.getElementById('pil-revue')?.scrollIntoView({ behavior: 'smooth' })} style={{ ...chipBase, borderColor: '#4E7A2A', color: C.ink, fontWeight: 700 }}>
+                🔁 {revue.length} action{revue.length > 1 ? 's' : ''} en suivi
+              </button>
+            </div>
           </div>
+          <label style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 12, color: C.muted }}>
+            ✍️ Rédacteur (rédige et clôture)
+            <select
+              value={R.redacteur_id || ''}
+              onChange={async (e) => {
+                await supabase.from('piliers_reunions').update({ redacteur_id: e.target.value || null }).eq('id', R.id)
+                await api.reload()
+              }}
+              style={{ ...input, borderColor: R.redacteur_id ? C.lineStrong : C.alert, minWidth: 170 }}
+            >
+              <option value="">— à désigner —</option>
+              {membresActifs.map((m) => (
+                <option key={m.id} value={m.id}>
+                  {m.prenom}
+                </option>
+              ))}
+            </select>
+          </label>
           <div style={{ minWidth: 220 }}>
             <div style={{ fontSize: 12, color: C.muted, marginBottom: 4 }}>
               {fait} / {total} sujets traités
@@ -621,18 +654,18 @@ function TabReunion() {
           </div>
         </Card>
 
-        <Step id="pil-meteo" n={1} title="Météo" subtitle="Un tour rapide : comment ça va, en un mot — et les actions qui en sortent, rattachées à la personne.">
+        <Step id="pil-meteo" n={1} title="Météo" subtitle="Cliquez sur la personne qui parle : son humeur, et les sujets qu’elle met à l’ordre du jour, saisis à la volée.">
           <MeteoGrid reunion={R} />
         </Step>
 
         <Step
           id="pil-revue"
           n={2}
-          title="Revue des actions"
+          title="Suivi des actions en cours"
           subtitle={
             derniere
-              ? `Ce qui a bougé depuis la réunion du ${fmtDate(derniere.date_reunion, { day: 'numeric', month: 'long' })}, porteur par porteur.`
-              : 'Les sujets en cours, porteur par porteur.'
+              ? `Actions déjà connues : ce qui a bougé depuis la réunion du ${fmtDate(derniere.date_reunion, { day: 'numeric', month: 'long' })}, porteur par porteur.`
+              : 'Actions déjà connues, porteur par porteur.'
           }
         >
           {groupes.length === 0 && <Empty>Aucune action ouverte. Les sujets pris en charge aujourd’hui apparaîtront ici à la prochaine réunion.</Empty>}
@@ -655,15 +688,8 @@ function TabReunion() {
           ))}
         </Step>
 
-        <Step id="pil-nouveaux" n={3} title="Nouveaux sujets & questions" subtitle="Remontés entre deux réunions : on qualifie, on désigne qui prend, on fixe le prochain point.">
-          {nouveaux.length === 0 && <Empty>Rien de nouveau. Utilisez « ＋ Remonter un sujet » pour alimenter l’ordre du jour.</Empty>}
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-            {nouveaux
-              .sort((a, b) => a.numero - b.numero)
-              .map((s) => (
-                <QualifyCard key={s.id} sujet={s} reunion={R} revu={issueOf(s.id)} />
-              ))}
-          </div>
+        <Step id="pil-nouveaux" n={3} title="Nouveaux sujets proposés" subtitle="Les demandes mises à l’ordre du jour (entre deux réunions ou pendant la météo) : on tranche le statut et la priorité, ligne par ligne.">
+          <OdjListe sujets={[...nouveaux].sort((a, b) => a.numero - b.numero)} reunion={R} />
           <InlineAdd reunion={R} />
         </Step>
 
@@ -750,8 +776,13 @@ function Step({ id, n, title, subtitle, children }: { id: string; n: number; tit
 }
 
 // ---------------------------------------------------------------- 1. Météo
+// (19/11/2026, v3) On clique sur la personne qui parle : sa tuile s'ouvre en un
+// petit tableau des sujets qu'elle met à l'ordre du jour (déjà proposés ou
+// saisis à la volée sur les lignes vides). Ces sujets alimentent la liste
+// « Nouveaux sujets proposés » de l'étape 3.
 function MeteoGrid({ reunion }: { reunion: Reunion }) {
   const api = useApi()
+  const [actif, setActif] = useState<string | null>(null)
   const save = async (membreId: string, patch: { humeur?: number | null; mot?: string }) => {
     const current = api.meteo.find((m) => m.reunion_id === reunion.id && m.membre_id === membreId)
     const { error } = await supabase.from('piliers_meteo').upsert({
@@ -764,63 +795,87 @@ function MeteoGrid({ reunion }: { reunion: Reunion }) {
     if (error) api.notify(error.message, 'err')
     await api.reload()
   }
+  const sujetsDe = (membreId: string) =>
+    api.sujets
+      .filter(
+        (s) =>
+          s.propose_par === membreId &&
+          s.origine !== 'action_liee' &&
+          (s.statut === 'a_aborder' || s.reunion_origine === reunion.id || api.reunionSujets.some((rs) => rs.reunion_id === reunion.id && rs.sujet_id === s.id)),
+      )
+      .sort((a, b) => a.numero - b.numero)
+  const membreActif = actif ? api.membreById.get(actif) || null : null
+
   return (
-    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: 10 }}>
-      {api.membresActifs.map((m) => {
-        const mt = api.meteo.find((x) => x.reunion_id === reunion.id && x.membre_id === m.id)
-        // Lignes saisies pendant le tour de météo de ce membre (actions rattachées à lui, infos)
-        const lignes = api.sujets.filter(
-          (s) => s.reunion_origine === reunion.id && s.origine === 'meteo' && api.porteurs.some((p) => p.sujet_id === s.id && p.membre_id === m.id && p.role === 'pilote'),
-        )
-        return (
-          <Card key={m.id} style={{ padding: 12 }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
-              <Avatar membre={m} size={26} />
-              <b style={{ fontSize: 14 }}>{m.prenom}</b>
+    <div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: 10 }}>
+        {api.membresActifs.map((m) => {
+          const mt = api.meteo.find((x) => x.reunion_id === reunion.id && x.membre_id === m.id)
+          const nb = sujetsDe(m.id).length
+          const on = actif === m.id
+          return (
+            <Card key={m.id} style={{ padding: 12, borderColor: on ? m.couleur : C.line, boxShadow: on ? `0 0 0 2px ${m.couleur}` : 'none' }}>
+              <button
+                onClick={() => setActif(on ? null : m.id)}
+                title="Ouvrir le tour de parole : ses sujets pour l’ordre du jour"
+                style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8, background: 'none', border: 'none', padding: 0, cursor: 'pointer', color: C.ink, width: '100%', fontFamily: FONT_BODY }}
+              >
+                <Avatar membre={m} size={26} />
+                <b style={{ fontSize: 14 }}>{m.prenom}</b>
+                <span style={{ marginLeft: 'auto', fontSize: 12, color: nb ? C.ink : C.faint, padding: '1px 8px', borderRadius: 999, background: nb ? `${C.gold}33` : C.soft2 }}>
+                  {nb ? `📥 ${nb}` : '＋ sujets'} {on ? '▴' : '▾'}
+                </span>
+              </button>
+              <div style={{ display: 'flex', gap: 2, marginBottom: 8 }}>
+                {MOODS.map((mood) => (
+                  <button
+                    key={mood.key}
+                    title={mood.label}
+                    onClick={() => void save(m.id, { humeur: mt?.humeur === mood.key ? null : mood.key })}
+                    style={{
+                      fontSize: 19,
+                      padding: '2px 3px',
+                      borderRadius: 8,
+                      border: `2px solid ${mt?.humeur === mood.key ? C.accent : 'transparent'}`,
+                      background: mt?.humeur === mood.key ? C.soft2 : 'transparent',
+                      cursor: 'pointer',
+                      opacity: mt?.humeur && mt.humeur !== mood.key ? 0.35 : 1,
+                    }}
+                  >
+                    {mood.icon}
+                  </button>
+                ))}
+              </div>
+              <input
+                defaultValue={mt?.mot || ''}
+                key={`${m.id}-${mt?.mot || ''}`}
+                placeholder="En un mot…"
+                onBlur={(e) => {
+                  if (e.target.value !== (mt?.mot || '')) void save(m.id, { mot: e.target.value })
+                }}
+                style={{ ...input, width: '100%' }}
+              />
+            </Card>
+          )
+        })}
+      </div>
+
+      {membreActif && (
+        <Card style={{ marginTop: 12, borderLeft: `5px solid ${membreActif.couleur}`, padding: 14 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 10 }}>
+            <Avatar membre={membreActif} size={30} />
+            <div>
+              <div style={{ fontWeight: 700, fontSize: 15 }}>Tour de {membreActif.prenom}</div>
+              <div style={{ fontSize: 12, color: C.muted }}>Ses sujets pour l’ordre du jour — ils s’ajoutent à l’étape 3.</div>
             </div>
-            <div style={{ display: 'flex', gap: 2, marginBottom: 8 }}>
-              {MOODS.map((mood) => (
-                <button
-                  key={mood.key}
-                  title={mood.label}
-                  onClick={() => void save(m.id, { humeur: mt?.humeur === mood.key ? null : mood.key })}
-                  style={{
-                    fontSize: 20,
-                    padding: '2px 4px',
-                    borderRadius: 8,
-                    border: `2px solid ${mt?.humeur === mood.key ? C.accent : 'transparent'}`,
-                    background: mt?.humeur === mood.key ? C.soft2 : 'transparent',
-                    cursor: 'pointer',
-                    opacity: mt?.humeur && mt.humeur !== mood.key ? 0.35 : 1,
-                  }}
-                >
-                  {mood.icon}
-                </button>
-              ))}
-            </div>
-            <input
-              defaultValue={mt?.mot || ''}
-              key={`${m.id}-${mt?.mot || ''}`}
-              placeholder="En un mot…"
-              onBlur={(e) => {
-                if (e.target.value !== (mt?.mot || '')) void save(m.id, { mot: e.target.value })
-              }}
-              style={{ ...input, width: '100%' }}
-            />
-            <QuickLines
-              reunion={reunion}
-              items={lignes}
-              defaultPiloteId={m.id}
-              origine="meteo"
-              allowInfo
-              hidePiloteSelect
-              label="＋ Actions / infos"
-              collapsed={!lignes.length}
-              placeholder={`Action pour ${m.prenom}… puis Entrée`}
-            />
-          </Card>
-        )
-      })}
+            <button style={{ ...linkBtn, marginLeft: 'auto', fontSize: 20 }} onClick={() => setActif(null)} aria-label="Fermer">
+              ×
+            </button>
+          </div>
+          <OdjListe sujets={sujetsDe(membreActif.id)} reunion={reunion} vide="" />
+          <NouvellesLignes reunion={reunion} proposePar={membreActif.id} />
+        </Card>
+      )}
     </div>
   )
 }
@@ -865,7 +920,7 @@ function ReviewCard({ sujet, reunion, revu }: { sujet: Sujet; reunion: Reunion; 
         <span style={{ fontSize: 12, color: is.color, fontWeight: 700 }}>{is.label}</span>
         {revu.commentaire && <span style={{ fontSize: 13, color: C.muted, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>— {revu.commentaire}</span>}
         {sujet.prochain_point && isOpen(sujet) && <span style={{ fontSize: 12, color: C.muted, marginLeft: 'auto' }}>prochain point {fmtDate(sujet.prochain_point)}</span>}
-        {isOpen(sujet) && sujet.nature !== 'info' && <PrioInline sujet={sujet} reunionId={reunion.id} />}
+        {prioriteAttendue(sujet) && <PrioInline sujet={sujet} reunionId={reunion.id} />}
         <button
           onClick={async () => {
             await supabase.from('piliers_reunion_sujets').delete().eq('reunion_id', reunion.id).eq('sujet_id', sujet.id)
@@ -931,7 +986,7 @@ function ReviewCard({ sujet, reunion, revu }: { sujet: Sujet; reunion: Reunion; 
           prochain point
           <input type="date" value={prochain} onChange={(e) => setProchain(e.target.value)} style={{ ...input, width: 140 }} />
         </label>
-        {sujet.nature !== 'info' && <PrioInline sujet={sujet} reunionId={reunion.id} />}
+        {!estInfo(sujet.nature) && <PrioInline sujet={sujet} reunionId={reunion.id} />}
       </div>
       <div style={{ display: 'flex', gap: 6, marginTop: 10, flexWrap: 'wrap' }}>
         <Btn disabled={busy} color={C.ok} onClick={() => void act('fait')}>
@@ -963,223 +1018,258 @@ function ReviewCard({ sujet, reunion, revu }: { sujet: Sujet; reunion: Reunion; 
   )
 }
 
-// ---------------------------------------------------------------- 3. Nouveaux
-// (19/11/2026, v2) Carte compacte par défaut : nature + qui + décision en une
-// ligne ; le détail (ressenti, priorité, date, CA, commentaire) est replié.
-// Une action est rattachée par défaut au membre qui a remonté le sujet.
-// « ＋ Actions à en tirer » saisit une série d'actions liées (parent_id).
-function membreOfEmail(api: Api, email: string | null | undefined) {
-  if (!email) return null
-  return api.membres.find((m) => m.email && m.email.toLowerCase() === email.toLowerCase()) || null
+// ---------------------------------------------------------------- 3. Nouveaux sujets proposés
+// (19/11/2026, v3) Lecture « une ligne » : À aborder · c'est… · proposé par ·
+// titre (+ le blabla) · 🔒 · statut · priorité · Détail. Le statut et la
+// priorité se tranchent directement sur la ligne ; passer un sujet en cours /
+// à planifier / en attente le rattache par défaut à la personne qui l'a proposé.
+function OdjListe({ sujets, reunion, vide }: { sujets: Sujet[]; reunion: Reunion | null; vide?: string }) {
+  if (!sujets.length) {
+    return vide === '' ? null : <Empty>{vide || 'Aucun sujet proposé pour l’instant. « ＋ Remonter un sujet » pour alimenter l’ordre du jour.'}</Empty>
+  }
+  return (
+    <div style={{ border: `1px solid ${C.line}`, borderRadius: 12, overflow: 'hidden', background: C.card }}>
+      {sujets.map((s, i) => (
+        <SujetLigne key={s.id} sujet={s} reunion={reunion} last={i === sujets.length - 1} />
+      ))}
+    </div>
+  )
 }
 
-function QualifyCard({ sujet, reunion, revu }: { sujet: Sujet; reunion: Reunion; revu: ReunionSujet | null }) {
-  const api = useApi()
-  const porteurs = api.porteursOf(sujet.id)
-  const auteur = membreOfEmail(api, sujet.created_by)
-  const [nature, setNature] = useState<Nature>(sujet.nature)
-  const [pilote, setPilote] = useState<string>(porteurs.find((p) => p.role === 'pilote')?.membre.id || (auteur?.actif ? auteur.id : ''))
-  const [priorite, setPriorite] = useState<number | null>(sujet.priorite)
-  const [prochain, setProchain] = useState(sujet.prochain_point || addDaysIso(reunion.date_reunion, 28))
-  const [ca, setCa] = useState(sujet.impacte_ca)
-  const [ressenti, setRessenti] = useState<Ressenti>(sujet.ressenti)
-  const [commentaire, setCommentaire] = useState('')
-  const [details, setDetails] = useState(false)
-  const [busy, setBusy] = useState(false)
-  const enfants = api.sujets.filter((s) => s.parent_id === sujet.id)
+const ODJ_SELECT: React.CSSProperties = { padding: '5px 6px', borderRadius: 8, fontSize: 12, fontFamily: FONT_BODY, cursor: 'pointer', outline: 'none' }
 
-  const go = async (choice: 'en_cours' | 'a_planifier' | 'pour_info' | 'abandonne') => {
-    if ((choice === 'en_cours' || choice === 'a_planifier') && !pilote) {
-      api.notify('Choisissez qui prend le sujet.', 'err')
-      return
-    }
-    if ((choice === 'en_cours' || choice === 'a_planifier') && !priorite) {
-      api.notify('Donnez une priorité (P1, P2 ou P3).', 'err')
-      return
-    }
+function SujetLigne({ sujet, reunion, last }: { sujet: Sujet; reunion: Reunion | null; last?: boolean }) {
+  const api = useApi()
+  const [busy, setBusy] = useState(false)
+  const rs = reunion ? api.reunionSujets.find((x) => x.reunion_id === reunion.id && x.sujet_id === sujet.id) || null : null
+  const propose = sujet.propose_par ? api.membreById.get(sujet.propose_par) || null : null
+  const pilote = api.porteursOf(sujet.id).find((p) => p.role === 'pilote')?.membre || null
+  const na = refOf(NATURES, sujet.nature)
+  const st = refOf(STATUTS, sujet.statut)
+  const enfants = api.sujets.filter((x) => x.parent_id === sujet.id).length
+
+  const changerStatut = async (statut: Statut) => {
     setBusy(true)
-    const statut: Statut = choice === 'pour_info' ? 'fait' : choice
-    const issue: Issue = choice === 'pour_info' ? 'pour_info' : choice === 'abandonne' ? 'abandonne' : 'qualifie'
-    const ok = await api.updateSujet(
-      sujet,
-      {
-        statut,
-        nature: choice === 'pour_info' ? 'info' : nature === 'info' ? 'action' : nature,
-        priorite,
-        impacte_ca: ca,
-        ressenti,
-        prochain_point: choice === 'en_cours' || choice === 'a_planifier' ? prochain || null : sujet.prochain_point,
-        reunion_origine: sujet.reunion_origine || reunion.id,
-        a_l_ordre_du_jour: false,
-        domaine: sujet.domaine || api.membreById.get(pilote)?.domaine || '',
-      },
-      reunion.id,
-    )
-    if (ok) {
-      // Les actions liées remontées avec le sujet suivent sa décision
-      for (const e of enfants.filter((x) => x.statut === 'a_aborder')) {
-        await api.updateSujet(e, { statut: choice === 'abandonne' ? 'abandonne' : choice === 'a_planifier' ? 'a_planifier' : 'en_cours', reunion_origine: e.reunion_origine || reunion.id, prochain_point: e.prochain_point || prochain || null }, reunion.id)
+    const ouvert = OPEN_STATUTS.includes(statut)
+    const patch: Partial<Sujet> = { statut, a_l_ordre_du_jour: false }
+    if (reunion && statut !== 'a_aborder') patch.reunion_origine = sujet.reunion_origine || reunion.id
+    if (ouvert && !sujet.prochain_point) patch.prochain_point = addDaysIso(reunion?.date_reunion || todayIso(), 28)
+    if (statut === 'fait' && sujet.nature === 'question') patch.nature = 'info'
+    const ok = await api.updateSujet(sujet, patch, reunion?.id || null)
+    if (ok && ouvert && !pilote) {
+      const qui = propose?.actif ? propose.id : api.me?.id
+      if (qui) await api.setPorteurs(sujet.id, [{ membre_id: qui, role: 'pilote' }])
+    }
+    if (ok && reunion) {
+      if (statut === 'a_aborder') {
+        await supabase.from('piliers_reunion_sujets').delete().eq('reunion_id', reunion.id).eq('sujet_id', sujet.id)
+      } else {
+        const issue: Issue = ouvert ? 'qualifie' : statut === 'abandonne' ? 'abandonne' : estInfo(sujet.nature) || sujet.nature === 'question' ? 'pour_info' : 'fait'
+        await supabase.from('piliers_reunion_sujets').upsert({ reunion_id: reunion.id, sujet_id: sujet.id, issue, commentaire: rs?.commentaire || '', revu_le: new Date().toISOString() })
       }
-      if (pilote && choice !== 'abandonne') {
-        const others = porteurs.filter((p) => p.membre.id !== pilote).map((p) => ({ membre_id: p.membre.id, role: 'contributeur' as const }))
-        await api.setPorteurs(sujet.id, [{ membre_id: pilote, role: 'pilote' }, ...others])
-      }
-      await supabase.from('piliers_reunion_sujets').upsert({ reunion_id: reunion.id, sujet_id: sujet.id, issue, commentaire: commentaire.trim(), revu_le: new Date().toISOString() })
-      if (commentaire.trim()) await api.addSuivi(sujet.id, 'decision', commentaire, reunion.id)
     }
     await api.reload()
     setBusy(false)
   }
 
-  if (revu) {
-    const is = ISSUES[revu.issue]
-    const p = porteurs.find((x) => x.role === 'pilote')
-    return (
-      <div style={{ borderRadius: 12, border: `1px solid ${C.line}`, background: C.soft, padding: '10px 14px' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
-          <span>{is.icon}</span>
-          <SujetTitle sujet={sujet} small />
-          <span style={{ fontSize: 12, color: is.color, fontWeight: 700 }}>{is.label}</span>
-          {p && revu.issue !== 'abandonne' && (
-            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 13, color: C.muted }}>
-              <Avatar membre={p.membre} size={20} /> {p.membre.prenom}
-            </span>
-          )}
-          {isOpen(sujet) && sujet.nature !== 'info' && <PrioInline sujet={sujet} reunionId={reunion.id} />}
-          {revu.commentaire && <span style={{ fontSize: 13, color: C.muted, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>— {revu.commentaire}</span>}
-          <button
-            style={{ ...linkBtn, marginLeft: 'auto' }}
-            onClick={async () => {
-              await supabase.from('piliers_reunion_sujets').delete().eq('reunion_id', reunion.id).eq('sujet_id', sujet.id)
-              await api.updateSujet(sujet, { statut: 'a_aborder' }, reunion.id)
-              await api.reload()
-            }}
-          >
-            Revoir
-          </button>
-        </div>
-        {revu.issue !== 'abandonne' && (
-          <QuickLines
-            reunion={reunion}
-            items={enfants}
-            defaultPiloteId={p?.membre.id || pilote}
-            parentId={sujet.id}
-            origine="action_liee"
-            label="＋ Actions à en tirer"
-            collapsed={!enfants.length}
-          />
-        )}
-      </div>
-    )
-  }
-
-  const NATURES_COURTES = NATURES.filter((n) => n.key !== 'projet' || nature === 'projet')
+  const tag = rs
+    ? { label: 'Tranché', icon: '✓', color: C.ok }
+    : sujet.statut === 'a_aborder'
+      ? { label: 'À aborder', icon: '📥', color: C.gold }
+      : { label: 'À l’ODJ', icon: '📌', color: '#5E8FB3' }
 
   return (
-    <Card style={{ padding: '12px 14px', borderLeft: `4px solid ${C.gold}` }}>
-      <div style={{ display: 'flex', gap: 8, alignItems: 'baseline', flexWrap: 'wrap' }}>
-        <SujetTitle sujet={sujet} small />
-        <span style={{ fontSize: 12, color: C.faint }}>
-          par {api.nameOfEmail(sujet.created_by)} · {fmtDate(sujet.created_at.slice(0, 10))}
-        </span>
-        <button style={{ ...linkBtn, marginLeft: 'auto', fontSize: 12 }} onClick={() => setDetails(!details)}>
-          {details ? 'Moins de détails ▴' : 'Détails ▾'}
+    <div
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: 8,
+        padding: '8px 10px',
+        borderBottom: last ? 'none' : `1px solid ${C.line}`,
+        flexWrap: 'wrap',
+        opacity: busy ? 0.6 : 1,
+        background: rs ? C.soft : 'transparent',
+      }}
+    >
+      <span style={{ width: 92, flex: '0 0 auto' }}>
+        <Tag color={tag.color}>
+          {tag.icon} {tag.label}
+        </Tag>
+      </span>
+      <select
+        value={sujet.nature}
+        onChange={async (e) => {
+          await api.updateSujet(sujet, { nature: e.target.value as Nature })
+          await api.reload()
+        }}
+        title="C’est…"
+        style={{ ...ODJ_SELECT, width: 158, flex: '0 0 auto', border: `1px solid ${na?.color || C.line}`, background: `${na?.color || '#888'}1F`, color: C.ink }}
+      >
+        {NATURES.map((n) => (
+          <option key={n.key} value={n.key}>
+            {n.icon} {n.label}
+          </option>
+        ))}
+      </select>
+      <span style={{ width: 26, flex: '0 0 auto' }} title={propose ? `Mis à l’ordre du jour par ${propose.prenom}` : 'Proposé par ?'}>
+        {propose ? <Avatar membre={propose} size={24} /> : <span style={{ color: C.faint }}>?</span>}
+      </span>
+      <div style={{ flex: '1 1 240px', minWidth: 0 }}>
+        <button
+          onClick={() => api.openSujet(sujet.id)}
+          style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', color: C.ink, textAlign: 'left', fontSize: 14, fontWeight: 600, fontFamily: FONT_BODY, maxWidth: '100%' }}
+        >
+          <span style={{ color: C.faint, fontWeight: 500 }}>#{sujet.numero} </span>
+          {sujet.impacte_ca && <span title="Impacte le CA">⚡ </span>}
+          {sujet.titre}
+          {enfants > 0 && <span style={{ color: C.faint, fontWeight: 500, fontSize: 12 }}> · ↳ {enfants} action{enfants > 1 ? 's' : ''}</span>}
         </button>
-      </div>
-      {sujet.contexte && !details && (
-        <div style={{ fontSize: 13, color: C.muted, marginTop: 4, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{sujet.contexte}</div>
-      )}
-
-      <div style={{ display: 'flex', gap: 6, alignItems: 'center', marginTop: 10, flexWrap: 'wrap' }}>
-        {NATURES_COURTES.map((n) => {
-          const on = n.key === nature
-          return (
-            <button
-              key={n.key}
-              title={n.help}
-              onClick={() => setNature(n.key)}
-              style={{ ...chipBase, padding: '4px 9px', fontSize: 12, borderColor: on ? n.color : C.line, background: on ? `${n.color}26` : 'transparent', color: on ? C.ink : C.muted, fontWeight: on ? 700 : 500 }}
-            >
-              {n.icon} {n.label}
-            </button>
-          )
-        })}
-        {nature !== 'info' && (
-          <select value={pilote} onChange={(e) => setPilote(e.target.value)} style={{ ...input, padding: '5px 8px', fontSize: 13 }} title="Qui prend ?">
-            <option value="">Qui prend ?</option>
-            {api.membresActifs.map((m) => (
-              <option key={m.id} value={m.id}>
-                👤 {m.prenom}
-              </option>
-            ))}
-          </select>
-        )}
-        {nature !== 'info' && <PrioPicker small required value={priorite} onChange={setPriorite} />}
-        <span style={{ flex: 1 }} />
-        {nature === 'info' ? (
-          <Btn disabled={busy} color="#5E8FB3" onClick={() => void go('pour_info')}>
-            ℹ️ Pris pour info
-          </Btn>
-        ) : (
-          <>
-            <Btn disabled={busy} color="#4E7A2A" onClick={() => void go('en_cours')}>
-              🚀 On lance
-            </Btn>
-            <Btn disabled={busy} color="#5E8FB3" onClick={() => void go('a_planifier')} title="Validé, démarrage plus tard">
-              🗓️ Plus tard
-            </Btn>
-          </>
-        )}
-        <Btn disabled={busy} color="#7C8597" onClick={() => void go('abandonne')} title="On écarte ce sujet">
-          ✖️
-        </Btn>
-      </div>
-
-      {details && (
-        <div style={{ marginTop: 12, padding: 12, borderRadius: 10, background: C.soft, display: 'flex', flexDirection: 'column', gap: 10 }}>
-          {sujet.contexte && <div style={{ fontSize: 14, lineHeight: 1.5, whiteSpace: 'pre-wrap' }}>{sujet.contexte}</div>}
-          {api.suivisOf(sujet.id)
-            .filter((s) => s.type !== 'statut')
-            .slice(0, 4)
-            .map((s) => (
-              <SuiviLine key={s.id} suivi={s} compact />
-            ))}
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(230px, 1fr))', gap: 10 }}>
-            <Field label="Pour les équipes">
-              <Chips list={RESSENTIS} value={ressenti} onChange={(v) => setRessenti(v as Ressenti)} />
-            </Field>
-            <Field label="Prochain point">
-              <input type="date" value={prochain} onChange={(e) => setProchain(e.target.value)} style={{ ...input, width: 140 }} />
-            </Field>
+        {sujet.contexte && (
+          <div style={{ fontSize: 12, color: C.muted, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={sujet.contexte}>
+            {sujet.contexte}
           </div>
-          <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-            <CaToggle value={ca} onChange={setCa} />
-            <input value={commentaire} onChange={(e) => setCommentaire(e.target.value)} placeholder="Ce qu’on retient (facultatif)" style={{ ...input, flex: '1 1 240px' }} />
-            <button style={linkBtn} onClick={() => api.openSujet(sujet.id)}>
-              Fiche complète
-            </button>
-          </div>
-        </div>
+        )}
+      </div>
+      <button
+        onClick={async () => {
+          await api.updateSujet(sujet, { confidentiel: !sujet.confidentiel, ...(sujet.confidentiel ? {} : { a_communiquer: false }) })
+          await api.reload()
+        }}
+        title={sujet.confidentiel ? 'Confidentiel — cliquer pour retirer' : 'Marquer confidentiel'}
+        style={{
+          ...chipBase,
+          padding: '3px 8px',
+          fontSize: 12,
+          flex: '0 0 auto',
+          borderColor: sujet.confidentiel ? C.alert : C.line,
+          background: sujet.confidentiel ? `${C.alert}22` : 'transparent',
+          color: sujet.confidentiel ? C.ink : C.faint,
+          fontWeight: sujet.confidentiel ? 700 : 400,
+        }}
+      >
+        🔒{sujet.confidentiel ? ' Confidentiel' : ''}
+      </button>
+      <select
+        value={sujet.statut}
+        disabled={busy}
+        onChange={(e) => void changerStatut(e.target.value as Statut)}
+        title="Statut"
+        style={{ ...ODJ_SELECT, width: 132, flex: '0 0 auto', border: `1px solid ${st?.color || C.line}`, background: `${st?.color || '#888'}1F`, color: C.ink }}
+      >
+        {STATUTS.map((x) => (
+          <option key={x.key} value={x.key}>
+            {x.icon} {x.label}
+          </option>
+        ))}
+      </select>
+      <span style={{ flex: '0 0 auto', minWidth: 112 }}>{prioriteAttendue(sujet) ? <PrioInline sujet={sujet} reunionId={reunion?.id} /> : <span style={{ fontSize: 12, color: C.faint }}>—</span>}</span>
+      {pilote && OPEN_STATUTS.includes(sujet.statut) && (
+        <span title={`Porté par ${pilote.prenom}`} style={{ flex: '0 0 auto' }}>
+          <Avatar membre={pilote} size={20} />
+        </span>
       )}
+      <Btn onClick={() => api.openSujet(sujet.id)} style={{ flex: '0 0 auto', padding: '8px 16px', fontSize: 14 }}>
+        Détail ›
+      </Btn>
+    </div>
+  )
+}
 
-      <QuickLines
-        reunion={reunion}
-        items={enfants}
-        defaultPiloteId={pilote}
-        parentId={sujet.id}
-        origine="action_liee"
-        label="＋ Actions à en tirer"
-        collapsed={!enfants.length}
+/** Lignes vides de saisie rapide (tour de météo) : c'est… · titre · le blabla · 🔒 */
+function NouvellesLignes({ reunion, proposePar }: { reunion: Reunion; proposePar: string }) {
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 10 }}>
+      <LigneVide reunion={reunion} proposePar={proposePar} autoFocus />
+      <LigneVide reunion={reunion} proposePar={proposePar} />
+    </div>
+  )
+}
+
+function LigneVide({ reunion, proposePar, autoFocus }: { reunion: Reunion; proposePar: string; autoFocus?: boolean }) {
+  const api = useApi()
+  const [nature, setNature] = useState<Nature>('question')
+  const [titre, setTitre] = useState('')
+  const [contexte, setContexte] = useState('')
+  const [confidentiel, setConfidentiel] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const na = refOf(NATURES, nature)
+
+  const ajouter = async () => {
+    if (!titre.trim() || busy) return
+    setBusy(true)
+    const s = await api.createSujet({
+      titre,
+      contexte,
+      nature,
+      propose_par: proposePar,
+      origine: 'meteo',
+      reunion_origine: reunion.id,
+      confidentiel,
+      pilote_id: nature === 'action' || nature === 'projet' ? proposePar : null,
+      domaine: api.membreById.get(proposePar)?.domaine || '',
+    })
+    if (s) {
+      setTitre('')
+      setContexte('')
+      setConfidentiel(false)
+    }
+    await api.reload()
+    setBusy(false)
+  }
+
+  return (
+    <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap', padding: '6px 10px', borderRadius: 10, border: `1px dashed ${C.lineStrong}` }}>
+      <span style={{ width: 92, flex: '0 0 auto', fontSize: 12, color: C.faint }}>＋ nouveau</span>
+      <select
+        value={nature}
+        onChange={(e) => setNature(e.target.value as Nature)}
+        style={{ ...ODJ_SELECT, width: 158, flex: '0 0 auto', border: `1px solid ${na?.color || C.line}`, background: `${na?.color || '#888'}1F`, color: C.ink }}
+      >
+        {NATURES.map((n) => (
+          <option key={n.key} value={n.key}>
+            {n.icon} {n.label}
+          </option>
+        ))}
+      </select>
+      <input
+        autoFocus={autoFocus}
+        value={titre}
+        disabled={busy}
+        onChange={(e) => setTitre(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') void ajouter()
+        }}
+        placeholder="Le sujet… puis Entrée"
+        style={{ ...input, padding: '6px 9px', fontSize: 13, flex: '2 1 220px' }}
       />
-    </Card>
+      <input
+        value={contexte}
+        disabled={busy}
+        onChange={(e) => setContexte(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') void ajouter()
+        }}
+        placeholder="Le blabla (facultatif)"
+        style={{ ...input, padding: '6px 9px', fontSize: 13, flex: '3 1 220px' }}
+      />
+      <button
+        onClick={() => setConfidentiel(!confidentiel)}
+        title="Confidentiel"
+        style={{ ...chipBase, padding: '4px 8px', fontSize: 12, borderColor: confidentiel ? C.alert : C.line, background: confidentiel ? `${C.alert}22` : 'transparent', color: confidentiel ? C.ink : C.faint }}
+      >
+        🔒
+      </button>
+      <Btn disabled={busy || !titre.trim()} onClick={() => void ajouter()}>
+        Ajouter
+      </Btn>
+    </div>
   )
 }
 
 // ---------------------------------------------------------------- Lignes rapides
-// (19/11/2026) Saisie d'actions (ou d'infos) à la volée : une ligne = un sujet,
-// Entrée pour valider, collage de plusieurs lignes = plusieurs sujets. Une
-// action est rattachée par défaut au membre indiqué (pilote) et datée pour la
-// réunion suivante ; le détail se complète plus tard dans la fiche.
+// Saisie d'actions à la volée : une ligne = une action, Entrée pour valider,
+// collage de plusieurs lignes = plusieurs actions. L'action est rattachée par
+// défaut au porteur indiqué ; le détail se complète plus tard dans la fiche.
 function QuickLines({
   reunion,
   items,
@@ -1192,7 +1282,7 @@ function QuickLines({
   collapsed,
   hidePiloteSelect,
 }: {
-  reunion: Reunion
+  reunion?: Reunion | null
   items: Sujet[]
   defaultPiloteId?: string | null
   parentId?: string | null
@@ -1226,13 +1316,13 @@ function QuickLines({
         nature: info ? 'info' : 'action',
         statut: info ? 'fait' : 'en_cours',
         pilote_id: piloteEffectif || null,
-        reunion_origine: reunion.id,
+        reunion_origine: reunion?.id || null,
         parent_id: parentId || null,
         origine,
-        prochain_point: info ? null : addDaysIso(reunion.date_reunion, 28),
+        prochain_point: info ? null : addDaysIso(reunion?.date_reunion || todayIso(), 28),
         domaine: (piloteEffectif && api.membreById.get(piloteEffectif)?.domaine) || '',
       })
-      if (s) {
+      if (s && reunion) {
         await supabase
           .from('piliers_reunion_sujets')
           .upsert({ reunion_id: reunion.id, sujet_id: s.id, issue: info ? 'pour_info' : 'qualifie', commentaire: '', revu_le: new Date().toISOString() })
@@ -1257,14 +1347,14 @@ function QuickLines({
         const p = api.porteursOf(s.id).find((x) => x.role === 'pilote')
         return (
           <div key={s.id} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, padding: '3px 2px' }}>
-            <span style={{ width: 18 }}>{s.nature === 'info' ? 'ℹ️' : s.statut === 'fait' ? '✅' : '🎯'}</span>
+            <span style={{ width: 18 }}>{estInfo(s.nature) ? 'ℹ️' : s.statut === 'fait' ? '✅' : '🎯'}</span>
             <button
               onClick={() => api.openSujet(s.id)}
               style={{ background: 'none', border: 'none', padding: 0, color: C.ink, cursor: 'pointer', textAlign: 'left', flex: 1, fontSize: 13, fontFamily: FONT_BODY }}
             >
               {s.titre}
             </button>
-            {isOpen(s) && s.nature !== 'info' && <PrioInline sujet={s} reunionId={reunion.id} />}
+            {prioriteAttendue(s) && <PrioInline sujet={s} reunionId={reunion?.id} />}
             {p && <Avatar membre={p.membre} size={18} />}
             <button
               title="Retirer cette ligne"
@@ -1374,7 +1464,7 @@ function ComStep({ reunion, revus }: { reunion: Reunion; revus: ReunionSujet[] }
   const candidats = revus
     .filter((rs) => ['fait', 'qualifie', 'on_continue'].includes(rs.issue))
     .map((rs) => api.sujetById.get(rs.sujet_id))
-    .filter((s): s is Sujet => !!s && !s.a_communiquer)
+    .filter((s): s is Sujet => !!s && !s.a_communiquer && !s.confidentiel)
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
       {aCommuniquer.length === 0 && <Empty>Aucun message en préparation.</Empty>}
@@ -1478,6 +1568,8 @@ function Cloture({
     .sort((x, y) => x.date_reunion.localeCompare(y.date_reunion))[0]
   const [prochaine, setProchaine] = useState(suivante?.date_reunion || addDaysIso(reunion.date_reunion, 28))
   const [busy, setBusy] = useState(false)
+  const redacteur = reunion.redacteur_id ? api.membreById.get(reunion.redacteur_id) || null : null
+  const suisRedacteur = !!redacteur && redacteur.id === api.me?.id
   const nbStatut = blocages.filter((b) => b.statut).length
   const nbPrio = blocages.filter((b) => b.priorite).length
 
@@ -1523,6 +1615,16 @@ function Cloture({
         placeholder="Les 3 messages clés de la réunion…"
         style={{ ...input, width: '100%', resize: 'vertical' }}
       />
+      <div style={{ fontSize: 13, marginTop: 10, color: redacteur ? C.muted : C.alert }}>
+        {redacteur ? (
+          <>
+            ✍️ Rédacteur : <b style={{ color: C.ink }}>{redacteur.prenom}</b>
+            {suisRedacteur ? ' — c’est vous qui clôturez.' : ` — seul(e) ${redacteur.prenom} peut clôturer.`}
+          </>
+        ) : (
+          '✍️ Désignez le rédacteur de la réunion (en haut de page) : c’est lui qui rédige et clôture.'
+        )}
+      </div>
       <div style={{ display: 'flex', gap: 10, alignItems: 'center', marginTop: 12, flexWrap: 'wrap' }}>
         <label style={{ fontSize: 13, color: C.muted, display: 'flex', alignItems: 'center', gap: 8 }}>
           Prochaine réunion le
@@ -1531,8 +1633,8 @@ function Cloture({
         <Btn
           primary
           big
-          disabled={busy || blocages.length > 0}
-          title={blocages.length ? 'Tranchez et priorisez tous les sujets avant de clôturer' : undefined}
+          disabled={busy || blocages.length > 0 || !suisRedacteur}
+          title={!suisRedacteur ? 'Réservé au rédacteur de la réunion' : blocages.length ? 'Tranchez et priorisez tous les sujets avant de clôturer' : undefined}
           onClick={async () => {
             if (!window.confirm('Clôturer la réunion ? Le compte rendu sera disponible dans « Réunions passées » (elle pourra être rouverte).')) return
             setBusy(true)
@@ -1828,17 +1930,22 @@ function TabEntre({ onQuickAdd }: { onQuickAdd: () => void }) {
   events.sort((a, b) => b.at.localeCompare(a.at))
 
   const ouverts = api.sujets.filter((s) => isOpen(s)).sort((a, b) => a.numero - b.numero)
+  const proposes = api.sujets.filter((s) => s.statut === 'a_aborder' && s.origine !== 'action_liee').sort((a, b) => a.numero - b.numero)
 
   return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+        <Card style={{ borderLeft: `5px solid ${C.gold}` }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', marginBottom: 10 }}>
+            <h2 style={{ ...h2, margin: 0, flex: 1 }}>📥 Proposés pour la prochaine réunion ({proposes.length})</h2>
+            <Btn primary onClick={onQuickAdd}>
+              ＋ Remonter un sujet
+            </Btn>
+          </div>
+          <p style={{ color: C.muted, fontSize: 13, marginTop: 0 }}>Les nouvelles demandes (hors suivi des actions déjà connues), dans l’ordre où elles seront abordées.</p>
+          <OdjListe sujets={proposes} reunion={null} vide="Aucun sujet proposé pour l’instant." />
+        </Card>
     <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1.1fr)', gap: 20, alignItems: 'start' }}>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-        <Card style={{ borderLeft: `5px solid ${C.gold}` }}>
-          <h2 style={h2}>Une info, une question pour la prochaine réunion ?</h2>
-          <p style={{ color: C.muted, fontSize: 14, marginTop: 0 }}>Remontez-la maintenant : elle sera automatiquement à l’ordre du jour (étape « Nouveaux sujets »).</p>
-          <Btn primary big onClick={onQuickAdd}>
-            ＋ Remonter un sujet
-          </Btn>
-        </Card>
 
         <Card>
           <h2 style={h2}>Donner une nouvelle sur un sujet</h2>
@@ -1927,6 +2034,7 @@ function TabEntre({ onQuickAdd }: { onQuickAdd: () => void }) {
           ))}
         </div>
       </Card>
+    </div>
     </div>
   )
 }
@@ -2034,6 +2142,8 @@ function compteRenduTexte(api: Api, r: Reunion) {
   const mt = api.meteo.filter((m) => m.reunion_id === r.id)
   const lines: string[] = []
   lines.push(`Réunion Piliers — ${fmtDateLong(r.date_reunion)}`)
+  const red = r.redacteur_id ? api.membreById.get(r.redacteur_id) : null
+  if (red) lines.push(`Rédacteur : ${red.prenom}`)
   lines.push('')
   if (r.synthese) {
     lines.push('SYNTHÈSE', r.synthese, '')
@@ -2055,7 +2165,7 @@ function compteRenduTexte(api: Api, r: Reunion) {
       const s = api.sujetById.get(x.sujet_id)
       if (!s) return
       const pil = api.porteursOf(s.id).find((p) => p.role === 'pilote')?.membre.prenom
-      lines.push(`  #${s.numero} ${s.titre} — ${ISSUES[x.issue].label}${pil ? ` (${pil})` : ''}${x.commentaire ? ` : ${x.commentaire}` : ''}${isOpen(s) && s.prochain_point ? ` · prochain point ${fmtDate(s.prochain_point)}` : ''}`)
+      lines.push(`  #${s.numero}${s.confidentiel ? ' [CONFIDENTIEL]' : ''} ${s.titre} — ${ISSUES[x.issue].label}${pil ? ` (${pil})` : ''}${x.commentaire ? ` : ${x.commentaire}` : ''}${isOpen(s) && s.prochain_point ? ` · prochain point ${fmtDate(s.prochain_point)}` : ''}`)
     })
     lines.push('')
   }
@@ -2119,6 +2229,8 @@ function CompteRendu({ reunion }: { reunion: Reunion }) {
           📋 Copier
         </Btn>
         <Btn
+          disabled={!(api.me?.est_animateur || (reunion.redacteur_id && reunion.redacteur_id === api.me?.id))}
+          title="Réservé au rédacteur de la réunion et aux animateurs"
           onClick={async () => {
             if (!window.confirm('Rouvrir cette réunion ? Elle redevient la réunion en cours (onglet « Prochaine réunion ») ; les décisions déjà prises sont conservées.')) return
             const { error } = await supabase.from('piliers_reunions').update({ statut: 'en_cours', cloturee_le: null }).eq('id', reunion.id)
@@ -2138,6 +2250,9 @@ function CompteRendu({ reunion }: { reunion: Reunion }) {
           ✉️ Envoyer aux membres
         </Btn>
       </div>
+      {reunion.redacteur_id && api.membreById.get(reunion.redacteur_id) && (
+        <div style={{ fontSize: 13, color: C.muted, marginTop: 6 }}>✍️ Rédigé par {api.membreById.get(reunion.redacteur_id)!.prenom}</div>
+      )}
       {reunion.synthese && <div style={{ marginTop: 14, padding: 12, borderRadius: 10, background: C.soft, whiteSpace: 'pre-wrap', lineHeight: 1.55 }}>{reunion.synthese}</div>}
       {mt.length > 0 && (
         <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', marginTop: 14 }}>
@@ -2159,8 +2274,11 @@ function CompteRendu({ reunion }: { reunion: Reunion }) {
 }
 
 // ============================================================================
-// Fiche sujet (volet latéral)
+// Fiche sujet (fenêtre de détail)
 // ============================================================================
+// (19/11/2026, v3) Fenêtre simplifiée : l'essentiel d'abord (c'est…, le
+// blabla, proposé par, porteur, statut, priorité, prochain point, CA,
+// confidentiel), le reste replié sous « Plus de détails ».
 function SujetDrawer({ sujet, onClose }: { sujet: Sujet; onClose: () => void }) {
   const api = useApi()
   const [d, setD] = useState<Sujet>(sujet)
@@ -2168,9 +2286,13 @@ function SujetDrawer({ sujet, onClose }: { sujet: Sujet; onClose: () => void }) 
   const [pt, setPt] = useState(initialPorteurs)
   const [dirty, setDirty] = useState(false)
   const [busy, setBusy] = useState(false)
+  const [plus, setPlus] = useState(false)
   const [type, setType] = useState<SuiviType>('update')
   const [texte, setTexte] = useState('')
   const suivis = api.suivisOf(sujet.id)
+  const enfants = api.sujets.filter((x) => x.parent_id === sujet.id)
+  const parent = sujet.parent_id ? api.sujetById.get(sujet.parent_id) || null : null
+  const piloteId = pt.find((p) => p.role === 'pilote')?.membre_id || ''
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -2185,19 +2307,25 @@ function SujetDrawer({ sujet, onClose }: { sujet: Sujet; onClose: () => void }) 
     setDirty(true)
   }
 
-  const togglePorteur = (membreId: string) => {
+  const setPilote = (membreId: string) => {
+    setDirty(true)
+    setPt((prev) => {
+      const sansPilote = prev.filter((p) => p.role !== 'pilote' && p.membre_id !== membreId)
+      return membreId ? [{ membre_id: membreId, role: 'pilote' as const }, ...sansPilote] : sansPilote
+    })
+  }
+
+  const toggleAppui = (membreId: string) => {
     setDirty(true)
     setPt((prev) => {
       const ex = prev.find((p) => p.membre_id === membreId)
-      if (!ex) {
-        if (prev.length >= 4) {
-          api.notify('4 porteurs maximum : un pilote et ses appuis', 'err')
-          return prev
-        }
-        return [...prev, { membre_id: membreId, role: prev.some((p) => p.role === 'pilote') ? 'contributeur' : 'pilote' }]
+      if (ex?.role === 'pilote') return prev
+      if (ex) return prev.filter((p) => p.membre_id !== membreId)
+      if (prev.length >= 4) {
+        api.notify('Un porteur et 3 appuis au maximum', 'err')
+        return prev
       }
-      if (ex.role === 'contributeur') return prev.map((p) => (p.membre_id === membreId ? { ...p, role: 'pilote' } : p.role === 'pilote' ? { ...p, role: 'contributeur' } : p))
-      return prev.filter((p) => p.membre_id !== membreId)
+      return [...prev, { membre_id: membreId, role: 'contributeur' as const }]
     })
   }
 
@@ -2217,13 +2345,15 @@ function SujetDrawer({ sujet, onClose }: { sujet: Sujet; onClose: () => void }) 
       prochain_point: d.prochain_point || null,
       echeance: d.echeance || null,
       a_l_ordre_du_jour: d.a_l_ordre_du_jour,
-      a_communiquer: d.a_communiquer,
+      a_communiquer: d.confidentiel ? false : d.a_communiquer,
       communication_statut: d.communication_statut,
       communication_cible: d.communication_cible,
       communication_message: d.communication_message,
+      confidentiel: d.confidentiel,
+      propose_par: d.propose_par,
     })
-    const samePt = JSON.stringify([...pt].sort((a, b) => a.membre_id.localeCompare(b.membre_id))) === JSON.stringify([...initialPorteurs].sort((a, b) => a.membre_id.localeCompare(b.membre_id)))
-    if (ok && !samePt) await api.setPorteurs(sujet.id, pt)
+    const norm = (l: { membre_id: string; role: string }[]) => JSON.stringify([...l].sort((a, b) => a.membre_id.localeCompare(b.membre_id)))
+    if (ok && norm(pt) !== norm(initialPorteurs)) await api.setPorteurs(sujet.id, pt)
     await api.reload()
     setBusy(false)
     if (ok) {
@@ -2238,177 +2368,252 @@ function SujetDrawer({ sujet, onClose }: { sujet: Sujet; onClose: () => void }) 
   }
 
   const domaines = Array.from(new Set(api.membres.map((m) => m.domaine).filter(Boolean)))
+  const lbl: React.CSSProperties = { fontSize: 12, color: C.muted, marginBottom: 4 }
 
   return (
-    <div style={{ position: 'fixed', inset: 0, zIndex: 1200, display: 'flex', justifyContent: 'flex-end' }}>
-      <div onClick={close} style={{ position: 'absolute', inset: 0, background: 'rgba(6,10,18,0.45)' }} />
+    <div style={{ position: 'fixed', inset: 0, zIndex: 1200, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16 }}>
+      <div onClick={close} style={{ position: 'absolute', inset: 0, background: 'rgba(6,10,18,0.5)' }} />
       <div
         style={{
           position: 'relative',
-          width: 'min(640px, 100vw)',
-          height: '100%',
+          width: 'min(760px, 100%)',
+          maxHeight: '92vh',
           background: C.card,
           color: C.ink,
-          boxShadow: '-12px 0 40px rgba(0,0,0,0.25)',
+          borderRadius: 18,
+          boxShadow: '0 20px 60px rgba(0,0,0,0.35)',
           display: 'flex',
           flexDirection: 'column',
           fontFamily: FONT_BODY,
         }}
       >
-        <div style={{ padding: '16px 20px', borderBottom: `1px solid ${C.line}`, display: 'flex', gap: 10, alignItems: 'center' }}>
+        <div style={{ padding: '14px 20px', borderBottom: `1px solid ${C.line}`, display: 'flex', gap: 10, alignItems: 'center' }}>
           <span style={{ color: C.faint, fontFamily: FONT_TITLE, fontWeight: 700 }}>#{sujet.numero}</span>
           <span style={{ fontSize: 12, color: C.muted, flex: 1 }}>
-            remonté par {api.nameOfEmail(sujet.created_by)} le {fmtDate(sujet.created_at.slice(0, 10), { day: 'numeric', month: 'long', year: 'numeric' })}
+            créé le {fmtDate(sujet.created_at.slice(0, 10), { day: 'numeric', month: 'long', year: 'numeric' })}
+            {parent && (
+              <>
+                {' · tirée de '}
+                <button style={{ ...linkBtn, fontSize: 12 }} onClick={() => api.openSujet(parent.id)}>
+                  #{parent.numero} {parent.titre}
+                </button>
+              </>
+            )}
           </span>
-          <button onClick={close} style={{ ...linkBtn, fontSize: 22, lineHeight: 1 }} aria-label="Fermer">
+          <button onClick={close} style={{ ...linkBtn, fontSize: 24, lineHeight: 1 }} aria-label="Fermer">
             ×
           </button>
         </div>
 
-        <div style={{ flex: 1, overflowY: 'auto', padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: 16 }}>
-          <input value={d.titre} onChange={(e) => set('titre', e.target.value)} style={{ ...input, fontSize: 18, fontWeight: 700, fontFamily: FONT_TITLE }} />
-          <textarea value={d.contexte} onChange={(e) => set('contexte', e.target.value)} rows={4} placeholder="Contexte : de quoi parle-t-on, pourquoi maintenant, chiffres, liens…" style={{ ...input, resize: 'vertical', lineHeight: 1.5, minHeight: 96, flexShrink: 0 }} />
+        <div style={{ flex: 1, overflowY: 'auto', padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: 14 }}>
+          <input value={d.titre} onChange={(e) => set('titre', e.target.value)} style={{ ...input, fontSize: 18, fontWeight: 700, fontFamily: FONT_TITLE, flexShrink: 0 }} />
 
-          <Field label="Où en est-on ?">
-            <Chips list={STATUTS} value={d.statut} onChange={(v) => set('statut', v as Statut)} />
-          </Field>
-          <Field label="C’est…">
-            <Chips list={NATURES} value={d.nature} onChange={(v) => set('nature', v as Nature)} />
-          </Field>
-
-          <div style={{ padding: 12, borderRadius: 12, background: C.soft, display: 'flex', flexDirection: 'column', gap: 12 }}>
-            <div style={{ fontSize: 12, textTransform: 'uppercase', letterSpacing: 1, color: C.muted }}>Pourquoi c’est important</div>
-            <Field label="Pour les équipes">
-              <Chips list={RESSENTIS} value={d.ressenti} onChange={(v) => set('ressenti', v as Ressenti)} />
-            </Field>
-            <Field label="Enjeux pour l’entreprise (plusieurs possibles)">
-              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                {ENJEUX.map((e) => {
-                  const on = d.enjeux.includes(e.key)
-                  return (
-                    <button
-                      key={e.key}
-                      title={e.help}
-                      onClick={() => set('enjeux', on ? d.enjeux.filter((x) => x !== e.key) : [...d.enjeux, e.key])}
-                      style={{ ...chipBase, borderColor: on ? e.color : C.line, background: on ? `${e.color}22` : 'transparent', color: on ? C.ink : C.muted }}
-                    >
-                      {e.icon} {e.label}
-                    </button>
-                  )
-                })}
-              </div>
-            </Field>
-            <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
-              <CaToggle value={d.impacte_ca} onChange={(v) => set('impacte_ca', v)} />
-              {d.impacte_ca && (
-                <input value={d.impact_ca_note} onChange={(e) => set('impact_ca_note', e.target.value)} placeholder="Ordre de grandeur / comment (facultatif)" style={{ ...input, flex: 1 }} />
-              )}
-            </div>
-            <Field label="Priorité">
-              <PrioPicker value={d.priorite} onChange={(v) => set('priorite', v)} withHelp />
-            </Field>
-          </div>
-
-          <Field label="Qui ? — 1er clic : porteur · 2e clic : pilote ★ · 3e clic : retirer">
+          <div>
+            <div style={lbl}>C’est…</div>
             <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-              {api.membresActifs.map((m) => {
-                const p = pt.find((x) => x.membre_id === m.id)
+              {NATURES.map((n) => {
+                const on = n.key === d.nature
                 return (
                   <button
-                    key={m.id}
-                    onClick={() => togglePorteur(m.id)}
-                    title={m.role}
-                    style={{
-                      ...chipBase,
-                      display: 'inline-flex',
-                      alignItems: 'center',
-                      gap: 6,
-                      borderColor: p ? m.couleur : C.line,
-                      background: p ? `${m.couleur}26` : 'transparent',
-                      color: p ? C.ink : C.muted,
-                      fontWeight: p?.role === 'pilote' ? 700 : 500,
-                    }}
+                    key={n.key}
+                    title={n.help}
+                    onClick={() => set('nature', n.key)}
+                    style={{ ...chipBase, borderColor: on ? n.color : C.line, background: on ? `${n.color}26` : 'transparent', color: on ? C.ink : C.muted, fontWeight: on ? 700 : 500 }}
                   >
-                    <Avatar membre={m} size={18} />
-                    {m.prenom}
-                    {p?.role === 'pilote' && ' ★'}
+                    {n.icon} {n.label}
                   </button>
                 )
               })}
             </div>
-          </Field>
+          </div>
 
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 10 }}>
-            <Field label="Prochain point attendu le">
-              <input type="date" value={d.prochain_point || ''} onChange={(e) => set('prochain_point', e.target.value || null)} style={{ ...input, width: '100%' }} />
-              <div style={{ display: 'flex', gap: 4, marginTop: 4 }}>
-                {[7, 14, 28].map((n) => (
-                  <button key={n} style={{ ...linkBtn, fontSize: 11 }} onClick={() => set('prochain_point', addDaysIso(todayIso(), n))}>
-                    +{n} j
-                  </button>
+          <textarea
+            value={d.contexte}
+            onChange={(e) => set('contexte', e.target.value)}
+            rows={4}
+            placeholder="Le blabla : de quoi parle-t-on, pourquoi maintenant, ce qu’on attend du groupe…"
+            style={{ ...input, resize: 'vertical', lineHeight: 1.5, minHeight: 96, flexShrink: 0 }}
+          />
+
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: 12 }}>
+            <div>
+              <div style={lbl}>Mis à l’ODJ par</div>
+              <select value={d.propose_par || ''} onChange={(e) => set('propose_par', e.target.value || null)} style={{ ...input, width: '100%' }}>
+                <option value="">—</option>
+                {api.membresActifs.map((m) => (
+                  <option key={m.id} value={m.id}>
+                    {m.prenom}
+                  </option>
                 ))}
-                {api.prochaine && (
-                  <button style={{ ...linkBtn, fontSize: 11 }} onClick={() => set('prochain_point', api.prochaine!.date_reunion)}>
-                    réunion
-                  </button>
+              </select>
+            </div>
+            <div>
+              <div style={lbl}>Porteur</div>
+              <select value={piloteId} onChange={(e) => setPilote(e.target.value)} style={{ ...input, width: '100%' }}>
+                <option value="">{estInfo(d.nature) ? '— (pas nécessaire)' : '— à désigner —'}</option>
+                {api.membresActifs.map((m) => (
+                  <option key={m.id} value={m.id}>
+                    {m.prenom}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <div style={lbl}>Statut</div>
+              <select value={d.statut} onChange={(e) => set('statut', e.target.value as Statut)} style={{ ...input, width: '100%' }}>
+                {STATUTS.map((x) => (
+                  <option key={x.key} value={x.key}>
+                    {x.icon} {x.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <div style={lbl}>Priorité</div>
+              <PrioPicker value={d.priorite} onChange={(v) => set('priorite', v)} required={isOpen(d) && !estInfo(d.nature)} />
+            </div>
+            <div>
+              <div style={lbl}>Prochain point</div>
+              <input type="date" value={d.prochain_point || ''} onChange={(e) => set('prochain_point', e.target.value || null)} style={{ ...input, width: '100%' }} />
+            </div>
+            <div style={{ display: 'flex', gap: 6, alignItems: 'flex-end', flexWrap: 'wrap' }}>
+              <CaToggle value={d.impacte_ca} onChange={(v) => set('impacte_ca', v)} />
+              <button
+                onClick={() => set('confidentiel', !d.confidentiel)}
+                style={{ ...chipBase, borderColor: d.confidentiel ? C.alert : C.line, background: d.confidentiel ? `${C.alert}22` : 'transparent', color: d.confidentiel ? C.ink : C.muted, fontWeight: 700 }}
+              >
+                🔒 {d.confidentiel ? 'Confidentiel' : 'Confidentiel ?'}
+              </button>
+            </div>
+          </div>
+
+          {/* Actions liées */}
+          <div style={{ padding: 12, borderRadius: 12, background: C.soft }}>
+            <div style={{ fontSize: 12, color: C.muted }}>Actions tirées de ce sujet ({enfants.length})</div>
+            <QuickLines
+              reunion={api.prochaine && api.prochaine.statut === 'en_cours' ? api.prochaine : null}
+              items={enfants}
+              defaultPiloteId={piloteId || d.propose_par}
+              parentId={sujet.id}
+              origine="action_liee"
+              label="＋ Ajouter des actions"
+              collapsed={!enfants.length}
+            />
+          </div>
+
+          <button style={{ ...linkBtn, alignSelf: 'flex-start' }} onClick={() => setPlus(!plus)}>
+            {plus ? 'Moins de détails ▴' : 'Plus de détails ▾ (appuis, ressenti des équipes, enjeux, échéance, communication)'}
+          </button>
+
+          {plus && (
+            <div style={{ padding: 12, borderRadius: 12, border: `1px solid ${C.line}`, display: 'flex', flexDirection: 'column', gap: 12 }}>
+              <div>
+                <div style={lbl}>Appuis (en plus du porteur)</div>
+                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                  {api.membresActifs
+                    .filter((m) => m.id !== piloteId)
+                    .map((m) => {
+                      const on = pt.some((p) => p.membre_id === m.id)
+                      return (
+                        <button
+                          key={m.id}
+                          onClick={() => toggleAppui(m.id)}
+                          style={{ ...chipBase, display: 'inline-flex', alignItems: 'center', gap: 6, borderColor: on ? m.couleur : C.line, background: on ? `${m.couleur}26` : 'transparent', color: on ? C.ink : C.muted }}
+                        >
+                          <Avatar membre={m} size={18} />
+                          {m.prenom}
+                        </button>
+                      )
+                    })}
+                </div>
+              </div>
+              <Field label="Pour les équipes">
+                <Chips list={RESSENTIS} value={d.ressenti} onChange={(v) => set('ressenti', v as Ressenti)} />
+              </Field>
+              <Field label="Enjeux pour l’entreprise">
+                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                  {ENJEUX.map((e) => {
+                    const on = d.enjeux.includes(e.key)
+                    return (
+                      <button
+                        key={e.key}
+                        title={e.help}
+                        onClick={() => set('enjeux', on ? d.enjeux.filter((x) => x !== e.key) : [...d.enjeux, e.key])}
+                        style={{ ...chipBase, borderColor: on ? e.color : C.line, background: on ? `${e.color}22` : 'transparent', color: on ? C.ink : C.muted }}
+                      >
+                        {e.icon} {e.label}
+                      </button>
+                    )
+                  })}
+                </div>
+              </Field>
+              {d.impacte_ca && (
+                <input value={d.impact_ca_note} onChange={(e) => set('impact_ca_note', e.target.value)} placeholder="⚡ Ordre de grandeur de l’impact CA" style={input} />
+              )}
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+                <Field label="Échéance visée">
+                  <input type="date" value={d.echeance || ''} onChange={(e) => set('echeance', e.target.value || null)} style={{ ...input, width: '100%' }} />
+                </Field>
+                <Field label="Domaine">
+                  <input list="pil-domaines" value={d.domaine} onChange={(e) => set('domaine', e.target.value)} style={{ ...input, width: '100%' }} />
+                  <datalist id="pil-domaines">
+                    {domaines.map((x) => (
+                      <option key={x} value={x} />
+                    ))}
+                  </datalist>
+                </Field>
+              </div>
+              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                <Toggle on={d.a_l_ordre_du_jour} onClick={() => set('a_l_ordre_du_jour', !d.a_l_ordre_du_jour)}>
+                  🔎 À creuser à la prochaine réunion
+                </Toggle>
+                {!d.confidentiel && (
+                  <Toggle on={d.a_communiquer} onClick={() => set('a_communiquer', !d.a_communiquer)}>
+                    📣 À communiquer aux équipes
+                  </Toggle>
                 )}
               </div>
-            </Field>
-            <Field label="Échéance visée">
-              <input type="date" value={d.echeance || ''} onChange={(e) => set('echeance', e.target.value || null)} style={{ ...input, width: '100%' }} />
-            </Field>
-            <Field label="Domaine">
-              <input list="pil-domaines" value={d.domaine} onChange={(e) => set('domaine', e.target.value)} style={{ ...input, width: '100%' }} />
-              <datalist id="pil-domaines">
-                {domaines.map((x) => (
-                  <option key={x} value={x} />
-                ))}
-              </datalist>
-            </Field>
-          </div>
-
-          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-            <Toggle on={d.a_l_ordre_du_jour} onClick={() => set('a_l_ordre_du_jour', !d.a_l_ordre_du_jour)}>
-              🔎 À creuser à la prochaine réunion
-            </Toggle>
-            <Toggle on={d.a_communiquer} onClick={() => set('a_communiquer', !d.a_communiquer)}>
-              📣 À communiquer aux équipes
-            </Toggle>
-          </div>
-
-          {d.a_communiquer && (
-            <div style={{ padding: 12, borderRadius: 12, background: C.soft, display: 'flex', flexDirection: 'column', gap: 8 }}>
-              <Chips list={COM_STATUTS} value={d.communication_statut} onChange={(v) => set('communication_statut', v as ComStatut)} />
-              <input list="pil-cibles-d" value={d.communication_cible} onChange={(e) => set('communication_cible', e.target.value)} placeholder="À qui ?" style={input} />
-              <datalist id="pil-cibles-d">
-                {COM_CIBLES.map((c) => (
-                  <option key={c} value={c} />
-                ))}
-              </datalist>
-              <textarea value={d.communication_message} onChange={(e) => set('communication_message', e.target.value)} rows={3} placeholder="Le message, tel qu’on le dira aux équipes" style={{ ...input, resize: 'vertical' }} />
+              {d.a_communiquer && !d.confidentiel && (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                  <Chips list={COM_STATUTS} value={d.communication_statut} onChange={(v) => set('communication_statut', v as ComStatut)} />
+                  <input list="pil-cibles-d" value={d.communication_cible} onChange={(e) => set('communication_cible', e.target.value)} placeholder="À qui ?" style={input} />
+                  <datalist id="pil-cibles-d">
+                    {COM_CIBLES.map((c) => (
+                      <option key={c} value={c} />
+                    ))}
+                  </datalist>
+                  <textarea value={d.communication_message} onChange={(e) => set('communication_message', e.target.value)} rows={3} placeholder="Le message, tel qu’on le dira aux équipes" style={{ ...input, resize: 'vertical' }} />
+                </div>
+              )}
             </div>
           )}
 
           {/* Fil de suivi */}
           <div>
-            <div style={{ fontSize: 12, textTransform: 'uppercase', letterSpacing: 1, color: C.muted, marginBottom: 8 }}>Fil de suivi</div>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 6, padding: 10, borderRadius: 12, border: `1px solid ${C.line}` }}>
-              <Chips list={SUIVI_TYPES.filter((t) => t.key !== 'statut')} value={type} onChange={(v) => setType(v as SuiviType)} />
-              <textarea value={texte} onChange={(e) => setTexte(e.target.value)} rows={2} placeholder="Ajouter une nouvelle, une question, une décision…" style={{ ...input, resize: 'vertical' }} />
-              <div>
-                <Btn
-                  disabled={!texte.trim()}
-                  onClick={async () => {
+            <div style={{ fontSize: 12, textTransform: 'uppercase', letterSpacing: 1, color: C.muted, marginBottom: 6 }}>Fil de suivi</div>
+            <div style={{ display: 'flex', gap: 6, alignItems: 'flex-start' }}>
+              <select value={type} onChange={(e) => setType(e.target.value as SuiviType)} style={{ ...input, padding: '6px 8px', fontSize: 13 }}>
+                {SUIVI_TYPES.filter((t) => t.key !== 'statut').map((t) => (
+                  <option key={t.key} value={t.key}>
+                    {t.icon} {t.label}
+                  </option>
+                ))}
+              </select>
+              <input
+                value={texte}
+                onChange={(e) => setTexte(e.target.value)}
+                onKeyDown={async (e) => {
+                  if (e.key === 'Enter' && texte.trim()) {
                     const ok = await api.addSuivi(sujet.id, type, texte)
                     if (ok) setTexte('')
                     await api.reload()
-                  }}
-                >
-                  Publier
-                </Btn>
-              </div>
+                  }
+                }}
+                placeholder="Une nouvelle, une question, une décision… puis Entrée"
+                style={{ ...input, flex: 1, fontSize: 13 }}
+              />
             </div>
-            <div style={{ marginTop: 8 }}>
+            <div style={{ marginTop: 6 }}>
               {suivis.length === 0 && <div style={{ fontSize: 13, color: C.faint }}>Pas encore de suivi.</div>}
               {suivis.map((s) => (
                 <SuiviLine key={s.id} suivi={s} />
@@ -2416,9 +2621,9 @@ function SujetDrawer({ sujet, onClose }: { sujet: Sujet; onClose: () => void }) 
             </div>
           </div>
 
-          <div style={{ borderTop: `1px solid ${C.line}`, paddingTop: 12 }}>
+          <div style={{ borderTop: `1px solid ${C.line}`, paddingTop: 10 }}>
             <button
-              style={{ ...linkBtn, color: C.alert }}
+              style={{ ...linkBtn, color: C.alert, fontSize: 12 }}
               onClick={async () => {
                 if (!window.confirm(`Supprimer définitivement le sujet #${sujet.numero} et son fil de suivi ?\n(Préférez « Abandonné » pour garder la trace.)`)) return
                 const { error } = await supabase.from('piliers_sujets').delete().eq('id', sujet.id)
@@ -2435,7 +2640,9 @@ function SujetDrawer({ sujet, onClose }: { sujet: Sujet; onClose: () => void }) 
         </div>
 
         <div style={{ padding: '12px 20px', borderTop: `1px solid ${C.line}`, display: 'flex', gap: 10, alignItems: 'center' }}>
-          <span style={{ fontSize: 12, color: dirty ? C.alert : C.faint, flex: 1 }}>{dirty ? 'Modifications non enregistrées' : `Mis à jour ${fmtDateTime(sujet.updated_at)} par ${api.nameOfEmail(sujet.updated_by || sujet.created_by)}`}</span>
+          <span style={{ fontSize: 12, color: dirty ? C.alert : C.faint, flex: 1 }}>
+            {dirty ? 'Modifications non enregistrées' : `Mis à jour ${fmtDateTime(sujet.updated_at)} par ${api.nameOfEmail(sujet.updated_by || sujet.created_by)}`}
+          </span>
           <Btn onClick={close}>Fermer</Btn>
           <Btn primary disabled={!dirty || busy || !d.titre.trim()} onClick={() => void save()}>
             Enregistrer
@@ -2449,43 +2656,29 @@ function SujetDrawer({ sujet, onClose }: { sujet: Sujet; onClose: () => void }) 
 // ============================================================================
 // Remonter un sujet (fenêtre rapide)
 // ============================================================================
+// (19/11/2026, v3) Le minimum : le sujet, c'est…, le blabla, confidentiel.
+// Le reste se tranche en réunion, sur la ligne ou dans le détail.
 function QuickAddModal({ onClose }: { onClose: () => void }) {
   const api = useApi()
   const [titre, setTitre] = useState('')
   const [contexte, setContexte] = useState('')
-  const [showContexte, setShowContexte] = useState(false)
   const [nature, setNature] = useState<Nature>('question')
-  const [ca, setCa] = useState(false)
-  const [pilote, setPilote] = useState('')
-  const [actions, setActions] = useState('')
-  const [showActions, setShowActions] = useState(false)
+  const [confidentiel, setConfidentiel] = useState(false)
+  const [proposePar, setProposePar] = useState(api.me?.id || '')
   const [busy, setBusy] = useState(false)
 
-  // (19/11/2026) Une action / un projet est rattaché par défaut à la personne qui le remonte.
-  const choisirNature = (n: Nature) => {
-    setNature(n)
-    if ((n === 'action' || n === 'projet') && !pilote && api.me) setPilote(api.me.id)
-  }
-
   const submit = async () => {
+    if (!titre.trim() || busy) return
     setBusy(true)
     const s = await api.createSujet({
       titre,
       contexte,
       nature,
-      impacte_ca: ca,
-      pilote_id: pilote || null,
-      domaine: (pilote ? api.membreById.get(pilote)?.domaine : api.me?.domaine) || '',
+      confidentiel,
+      propose_par: proposePar || null,
+      pilote_id: (nature === 'action' || nature === 'projet') && proposePar ? proposePar : null,
+      domaine: api.membreById.get(proposePar)?.domaine || '',
     })
-    if (s) {
-      const lignes = actions
-        .split(/\r?\n/)
-        .map((l) => l.replace(/^\s*[-•*·]\s*/, '').trim())
-        .filter(Boolean)
-      for (const t of lignes) {
-        await api.createSujet({ titre: t, contexte: '', nature: 'action', pilote_id: pilote || api.me?.id || null, parent_id: s.id, origine: 'action_liee' })
-      }
-    }
     await api.reload()
     setBusy(false)
     if (s) {
@@ -2495,26 +2688,26 @@ function QuickAddModal({ onClose }: { onClose: () => void }) {
   }
 
   return (
-    <Modal onClose={onClose} title="Remonter un sujet pour la prochaine réunion">
+    <Modal onClose={onClose} title="Mettre un sujet à l’ordre du jour">
       <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
         <input
           autoFocus
           value={titre}
           onChange={(e) => setTitre(e.target.value)}
           onKeyDown={(e) => {
-            if (e.key === 'Enter' && titre.trim() && !busy) void submit()
+            if (e.key === 'Enter') void submit()
           }}
-          placeholder="Le sujet en une phrase — Entrée pour l’ajouter"
+          placeholder="Le sujet en une phrase"
           style={{ ...input, fontSize: 16, fontWeight: 600 }}
         />
-        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
+        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
           {NATURES.map((n) => {
             const on = n.key === nature
             return (
               <button
                 key={n.key}
                 title={n.help}
-                onClick={() => choisirNature(n.key)}
+                onClick={() => setNature(n.key)}
                 style={{ ...chipBase, borderColor: on ? n.color : C.line, background: on ? `${n.color}26` : 'transparent', color: on ? C.ink : C.muted, fontWeight: on ? 700 : 500 }}
               >
                 {n.icon} {n.label}
@@ -2522,53 +2715,34 @@ function QuickAddModal({ onClose }: { onClose: () => void }) {
             )
           })}
         </div>
+        <textarea
+          value={contexte}
+          onChange={(e) => setContexte(e.target.value)}
+          rows={3}
+          placeholder="Le blabla (facultatif)"
+          style={{ ...input, resize: 'vertical', lineHeight: 1.5 }}
+        />
         <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
-          {nature !== 'info' && (
-            <select value={pilote} onChange={(e) => setPilote(e.target.value)} style={{ ...input, flex: 1 }}>
-              <option value="">Qui le porte ? (facultatif)</option>
+          <button
+            onClick={() => setConfidentiel(!confidentiel)}
+            style={{ ...chipBase, borderColor: confidentiel ? C.alert : C.line, background: confidentiel ? `${C.alert}22` : 'transparent', color: confidentiel ? C.ink : C.muted, fontWeight: 700 }}
+          >
+            🔒 {confidentiel ? 'Confidentiel' : 'Confidentiel ?'}
+          </button>
+          <label style={{ fontSize: 13, color: C.muted, display: 'flex', alignItems: 'center', gap: 6 }}>
+            Proposé par
+            <select value={proposePar} onChange={(e) => setProposePar(e.target.value)} style={{ ...input, padding: '6px 8px' }}>
               {api.membresActifs.map((m) => (
                 <option key={m.id} value={m.id}>
-                  {m.prenom} · {m.role}
+                  {m.prenom}
                 </option>
               ))}
             </select>
-          )}
-          <CaToggle value={ca} onChange={setCa} />
-        </div>
-        <div style={{ display: 'flex', gap: 14 }}>
-          {!showContexte && (
-            <button style={linkBtn} onClick={() => setShowContexte(true)}>
-              ＋ Un peu de contexte
-            </button>
-          )}
-          {!showActions && nature !== 'info' && (
-            <button style={linkBtn} onClick={() => setShowActions(true)}>
-              ＋ Une série d’actions
-            </button>
-          )}
-        </div>
-        {showContexte && (
-          <textarea
-            value={contexte}
-            onChange={(e) => setContexte(e.target.value)}
-            rows={3}
-            placeholder="Ce qui se passe, pourquoi c’est important, ce qu’on attend du groupe"
-            style={{ ...input, resize: 'vertical', lineHeight: 1.5 }}
-          />
-        )}
-        {showActions && nature !== 'info' && (
-          <textarea
-            value={actions}
-            onChange={(e) => setActions(e.target.value)}
-            rows={4}
-            placeholder={'Une action par ligne, rattachées au porteur ci-dessus\n- Appeler le fournisseur\n- Préparer le chiffrage'}
-            style={{ ...input, resize: 'vertical', lineHeight: 1.5 }}
-          />
-        )}
-        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+          </label>
+          <span style={{ flex: 1 }} />
           <Btn onClick={onClose}>Annuler</Btn>
           <Btn primary disabled={busy || !titre.trim()} onClick={() => void submit()}>
-            Ajouter à l’ordre du jour
+            Ajouter à l’ODJ
           </Btn>
         </div>
       </div>
@@ -2861,6 +3035,7 @@ function SujetTitle({ sujet, small }: { sujet: Sujet; small?: boolean }) {
       style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', color: C.ink, textAlign: 'left', fontFamily: small ? FONT_BODY : FONT_TITLE, fontSize: small ? 14 : 16, fontWeight: 700 }}
     >
       <span style={{ color: C.faint, fontWeight: 500 }}>#{sujet.numero} </span>
+      {sujet.confidentiel && <span title="Confidentiel">🔒 </span>}
       {sujet.impacte_ca && <span title="Impacte le CA">⚡ </span>}
       {sujet.titre}
       {sujet.parent_id && api.sujetById.get(sujet.parent_id) && (
@@ -3005,7 +3180,7 @@ function PrioInline({ sujet, reunionId }: { sujet: Sujet; reunionId?: string | n
   return (
     <PrioPicker
       small
-      required={isOpen(sujet) && sujet.nature !== 'info'}
+      required={prioriteAttendue(sujet)}
       value={sujet.priorite}
       onChange={async (v) => {
         await api.updateSujet(sujet, { priorite: v }, reunionId || null)

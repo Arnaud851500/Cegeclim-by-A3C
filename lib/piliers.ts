@@ -28,6 +28,8 @@ export type Reunion = {
   statut: 'preparation' | 'en_cours' | 'cloturee'
   synthese: string
   cloturee_le: string | null
+  /** (19/11/2026) Rédacteur : rédige et clôture la réunion. */
+  redacteur_id: string | null
   created_at: string
 }
 
@@ -38,7 +40,7 @@ export type Meteo = {
   mot: string
 }
 
-export type Nature = 'info' | 'question' | 'decision' | 'action' | 'projet'
+export type Nature = 'info' | 'expose' | 'question' | 'decision' | 'action' | 'projet'
 export type Statut = 'a_aborder' | 'a_planifier' | 'en_cours' | 'en_attente' | 'fait' | 'abandonne'
 export type Ressenti = 'irritant' | 'attendu' | 'changement' | 'neutre'
 export type ComStatut = 'a_preparer' | 'pret' | 'diffuse'
@@ -69,6 +71,10 @@ export type Sujet = {
   /** Action tirée d'un autre sujet (série d'actions saisie en réunion). */
   parent_id: string | null
   origine: Origine
+  /** (19/11/2026) Sujet confidentiel : pastille 🔒, exclu de la communication. */
+  confidentiel: boolean
+  /** (19/11/2026) Membre qui a mis le sujet à l'ordre du jour. */
+  propose_par: string | null
   created_by: string | null
   created_at: string
   updated_by: string | null
@@ -107,8 +113,9 @@ type Ref<K extends string> = { key: K; label: string; icon: string; help: string
 
 export const NATURES: Ref<Nature>[] = [
   { key: 'info', label: 'Pour info', icon: 'ℹ️', help: 'On partage, rien à décider.', color: '#5E8FB3' },
+  { key: 'expose', label: 'Sujet à exposer', icon: '🗣️', help: 'On présente un sujet au groupe.', color: '#2D6F86' },
   { key: 'question', label: 'Question', icon: '❓', help: 'On a besoin de l’avis du groupe.', color: '#C9A227' },
-  { key: 'decision', label: 'À décider', icon: '⚖️', help: 'Une décision est attendue.', color: '#C1683C' },
+  { key: 'decision', label: 'Décision à prendre', icon: '⚖️', help: 'Une décision est attendue.', color: '#C1683C' },
   { key: 'action', label: 'Action', icon: '🎯', help: 'Quelque chose à faire, avec un porteur.', color: '#4E7A2A' },
   { key: 'projet', label: 'Projet', icon: '🧱', help: 'Plusieurs étapes, dans la durée.', color: '#7A5EA8' },
 ]
@@ -222,6 +229,16 @@ export function fmtDateLong(iso: string | null | undefined) {
 export function fmtDateTime(ts: string | null | undefined) {
   if (!ts) return ''
   return new Date(ts).toLocaleString('fr-FR', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })
+}
+
+/** Pour info / sujet à exposer : ni porteur ni priorité exigés. */
+export function estInfo(n: Nature) {
+  return n === 'info' || n === 'expose'
+}
+
+/** Priorité attendue : sujet ouvert qui n'est pas une simple info. */
+export function prioriteAttendue(s: Sujet) {
+  return isOpen(s) && !estInfo(s.nature)
 }
 
 export function isOpen(s: Sujet) {
