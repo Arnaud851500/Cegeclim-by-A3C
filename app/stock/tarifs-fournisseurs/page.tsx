@@ -21,6 +21,15 @@
  * update_tarif_proposition, set_tarif_ligne_article, delete_tarif_proposition, search_tarif_articles ;
  * lecture des fichiers : lib/tarifsFournisseurs.ts ; extraction IA : /api/stock/tarifs/extraire.
  * Migration : supabase/migrations/20261119e_tarifs_fournisseurs.sql.
+ *
+ * ÉVOLUTION (19/11/2026, 10h) : le 1er dépôt (tarif Aspen 2027) avait été rattaché à CEGECLIM, cité en
+ * tête du fichier → 0 ligne appariée. Le fournisseur est désormais deviné d'abord par les références du
+ * fichier (tarif_deviner_fournisseur : fournisseur SAGE portant le plus de réf. fournisseur), et peut être
+ * changé sur une proposition déposée (bandeau de suggestion + champ Fournisseur) ; appariement « mêmes
+ * lettres et chiffres » (ES6 ↔ ES-6) ; filtre par défaut sur les lignes appariées (un tarif catalogue
+ * contient beaucoup d'articles non référencés chez CEGECLIM) ; « absents du fichier » limités aux articles
+ * portant une réf. fournisseur (hors articles techniques DIVERS, TRANSPORT, REGUL…).
+ * Migration : supabase/migrations/20261119h_tarifs_fournisseurs_appariement.sql.
  */
 
 import React, { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
@@ -79,6 +88,8 @@ type QRef = 'unitaire' | 'habituelle'
 type Vue = 'actuel' | 'propositions' | 'comparaison'
 
 type EtatLigne = 'hausse' | 'baisse' | 'stable' | 'nouveau' | 'sans_prix' | 'doublon' | 'ignoree'
+type Suggestion = { fournisseur: string; nom: string | null; nb: number; sur: number }
+const refObsolete = (r: string | null) => /^OBS_|OBSOL|OSOLETE|^SUPPR/i.test(r || '')
 type LigneComp = {
   l: LigneProp; art: Article | null; q: number; pa: number | null; pn: number | null; evol: number | null; vol: number
   masse: number; impact: number; etat: EtatLigne; gamme: string; pvCoef: number | null; margeAct: number | null; margeNew: number | null
@@ -149,7 +160,7 @@ const ETATS: Record<EtatLigne, { libelle: string; bg: string; fg: string }> = {
   hausse: { libelle: 'Hausse', bg: '#F8E4DC', fg: '#A3401C' },
   baisse: { libelle: 'Baisse', bg: '#E3F1E4', fg: '#2F6F33' },
   stable: { libelle: 'Stable', bg: '#EFECE5', fg: '#5F5A4E' },
-  nouveau: { libelle: 'Non trouvé SAGE', bg: '#E4EEF8', fg: '#2D5F8C' },
+  nouveau: { libelle: 'Hors réf. SAGE', bg: '#E4EEF8', fg: '#2D5F8C' },
   sans_prix: { libelle: 'Sans prix SAGE', bg: '#FCEFD9', fg: '#96600F' },
   doublon: { libelle: 'Doublon', bg: '#EFECE5', fg: '#8A8474' },
   ignoree: { libelle: 'Ignorée', bg: '#EFECE5', fg: '#8A8474' },
@@ -157,6 +168,7 @@ const ETATS: Record<EtatLigne, { libelle: string; bg: string; fg: string }> = {
 const APPARIEMENTS: Record<string, string> = {
   ref_fournisseur: 'réf. fournisseur SAGE',
   ref_obsolete: 'réf. fournisseur marquée obsolète dans SAGE',
+  ref_alnum: 'réf. fournisseur SAGE (ponctuation près)',
   reference: 'référence article SAGE',
   ean: 'code EAN',
   manuel: 'appariement manuel',
@@ -253,7 +265,8 @@ function comparer(d: Donnees, base: Base, qref: QRef): { lignes: LigneComp[]; ab
       margeNew: pv && pn !== null ? (pv - pn) / pv : null,
     }
   })
-  const absents = d.articles.filter((a) => a.du_fournisseur && !a.sommeil && !vus.has(a.reference))
+  // Absents : articles actifs du fournisseur portant une réf. fournisseur (hors articles techniques DIVERS, TRANSPORT, REGUL…)
+  const absents = d.articles.filter((a) => a.du_fournisseur && !a.sommeil && !!(a.ref_fournisseur || '').trim() && !vus.has(a.reference))
   return { lignes, absents }
 }
 
@@ -462,7 +475,9 @@ function TarifsFournisseurs() {
 
   const [base, setBase] = useState<Base>('ventes')
   const [qref, setQref] = useState<QRef>('unitaire')
-  const [filtre, setFiltre] = useState<'tous' | EtatLigne | 'absents' | 'fortes'>('tous')
+  const [filtre, setFiltre] = useState<'tous' | 'apparies' | EtatLigne | 'absents' | 'fortes'>('apparies')
+  const [suggestion, setSuggestion] = useState<Suggestion | null>(null)
+  const [saisieFrsProp, setSaisieFrsProp] = useState('')
   const [seuilFort, setSeuilFort] = useState(5)
   const [recherche, setRecherche] = useState('')
   const [tri, setTri] = useState<{ col: string; sens: 1 | -1 }>({ col: 'impact', sens: -1 })
@@ -512,6 +527,20 @@ function TarifsFournisseurs() {
     if (frsUrl) void charger(frsUrl, propUrl)
     else setDonnees(null)
   }, [frsUrl, propUrl, charger])
+
+  // Fournisseur suggéré par les références d'une proposition (bandeau si différent)
+  useEffect(() => {
+    const prop = donnees?.proposition
+    if (!prop || !donnees?.lignes.length) return
+    let annule = false
+    const refs = donnees.lignes.map((l) => l.ref_fournisseur).filter((r): r is string => !!r).slice(0, 3000)
+    void supabase.rpc('tarif_deviner_fournisseur', { p_refs: refs }).then(({ data }) => {
+      if (annule) return
+      const top = ((data || []) as Suggestion[])[0] || null
+      setSuggestion(top && top.fournisseur !== prop.fournisseur && top.nb >= 3 ? top : null)
+    })
+    return () => { annule = true }
+  }, [donnees?.proposition, donnees?.lignes])
 
   useEffect(() => {
     const f = liste.find((x) => x.fournisseur === frsUrl)
@@ -573,7 +602,15 @@ function TarifsFournisseurs() {
         textesInfo = textesClasseur(grilles, grilles[feuille].feuille)
       }
       const infos = infosFichier(textesInfo)
-      const devine = devinerFournisseur([f.name, ...textesInfo], liste)
+      // Fournisseur : d'abord celui qui porte le plus de références du fichier dans SAGE, sinon par le nom.
+      let devine: string | null = null
+      const refs = lireLignes(grilles[feuille].lignes, mapping).map((l) => l.ref_fournisseur).filter((r): r is string => !!r).slice(0, 3000)
+      if (refs.length) {
+        const { data: sug } = await supabase.rpc('tarif_deviner_fournisseur', { p_refs: refs })
+        const top = ((sug || []) as Suggestion[])[0]
+        if (top && top.nb >= 3) devine = top.fournisseur
+      }
+      if (!devine) devine = devinerFournisseur([f.name, ...textesInfo], liste)
       const frs = devine || frsUrl || ''
       const annee = infos.date_effet ? infos.date_effet.slice(0, 4) : String(new Date().getFullYear() + 1)
       setImp({
@@ -699,6 +736,19 @@ function TarifsFournisseurs() {
       propositions: d.propositions.map((x) => (x.id === id ? ({ ...x, ...p } as Proposition) : x)),
     } : d)
   }
+  async function changerFournisseurProposition(p: Proposition, code: string) {
+    if (!code || code === p.fournisseur) return
+    setOccupe('Changement de fournisseur et nouvel appariement…')
+    const { error } = await supabase.rpc('update_tarif_proposition', { p_id: p.id, p: { fournisseur: code } })
+    setOccupe(null)
+    if (error) { setErreur(messageErreur(error)); return }
+    setSuggestion(null)
+    dernierResume.current = ''
+    const { data: l2 } = await supabase.rpc('get_tarifs_fournisseurs_liste')
+    if (l2) setListe(l2 as FournisseurListe[])
+    if (code === frsUrl) await charger(frsUrl, p.id)
+    else naviguer(code, p.id, 'comparaison')
+  }
   async function supprimerProposition(p: Proposition) {
     if (!window.confirm(`Supprimer la proposition « ${p.libelle || p.fichier_nom} » du ${fmtDate(p.cree_le)} ?`)) return
     const { data, error } = await supabase.rpc('delete_tarif_proposition', { p_id: p.id })
@@ -726,6 +776,7 @@ function TarifsFournisseurs() {
     const q = recherche.trim().toUpperCase()
     let l = comp.lignes.filter((x) => {
       if (filtre === 'fortes') { if (x.evol === null || Math.abs(x.evol) * 100 < seuilFort || x.etat === 'doublon' || x.etat === 'ignoree') return false }
+      else if (filtre === 'apparies') { if (!x.art) return false }
       else if (filtre !== 'tous' && filtre !== 'absents' && x.etat !== filtre) return false
       if (q && ![x.l.ref_fournisseur, x.l.designation, x.art?.reference, x.art?.designation, x.gamme].some((s) => (s || '').toUpperCase().includes(q))) return false
       return true
@@ -1020,6 +1071,20 @@ function TarifsFournisseurs() {
                     </div>
                     {!!p.conditions?.length && <div className="mt-1 text-[11.5px] text-[#5F5A4E]">{p.conditions.join(' · ')}</div>}
                   </div>
+                  <label className="text-[11px] text-[#8A8474]">Fournisseur SAGE<br />
+                    <input list="tarifs-frs" value={saisieFrsProp || `${p.fournisseur} — ${p.fournisseur_nom || donnees.nom || ''}`}
+                      onFocus={() => setSaisieFrsProp(`${p.fournisseur} — ${p.fournisseur_nom || donnees.nom || ''}`)}
+                      onChange={(e) => {
+                        setSaisieFrsProp(e.target.value)
+                        const code = e.target.value.split(' — ')[0].trim().toUpperCase()
+                        if (code !== p.fournisseur && liste.some((x) => x.fournisseur === code)) {
+                          setSaisieFrsProp('')
+                          if (window.confirm(`Rattacher cette proposition à ${e.target.value} ? L’appariement aux articles SAGE sera refait.`)) void changerFournisseurProposition(p, code)
+                        }
+                      }}
+                      onBlur={() => setSaisieFrsProp('')}
+                      className={`${ctl} w-[240px]`} />
+                  </label>
                   <label className="text-[11px] text-[#8A8474]">Effet<br />
                     <input type="date" defaultValue={p.date_effet || ''} key={`de-${p.id}`} onBlur={(e) => { if (e.target.value !== (p.date_effet || '')) void majProposition(p.id, { date_effet: e.target.value }) }} className={ctl} />
                   </label>
@@ -1041,19 +1106,25 @@ function TarifsFournisseurs() {
                   </div>
                 </section>
 
+                {suggestion && (
+                  <div className="flex flex-wrap items-center gap-3 rounded-xl border border-[#E9B9A6] bg-[#FBEDE7] px-4 py-2 text-[12.5px] text-[#A3401C]">
+                    <span>⚠ Les références de ce fichier correspondent à <b>{suggestion.nom || suggestion.fournisseur}</b> ({suggestion.fournisseur}) : {fmtNum(suggestion.nb)} réf. fournisseur sur {fmtNum(suggestion.sur)} connues dans SAGE, contre {fmtNum(syn.nbApparies)} appariées ici.</span>
+                    <button className={btnFonce} onClick={() => void changerFournisseurProposition(p, suggestion.fournisseur)}>Rattacher à {suggestion.nom || suggestion.fournisseur}</button>
+                  </div>
+                )}
                 <section className="grid grid-cols-2 gap-2 md:grid-cols-4 xl:grid-cols-8">
                   <Kpi label="Évolution pondérée" value={fmtPct(syn.evol)} color={couleurEvol(syn.evol)} sub={`moyenne simple ${fmtPct(syn.evolSimple)}`} />
                   <Kpi label="Impact annuel" value={fmtEur(syn.impact, true)} color={couleurEvol(syn.impact)} sub={libelleBase} />
                   <Kpi label="Masse d’achat" value={fmtEur(syn.masse)} sub={`→ ${fmtEur(syn.masse + syn.impact)} au nouveau tarif`} />
                   <Kpi label="Marge si PV inchangé" value={syn.margeNew !== null ? fmtPct(syn.margeNew, 1, false) : '—'}
                     sub={syn.margeAct !== null && syn.margeNew !== null ? `contre ${fmtPct(syn.margeAct, 1, false)} (${fmtNum((syn.margeNew - syn.margeAct) * 100, 1)} pt)` : 'PV fiche article'} />
-                  <Kpi label="Hausses" value={fmtNum(syn.nbHausses)} color="#A3401C" onClick={() => setFiltre(filtre === 'hausse' ? 'tous' : 'hausse')} actif={filtre === 'hausse'} sub={`${fmtNum(syn.nbStables)} stables`} />
-                  <Kpi label="Baisses" value={fmtNum(syn.nbBaisses)} color="#2F6F33" onClick={() => setFiltre(filtre === 'baisse' ? 'tous' : 'baisse')} actif={filtre === 'baisse'} />
-                  <Kpi label="Non trouvées dans SAGE" value={fmtNum(syn.nbNouveaux)} color={syn.nbNouveaux ? '#2D5F8C' : undefined}
-                    sub={`${fmtNum(syn.nbApparies)} / ${fmtNum(syn.nbLignes)} lignes appariées`} onClick={() => setFiltre(filtre === 'nouveau' ? 'tous' : 'nouveau')} actif={filtre === 'nouveau'} />
+                  <Kpi label="Hausses" value={fmtNum(syn.nbHausses)} color="#A3401C" onClick={() => setFiltre(filtre === 'hausse' ? 'apparies' : 'hausse')} actif={filtre === 'hausse'} sub={`${fmtNum(syn.nbStables)} stables`} />
+                  <Kpi label="Baisses" value={fmtNum(syn.nbBaisses)} color="#2F6F33" onClick={() => setFiltre(filtre === 'baisse' ? 'apparies' : 'baisse')} actif={filtre === 'baisse'} />
+                  <Kpi label="Lignes appariées" value={`${fmtNum(syn.nbApparies)} / ${fmtNum(syn.nbLignes)}`} color={syn.nbApparies ? '#111820' : '#A3401C'}
+                    sub={`${fmtNum(syn.nbNouveaux)} hors référentiel SAGE (clic)`} onClick={() => setFiltre(filtre === 'nouveau' ? 'apparies' : 'nouveau')} actif={filtre === 'nouveau'} />
                   <Kpi label="Absents du fichier" value={fmtNum(comp.absents.length)} color={comp.absents.length ? '#96600F' : undefined}
                     sub={`articles SAGE actifs · ${fmtEur(comp.absents.reduce((s, a) => s + volume(a, base) * n0(a.prix_net), 0))}/an`}
-                    onClick={() => setFiltre(filtre === 'absents' ? 'tous' : 'absents')} actif={filtre === 'absents'} />
+                    onClick={() => setFiltre(filtre === 'absents' ? 'apparies' : 'absents')} actif={filtre === 'absents'} />
                 </section>
 
                 {parGamme.length > 1 && (
@@ -1078,12 +1149,13 @@ function TarifsFournisseurs() {
                   <div className="flex flex-wrap items-center gap-2 border-b border-[#EFECE5] px-3 py-2">
                     <input value={recherche} onChange={(e) => setRecherche(e.target.value)} placeholder="Rechercher (réf., désignation, gamme)…" className={`${ctl} w-[300px]`} />
                     <select value={filtre} onChange={(e) => setFiltre(e.target.value as typeof filtre)} className={ctl}>
-                      <option value="tous">Toutes les lignes</option>
+                      <option value="apparies">Lignes appariées à un article SAGE</option>
+                      <option value="tous">Toutes les lignes du fichier</option>
                       <option value="hausse">Hausses</option>
                       <option value="baisse">Baisses</option>
                       <option value="stable">Stables</option>
                       <option value="fortes">Écart supérieur à…</option>
-                      <option value="nouveau">Non trouvées dans SAGE</option>
+                      <option value="nouveau">Hors référentiel SAGE</option>
                       <option value="sans_prix">Sans prix SAGE</option>
                       <option value="doublon">Doublons</option>
                       <option value="ignoree">Ignorées</option>
@@ -1103,7 +1175,7 @@ function TarifsFournisseurs() {
                         <tbody>
                           {[...comp.absents].sort((a, b) => volume(b, base) * n0(b.prix_net) - volume(a, base) * n0(a.prix_net)).map((a) => (
                             <tr key={a.reference} className="border-t border-[#EFECE5]">
-                              <td className="px-2 py-1 font-bold">{a.reference}</td><td className="px-2 py-1">{a.designation}</td><td className="px-2 py-1 text-[#5F5A4E]">{a.ref_fournisseur || '—'}</td>
+                              <td className="px-2 py-1 font-bold">{a.reference}</td><td className="px-2 py-1">{a.designation}</td><td className="px-2 py-1 text-[#5F5A4E]">{a.ref_fournisseur || '—'}{refObsolete(a.ref_fournisseur) && <span className="ml-1 text-[10px] font-bold text-[#96600F]">marquée obsolète</span>}</td>
                               <td className="px-2 py-1 text-right">{fmtPrix(a.prix_net)}</td><td className="px-2 py-1 text-right">{fmtNum(a.qte_ventes_12m)}</td><td className="px-2 py-1 text-right">{fmtNum(a.qte_achats_12m)}</td>
                               <td className="px-2 py-1 text-right font-bold">{fmtEur(volume(a, base) * n0(a.prix_net))}</td>
                             </tr>

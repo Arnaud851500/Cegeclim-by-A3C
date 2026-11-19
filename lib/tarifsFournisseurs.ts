@@ -454,6 +454,8 @@ export function devinerFournisseur(textes: string[], fournisseurs: { fournisseur
   for (const f of fournisseurs) {
     const nom = sansAccents(f.nom || '').replace(/[^a-z0-9]+/g, ' ').trim()
     if (nom.length < 4) continue
+    // Notre propre société (« SOCIETE : CEGECLIM » en tête des tarifs) n'est jamais le fournisseur.
+    if (/\b(cegeclim|a3c)\b/.test(nom)) continue
     const mots = nom.split(' ').filter((m) => m.length >= 4 && !['france', 'group', 'groupe', 'societe', 'distribution', 'industrie', 'industries'].includes(m))
     if (!mots.length) continue
     let score = 0
