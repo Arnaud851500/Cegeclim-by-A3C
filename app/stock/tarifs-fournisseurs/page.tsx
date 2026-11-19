@@ -41,6 +41,11 @@
  * vendu sur 12 mois (sans mouvement, l'évolution du tarif est sans conséquence) ; une proposition dont le
  * fournisseur diffère de celui de l'URL recharge la page sur son fournisseur (sinon prix SAGE vides :
  * cas de la proposition Aspen corrigée en base alors que la page était ouverte sur CEGECLIM).
+ *
+ * ÉVOLUTION (19/11/2026, 10h45) : retour à la liste des fournisseurs (bouton « ← Fournisseurs »), liste
+ * complète en tableau triable par code, désignation, masse d'achat ou propositions, avec recherche ;
+ * périmètre des volumes Tous / FMS / Agences / FMS + Agences séparés (ventes : dépôt FMS de la facture ;
+ * achats : CDF livrées à FMS ; agences = total − FMS). Migration 20261119l_tarifs_volumes_fms_agences.sql.
  */
 
 import React, { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
@@ -72,6 +77,7 @@ type Article = {
   coef: number | null; prix_vente: number | null; paliers: PalierSage[] | null
   qte_ventes_12m: number; ca_ventes_12m: number; marge_ventes_12m: number; nb_clients_12m: number
   qte_achats_12m: number; nb_lignes_cdf_12m: number; qte_moy_ligne_cdf: number | null
+  qte_ventes_12m_fms?: number; qte_achats_12m_fms?: number; nb_lignes_cdf_12m_fms?: number
 }
 type Statut = 'a_analyser' | 'en_negociation' | 'acceptee' | 'refusee' | 'archivee'
 type Resume = {
@@ -96,6 +102,13 @@ type Donnees = {
   articles: Article[]; propositions: Proposition[]; proposition: Proposition | null; lignes: LigneProp[]
 }
 type Base = 'ventes' | 'achats'
+type Perim = 'tous' | 'fms' | 'agences' | 'split'
+const PERIMS: [Perim, string, string][] = [
+  ['tous', 'Tous', 'Volumes tous dépôts'],
+  ['fms', 'FMS', 'Ventes du dépôt FMS / achats livrés à FMS'],
+  ['agences', 'Agences', 'Ventes des dépôts agences / achats livrés en agence (total − FMS)'],
+  ['split', 'FMS | Agences', 'Total, avec FMS et agences en colonnes séparées'],
+]
 type QRef = 'unitaire' | 'habituelle'
 type Vue = 'actuel' | 'propositions' | 'comparaison'
 
@@ -103,6 +116,7 @@ type EtatLigne = 'hausse' | 'baisse' | 'stable' | 'nouveau' | 'sans_prix' | 'dou
 type Suggestion = { fournisseur: string; nom: string | null; nb: number; sur: number }
 const refObsolete = (r: string | null) => /^OBS_|OBSOL|OSOLETE|^SUPPR/i.test(r || '')
 type LigneComp = {
+  volFms: number; volAg: number; impactFms: number; impactAg: number;
   l: LigneProp; conv: number; paliersSage: Palier[]; suspect: boolean; art: Article | null; q: number; pa: number | null; pn: number | null; evol: number | null; vol: number
   masse: number; impact: number; etat: EtatLigne; gamme: string; pvCoef: number | null; margeAct: number | null; margeNew: number | null
 }
@@ -243,12 +257,19 @@ function quantiteReference(art: Article | null, qref: QRef): number {
 function avecMouvement(a: Article): boolean {
   return n0(a.qte_achats_12m) > 0 || n0(a.qte_ventes_12m) > 0
 }
-function volume(art: Article | null, base: Base): number {
-  if (!art) return 0
-  return Math.max(0, base === 'ventes' ? n0(art.qte_ventes_12m) : n0(art.qte_achats_12m))
+/** Volumes 12 mois d'un article : total, FMS et agences (= total − FMS). */
+function volumes(art: Article | null, base: Base): { tot: number; fms: number; ag: number } {
+  if (!art) return { tot: 0, fms: 0, ag: 0 }
+  const tot = Math.max(0, base === 'ventes' ? n0(art.qte_ventes_12m) : n0(art.qte_achats_12m))
+  const fms = Math.min(tot, Math.max(0, base === 'ventes' ? n0(art.qte_ventes_12m_fms) : n0(art.qte_achats_12m_fms)))
+  return { tot, fms, ag: Math.max(0, tot - fms) }
+}
+function volume(art: Article | null, base: Base, perim: Perim = 'tous'): number {
+  const v = volumes(art, base)
+  return perim === 'fms' ? v.fms : perim === 'agences' ? v.ag : v.tot
 }
 
-function comparer(d: Donnees, base: Base, qref: QRef): { lignes: LigneComp[]; absents: Article[] } {
+function comparer(d: Donnees, base: Base, qref: QRef, perim: Perim): { lignes: LigneComp[]; absents: Article[] } {
   const parRef = new Map(d.articles.map((a) => [a.reference, a]))
   const vus = new Set<string>()
   const lignes: LigneComp[] = d.lignes.map((l) => {
@@ -259,7 +280,8 @@ function comparer(d: Donnees, base: Base, qref: QRef): { lignes: LigneComp[]; ab
     const paliersSage = (l.paliers || []).map((x) => ({ qte: x.qte * conv, prix: x.prix / conv }))
     const pa = art ? prixSage(art.prix_net, art.paliers, q) : null
     const pn = prixPalier(paliersSage, q)
-    const vol = volume(art, base)
+    const vols = volumes(art, base)
+    const vol = volume(art, base, perim)
     let etat: EtatLigne
     if (l.ignoree) etat = 'ignoree'
     else if (!art) etat = 'nouveau'
@@ -274,6 +296,8 @@ function comparer(d: Donnees, base: Base, qref: QRef): { lignes: LigneComp[]; ab
     const evol = pa && pn ? pn / pa - 1 : null
     const pv = art?.prix_vente ?? null
     return {
+      volFms: vols.fms, volAg: vols.ag,
+      impactFms: compte && pa && pn ? (pn - pa) * vols.fms : 0, impactAg: compte && pa && pn ? (pn - pa) * vols.ag : 0,
       l, conv, paliersSage, suspect: evol !== null && Math.abs(evol) > 0.3, art, q, pa, pn, evol, vol,
       masse: compte && pa ? pa * vol : 0,
       impact: compte && pa && pn ? (pn - pa) * vol : 0,
@@ -333,7 +357,7 @@ function synthese(lignes: LigneComp[]): Synthese {
 // Export Excel
 // ─────────────────────────────────────────────────────────────────────────
 
-async function exporterExcel(d: Donnees, comp: { lignes: LigneComp[]; absents: Article[] }, base: Base, qref: QRef) {
+async function exporterExcel(d: Donnees, comp: { lignes: LigneComp[]; absents: Article[] }, base: Base, qref: QRef, perim: Perim) {
   const p = d.proposition
   const wb = new ExcelJS.Workbook()
   wb.creator = 'Compagnon CEGECLIM'
@@ -357,6 +381,7 @@ async function exporterExcel(d: Donnees, comp: { lignes: LigneComp[]; absents: A
     ['Fichier', p?.fichier_nom || ''],
     ['Date d’effet', p?.date_effet ? fmtDate(p.date_effet) : ''],
     ['Volume retenu', base === 'ventes' ? `Ventes facturées SAGE ${fmtDate(d.periode_volumes.du)} → ${fmtDate(d.periode_volumes.au)}` : `Achats reçus BLG 12 mois`],
+    ['Périmètre des volumes', PERIMS.find((x) => x[0] === perim)?.[2] || ''],
     ['Quantité de comparaison', qref === 'unitaire' ? 'Unitaire (1er palier)' : 'Quantité habituelle par ligne de commande fournisseur'],
     ['Lignes du fichier', s.nbLignes],
     ['Appariées à un article SAGE', s.nbApparies],
@@ -400,7 +425,9 @@ async function exporterExcel(d: Donnees, comp: { lignes: LigneComp[]; absents: A
     { header: 'Nouveau prix', key: 'pn', width: 12, style: { numFmt: euro } }, { header: 'Évolution', key: 'ev', width: 10, style: { numFmt: pct } },
     { header: 'Paliers actuels (SAGE)', key: 'ps', width: 30 }, { header: 'Nouveaux paliers', key: 'pnv', width: 34 },
     { header: 'Volume 12 mois', key: 'vol', width: 10 }, { header: 'Masse actuelle', key: 'masse', width: 13, style: { numFmt: euro0 } },
-    { header: 'Impact annuel', key: 'imp', width: 13, style: { numFmt: euro0 } }, { header: 'Coef.', key: 'coef', width: 7 },
+    { header: 'Impact annuel', key: 'imp', width: 13, style: { numFmt: euro0 } },
+    { header: 'Volume FMS', key: 'vf', width: 10 }, { header: 'Impact FMS', key: 'if', width: 12, style: { numFmt: euro0 } },
+    { header: 'Volume agences', key: 'va', width: 10 }, { header: 'Impact agences', key: 'ia', width: 12, style: { numFmt: euro0 } }, { header: 'Coef.', key: 'coef', width: 7 },
     { header: 'PV fiche', key: 'pv', width: 11, style: { numFmt: euro } }, { header: 'PV à coef. constant', key: 'pvc', width: 13, style: { numFmt: euro } },
     { header: 'Marge actuelle', key: 'ma', width: 10, style: { numFmt: '0.0%' } }, { header: 'Marge si PV inchangé', key: 'mn', width: 12, style: { numFmt: '0.0%' } },
     { header: 'Prix public', key: 'ppub', width: 11, style: { numFmt: euro } }, { header: 'Appariement', key: 'app', width: 24 },
@@ -411,7 +438,7 @@ async function exporterExcel(d: Donnees, comp: { lignes: LigneComp[]; absents: A
       gamme: x.gamme, etat: ETATS[x.etat].libelle, q: x.q, pa: x.pa, pn: x.pn, ev: x.evol,
       ps: (x.art?.paliers || []).map((p, i) => `${i === 0 ? '≤' : '≥'}${i === 0 ? p.a : n0(p.de) + 1} : ${fmtNum(p.prix, 2)}`).join(' · '),
       pnv: (x.l.paliers || []).map((p) => `≥${p.qte} : ${fmtNum(p.prix, 2)}`).join(' · ') + (x.conv !== 1 ? ` (1 unité tarif = ${x.conv} unités SAGE)` : ''),
-      vol: x.vol, masse: x.masse, imp: x.impact, coef: x.art?.coef, pv: x.art?.prix_vente, pvc: x.pvCoef,
+      vol: x.vol, masse: x.masse, imp: x.impact, vf: x.volFms, if: x.impactFms, va: x.volAg, ia: x.impactAg, coef: x.art?.coef, pv: x.art?.prix_vente, pvc: x.pvCoef,
       ma: x.margeAct, mn: x.margeNew, ppub: x.l.prix_public, app: x.l.appariement ? APPARIEMENTS[x.l.appariement] || x.l.appariement : '',
     })
   }
@@ -423,8 +450,8 @@ async function exporterExcel(d: Donnees, comp: { lignes: LigneComp[]; absents: A
     { header: 'Prix net actuel', key: 'pa', width: 13, style: { numFmt: euro } }, { header: 'Ventes 12 mois (qté)', key: 'qv', width: 12 },
     { header: 'Achats reçus 12 mois (qté)', key: 'qa', width: 12 }, { header: 'Masse actuelle', key: 'm', width: 13, style: { numFmt: euro0 } },
   ]
-  for (const a of comp.absents.sort((x, y) => volume(y, base) * n0(y.prix_net) - volume(x, base) * n0(x.prix_net))) {
-    wa.addRow({ ref: a.reference, des: a.designation, rf: a.ref_fournisseur, pa: a.prix_net, qv: a.qte_ventes_12m, qa: a.qte_achats_12m, m: volume(a, base) * n0(a.prix_net) })
+  for (const a of comp.absents.sort((x, y) => volume(y, base, perim) * n0(y.prix_net) - volume(x, base, perim) * n0(x.prix_net))) {
+    wa.addRow({ ref: a.reference, des: a.designation, rf: a.ref_fournisseur, pa: a.prix_net, qv: a.qte_ventes_12m, qa: a.qte_achats_12m, m: volume(a, base, perim) * n0(a.prix_net) })
   }
   entete(wa)
 
@@ -449,7 +476,10 @@ async function exporterTarifActuel(d: Donnees, articles: Article[]) {
     { header: 'Date d’application', key: 'dap', width: 12 }, { header: 'Dernier prix d’achat', key: 'dpa', width: 12, style: { numFmt: euro } },
     { header: 'Coef.', key: 'coef', width: 7 }, { header: 'PV fiche', key: 'pv', width: 11, style: { numFmt: euro } },
     { header: 'Marge théorique', key: 'mt', width: 10, style: { numFmt: '0.0%' } }, { header: 'Ventes 12 mois (qté)', key: 'qv', width: 11 },
-    { header: 'Achats reçus 12 mois (qté)', key: 'qa', width: 11 }, { header: 'Masse d’achat 12 mois', key: 'm', width: 13, style: { numFmt: '#,##0 "€"' } },
+    { header: 'Achats reçus 12 mois (qté)', key: 'qa', width: 11 },
+    { header: 'Ventes FMS', key: 'vf', width: 10 }, { header: 'Ventes agences', key: 'vag', width: 10 },
+    { header: 'Achats livrés FMS', key: 'af', width: 10 }, { header: 'Achats livrés agences', key: 'aag', width: 10 },
+    { header: 'Masse d’achat 12 mois', key: 'm', width: 13, style: { numFmt: '#,##0 "€"' } },
   ]
   for (const a of articles) {
     ws.addRow({
@@ -457,7 +487,9 @@ async function exporterTarifActuel(d: Donnees, articles: Article[]) {
       pn: a.prix_net, pal: (a.paliers || []).map((p, i) => `${i === 0 ? '≤' : '≥'}${i === 0 ? p.a : n0(p.de) + 1} : ${fmtNum(p.prix, 2)}`).join(' · '),
       pp: a.prix_nouveau_sage, dap: a.date_application_sage ? fmtDate(a.date_application_sage) : '', dpa: a.dernier_prix_achat, coef: a.coef,
       pv: a.prix_vente, mt: a.prix_vente && a.prix_net ? (a.prix_vente - a.prix_net) / a.prix_vente : null,
-      qv: a.qte_ventes_12m, qa: a.qte_achats_12m, m: Math.max(0, a.qte_ventes_12m) * n0(a.prix_net),
+      qv: a.qte_ventes_12m, qa: a.qte_achats_12m,
+      vf: volumes(a, 'ventes').fms, vag: volumes(a, 'ventes').ag, af: volumes(a, 'achats').fms, aag: volumes(a, 'achats').ag,
+      m: Math.max(0, a.qte_ventes_12m) * n0(a.prix_net),
     })
   }
   const h = ws.getRow(1)
@@ -493,6 +525,9 @@ function TarifsFournisseurs() {
   const [saisieFrs, setSaisieFrs] = useState('')
 
   const [base, setBase] = useState<Base>('ventes')
+  const [perim, setPerim] = useState<Perim>('tous')
+  const [rechFrs, setRechFrs] = useState('')
+  const [triFrs, setTriFrs] = useState<{ col: 'code' | 'nom' | 'masse' | 'prop'; sens: 1 | -1 }>({ col: 'nom', sens: 1 })
   const [qref, setQref] = useState<QRef>('unitaire')
   const [filtre, setFiltre] = useState<'tous' | 'apparies' | 'actifs' | EtatLigne | 'absents' | 'fortes' | 'suspects'>('actifs')
   const [suggestion, setSuggestion] = useState<Suggestion | null>(null)
@@ -574,7 +609,7 @@ function TarifsFournisseurs() {
   }, [frsUrl, liste, donnees?.nom])
 
   // Comparaison
-  const comp = useMemo(() => (donnees?.proposition ? comparer(donnees, base, qref) : null), [donnees, base, qref])
+  const comp = useMemo(() => (donnees?.proposition ? comparer(donnees, base, qref, perim) : null), [donnees, base, qref, perim])
   const syn = useMemo(() => (comp ? synthese(comp.lignes) : null), [comp])
 
   // Mémorise la synthèse sur la proposition (liste des propositions)
@@ -860,21 +895,21 @@ function TarifsFournisseurs() {
       .filter((a) => voirSommeil || !a.sommeil)
       .filter((a) => !seulementVentes || a.qte_ventes_12m > 0 || a.qte_achats_12m > 0)
       .filter((a) => !q || [a.reference, a.designation, a.ref_fournisseur, a.famille].some((s) => (s || '').toUpperCase().includes(q)))
-      .sort((a, b) => volume(b, base) * n0(b.prix_net) - volume(a, base) * n0(a.prix_net) || a.reference.localeCompare(b.reference))
-  }, [donnees, recherche, voirSommeil, seulementVentes, base])
+      .sort((a, b) => volume(b, base, perim) * n0(b.prix_net) - volume(a, base, perim) * n0(a.prix_net) || a.reference.localeCompare(b.reference))
+  }, [donnees, recherche, voirSommeil, seulementVentes, base, perim])
 
   const synActuel = useMemo(() => {
     const s = { nb: 0, masse: 0, paliers: 0, programme: 0, pvVol: 0, paVol: 0 }
     for (const a of articlesActuels) {
       s.nb++
-      const v = volume(a, base)
+      const v = volume(a, base, perim)
       s.masse += v * n0(a.prix_net)
       if (a.paliers?.length) s.paliers++
       if (a.prix_nouveau_sage) s.programme++
       if (a.prix_vente && a.prix_net) { s.pvVol += v * a.prix_vente; s.paVol += v * a.prix_net }
     }
     return s
-  }, [articlesActuels, base])
+  }, [articlesActuels, base, perim])
 
   const enTeteTri = (col: string, label: string, cls = '') => (
     <th className={`cursor-pointer select-none px-2 py-1.5 ${cls}`} onClick={() => setTri((t) => ({ col, sens: t.col === col ? (t.sens === 1 ? -1 : 1) : -1 }))}>
@@ -882,9 +917,20 @@ function TarifsFournisseurs() {
     </th>
   )
 
+  const fournisseursAffiches = useMemo(() => {
+    const q = rechFrs.trim().toUpperCase()
+    const l = liste.filter((f) => !q || f.fournisseur.includes(q) || (f.nom || '').toUpperCase().includes(q))
+    const v = (f: FournisseurListe): number | string =>
+      triFrs.col === 'code' ? f.fournisseur : triFrs.col === 'nom' ? (f.nom || f.fournisseur).toUpperCase() : triFrs.col === 'masse' ? n0(f.masse_achat_12m) : n0(f.nb_propositions)
+    return [...l].sort((a, b) => {
+      const x = v(a)
+      const y = v(b)
+      return (typeof x === 'string' ? x.localeCompare(String(y), 'fr') : x - (y as number)) * triFrs.sens
+    })
+  }, [liste, rechFrs, triFrs])
   const fournisseurCourant = liste.find((x) => x.fournisseur === frsUrl)
   const p = donnees?.proposition || null
-  const libelleBase = base === 'ventes' ? 'ventes facturées SAGE 12 mois' : 'achats reçus 12 mois (CDF BLG)'
+  const libelleBase = (base === 'ventes' ? 'ventes facturées SAGE 12 mois' : 'achats reçus 12 mois (CDF BLG)') + (perim === 'fms' ? ' · FMS' : perim === 'agences' ? ' · agences' : '')
 
   // ─────────────────────────────────────────────────────────────────────
   return (
@@ -937,20 +983,37 @@ function TarifsFournisseurs() {
         )}
 
         {!frsUrl && !imp && (
-          <section className="rounded-xl border border-[#E5E1D8] bg-white p-4">
-            <h2 className="mb-2 text-[14px] font-bold">Choisissez un fournisseur, ou déposez directement un fichier de tarif</h2>
-            <p className="mb-3 text-[12px] text-[#8A8474]">Le fournisseur est reconnu dans le fichier quand c’est possible. Fournisseurs classés par proposition la plus récente, puis par masse d’achat annuelle (ventes 12 mois × prix net SAGE).</p>
-            <div className="grid grid-cols-1 gap-1.5 md:grid-cols-2 xl:grid-cols-4">
-              {liste.filter((f) => f.masse_achat_12m > 0 || f.nb_propositions > 0).slice(0, 40).map((f) => (
-                <button key={f.fournisseur} onClick={() => naviguer(f.fournisseur, null, 'actuel')}
-                  className="flex items-center justify-between gap-2 rounded-lg border border-[#E5E1D8] px-3 py-2 text-left hover:border-[#B4761A]">
-                  <span className="min-w-0">
-                    <span className="block truncate text-[12.5px] font-bold">{f.nom || f.fournisseur}</span>
-                    <span className="block text-[11px] text-[#8A8474]">{f.fournisseur} · {f.nb_actifs} art. actifs{f.nb_articles_paliers ? ` · ${f.nb_articles_paliers} à paliers` : ''}{f.nb_propositions ? ` · ${f.nb_propositions} prop.` : ''}</span>
-                  </span>
-                  <span className="shrink-0 text-[12px] font-bold">{fmtEur(f.masse_achat_12m)}</span>
-                </button>
-              ))}
+          <section className="rounded-xl border border-[#E5E1D8] bg-white">
+            <div className="flex flex-wrap items-center gap-2 border-b border-[#EFECE5] px-3 py-2">
+              <h2 className="text-[14px] font-bold">Fournisseurs</h2>
+              <input value={rechFrs} onChange={(e) => setRechFrs(e.target.value)} placeholder="Rechercher (code ou nom)…" className={`${ctl} w-[280px]`} />
+              <span className="text-[11.5px] text-[#8A8474]">{fmtNum(fournisseursAffiches.length)} fournisseur(s) ayant des articles dans SAGE — cliquez un en-tête pour trier ; ou déposez directement un fichier de tarif (le fournisseur est reconnu par ses références).</span>
+            </div>
+            <div className="max-h-[75vh] overflow-auto">
+              <table className="w-full border-collapse text-[12.5px]">
+                <thead className="sticky top-0 z-10 bg-[#FAF9F6] text-left text-[10.5px] uppercase tracking-wide text-[#8A8474]">
+                  <tr>
+                    {([['code', 'Code', ''], ['nom', 'Désignation', '']] as const).map(([c, l]) => (
+                      <th key={c} className="cursor-pointer select-none px-3 py-1.5" onClick={() => setTriFrs((t) => ({ col: c, sens: t.col === c ? (t.sens === 1 ? -1 : 1) : 1 }))}>{l}{triFrs.col === c ? (triFrs.sens === 1 ? ' ↑' : ' ↓') : ''}</th>
+                    ))}
+                    <th className="px-3 py-1.5 text-right">Articles actifs</th><th className="px-3 py-1.5 text-right">À paliers</th>
+                    <th className="cursor-pointer select-none px-3 py-1.5 text-right" onClick={() => setTriFrs((t) => ({ col: 'masse', sens: t.col === 'masse' ? (t.sens === 1 ? -1 : 1) : -1 }))}>Masse d’achat 12 m{triFrs.col === 'masse' ? (triFrs.sens === 1 ? ' ↑' : ' ↓') : ''}</th>
+                    <th className="cursor-pointer select-none px-3 py-1.5 text-right" onClick={() => setTriFrs((t) => ({ col: 'prop', sens: t.col === 'prop' ? (t.sens === 1 ? -1 : 1) : -1 }))}>Propositions{triFrs.col === 'prop' ? (triFrs.sens === 1 ? ' ↑' : ' ↓') : ''}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {fournisseursAffiches.map((f) => (
+                    <tr key={f.fournisseur} onClick={() => naviguer(f.fournisseur, null, 'actuel')} className="cursor-pointer border-t border-[#EFECE5] hover:bg-[#FDF6EA]">
+                      <td className="whitespace-nowrap px-3 py-1.5 font-bold">{f.fournisseur}</td>
+                      <td className="px-3 py-1.5">{f.nom || '—'}{f.sommeil === '1' && <span className="ml-1 text-[10.5px] text-[#8A8474]">(sommeil)</span>}</td>
+                      <td className="px-3 py-1.5 text-right">{fmtNum(f.nb_actifs)}</td>
+                      <td className="px-3 py-1.5 text-right">{f.nb_articles_paliers ? fmtNum(f.nb_articles_paliers) : ''}</td>
+                      <td className="px-3 py-1.5 text-right font-bold">{f.masse_achat_12m ? fmtEur(f.masse_achat_12m) : '—'}</td>
+                      <td className="px-3 py-1.5 text-right">{f.nb_propositions ? `${f.nb_propositions} · ${fmtDate(f.derniere_proposition)}` : ''}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             </div>
           </section>
         )}
@@ -960,7 +1023,8 @@ function TarifsFournisseurs() {
             {/* Onglets */}
             <section className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-[#E5E1D8] bg-white px-3 py-2">
               <div className="flex flex-wrap items-center gap-1.5">
-                <span className="mr-2 text-[14px] font-bold">{donnees.nom || donnees.fournisseur}</span>
+                <button className={`${btn} h-8`} onClick={() => naviguer(null, null)} title="Revenir à la liste des fournisseurs">← Fournisseurs</button>
+                <span className="mx-2 text-[14px] font-bold">{donnees.nom || donnees.fournisseur} <span className="text-[12px] font-normal text-[#8A8474]">{donnees.fournisseur}</span></span>
                 {([['actuel', 'Tarif actuel SAGE'], ['propositions', `Propositions (${donnees.propositions.length})`]] as [Vue, string][]).map(([v, l]) => (
                   <button key={v} onClick={() => naviguer(frsUrl, propUrl, v)}
                     className={`h-8 rounded-lg px-3 text-[12.5px] font-bold ${vue === v ? 'bg-[#111820] text-white' : 'border border-[#D9D4C7] bg-white hover:border-[#B4761A]'}`}>{l}</button>
@@ -978,6 +1042,12 @@ function TarifsFournisseurs() {
                   <option value="ventes">Ventes facturées 12 mois (SAGE)</option>
                   <option value="achats">Achats reçus 12 mois (CDF BLG)</option>
                 </select>
+                <span className="inline-flex overflow-hidden rounded-lg border border-[#D9D4C7]">
+                  {PERIMS.map(([k, l, t]) => (
+                    <button key={k} title={t} onClick={() => setPerim(k)}
+                      className={`h-9 px-2.5 text-[12px] font-bold ${perim === k ? 'bg-[#111820] text-white' : 'bg-white hover:bg-[#FAF9F6]'} ${k !== 'tous' ? 'border-l border-[#D9D4C7]' : ''}`}>{l}</button>
+                  ))}
+                </span>
                 {vue === 'comparaison' && (
                   <>
                     <span className="text-[#8A8474]">Prix comparé à :</span>
@@ -1017,7 +1087,11 @@ function TarifsFournisseurs() {
                           <th className="px-2 py-1.5 text-right">Prix tarif</th><th className="px-2 py-1.5 text-right">Remise</th><th className="px-2 py-1.5 text-right">Prix net</th>
                           <th className="px-2 py-1.5">Paliers SAGE</th><th className="px-2 py-1.5 text-right">Prix programmé</th>
                           <th className="px-2 py-1.5 text-right">Dernier PA</th><th className="px-2 py-1.5 text-right">Coef.</th><th className="px-2 py-1.5 text-right">PV fiche</th>
-                          <th className="px-2 py-1.5 text-right">Marge th.</th><th className="px-2 py-1.5 text-right">Ventes 12 m</th><th className="px-2 py-1.5 text-right">Achats 12 m</th>
+                          <th className="px-2 py-1.5 text-right">Marge th.</th>{perim === 'split' ? (
+                            <><th className="px-2 py-1.5 text-right">Ventes FMS</th><th className="px-2 py-1.5 text-right">Ventes ag.</th><th className="px-2 py-1.5 text-right">Achats FMS</th><th className="px-2 py-1.5 text-right">Achats ag.</th></>
+                          ) : (
+                            <><th className="px-2 py-1.5 text-right">Ventes 12 m{perim !== 'tous' ? (perim === 'fms' ? ' FMS' : ' ag.') : ''}</th><th className="px-2 py-1.5 text-right">Achats 12 m{perim !== 'tous' ? (perim === 'fms' ? ' FMS' : ' ag.') : ''}</th></>
+                          )}
                           <th className="px-2 py-1.5 text-right">Masse 12 m</th>
                         </tr>
                       </thead>
@@ -1036,12 +1110,23 @@ function TarifsFournisseurs() {
                             <td className="px-2 py-1 text-right">{a.coef ? fmtNum(a.coef, 2) : '—'}</td>
                             <td className="px-2 py-1 text-right">{fmtPrix(a.prix_vente)}</td>
                             <td className="px-2 py-1 text-right">{a.prix_vente && a.prix_net ? fmtPct((a.prix_vente - a.prix_net) / a.prix_vente, 0, false) : '—'}</td>
-                            <td className="px-2 py-1 text-right">{fmtNum(a.qte_ventes_12m)}</td>
-                            <td className="px-2 py-1 text-right" title={a.nb_lignes_cdf_12m ? `${a.nb_lignes_cdf_12m} ligne(s) de CDF, ${fmtNum(a.qte_moy_ligne_cdf, 1)} en moyenne` : ''}>{fmtNum(a.qte_achats_12m)}</td>
-                            <td className="px-2 py-1 text-right font-bold">{fmtEur(volume(a, base) * n0(a.prix_net))}</td>
+                            {perim === 'split' ? (
+                              <>
+                                <td className="px-2 py-1 text-right">{fmtNum(volumes(a, 'ventes').fms)}</td>
+                                <td className="px-2 py-1 text-right">{fmtNum(volumes(a, 'ventes').ag)}</td>
+                                <td className="px-2 py-1 text-right">{fmtNum(volumes(a, 'achats').fms)}</td>
+                                <td className="px-2 py-1 text-right">{fmtNum(volumes(a, 'achats').ag)}</td>
+                              </>
+                            ) : (
+                              <>
+                                <td className="px-2 py-1 text-right">{fmtNum(volume(a, 'ventes', perim))}</td>
+                                <td className="px-2 py-1 text-right" title={a.nb_lignes_cdf_12m ? `${a.nb_lignes_cdf_12m} ligne(s) de CDF (dont ${a.nb_lignes_cdf_12m_fms ?? 0} livrées à FMS), ${fmtNum(a.qte_moy_ligne_cdf, 1)} en moyenne` : ''}>{fmtNum(volume(a, 'achats', perim))}</td>
+                              </>
+                            )}
+                            <td className="px-2 py-1 text-right font-bold">{fmtEur(volume(a, base, perim) * n0(a.prix_net))}</td>
                           </tr>
                         ))}
-                        {!articlesActuels.length && <tr><td colSpan={15} className="px-3 py-6 text-center text-[#8A8474]">Aucun article.</td></tr>}
+                        {!articlesActuels.length && <tr><td colSpan={17} className="px-3 py-6 text-center text-[#8A8474]">Aucun article.</td></tr>}
                       </tbody>
                     </table>
                   </div>
@@ -1136,7 +1221,7 @@ function TarifsFournisseurs() {
                       className="w-full rounded-lg border border-[#D9D4C7] px-2 py-1 text-[12.5px] text-[#111820] outline-none focus:border-[#B4761A]" />
                   </label>
                   <div className="flex flex-col gap-1.5 pt-3.5">
-                    <button className={btn} onClick={() => void exporterExcel(donnees, comp, base, qref)}>Export Excel</button>
+                    <button className={btn} onClick={() => void exporterExcel(donnees, comp, base, qref, perim)}>Export Excel</button>
                   </div>
                 </section>
 
@@ -1148,7 +1233,8 @@ function TarifsFournisseurs() {
                 )}
                 <section className="grid grid-cols-2 gap-2 md:grid-cols-4 xl:grid-cols-8">
                   <Kpi label="Évolution pondérée" value={fmtPct(syn.evol)} color={couleurEvol(syn.evol)} sub={`moyenne simple ${fmtPct(syn.evolSimple)}`} />
-                  <Kpi label="Impact annuel" value={fmtEur(syn.impact, true)} color={couleurEvol(syn.impact)} sub={libelleBase} />
+                  <Kpi label="Impact annuel" value={fmtEur(syn.impact, true)} color={couleurEvol(syn.impact)}
+                    sub={perim === 'split' ? `FMS ${fmtEur(comp.lignes.reduce((t, x) => t + x.impactFms, 0), true)} · agences ${fmtEur(comp.lignes.reduce((t, x) => t + x.impactAg, 0), true)}` : libelleBase} />
                   <Kpi label="Masse d’achat" value={fmtEur(syn.masse)} sub={`→ ${fmtEur(syn.masse + syn.impact)} au nouveau tarif`} />
                   <Kpi label="Marge si PV inchangé" value={syn.margeNew !== null ? fmtPct(syn.margeNew, 1, false) : '—'}
                     sub={syn.margeAct !== null && syn.margeNew !== null ? `contre ${fmtPct(syn.margeAct, 1, false)} (${fmtNum((syn.margeNew - syn.margeAct) * 100, 1)} pt)` : 'PV fiche article'} />
@@ -1157,7 +1243,7 @@ function TarifsFournisseurs() {
                   <Kpi label="Lignes appariées" value={`${fmtNum(syn.nbApparies)} / ${fmtNum(syn.nbLignes)}`} color={syn.nbApparies ? '#111820' : '#A3401C'}
                     sub={`${fmtNum(comp.lignes.filter((x) => x.art && avecMouvement(x.art) && x.etat !== 'doublon' && x.etat !== 'ignoree').length)} avec achats/ventes 12 m · ${fmtNum(syn.nbNouveaux)} hors réf. SAGE`} onClick={() => setFiltre(filtre === 'nouveau' ? 'actifs' : 'nouveau')} actif={filtre === 'nouveau'} />
                   <Kpi label="Absents du fichier" value={fmtNum(comp.absents.length)} color={comp.absents.length ? '#96600F' : undefined}
-                    sub={`articles SAGE actifs · ${fmtEur(comp.absents.reduce((s, a) => s + volume(a, base) * n0(a.prix_net), 0))}/an`}
+                    sub={`articles SAGE actifs · ${fmtEur(comp.absents.reduce((s, a) => s + volume(a, base, perim) * n0(a.prix_net), 0))}/an`}
                     onClick={() => setFiltre(filtre === 'absents' ? 'actifs' : 'absents')} actif={filtre === 'absents'} />
                 </section>
 
@@ -1209,11 +1295,11 @@ function TarifsFournisseurs() {
                           <tr><th className="px-2 py-1.5">Article SAGE</th><th className="px-2 py-1.5">Désignation</th><th className="px-2 py-1.5">Réf. frs SAGE</th><th className="px-2 py-1.5 text-right">Prix net</th><th className="px-2 py-1.5 text-right">Ventes 12 m</th><th className="px-2 py-1.5 text-right">Achats 12 m</th><th className="px-2 py-1.5 text-right">Masse 12 m</th></tr>
                         </thead>
                         <tbody>
-                          {[...comp.absents].sort((a, b) => volume(b, base) * n0(b.prix_net) - volume(a, base) * n0(a.prix_net)).map((a) => (
+                          {[...comp.absents].sort((a, b) => volume(b, base, perim) * n0(b.prix_net) - volume(a, base, perim) * n0(a.prix_net)).map((a) => (
                             <tr key={a.reference} className="border-t border-[#EFECE5]">
                               <td className="px-2 py-1 font-bold">{a.reference}</td><td className="px-2 py-1">{a.designation}</td><td className="px-2 py-1 text-[#5F5A4E]">{a.ref_fournisseur || '—'}{refObsolete(a.ref_fournisseur) && <span className="ml-1 text-[10px] font-bold text-[#96600F]">marquée obsolète</span>}</td>
                               <td className="px-2 py-1 text-right">{fmtPrix(a.prix_net)}</td><td className="px-2 py-1 text-right">{fmtNum(a.qte_ventes_12m)}</td><td className="px-2 py-1 text-right">{fmtNum(a.qte_achats_12m)}</td>
-                              <td className="px-2 py-1 text-right font-bold">{fmtEur(volume(a, base) * n0(a.prix_net))}</td>
+                              <td className="px-2 py-1 text-right font-bold">{fmtEur(volume(a, base, perim) * n0(a.prix_net))}</td>
                             </tr>
                           ))}
                         </tbody>
@@ -1227,6 +1313,7 @@ function TarifsFournisseurs() {
                             {enTeteTri('pa', 'Prix actuel', 'text-right')}{enTeteTri('pn', 'Nouveau', 'text-right')}{enTeteTri('evol', 'Évol.', 'text-right')}
                             <th className="px-2 py-1.5">Nouveaux paliers</th>
                             {enTeteTri('vol', 'Volume', 'text-right')}{enTeteTri('masse', 'Masse act.', 'text-right')}{enTeteTri('impact', 'Impact €/an', 'text-right')}
+                            {perim === 'split' && <><th className="px-2 py-1.5 text-right">Impact FMS</th><th className="px-2 py-1.5 text-right">Impact ag.</th></>}
                             {enTeteTri('coef', 'Coef.', 'text-right')}<th className="px-2 py-1.5 text-right">PV fiche</th><th className="px-2 py-1.5 text-right">PV coef. cst</th>
                             {enTeteTri('marge', 'Marge (PV inch.)', 'text-right')}
                           </tr>
@@ -1247,6 +1334,10 @@ function TarifsFournisseurs() {
                               <td className="px-2 py-1 text-right">{x.art ? fmtNum(x.vol) : '—'}</td>
                               <td className="px-2 py-1 text-right">{x.masse ? fmtEur(x.masse) : '—'}</td>
                               <td className="px-2 py-1 text-right font-bold" style={{ color: couleurEvol(x.impact) }}>{x.impact ? fmtEur(x.impact, true) : '—'}</td>
+                              {perim === 'split' && <>
+                                <td className="px-2 py-1 text-right" title={`Volume FMS ${fmtNum(x.volFms)}`} style={{ color: couleurEvol(x.impactFms) }}>{x.impactFms ? fmtEur(x.impactFms, true) : '—'}</td>
+                                <td className="px-2 py-1 text-right" title={`Volume agences ${fmtNum(x.volAg)}`} style={{ color: couleurEvol(x.impactAg) }}>{x.impactAg ? fmtEur(x.impactAg, true) : '—'}</td>
+                              </>}
                               <td className="px-2 py-1 text-right">{x.art?.coef ? fmtNum(x.art.coef, 2) : '—'}</td>
                               <td className="px-2 py-1 text-right">{fmtPrix(x.art?.prix_vente)}</td>
                               <td className="px-2 py-1 text-right text-[#5F5A4E]">{fmtPrix(x.pvCoef)}</td>
