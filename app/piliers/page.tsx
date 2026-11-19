@@ -21,8 +21,6 @@ import React, { createContext, useCallback, useContext, useEffect, useMemo, useS
 import { supabase } from '@/lib/supabaseClient'
 import { useAccess } from '@/components/AccessContext'
 import {
-  COM_CIBLES,
-  COM_STATUTS,
   ENJEUX,
   ISSUES,
   MOODS,
@@ -44,7 +42,6 @@ import {
   refOf,
   scoreSujet,
   todayIso,
-  type ComStatut,
   type Origine,
   type Issue,
   type Membre,
@@ -378,7 +375,6 @@ export default function PiliersPage() {
     { key: 'reunion', label: prochaine ? 'Prochaine réunion' : 'Réunion' },
     { key: 'feuille', label: 'Feuille de route', count: ouverts.length + aAborder.length },
     { key: 'entre', label: 'Entre deux réunions' },
-    { key: 'com', label: 'Communication', count: sujets.filter((s) => s.a_communiquer && s.communication_statut !== 'diffuse').length },
     { key: 'historique', label: 'Réunions passées', count: reunions.filter((r) => r.statut === 'cloturee').length },
   ]
 
@@ -461,7 +457,6 @@ export default function PiliersPage() {
         {tab === 'reunion' && <TabReunion />}
         {tab === 'feuille' && <TabFeuille />}
         {tab === 'entre' && <TabEntre onQuickAdd={() => setQuickAdd(true)} />}
-        {tab === 'com' && <TabCom />}
         {tab === 'historique' && <TabHistorique />}
 
         {openId && sujetById.get(openId) && <SujetDrawer key={openId} sujet={sujetById.get(openId)!} onClose={() => setOpenId(null)} />}
@@ -696,11 +691,7 @@ function TabReunion() {
           <InlineAdd reunion={R} />
         </Step>
 
-        <Step id="pil-com" n={4} title="Communication aux équipes" subtitle="Qu’est-ce qu’on dit aux collaborateurs à la suite de cette réunion ?">
-          <ComStep reunion={R} revus={revusIci} />
-        </Step>
-
-        <Step id="pil-cloture" n={5} title="Clôture" subtitle="Synthèse en quelques lignes et date de la prochaine réunion.">
+        <Step id="pil-cloture" n={4} title="Clôture" subtitle="Synthèse en quelques lignes et date de la prochaine réunion.">
           <Cloture reunion={R} blocages={blocages} stats={{ revueFaits, revueTotal: revue.length, nouveauxFaits, nouveauxTotal: nouveaux.length, meteoFaite }} />
         </Step>
       </div>
@@ -713,8 +704,7 @@ function TabReunion() {
             { id: 'pil-meteo', label: '1. Météo', done: meteoFaite, tot: membresActifs.length },
             { id: 'pil-revue', label: '2. Réunion précédente', done: revueFaits, tot: revue.length },
             { id: 'pil-nouveaux', label: '3. Ordre du jour', done: nouveauxFaits, tot: nouveaux.length },
-            { id: 'pil-com', label: '4. Communication', done: -1, tot: 0 },
-            { id: 'pil-cloture', label: '5. Clôture', done: -1, tot: 0 },
+            { id: 'pil-cloture', label: '4. Clôture', done: -1, tot: 0 },
           ].map((it) => (
             <button
               key={it.id}
@@ -1093,7 +1083,7 @@ function SujetLigne({ sujet, reunion, last }: { sujet: Sujet; reunion: Reunion |
         borderBottom: last ? 'none' : `1px solid ${C.line}`,
         flexWrap: 'wrap',
         opacity: busy ? 0.6 : 1,
-        background: rs ? C.soft : 'transparent',
+        background: tag.label === 'Tranché' ? C.soft : 'transparent',
       }}
     >
       <span style={{ width: 92, flex: '0 0 auto' }}>
@@ -1459,99 +1449,6 @@ function InlineAdd({ reunion }: { reunion: Reunion }) {
         Ajouter
       </Btn>
     </div>
-  )
-}
-
-// ---------------------------------------------------------------- 4. Communication
-function ComStep({ reunion, revus }: { reunion: Reunion; revus: ReunionSujet[] }) {
-  const api = useApi()
-  const aCommuniquer = api.sujets.filter((s) => s.a_communiquer && s.communication_statut !== 'diffuse')
-  const candidats = revus
-    .filter((rs) => ['fait', 'qualifie', 'on_continue'].includes(rs.issue))
-    .map((rs) => api.sujetById.get(rs.sujet_id))
-    .filter((s): s is Sujet => !!s && !s.a_communiquer && !s.confidentiel)
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-      {aCommuniquer.length === 0 && <Empty>Aucun message en préparation.</Empty>}
-      {aCommuniquer.map((s) => (
-        <ComCard key={s.id} sujet={s} />
-      ))}
-      {candidats.length > 0 && (
-        <Card style={{ padding: 12, background: C.soft }}>
-          <div style={{ fontSize: 13, color: C.muted, marginBottom: 8 }}>Sujets traités aujourd’hui — faut-il en parler aux équipes ?</div>
-          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-            {candidats.map((s) => (
-              <button
-                key={s.id}
-                onClick={async () => {
-                  await api.updateSujet(s, { a_communiquer: true, communication_statut: 'a_preparer' }, reunion.id)
-                  await api.reload()
-                }}
-                style={{ ...chipBase, borderColor: C.lineStrong }}
-              >
-                📣 #{s.numero} {s.titre}
-              </button>
-            ))}
-          </div>
-        </Card>
-      )}
-    </div>
-  )
-}
-
-function ComCard({ sujet }: { sujet: Sujet }) {
-  const api = useApi()
-  const [message, setMessage] = useState(sujet.communication_message)
-  const [cible, setCible] = useState(sujet.communication_cible)
-  const save = async (patch: Partial<Sujet>) => {
-    await api.updateSujet(sujet, patch)
-    await api.reload()
-  }
-  return (
-    <Card style={{ padding: 12 }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 8 }}>
-        <SujetTitle sujet={sujet} small />
-        <div style={{ marginLeft: 'auto', display: 'flex', gap: 4 }}>
-          {COM_STATUTS.map((c) => (
-            <button
-              key={c.key}
-              onClick={() => void save({ communication_statut: c.key })}
-              style={{
-                ...chipBase,
-                borderColor: sujet.communication_statut === c.key ? c.color : C.line,
-                background: sujet.communication_statut === c.key ? `${c.color}22` : 'transparent',
-                color: sujet.communication_statut === c.key ? C.ink : C.muted,
-              }}
-            >
-              {c.icon} {c.label}
-            </button>
-          ))}
-        </div>
-      </div>
-      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-        <input
-          list="pil-cibles"
-          value={cible}
-          onChange={(e) => setCible(e.target.value)}
-          onBlur={() => cible !== sujet.communication_cible && void save({ communication_cible: cible })}
-          placeholder="À qui ?"
-          style={{ ...input, width: 220 }}
-        />
-        <datalist id="pil-cibles">
-          {COM_CIBLES.map((c) => (
-            <option key={c} value={c} />
-          ))}
-        </datalist>
-        <textarea
-          value={message}
-          onChange={(e) => setMessage(e.target.value)}
-          onBlur={() => message !== sujet.communication_message && void save({ communication_message: message })}
-          placeholder="Le message, tel qu’on le dira aux équipes"
-          rows={2}
-          style={{ ...input, flex: '1 1 320px', resize: 'vertical' }}
-        />
-      </div>
-    </Card>
   )
 }
 
@@ -2045,76 +1942,6 @@ function TabEntre({ onQuickAdd }: { onQuickAdd: () => void }) {
 }
 
 // ============================================================================
-// Onglet 4 — Communication
-// ============================================================================
-function TabCom() {
-  const api = useApi()
-  const items = api.sujets.filter((s) => s.a_communiquer)
-  const pret = items.filter((s) => s.communication_statut === 'pret')
-
-  const copier = async () => {
-    const parCible = new Map<string, Sujet[]>()
-    pret.forEach((s) => {
-      const k = s.communication_cible || 'Tous les collaborateurs'
-      parCible.set(k, [...(parCible.get(k) || []), s])
-    })
-    const txt = Array.from(parCible.entries())
-      .map(([cible, list]) => `▶ ${cible}\n${list.map((s) => `• ${s.titre}${s.communication_message ? ` — ${s.communication_message}` : ''}`).join('\n')}`)
-      .join('\n\n')
-    try {
-      await navigator.clipboard.writeText(txt)
-      api.notify('Messages copiés — prêts à coller dans un mail ou le fil d’actualité')
-    } catch {
-      api.notify('Copie impossible depuis ce navigateur', 'err')
-    }
-  }
-
-  return (
-    <div>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 14, flexWrap: 'wrap' }}>
-        <div style={{ color: C.muted, fontSize: 14, flex: 1 }}>
-          Ce qu’on dit aux collaborateurs à la suite des réunions. Cochez « 📣 À communiquer » dans la fiche d’un sujet pour l’ajouter ici.
-        </div>
-        <Btn primary disabled={!pret.length} onClick={() => void copier()}>
-          📋 Copier les {pret.length} message{pret.length > 1 ? 's' : ''} prêt{pret.length > 1 ? 's' : ''}
-        </Btn>
-      </div>
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(260px, 1fr))', gap: 12 }}>
-        {COM_STATUTS.map((c) => {
-          const list = items.filter((s) => s.communication_statut === c.key).sort((a, b) => b.updated_at.localeCompare(a.updated_at))
-          return (
-            <div key={c.key} style={{ background: C.soft, borderRadius: 14, padding: 10 }}>
-              <div style={{ display: 'flex', gap: 6, alignItems: 'center', marginBottom: 10 }}>
-                <span>{c.icon}</span>
-                <b style={{ fontSize: 14 }}>{c.label}</b>
-                <span style={{ marginLeft: 'auto', fontSize: 12, color: C.muted }}>{list.length}</span>
-              </div>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                {list.map((s) => (
-                  <button key={s.id} onClick={() => api.openSujet(s.id)} style={{ ...rowBtn, flexDirection: 'column', alignItems: 'stretch', background: C.card, border: `1px solid ${C.line}`, padding: 10 }}>
-                    <span style={{ fontSize: 12, color: C.muted, textAlign: 'left' }}>
-                      {s.communication_cible || 'Cible à préciser'}
-                      {s.communication_diffusee_le ? ` · diffusé le ${fmtDate(s.communication_diffusee_le)}` : ''}
-                    </span>
-                    <span style={{ fontWeight: 600, fontSize: 13, textAlign: 'left' }}>
-                      #{s.numero} {s.titre}
-                    </span>
-                    <span style={{ fontSize: 13, color: s.communication_message ? C.ink : C.faint, textAlign: 'left', whiteSpace: 'pre-wrap' }}>
-                      {s.communication_message || 'Message à rédiger…'}
-                    </span>
-                  </button>
-                ))}
-                {list.length === 0 && <div style={{ fontSize: 12, color: C.faint, padding: 6 }}>—</div>}
-              </div>
-            </div>
-          )
-        })}
-      </div>
-    </div>
-  )
-}
-
-// ============================================================================
 // Onglet 5 — Réunions passées
 // ============================================================================
 function TabHistorique() {
@@ -2142,8 +1969,21 @@ function TabHistorique() {
   )
 }
 
-function compteRenduTexte(api: Api, r: Reunion) {
+/** Sujets traités lors d'une réunion : passages enregistrés, plus les sujets nés
+ * dans cette réunion et tranchés depuis leur fiche (sans passage enregistré). */
+function passagesDe(api: Api, r: Reunion): ReunionSujet[] {
   const rs = api.reunionSujets.filter((x) => x.reunion_id === r.id)
+  const deja = new Set(rs.map((x) => x.sujet_id))
+  api.sujets.forEach((s) => {
+    if (deja.has(s.id) || s.reunion_origine !== r.id || s.statut === 'a_aborder' || s.origine === 'action_liee') return
+    const issue: Issue = OPEN_STATUTS.includes(s.statut) ? 'qualifie' : s.statut === 'abandonne' ? 'abandonne' : estInfo(s.nature) ? 'pour_info' : 'fait'
+    rs.push({ reunion_id: r.id, sujet_id: s.id, issue, commentaire: '', revu_le: s.updated_at })
+  })
+  return rs
+}
+
+function compteRenduTexte(api: Api, r: Reunion) {
+  const rs = passagesDe(api, r)
   const mt = api.meteo.filter((m) => m.reunion_id === r.id)
   const lines: string[] = []
   lines.push(`Réunion Piliers — ${fmtDateLong(r.date_reunion)}`)
@@ -2162,8 +2002,8 @@ function compteRenduTexte(api: Api, r: Reunion) {
     })
     lines.push('')
   }
-  const section = (title: string, issues: Issue[]) => {
-    const list = rs.filter((x) => issues.includes(x.issue))
+  const section = (title: string, odj: boolean) => {
+    const list = rs.filter((x) => (api.sujetById.get(x.sujet_id)?.reunion_origine === r.id) === odj)
     if (!list.length) return
     lines.push(title)
     list.forEach((x) => {
@@ -2174,25 +2014,20 @@ function compteRenduTexte(api: Api, r: Reunion) {
     })
     lines.push('')
   }
-  section('ACTIONS REVUES', ['fait', 'on_continue', 'en_attente', 'abandonne'])
-  section('NOUVEAUX SUJETS', ['qualifie', 'pour_info'])
-  const com = api.sujets.filter((s) => s.a_communiquer && rs.some((x) => x.sujet_id === s.id))
-  if (com.length) {
-    lines.push('À COMMUNIQUER')
-    com.forEach((s) => lines.push(`  ${s.communication_cible || 'Tous'} : ${s.titre}${s.communication_message ? ` — ${s.communication_message}` : ''}`))
-  }
+  section('REVUE DE LA RÉUNION PRÉCÉDENTE', false)
+  section('ORDRE DU JOUR ET SUJETS AJOUTÉS EN SÉANCE', true)
   return lines.join('\n')
 }
 
 function CompteRendu({ reunion }: { reunion: Reunion }) {
   const api = useApi()
-  const rs = api.reunionSujets.filter((x) => x.reunion_id === reunion.id)
+  const rs = passagesDe(api, reunion)
   const mt = api.meteo.filter((m) => m.reunion_id === reunion.id)
   const txt = compteRenduTexte(api, reunion)
   const mails = api.membresActifs.map((m) => m.email).filter(Boolean).join(';')
 
-  const bloc = (title: string, issues: Issue[]) => {
-    const list = rs.filter((x) => issues.includes(x.issue))
+  const bloc = (title: string, odj: boolean) => {
+    const list = rs.filter((x) => (api.sujetById.get(x.sujet_id)?.reunion_origine === reunion.id) === odj)
     if (!list.length) return null
     return (
       <div style={{ marginTop: 18 }}>
@@ -2272,8 +2107,8 @@ function CompteRendu({ reunion }: { reunion: Reunion }) {
           })}
         </div>
       )}
-      {bloc('Actions revues', ['fait', 'on_continue', 'en_attente', 'abandonne'])}
-      {bloc('Nouveaux sujets', ['qualifie', 'pour_info'])}
+      {bloc('Revue de la réunion précédente', false)}
+      {bloc('Ordre du jour et sujets ajoutés en séance', true)}
     </Card>
   )
 }
@@ -2356,6 +2191,10 @@ function SujetDrawer({ sujet, onClose }: { sujet: Sujet; onClose: () => void }) 
       communication_message: d.communication_message,
       confidentiel: d.confidentiel,
       propose_par: d.propose_par,
+      // Tranché depuis la fiche pendant une réunion en cours : rattaché à cette réunion
+      ...(d.statut !== sujet.statut && sujet.statut === 'a_aborder' && !sujet.reunion_origine && api.prochaine?.statut === 'en_cours'
+        ? { reunion_origine: api.prochaine.id }
+        : {}),
     })
     const norm = (l: { membre_id: string; role: string }[]) => JSON.stringify([...l].sort((a, b) => a.membre_id.localeCompare(b.membre_id)))
     if (ok && norm(pt) !== norm(initialPorteurs)) await api.setPorteurs(sujet.id, pt)
@@ -2572,24 +2411,7 @@ function SujetDrawer({ sujet, onClose }: { sujet: Sujet; onClose: () => void }) 
                 <Toggle on={d.a_l_ordre_du_jour} onClick={() => set('a_l_ordre_du_jour', !d.a_l_ordre_du_jour)}>
                   🔎 À creuser à la prochaine réunion
                 </Toggle>
-                {!d.confidentiel && (
-                  <Toggle on={d.a_communiquer} onClick={() => set('a_communiquer', !d.a_communiquer)}>
-                    📣 À communiquer aux équipes
-                  </Toggle>
-                )}
               </div>
-              {d.a_communiquer && !d.confidentiel && (
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                  <Chips list={COM_STATUTS} value={d.communication_statut} onChange={(v) => set('communication_statut', v as ComStatut)} />
-                  <input list="pil-cibles-d" value={d.communication_cible} onChange={(e) => set('communication_cible', e.target.value)} placeholder="À qui ?" style={input} />
-                  <datalist id="pil-cibles-d">
-                    {COM_CIBLES.map((c) => (
-                      <option key={c} value={c} />
-                    ))}
-                  </datalist>
-                  <textarea value={d.communication_message} onChange={(e) => set('communication_message', e.target.value)} rows={3} placeholder="Le message, tel qu’on le dira aux équipes" style={{ ...input, resize: 'vertical' }} />
-                </div>
-              )}
             </div>
           )}
 
