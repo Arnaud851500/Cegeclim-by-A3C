@@ -259,6 +259,7 @@ const PAGE_ACCESS_CHECKS: Array<[string, keyof AccessRights]> = [
   ['/stock/controle-mystock', 'can_appro'],
   ['/stock/plan-expedition-fms/agences', 'can_stocks'],
   ['/stock/plan-expedition-fms', 'can_superuser'],
+  ['/stock/engagement-hitachi', 'can_superuser'],
   ['/stock/reconstruction', 'can_appro'],
   ['/stock/groupes', 'can_appro'],
   ['/stocks-disponibilites2', 'can_appro'],

@@ -29,6 +29,8 @@
 // rattachée au droit can_dashboard (au lieu de can_allocation_ro).
 // ÉVOLUTION (2026-11-04) : « Plan d’expédition FMS » (/stock/plan-expedition-fms) ajouté sous
 // Portefeuille commandes fournisseurs (droit can_superuser ; page et RPC réservées à Arnaud).
+// ÉVOLUTION (2026-11-19) : « Engagement Hitachi » (/stock/engagement-hitachi), droit can_superuser,
+// page et RPC réservées à Arnaud (hitachi_engagement_autorise). Migration 20261119_engagement_hitachi.sql.
 // ÉVOLUTION (2026-11-05) : « Plan d’expédition – vue agence » (/stock/plan-expedition-fms/agences), même droit.
 // ÉVOLUTION (2026-11-08) : la vue agence rejoint le tronc commun Stocks & logistique (can_stocks :
 // TCI/TCS, TCS, Logistique), limitée au périmètre agence / collaborateur de l'utilisateur.
@@ -247,6 +249,7 @@ export const NAV_BLOCS: NavBloc[] = [
       { label: 'Portefeuille commandes fournisseurs', path: '/stock/portefeuille-cdf', activeLabel: 'Portefeuille commandes fournisseurs', accessKey: 'can_appro', description: 'CDF ouvertes : alertes containers (n°, suivi bateau, marge), sans AR, CDF attendues par des CDC à faire confirmer, dates dépassées.' },
       { label: 'Contrôle stock FMS – MyStock', path: '/stock/controle-mystock', activeLabel: 'Contrôle stock FMS – MyStock', accessKey: 'can_appro', description: 'Image de stock MyStock du prestataire FMS comparée au stock SAGE du dépôt FMS de fin de journée J : écarts, BL du jour, valeur, suivi des écarts.' },
       { label: 'Plan d’expédition FMS', path: '/stock/plan-expedition-fms', activeLabel: 'Plan d’expédition FMS', accessKey: 'can_superuser', description: 'Arrivages containers : ce qui peut partir de FMS dès maintenant (groupes extérieurs, cuivre, volumineux), ce qui attend les réceptions, préconisations par agence et planning de charge FMS (accès réservé).' },
+      { label: 'Engagement Hitachi', path: '/stock/engagement-hitachi', activeLabel: 'Engagement Hitachi', accessKey: 'can_superuser', description: 'Objectifs annuels Hitachi (annexe 6) : CA et quantités par gamme, situation à date en achats (reçu + ferme) et en ventes (BL + CDC à livrer), rattachement des familles (accès réservé).' },
       { label: 'Plan d’expédition – vue agence', path: '/stock/plan-expedition-fms/agences', activeLabel: 'Plan d’expédition – vue agence', accessKey: 'can_stocks', description: 'Par agence (commercial) : commandes rangées par dépôt de départ, frise des livraisons avec GE / UI / palettes, manques et complétude, glisser-déposer date ou dépôt, scission des envois — limité aux agences de l’utilisateur.' },
       { label: 'Projection stock', path: '/stocks-disponibilites2', accessKey: 'can_appro', description: 'Stock projeté par référence, hypothèses mensuelles et substitutions.' },
       { label: 'Reconstitution Stock', path: '/stock/reconstruction', accessKey: 'can_appro', description: 'Reconstruction du stock projeté et vérification des promesses.' },
