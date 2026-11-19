@@ -53,6 +53,13 @@
  * Écran fournisseur : la masse estimée ne compte que les articles dont le fournisseur est principal, avec
  * réf. fournisseur et prix > 0 (hors DIVERS, TRANSPORT, REGUL…) ; KPI « Commandé 12 mois » FMS / agences.
  * Migration 20261119m_tarifs_liste_masse_cdf.sql.
+ *
+ * ÉVOLUTION (19/11/2026, 12h15) : décision d'Arnaud — les articles « fourre-tout » (DIVERS, TRANSPORT,
+ * REGUL…, PLV, MARGE…) dont le prix change d'une ligne de commande à l'autre n'ont pas de tarif : aucun
+ * calcul de masse possible, ils sont filtrés du tarif actuel (case « articles techniques » pour les voir),
+ * des absents du fichier et de toute masse. Article technique = sans réf. fournisseur, prix ≤ 0, ou code
+ * DIVERS / TRANSPORT / REGUL* / MARGE* / PLV* / RETOUR / PERDU / REMPLAC* / OBSERVATION* / PASDEMAIL /
+ * PIECESAV / BRMOTIF / WORKGROUP.
  */
 
 import React, { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
@@ -272,9 +279,14 @@ function volumes(art: Article | null, base: Base): { tot: number; fms: number; a
   const fms = Math.min(tot, Math.max(0, base === 'ventes' ? n0(art.qte_ventes_12m_fms) : n0(art.qte_achats_12m_fms)))
   return { tot, fms, ag: Math.max(0, tot - fms) }
 }
-/** Article compté dans la masse d'achat : fournisseur principal, réf. fournisseur, prix positif (hors DIVERS, TRANSPORT, REGUL…). */
+/** Article technique / fourre-tout : pas de tarif (prix variable à chaque commande), exclu de l'écran et des masses. */
+const RE_TECHNIQUE = /^(DIVERS|TRANSPORT|REGUL|MARGE|PLV|RETOUR$|PERDU$|REMPLAC|OBSERVATION|PASDEMAIL|PIECESAV|BRMOTIF|WORKGROUP)/i
+function articleTechnique(a: Article): boolean {
+  return RE_TECHNIQUE.test(a.reference) || !(a.ref_fournisseur || '').trim() || n0(a.prix_net) <= 0
+}
+/** Article compté dans la masse d'achat : fournisseur principal et article tarifé (hors articles techniques). */
 function compteDansMasse(a: Article): boolean {
-  return a.principal && !!(a.ref_fournisseur || '').trim() && n0(a.prix_net) > 0
+  return a.principal && !articleTechnique(a)
 }
 function volume(art: Article | null, base: Base, perim: Perim = 'tous'): number {
   const v = volumes(art, base)
@@ -321,7 +333,7 @@ function comparer(d: Donnees, base: Base, qref: QRef, perim: Perim): { lignes: L
     }
   })
   // Absents : articles actifs du fournisseur portant une réf. fournisseur (hors articles techniques DIVERS, TRANSPORT, REGUL…)
-  const absents = d.articles.filter((a) => a.du_fournisseur && !a.sommeil && !!(a.ref_fournisseur || '').trim() && !vus.has(a.reference))
+  const absents = d.articles.filter((a) => a.du_fournisseur && !a.sommeil && !articleTechnique(a) && !vus.has(a.reference))
   return { lignes, absents }
 }
 
@@ -548,6 +560,7 @@ function TarifsFournisseurs() {
   const [recherche, setRecherche] = useState('')
   const [tri, setTri] = useState<{ col: string; sens: 1 | -1 }>({ col: 'impact', sens: -1 })
   const [voirSommeil, setVoirSommeil] = useState(false)
+  const [voirTechniques, setVoirTechniques] = useState(false)
   const [seulementVentes, setSeulementVentes] = useState(false)
   const [fiche, setFiche] = useState<LigneComp | null>(null)
   const [imp, setImp] = useState<ImportEnCours | null>(null)
@@ -905,10 +918,11 @@ function TarifsFournisseurs() {
     return donnees.articles
       .filter((a) => a.du_fournisseur)
       .filter((a) => voirSommeil || !a.sommeil)
+      .filter((a) => voirTechniques || !articleTechnique(a))
       .filter((a) => !seulementVentes || a.qte_ventes_12m > 0 || a.qte_achats_12m > 0)
       .filter((a) => !q || [a.reference, a.designation, a.ref_fournisseur, a.famille].some((s) => (s || '').toUpperCase().includes(q)))
       .sort((a, b) => Number(compteDansMasse(b)) - Number(compteDansMasse(a)) || volume(b, base, perim) * n0(b.prix_net) - volume(a, base, perim) * n0(a.prix_net) || a.reference.localeCompare(b.reference))
-  }, [donnees, recherche, voirSommeil, seulementVentes, base, perim])
+  }, [donnees, recherche, voirSommeil, voirTechniques, seulementVentes, base, perim])
 
   const synActuel = useMemo(() => {
     const s = { nb: 0, masse: 0, paliers: 0, programme: 0, pvVol: 0, paVol: 0 }
@@ -1098,6 +1112,7 @@ function TarifsFournisseurs() {
                   <div className="flex flex-wrap items-center gap-2 border-b border-[#EFECE5] px-3 py-2">
                     <input value={recherche} onChange={(e) => setRecherche(e.target.value)} placeholder="Rechercher (réf., désignation, famille)…" className={`${ctl} w-[300px]`} />
                     <label className="flex items-center gap-1.5 text-[12px]"><input type="checkbox" checked={voirSommeil} onChange={(e) => setVoirSommeil(e.target.checked)} /> articles en sommeil</label>
+                    <label className="flex items-center gap-1.5 text-[12px]" title="DIVERS, TRANSPORT, REGUL…, articles sans réf. fournisseur ou sans prix : pas de tarif, exclus des masses"><input type="checkbox" checked={voirTechniques} onChange={(e) => setVoirTechniques(e.target.checked)} /> articles techniques ({fmtNum(donnees.articles.filter((a) => a.du_fournisseur && articleTechnique(a) && (voirSommeil || !a.sommeil)).length)})</label>
                     <label className="flex items-center gap-1.5 text-[12px]"><input type="checkbox" checked={seulementVentes} onChange={(e) => setSeulementVentes(e.target.checked)} /> avec ventes ou achats sur 12 mois</label>
                     <span className="flex-1" />
                     <button className={btn} onClick={() => void exporterTarifActuel(donnees, articlesActuels)}>Export Excel</button>
