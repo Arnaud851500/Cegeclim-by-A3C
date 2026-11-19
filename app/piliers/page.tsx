@@ -2203,6 +2203,7 @@ function SujetDrawer({ sujet, onClose }: { sujet: Sujet; onClose: () => void }) 
     if (ok) {
       setDirty(false)
       api.notify('Sujet enregistré')
+      onClose()
     }
   }
 
