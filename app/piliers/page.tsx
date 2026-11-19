@@ -82,6 +82,11 @@ const FONT_BODY = '"IBM Plex Sans", system-ui, sans-serif'
 
 type Tab = 'reunion' | 'feuille' | 'entre' | 'com' | 'historique'
 
+// (19/11/2026) « Commençons petit » : pavés de synthèse et onglet Feuille de route
+// (plan d'action) masqués pour l'instant — repasser à true pour les réafficher.
+const AFFICHER_SYNTHESE = false
+const AFFICHER_FEUILLE = false
+
 // ----------------------------------------------------------------------------
 // Contexte de l'écran (données + actions)
 // ----------------------------------------------------------------------------
@@ -375,7 +380,7 @@ export default function PiliersPage() {
 
   const TABS: { key: Tab; label: string; count?: number }[] = [
     { key: 'reunion', label: prochaine ? 'Prochaine réunion' : 'Réunion' },
-    { key: 'feuille', label: 'Feuille de route', count: ouverts.length + aAborder.length },
+    ...(AFFICHER_FEUILLE ? [{ key: 'feuille' as Tab, label: 'Feuille de route', count: ouverts.length + aAborder.length }] : []),
     { key: 'entre', label: 'Entre deux réunions' },
     { key: 'historique', label: 'Réunions passées', count: reunions.filter((r) => r.statut === 'cloturee').length },
   ]
@@ -416,7 +421,9 @@ export default function PiliersPage() {
           </div>
         </div>
 
-        {/* KPI */}
+        {/* (19/11/2026) Pavés de synthèse masqués pour l'instant : « commençons petit ». */}
+        {AFFICHER_SYNTHESE && (
+          <>
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))', gap: 10, marginBottom: 18 }}>
           <Kpi label="À aborder" value={aAborder.length} hint="Remontés, pas encore vus" color={C.gold} onClick={() => setTab('reunion')} />
           <Kpi label="Actions ouvertes" value={ouverts.length} hint="À planifier, en cours, en attente" color="#4E7A2A" onClick={() => setTab('feuille')} />
@@ -425,6 +432,9 @@ export default function PiliersPage() {
           <Kpi label="🔥 Irritants" value={irritants.length} hint="Ressentis par les équipes" color={C.alert} onClick={() => setTab('feuille')} />
           <Kpi label={`Mes sujets · ${me.prenom}`} value={mesSujets.length} hint="Où je suis porteur" color={me.couleur} onClick={() => setTab('entre')} />
         </div>
+
+          </>
+        )}
 
         {/* Onglets */}
         <div style={{ display: 'flex', gap: 4, borderBottom: `1px solid ${C.line}`, marginBottom: 20, flexWrap: 'wrap' }}>
@@ -497,6 +507,7 @@ function TabReunion() {
   const { prochaine, sujets, reunionSujets, membresActifs, derniere } = api
   const [dateNouvelle, setDateNouvelle] = useState(() => addDaysIso(derniere?.date_reunion || todayIso(), derniere ? 28 : 7))
   const [busy, setBusy] = useState(false)
+  const [voirMeteo, setVoirMeteo] = useState(false)
 
   if (!prochaine) {
     const enAttente = sujets.filter((s) => s.statut === 'a_aborder').length
@@ -655,7 +666,18 @@ function TabReunion() {
         </Card>
 
         <Step id="pil-meteo" n={1} title="Météo" subtitle="Cliquez sur la personne qui parle : son humeur, et les sujets qu’elle met à l’ordre du jour, saisis à la volée.">
-          <MeteoGrid reunion={R} />
+          {voirMeteo ? (
+            <>
+              <button style={{ ...linkBtn, fontSize: 12, marginBottom: 8 }} onClick={() => setVoirMeteo(false)}>
+                ▴ Masquer la météo
+              </button>
+              <MeteoGrid reunion={R} />
+            </>
+          ) : (
+            <button style={{ ...linkBtn, fontSize: 12 }} onClick={() => setVoirMeteo(true)}>
+              ☀️ Afficher la météo et le tour de parole ▾
+            </button>
+          )}
         </Step>
 
         <Step
@@ -872,18 +894,35 @@ function MeteoGrid({ reunion }: { reunion: Reunion }) {
 }
 
 // ---------------------------------------------------------------- 2. Revue
-// (19/11/2026, v4) Lecture dense « une ligne » : porteur · sujet · proposition
-// du porteur (à suivre / à abandonner / à rediscuter + son commentaire) ·
-// prochain point · priorité · décision en réunion · Détail. Le porteur prépare
-// sa proposition avant la réunion (onglet « Entre deux réunions »). Une fois le
-// sujet revu, la proposition est versée au fil de suivi et remise à vide.
+// (19/11/2026, v5) Tableau dense, une ligne par sujet : porteur · sujet ·
+// proposition du porteur (➡️ à suivre / ✖️ à abandonner / 💬 à rediscuter) ·
+// son commentaire · nouvelles · prochain point · priorité · décision · détail.
+// Le porteur prépare sa proposition avant la réunion (onglet « Entre deux
+// réunions ») ; une fois le sujet revu, elle est versée au fil de suivi et
+// remise à vide.
+const REVUE_COLS = '26px minmax(200px, 1fr) 96px minmax(170px, 280px) 30px 124px 104px 236px 72px'
+
 function RevueListe({ sujets, reunion, issueOf }: { sujets: Sujet[]; reunion: Reunion | null; issueOf?: (id: string) => ReunionSujet | null }) {
   if (!sujets.length) return null
+  const th: React.CSSProperties = { fontSize: 11, color: C.faint, textTransform: 'uppercase', letterSpacing: 0.6, whiteSpace: 'nowrap' }
   return (
-    <div style={{ border: `1px solid ${C.line}`, borderRadius: 12, overflow: 'hidden', background: C.card }}>
-      {sujets.map((s, i) => (
-        <RevueLigne key={s.id} sujet={s} reunion={reunion} revu={issueOf ? issueOf(s.id) : null} last={i === sujets.length - 1} />
-      ))}
+    <div style={{ border: `1px solid ${C.line}`, borderRadius: 12, background: C.card, overflowX: 'auto' }}>
+      <div style={{ minWidth: 1180 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: REVUE_COLS, gap: 8, padding: '6px 10px', borderBottom: `1px solid ${C.line}`, alignItems: 'center' }}>
+          <span />
+          <span style={th}>Sujet</span>
+          <span style={th}>Proposition</span>
+          <span style={th}>Commentaire du porteur</span>
+          <span />
+          <span style={th}>Prochain point</span>
+          <span style={th}>Priorité</span>
+          <span style={th}>{reunion ? 'Décision' : ''}</span>
+          <span />
+        </div>
+        {sujets.map((s, i) => (
+          <RevueLigne key={s.id} sujet={s} reunion={reunion} revu={issueOf ? issueOf(s.id) : null} last={i === sujets.length - 1} />
+        ))}
+      </div>
     </div>
   )
 }
@@ -925,82 +964,100 @@ function RevueLigne({ sujet, reunion, revu, last }: { sujet: Sujet; reunion: Reu
   }
 
   const is = revu ? ISSUES[revu.issue] : null
-  const mini: React.CSSProperties = { ...chipBase, padding: '3px 8px', fontSize: 12 }
+  const mini: React.CSSProperties = { ...chipBase, padding: '3px 7px', fontSize: 12, whiteSpace: 'nowrap' }
+  const alerte = !revu && (overdue || sujet.proposition_porteur === 'rediscuter')
 
   return (
     <div
       style={{
-        display: 'flex',
+        display: 'grid',
+        gridTemplateColumns: REVUE_COLS,
+        gap: 8,
         alignItems: 'center',
-        gap: 10,
-        padding: '8px 10px',
+        padding: '6px 10px',
         borderBottom: last ? 'none' : `1px solid ${C.line}`,
-        borderLeft: `4px solid ${overdue && !revu ? C.alert : sujet.proposition_porteur === 'rediscuter' && !revu ? C.alert : 'transparent'}`,
+        boxShadow: alerte ? `inset 3px 0 0 ${C.alert}` : 'none',
         background: revu ? C.soft : 'transparent',
-        flexWrap: 'wrap',
         opacity: busy ? 0.6 : 1,
       }}
     >
-      <span style={{ width: 26, flex: '0 0 auto' }}>{pilote ? <Avatar membre={pilote} size={24} /> : <span style={{ color: C.faint }}>?</span>}</span>
+      <span>{pilote ? <Avatar membre={pilote} size={24} /> : <span style={{ color: C.faint }}>?</span>}</span>
 
-      {/* Sujet + proposition du porteur */}
-      <div style={{ flex: '1 1 420px', minWidth: 0 }}>
-        <button
-          onClick={() => api.openSujet(sujet.id)}
-          style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', color: C.ink, textAlign: 'left', fontSize: 14, fontWeight: 600, fontFamily: FONT_BODY, maxWidth: '100%' }}
-        >
-          <span style={{ color: C.faint, fontWeight: 500 }}>#{sujet.numero} </span>
-          <span title={na?.label}>{na?.icon} </span>
-          {sujet.confidentiel && <span title="Confidentiel">🔒 </span>}
-          {sujet.impacte_ca && <span title="Impacte le CA">⚡ </span>}
-          {sujet.titre}
-        </button>
-        {revu && is ? (
-          <div style={{ fontSize: 12, color: C.muted, marginTop: 2 }}>
-            <b style={{ color: is.color }}>
-              {is.icon} {is.label}
-            </b>
-            {revu.commentaire ? ` — ${revu.commentaire}` : ''}
-          </div>
-        ) : (
-          <div style={{ display: 'flex', gap: 6, alignItems: 'center', marginTop: 4, flexWrap: 'wrap' }}>
-            <span style={{ fontSize: 11, color: C.faint }}>Porteur :</span>
-            {PROPOSITIONS.map((p) => {
-              const on = sujet.proposition_porteur === p.key
-              return (
-                <button
-                  key={p.key}
-                  title={p.help}
-                  onClick={() => void proposer(on ? null : p.key, commentaire)}
-                  style={{ ...mini, borderColor: on ? p.color : C.line, background: on ? `${p.color}26` : 'transparent', color: on ? C.ink : C.faint, fontWeight: on ? 700 : 500 }}
-                >
-                  {p.icon} {p.label}
-                </button>
-              )
-            })}
-            <input
-              value={commentaire}
-              onChange={(e) => setCommentaire(e.target.value)}
-              onBlur={() => {
-                if (commentaire !== sujet.proposition_commentaire) void proposer(sujet.proposition_porteur, commentaire)
-              }}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') (e.target as HTMLInputElement).blur()
-              }}
-              placeholder={derniere ? `Dernière nouvelle : ${derniere.texte}` : 'Où en est-on ? (commentaire du porteur)'}
-              title={derniere ? `${api.nameOfEmail(derniere.auteur_email)} · ${fmtDateTime(derniere.created_at)} : ${derniere.texte}` : undefined}
-              style={{ ...input, padding: '4px 8px', fontSize: 12, flex: '1 1 220px', minWidth: 160 }}
-            />
-            {recents.length > 0 && (
-              <span title={recents.map((r) => `${api.nameOfEmail(r.auteur_email)} : ${r.texte}`).join('\n')} style={{ fontSize: 11, color: C.muted }}>
-                💬 {recents.length}
-              </span>
-            )}
-          </div>
-        )}
-      </div>
+      <button
+        onClick={() => api.openSujet(sujet.id)}
+        title={`${sujet.titre}${sujet.contexte ? `\n\n${sujet.contexte}` : ''}`}
+        style={{
+          background: 'none',
+          border: 'none',
+          padding: 0,
+          cursor: 'pointer',
+          color: C.ink,
+          textAlign: 'left',
+          fontSize: 13,
+          fontWeight: 600,
+          fontFamily: FONT_BODY,
+          minWidth: 0,
+          overflow: 'hidden',
+          textOverflow: 'ellipsis',
+          whiteSpace: 'nowrap',
+        }}
+      >
+        <span style={{ color: C.faint, fontWeight: 500 }}>#{sujet.numero} </span>
+        <span title={na?.label}>{na?.icon} </span>
+        {sujet.confidentiel && <span title="Confidentiel">🔒 </span>}
+        {sujet.impacte_ca && <span title="Impacte le CA">⚡ </span>}
+        {sujet.titre}
+      </button>
 
-      {/* Prochain point + priorité */}
+      {/* Proposition du porteur */}
+      {revu && is ? (
+        <span style={{ fontSize: 12, fontWeight: 700, color: is.color, whiteSpace: 'nowrap' }}>
+          {is.icon} {is.label}
+        </span>
+      ) : (
+        <span style={{ display: 'inline-flex', gap: 3 }}>
+          {PROPOSITIONS.map((p) => {
+            const on = sujet.proposition_porteur === p.key
+            return (
+              <button
+                key={p.key}
+                title={`${p.label} — ${p.help}`}
+                onClick={() => void proposer(on ? null : p.key, commentaire)}
+                style={{ ...mini, padding: '3px 6px', borderColor: on ? p.color : C.line, background: on ? `${p.color}33` : 'transparent', opacity: on || !sujet.proposition_porteur ? 1 : 0.4 }}
+              >
+                {p.icon}
+              </button>
+            )
+          })}
+        </span>
+      )}
+
+      {/* Commentaire du porteur */}
+      {revu ? (
+        <span style={{ fontSize: 12, color: C.muted, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={revu.commentaire}>
+          {revu.commentaire || '—'}
+        </span>
+      ) : (
+        <input
+          value={commentaire}
+          onChange={(e) => setCommentaire(e.target.value)}
+          onBlur={() => {
+            if (commentaire !== sujet.proposition_commentaire) void proposer(sujet.proposition_porteur, commentaire)
+          }}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') (e.target as HTMLInputElement).blur()
+          }}
+          placeholder={derniere ? derniere.texte : 'Où en est-on ?'}
+          title={commentaire || (derniere ? `Dernière nouvelle — ${api.nameOfEmail(derniere.auteur_email)} : ${derniere.texte}` : '')}
+          style={{ ...input, padding: '4px 8px', fontSize: 12, width: '100%', minWidth: 0 }}
+        />
+      )}
+
+      <span title={recents.map((r) => `${api.nameOfEmail(r.auteur_email)} : ${r.texte}`).join('\n')} style={{ fontSize: 11, color: C.muted, textAlign: 'center' }}>
+        {recents.length ? `💬${recents.length}` : ''}
+      </span>
+
+      {/* Prochain point */}
       {!revu || isOpen(sujet) ? (
         <input
           type="date"
@@ -1013,54 +1070,55 @@ function RevueLigne({ sujet, reunion, revu, last }: { sujet: Sujet; reunion: Reu
             }
           }}
           title={overdue ? 'Prochain point dépassé' : 'Prochain point'}
-          style={{ ...input, padding: '4px 6px', fontSize: 12, width: 128, flex: '0 0 auto', borderColor: overdue ? C.alert : C.lineStrong }}
+          style={{ ...input, padding: '3px 6px', fontSize: 12, width: '100%', borderColor: overdue ? C.alert : C.lineStrong }}
         />
       ) : (
-        <span style={{ width: 128 }} />
+        <span />
       )}
-      <span style={{ flex: '0 0 auto', minWidth: 104 }}>{prioriteAttendue(sujet) ? <PrioInline sujet={sujet} reunionId={reunion?.id} /> : null}</span>
+
+      <span>{prioriteAttendue(sujet) ? <PrioInline sujet={sujet} reunionId={reunion?.id} /> : null}</span>
 
       {/* Décision en réunion */}
-      {reunion &&
-        (revu ? (
-          <button
-            style={{ ...linkBtn, fontSize: 12, flex: '0 0 auto' }}
-            onClick={async () => {
-              await supabase.from('piliers_reunion_sujets').delete().eq('reunion_id', reunion.id).eq('sujet_id', sujet.id)
-              await api.reload()
-            }}
-          >
-            Revoir
-          </button>
-        ) : (
-          <div style={{ display: 'flex', gap: 4, flex: '0 0 auto' }}>
-            {(
+      <span style={{ display: 'inline-flex', gap: 3 }}>
+        {reunion &&
+          (revu ? (
+            <button
+              style={{ ...linkBtn, fontSize: 12 }}
+              onClick={async () => {
+                await supabase.from('piliers_reunion_sujets').delete().eq('reunion_id', reunion.id).eq('sujet_id', sujet.id)
+                await api.reload()
+              }}
+            >
+              Revoir
+            </button>
+          ) : (
+            (
               [
-                ['fait', '✅ Fait', C.ok],
-                ['on_continue', '➡️ Continue', '#2D6F86'],
-                ['en_attente', '⏸️ Attente', C.alert],
-                ['abandonne', '✖️ Stop', '#7C8597'],
-              ] as [Issue, string, string][]
-            ).map(([k, l, col]) => {
-              const suggere =
-                (k === 'on_continue' && sujet.proposition_porteur === 'suivre') || (k === 'abandonne' && sujet.proposition_porteur === 'abandonner')
+                ['fait', '✅ Fait', C.ok, 'Fait'],
+                ['on_continue', '➡️ Suite', '#2D6F86', 'On continue'],
+                ['en_attente', '⏸️', C.alert, 'En attente'],
+                ['abandonne', '✖️ Stop', '#7C8597', 'Abandonner'],
+              ] as [Issue, string, string, string][]
+            ).map(([k, l, col, t]) => {
+              const suggere = (k === 'on_continue' && sujet.proposition_porteur === 'suivre') || (k === 'abandonne' && sujet.proposition_porteur === 'abandonner')
               return (
                 <button
                   key={k}
                   disabled={busy}
                   onClick={() => void decider(k)}
-                  title={suggere ? 'Proposé par le porteur' : undefined}
-                  style={{ ...mini, borderColor: col, background: suggere ? `${col}40` : `${col}12`, color: C.ink, fontWeight: suggere ? 700 : 600 }}
+                  title={suggere ? `${t} — proposé par le porteur` : t}
+                  style={{ ...mini, borderColor: col, background: suggere ? `${col}44` : `${col}12`, color: C.ink, fontWeight: suggere ? 700 : 600 }}
                 >
                   {l}
                 </button>
               )
-            })}
-          </div>
-        ))}
-      <Btn onClick={() => api.openSujet(sujet.id)} style={{ flex: '0 0 auto', padding: '6px 12px' }}>
+            })
+          ))}
+      </span>
+
+      <button onClick={() => api.openSujet(sujet.id)} style={{ ...mini, borderColor: C.lineStrong, color: C.ink, fontWeight: 700 }}>
         Détail ›
-      </Btn>
+      </button>
     </div>
   )
 }
