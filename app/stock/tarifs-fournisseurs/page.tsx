@@ -30,6 +30,12 @@
  * contient beaucoup d'articles non référencés chez CEGECLIM) ; « absents du fichier » limités aux articles
  * portant une réf. fournisseur (hors articles techniques DIVERS, TRANSPORT, REGUL…).
  * Migration : supabase/migrations/20261119h_tarifs_fournisseurs_appariement.sql.
+ *
+ * ÉVOLUTION (19/11/2026, 11h) : unité du tarif ≠ unité SAGE (Rubber Foot tarifés « (paire) », achetés
+ * « l'unité » dans SAGE → +109 à +400 % affichés à tort). Conversion par ligne (unités SAGE dans une unité
+ * du tarif) : posée automatiquement « paire » ↔ « l'unité », modifiable dans la fiche ; prix et paliers
+ * ramenés à l'unité SAGE avant comparaison. Écart > 30 % signalé ⚠ (unité / conditionnement à vérifier).
+ * Migration : supabase/migrations/20261119j_tarifs_conversion_unite.sql.
  */
 
 import React, { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
@@ -78,6 +84,7 @@ type LigneProp = {
   gamme: string | null; unite: string | null; prix_public: number | null; colisage: number | null; qte_palette: number | null
   paliers: Palier[]; prix_base: number | null; reference_article: string | null; appariement: string | null; nb_candidats: number | null
   appariement_manuel: boolean; ignoree: boolean; commentaire: string | null
+  conversion: number | null; conversion_auto: boolean
 }
 type Donnees = {
   fournisseur: string; nom: string | null; genere_le: string; periode_volumes: { du: string; au: string }
@@ -91,7 +98,7 @@ type EtatLigne = 'hausse' | 'baisse' | 'stable' | 'nouveau' | 'sans_prix' | 'dou
 type Suggestion = { fournisseur: string; nom: string | null; nb: number; sur: number }
 const refObsolete = (r: string | null) => /^OBS_|OBSOL|OSOLETE|^SUPPR/i.test(r || '')
 type LigneComp = {
-  l: LigneProp; art: Article | null; q: number; pa: number | null; pn: number | null; evol: number | null; vol: number
+  l: LigneProp; conv: number; paliersSage: Palier[]; suspect: boolean; art: Article | null; q: number; pa: number | null; pn: number | null; evol: number | null; vol: number
   masse: number; impact: number; etat: EtatLigne; gamme: string; pvCoef: number | null; margeAct: number | null; margeNew: number | null
 }
 
@@ -238,8 +245,11 @@ function comparer(d: Donnees, base: Base, qref: QRef): { lignes: LigneComp[]; ab
   const lignes: LigneComp[] = d.lignes.map((l) => {
     const art = l.reference_article ? parRef.get(l.reference_article) || null : null
     const q = quantiteReference(art, qref)
+    // Paliers du tarif ramenés à l'unité SAGE (1 unité du tarif = conv unités SAGE)
+    const conv = n0(l.conversion) > 0 ? n0(l.conversion) : 1
+    const paliersSage = (l.paliers || []).map((x) => ({ qte: x.qte * conv, prix: x.prix / conv }))
     const pa = art ? prixSage(art.prix_net, art.paliers, q) : null
-    const pn = prixPalier(l.paliers, q)
+    const pn = prixPalier(paliersSage, q)
     const vol = volume(art, base)
     let etat: EtatLigne
     if (l.ignoree) etat = 'ignoree'
@@ -255,7 +265,7 @@ function comparer(d: Donnees, base: Base, qref: QRef): { lignes: LigneComp[]; ab
     const evol = pa && pn ? pn / pa - 1 : null
     const pv = art?.prix_vente ?? null
     return {
-      l, art, q, pa, pn, evol, vol,
+      l, conv, paliersSage, suspect: evol !== null && Math.abs(evol) > 0.3, art, q, pa, pn, evol, vol,
       masse: compte && pa ? pa * vol : 0,
       impact: compte && pa && pn ? (pn - pa) * vol : 0,
       etat,
@@ -391,7 +401,7 @@ async function exporterExcel(d: Donnees, comp: { lignes: LigneComp[]; absents: A
       rf: x.l.ref_fournisseur, ref: x.art?.reference || x.l.reference_article, des: x.l.designation || x.art?.designation,
       gamme: x.gamme, etat: ETATS[x.etat].libelle, q: x.q, pa: x.pa, pn: x.pn, ev: x.evol,
       ps: (x.art?.paliers || []).map((p, i) => `${i === 0 ? '≤' : '≥'}${i === 0 ? p.a : n0(p.de) + 1} : ${fmtNum(p.prix, 2)}`).join(' · '),
-      pnv: (x.l.paliers || []).map((p) => `≥${p.qte} : ${fmtNum(p.prix, 2)}`).join(' · '),
+      pnv: (x.l.paliers || []).map((p) => `≥${p.qte} : ${fmtNum(p.prix, 2)}`).join(' · ') + (x.conv !== 1 ? ` (1 unité tarif = ${x.conv} unités SAGE)` : ''),
       vol: x.vol, masse: x.masse, imp: x.impact, coef: x.art?.coef, pv: x.art?.prix_vente, pvc: x.pvCoef,
       ma: x.margeAct, mn: x.margeNew, ppub: x.l.prix_public, app: x.l.appariement ? APPARIEMENTS[x.l.appariement] || x.l.appariement : '',
     })
@@ -475,7 +485,7 @@ function TarifsFournisseurs() {
 
   const [base, setBase] = useState<Base>('ventes')
   const [qref, setQref] = useState<QRef>('unitaire')
-  const [filtre, setFiltre] = useState<'tous' | 'apparies' | EtatLigne | 'absents' | 'fortes'>('apparies')
+  const [filtre, setFiltre] = useState<'tous' | 'apparies' | EtatLigne | 'absents' | 'fortes' | 'suspects'>('apparies')
   const [suggestion, setSuggestion] = useState<Suggestion | null>(null)
   const [saisieFrsProp, setSaisieFrsProp] = useState('')
   const [seuilFort, setSeuilFort] = useState(5)
@@ -763,6 +773,12 @@ function TarifsFournisseurs() {
     if (error || !data?.signedUrl) { setErreur(messageErreur(error || 'Lien indisponible')); return }
     window.open(data.signedUrl, '_blank')
   }
+  async function convertir(ligne: LigneProp, c: number | null) {
+    const { error } = await supabase.rpc('set_tarif_ligne_conversion', { p_ligne_id: ligne.id, p_conversion: c })
+    if (error) { setErreur(messageErreur(error)); return }
+    setFiche(null)
+    if (frsUrl) await charger(frsUrl, propUrl)
+  }
   async function apparier(ligne: LigneProp, reference: string | null, ignoree?: boolean) {
     const { error } = await supabase.rpc('set_tarif_ligne_article', { p_ligne_id: ligne.id, p_reference: reference, p_ignoree: ignoree ?? null })
     if (error) { setErreur(messageErreur(error)); return }
@@ -777,6 +793,7 @@ function TarifsFournisseurs() {
     let l = comp.lignes.filter((x) => {
       if (filtre === 'fortes') { if (x.evol === null || Math.abs(x.evol) * 100 < seuilFort || x.etat === 'doublon' || x.etat === 'ignoree') return false }
       else if (filtre === 'apparies') { if (!x.art) return false }
+      else if (filtre === 'suspects') { if (!x.suspect || x.etat === 'doublon' || x.etat === 'ignoree') return false }
       else if (filtre !== 'tous' && filtre !== 'absents' && x.etat !== filtre) return false
       if (q && ![x.l.ref_fournisseur, x.l.designation, x.art?.reference, x.art?.designation, x.gamme].some((s) => (s || '').toUpperCase().includes(q))) return false
       return true
@@ -1155,6 +1172,7 @@ function TarifsFournisseurs() {
                       <option value="baisse">Baisses</option>
                       <option value="stable">Stables</option>
                       <option value="fortes">Écart supérieur à…</option>
+                      <option value="suspects">⚠ Écarts &gt; 30 % (unité à vérifier)</option>
                       <option value="nouveau">Hors référentiel SAGE</option>
                       <option value="sans_prix">Sans prix SAGE</option>
                       <option value="doublon">Doublons</option>
@@ -1205,8 +1223,8 @@ function TarifsFournisseurs() {
                               <td className="px-2 py-1"><Pastille {...ETATS[x.etat]}>{ETATS[x.etat].libelle}</Pastille></td>
                               <td className="px-2 py-1 text-right text-[#5F5A4E]">{fmtNum(x.q)}</td>
                               <td className="px-2 py-1 text-right">{fmtPrix(x.pa)}</td>
-                              <td className="px-2 py-1 text-right font-bold">{fmtPrix(x.pn)}</td>
-                              <td className="px-2 py-1 text-right font-bold" style={{ color: couleurEvol(x.evol) }}>{fmtPct(x.evol)}</td>
+                              <td className="whitespace-nowrap px-2 py-1 text-right font-bold">{x.conv !== 1 && <span className="mr-1 rounded bg-[#E4EEF8] px-1 text-[10px] text-[#2D5F8C]" title={`1 unité du tarif = ${fmtNum(x.conv, 2)} unités SAGE${x.l.conversion_auto ? ' (détecté : « paire » / « l’unité »)' : ''}`}>÷{fmtNum(x.conv, 2)}</span>}{fmtPrix(x.pn)}</td>
+                              <td className="whitespace-nowrap px-2 py-1 text-right font-bold" style={{ color: couleurEvol(x.evol) }}>{x.suspect && <span title="Écart de plus de 30 % : vérifier l’unité ou le conditionnement (fiche de la ligne)" className="mr-1">⚠</span>}{fmtPct(x.evol)}</td>
                               <td className="px-2 py-1"><PaliersNouveaux p={x.l.paliers} /></td>
                               <td className="px-2 py-1 text-right">{x.art ? fmtNum(x.vol) : '—'}</td>
                               <td className="px-2 py-1 text-right">{x.masse ? fmtEur(x.masse) : '—'}</td>
@@ -1237,7 +1255,7 @@ function TarifsFournisseurs() {
         )}
       </div>
 
-      {fiche && <FicheLigne x={fiche} onFermer={() => setFiche(null)} onApparier={(ref, ign) => void apparier(fiche.l, ref, ign)} />}
+      {fiche && <FicheLigne key={fiche.l.id} x={fiche} onFermer={() => setFiche(null)} onApparier={(ref, ign) => void apparier(fiche.l, ref, ign)} onConversion={(c) => void convertir(fiche.l, c)} />}
     </main>
   )
 }
@@ -1384,7 +1402,7 @@ function PanneauImport({ imp, setImp, liste, lignes, onEntete, onIA, onAnnuler, 
 
 type ResultatRecherche = { reference: string; designation: string | null; fournisseur_principal: string | null; sommeil: boolean }
 
-function FicheLigne({ x, onFermer, onApparier }: { x: LigneComp; onFermer: () => void; onApparier: (ref: string | null, ignoree?: boolean) => void }) {
+function FicheLigne({ x, onFermer, onApparier, onConversion }: { x: LigneComp; onFermer: () => void; onApparier: (ref: string | null, ignoree?: boolean) => void; onConversion: (c: number | null) => void }) {
   const [q, setQ] = useState('')
   const [res, setRes] = useState<ResultatRecherche[]>([])
   useEffect(() => {
@@ -1397,7 +1415,8 @@ function FicheLigne({ x, onFermer, onApparier }: { x: LigneComp; onFermer: () =>
   }, [q])
 
   const a = x.art
-  const seuils = seuilsComparaison(x.l.paliers, a?.paliers)
+  const seuils = seuilsComparaison(x.paliersSage, a?.paliers)
+  const [conv, setConv] = useState(String(x.conv))
   return (
     <div className="fixed inset-0 z-40 flex justify-end bg-black/30" onClick={onFermer}>
       <aside className="h-full w-full max-w-[640px] overflow-y-auto bg-white p-4 shadow-2xl" onClick={(e) => e.stopPropagation()}>
@@ -1442,7 +1461,7 @@ function FicheLigne({ x, onFermer, onApparier }: { x: LigneComp; onFermer: () =>
             <tbody>
               {seuils.map((s) => {
                 const pa = a ? prixSage(a.prix_net, a.paliers, s) : null
-                const pn = prixPalier(x.l.paliers, s)
+                const pn = prixPalier(x.paliersSage, s)
                 const ev = pa && pn ? pn / pa - 1 : null
                 return (
                   <tr key={s} className={`border-t border-[#EFECE5] ${s === x.q ? 'bg-[#FDF6EA]' : ''}`}>
@@ -1456,6 +1475,15 @@ function FicheLigne({ x, onFermer, onApparier }: { x: LigneComp; onFermer: () =>
               })}
             </tbody>
           </table>
+          {a && (
+            <div className="mt-2 flex flex-wrap items-center gap-2 rounded-lg bg-[#F4F3F0] px-2 py-1.5 text-[12px]">
+              <span>1 unité du tarif =</span>
+              <input type="number" min={0.001} step="any" value={conv} onChange={(e) => setConv(e.target.value)} className={`${ctl} h-7 w-20`} />
+              <span>unité(s) SAGE{x.l.conversion_auto ? ' (détecté : « paire » dans le tarif, « l’unité » dans SAGE)' : ''}</span>
+              <button className={`${btn} h-7`} disabled={!(Number(conv) > 0) || Number(conv) === x.conv} onClick={() => onConversion(Number(conv))}>Appliquer</button>
+              <span className="w-full text-[11px] text-[#8A8474]">Prix et paliers du tarif sont divisés / multipliés par ce nombre avant comparaison (paire, lot, carton…).</span>
+            </div>
+          )}
           {x.art && <p className="mt-2 text-[11.5px] text-[#5F5A4E]">Sur le volume annuel ({fmtNum(x.vol)}) : masse {fmtEur(x.masse)} → impact <b style={{ color: couleurEvol(x.impact) }}>{fmtEur(x.impact, true)}</b>.</p>}
         </div>
 
