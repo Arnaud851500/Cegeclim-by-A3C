@@ -45,6 +45,7 @@ export type Statut = 'a_aborder' | 'a_planifier' | 'en_cours' | 'en_attente' | '
 export type Ressenti = 'irritant' | 'attendu' | 'changement' | 'neutre'
 export type ComStatut = 'a_preparer' | 'pret' | 'diffuse'
 export type Origine = 'remonte' | 'seance' | 'meteo' | 'action_liee'
+export type PropositionPorteur = 'suivre' | 'abandonner' | 'rediscuter'
 
 export type Sujet = {
   id: string
@@ -75,6 +76,10 @@ export type Sujet = {
   confidentiel: boolean
   /** (19/11/2026) Membre qui a mis le sujet à l'ordre du jour. */
   propose_par: string | null
+  /** (19/11/2026) Proposition du porteur pour la revue (remise à vide une fois revu). */
+  proposition_porteur: PropositionPorteur | null
+  proposition_commentaire: string
+  proposition_le: string | null
   created_by: string | null
   created_at: string
   updated_by: string | null
@@ -182,6 +187,12 @@ export const ISSUES: Record<Issue, { label: string; icon: string; color: string 
   qualifie: { label: 'Pris en charge', icon: '🚀', color: '#4E7A2A' },
   pour_info: { label: 'Pris pour info', icon: 'ℹ️', color: '#5E8FB3' },
 }
+
+export const PROPOSITIONS: { key: PropositionPorteur; label: string; icon: string; color: string; help: string }[] = [
+  { key: 'suivre', label: 'À suivre', icon: '➡️', color: '#2D6F86', help: 'On continue, rien à décider.' },
+  { key: 'abandonner', label: 'À abandonner', icon: '✖️', color: '#7C8597', help: 'Le porteur propose d’arrêter.' },
+  { key: 'rediscuter', label: 'À rediscuter', icon: '💬', color: '#C1683C', help: 'Le porteur veut en parler en réunion.' },
+]
 
 export const OPEN_STATUTS: Statut[] = ['a_planifier', 'en_cours', 'en_attente']
 

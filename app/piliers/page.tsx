@@ -26,6 +26,7 @@ import {
   MOODS,
   NATURES,
   OPEN_STATUTS,
+  PROPOSITIONS,
   PRIORITES,
   RESSENTIS,
   STATUTS,
@@ -43,6 +44,7 @@ import {
   scoreSujet,
   todayIso,
   type Origine,
+  type PropositionPorteur,
   type Issue,
   type Membre,
   type Meteo,
@@ -668,20 +670,16 @@ function TabReunion() {
         >
           {groupes.length === 0 && <Empty>Aucune action ouverte. Les sujets pris en charge aujourd’hui apparaîtront ici à la prochaine réunion.</Empty>}
           {groupes.map((g) => (
-            <div key={g.membre?.id || 'sans'} style={{ marginBottom: 18 }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 10, margin: '6px 0 10px' }}>
-                {g.membre ? <Avatar membre={g.membre} size={30} /> : <span style={{ fontSize: 20 }}>❔</span>}
-                <div style={{ fontWeight: 700, fontSize: 15 }}>{g.membre ? g.membre.prenom : 'Sans pilote'}</div>
-                <div style={{ color: C.faint, fontSize: 13 }}>{g.membre?.role}</div>
+            <div key={g.membre?.id || 'sans'} style={{ marginBottom: 12 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, margin: '4px 0 6px' }}>
+                {g.membre ? <Avatar membre={g.membre} size={22} /> : <span>❔</span>}
+                <div style={{ fontWeight: 700, fontSize: 14 }}>{g.membre ? g.membre.prenom : 'Sans pilote'}</div>
+                <div style={{ color: C.faint, fontSize: 12 }}>{g.membre?.role}</div>
                 <div style={{ marginLeft: 'auto', fontSize: 12, color: C.muted }}>
-                  {g.items.filter((s) => issueOf(s.id)).length} / {g.items.length}
+                  {g.items.filter((s) => s.proposition_porteur || s.proposition_commentaire).length} préparé{g.items.length > 1 ? 's' : ''} · {g.items.filter((s) => issueOf(s.id)).length} / {g.items.length} revu{g.items.length > 1 ? 's' : ''}
                 </div>
               </div>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-                {g.items.map((s) => (
-                  <ReviewCard key={s.id} sujet={s} reunion={R} revu={issueOf(s.id)} />
-                ))}
-              </div>
+              <RevueListe sujets={g.items} reunion={R} issueOf={issueOf} />
             </div>
           ))}
         </Step>
@@ -874,140 +872,196 @@ function MeteoGrid({ reunion }: { reunion: Reunion }) {
 }
 
 // ---------------------------------------------------------------- 2. Revue
-function ReviewCard({ sujet, reunion, revu }: { sujet: Sujet; reunion: Reunion; revu: ReunionSujet | null }) {
+// (19/11/2026, v4) Lecture dense « une ligne » : porteur · sujet · proposition
+// du porteur (à suivre / à abandonner / à rediscuter + son commentaire) ·
+// prochain point · priorité · décision en réunion · Détail. Le porteur prépare
+// sa proposition avant la réunion (onglet « Entre deux réunions »). Une fois le
+// sujet revu, la proposition est versée au fil de suivi et remise à vide.
+function RevueListe({ sujets, reunion, issueOf }: { sujets: Sujet[]; reunion: Reunion | null; issueOf?: (id: string) => ReunionSujet | null }) {
+  if (!sujets.length) return null
+  return (
+    <div style={{ border: `1px solid ${C.line}`, borderRadius: 12, overflow: 'hidden', background: C.card }}>
+      {sujets.map((s, i) => (
+        <RevueLigne key={s.id} sujet={s} reunion={reunion} revu={issueOf ? issueOf(s.id) : null} last={i === sujets.length - 1} />
+      ))}
+    </div>
+  )
+}
+
+function RevueLigne({ sujet, reunion, revu, last }: { sujet: Sujet; reunion: Reunion | null; revu: ReunionSujet | null; last?: boolean }) {
   const api = useApi()
-  const [commentaire, setCommentaire] = useState('')
-  const [prochain, setProchain] = useState(sujet.prochain_point || addDaysIso(reunion.date_reunion, 28))
+  const [commentaire, setCommentaire] = useState(sujet.proposition_commentaire)
+  const [prochain, setProchain] = useState(sujet.prochain_point || (reunion ? addDaysIso(reunion.date_reunion, 28) : ''))
   const [busy, setBusy] = useState(false)
   const today = todayIso()
-  const recents = api.suivisOf(sujet.id).filter((s) => s.type !== 'statut' && (!api.depuis || s.created_at > api.depuis))
-  const questions = recents.filter((s) => s.type === 'question')
   const overdue = isOverdue(sujet, today)
-  const piloteId = api.porteursOf(sujet.id).find((p) => p.role === 'pilote')?.membre.id || ''
-  // Actions tirées de ce sujet pendant cette réunion
-  const enfantsIci = api.sujets.filter((s) => s.parent_id === sujet.id && s.reunion_origine === reunion.id)
+  const pilote = api.porteursOf(sujet.id).find((p) => p.role === 'pilote')?.membre || null
+  const na = refOf(NATURES, sujet.nature)
+  const recents = api.suivisOf(sujet.id).filter((s) => s.type !== 'statut' && (!api.depuis || s.created_at > api.depuis))
+  const derniere = recents[0]
 
-  const act = async (issue: Issue) => {
+  const proposer = async (p: PropositionPorteur | null, texte: string) => {
+    await api.updateSujet(sujet, { proposition_porteur: p, proposition_commentaire: texte, proposition_le: new Date().toISOString() })
+    await api.reload()
+  }
+
+  const decider = async (issue: Issue) => {
+    if (!reunion) return
     setBusy(true)
     const statutCible: Statut =
       issue === 'fait' ? 'fait' : issue === 'abandonne' ? 'abandonne' : issue === 'en_attente' ? 'en_attente' : sujet.statut === 'a_planifier' || sujet.statut === 'en_cours' ? sujet.statut : 'en_cours'
-    const patch: Partial<Sujet> = { statut: statutCible, a_l_ordre_du_jour: false }
+    const patch: Partial<Sujet> = { statut: statutCible, a_l_ordre_du_jour: false, proposition_porteur: null, proposition_commentaire: '', proposition_le: null }
     if (issue === 'on_continue' || issue === 'en_attente') patch.prochain_point = prochain || null
     const ok = await api.updateSujet(sujet, patch, reunion.id)
     if (ok) {
+      const prop = refOf(PROPOSITIONS, sujet.proposition_porteur)
+      const texte = [prop ? `Proposition du porteur : ${prop.label}` : '', commentaire.trim()].filter(Boolean).join(' — ')
       await supabase.from('piliers_reunion_sujets').upsert({ reunion_id: reunion.id, sujet_id: sujet.id, issue, commentaire: commentaire.trim(), revu_le: new Date().toISOString() })
-      if (commentaire.trim()) await api.addSuivi(sujet.id, 'decision', commentaire, reunion.id)
+      await api.addSuivi(sujet.id, 'decision', `${ISSUES[issue].label}${texte ? ` · ${texte}` : ''}`, reunion.id)
       setCommentaire('')
     }
     await api.reload()
     setBusy(false)
   }
 
-  if (revu) {
-    const is = ISSUES[revu.issue]
-    return (
-      <div style={{ padding: '10px 14px', borderRadius: 12, border: `1px solid ${C.line}`, background: C.soft }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-        <span style={{ fontSize: 16 }}>{is.icon}</span>
-        <SujetTitle sujet={sujet} small />
-        <span style={{ fontSize: 12, color: is.color, fontWeight: 700 }}>{is.label}</span>
-        {revu.commentaire && <span style={{ fontSize: 13, color: C.muted, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>— {revu.commentaire}</span>}
-        {sujet.prochain_point && isOpen(sujet) && <span style={{ fontSize: 12, color: C.muted, marginLeft: 'auto' }}>prochain point {fmtDate(sujet.prochain_point)}</span>}
-        {prioriteAttendue(sujet) && <PrioInline sujet={sujet} reunionId={reunion.id} />}
-        <button
-          onClick={async () => {
-            await supabase.from('piliers_reunion_sujets').delete().eq('reunion_id', reunion.id).eq('sujet_id', sujet.id)
-            await api.reload()
-          }}
-          style={linkBtn}
-          title="Revenir sur ce sujet"
-        >
-          Revoir
-        </button>
-      </div>
-      {revu.issue !== 'abandonne' && (
-        <QuickLines
-          reunion={reunion}
-          items={enfantsIci}
-          defaultPiloteId={piloteId}
-          parentId={sujet.id}
-          origine="action_liee"
-          label="＋ Nouvelles actions sur ce sujet"
-          collapsed={!enfantsIci.length}
-        />
-      )}
-      </div>
-    )
-  }
+  const is = revu ? ISSUES[revu.issue] : null
+  const mini: React.CSSProperties = { ...chipBase, padding: '3px 8px', fontSize: 12 }
 
   return (
-    <Card style={{ padding: 14, borderLeft: `4px solid ${overdue ? C.alert : sujet.a_l_ordre_du_jour ? C.gold : C.line}` }}>
-      <div style={{ display: 'flex', gap: 10, alignItems: 'flex-start', flexWrap: 'wrap' }}>
-        <div style={{ flex: '1 1 380px', minWidth: 0 }}>
-          <SujetTitle sujet={sujet} />
-          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 6 }}>
-            <SujetBadges sujet={sujet} />
-            {sujet.a_l_ordre_du_jour && <Tag color={C.gold}>🔎 à creuser</Tag>}
-            {overdue && <Tag color={C.alert}>point attendu le {fmtDate(sujet.prochain_point)}</Tag>}
+    <div
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: 10,
+        padding: '8px 10px',
+        borderBottom: last ? 'none' : `1px solid ${C.line}`,
+        borderLeft: `4px solid ${overdue && !revu ? C.alert : sujet.proposition_porteur === 'rediscuter' && !revu ? C.alert : 'transparent'}`,
+        background: revu ? C.soft : 'transparent',
+        flexWrap: 'wrap',
+        opacity: busy ? 0.6 : 1,
+      }}
+    >
+      <span style={{ width: 26, flex: '0 0 auto' }}>{pilote ? <Avatar membre={pilote} size={24} /> : <span style={{ color: C.faint }}>?</span>}</span>
+
+      {/* Sujet + proposition du porteur */}
+      <div style={{ flex: '1 1 420px', minWidth: 0 }}>
+        <button
+          onClick={() => api.openSujet(sujet.id)}
+          style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', color: C.ink, textAlign: 'left', fontSize: 14, fontWeight: 600, fontFamily: FONT_BODY, maxWidth: '100%' }}
+        >
+          <span style={{ color: C.faint, fontWeight: 500 }}>#{sujet.numero} </span>
+          <span title={na?.label}>{na?.icon} </span>
+          {sujet.confidentiel && <span title="Confidentiel">🔒 </span>}
+          {sujet.impacte_ca && <span title="Impacte le CA">⚡ </span>}
+          {sujet.titre}
+        </button>
+        {revu && is ? (
+          <div style={{ fontSize: 12, color: C.muted, marginTop: 2 }}>
+            <b style={{ color: is.color }}>
+              {is.icon} {is.label}
+            </b>
+            {revu.commentaire ? ` — ${revu.commentaire}` : ''}
           </div>
-        </div>
-        <PorteursInline sujetId={sujet.id} />
-      </div>
-
-      <div style={{ marginTop: 10, padding: '8px 10px', borderRadius: 8, background: C.soft, fontSize: 13 }}>
-        {recents.length === 0 ? (
-          <span style={{ color: C.faint }}>Pas de nouvelle donnée depuis la dernière réunion.</span>
         ) : (
-          recents.slice(0, 3).map((s) => <SuiviLine key={s.id} suivi={s} compact />)
+          <div style={{ display: 'flex', gap: 6, alignItems: 'center', marginTop: 4, flexWrap: 'wrap' }}>
+            <span style={{ fontSize: 11, color: C.faint }}>Porteur :</span>
+            {PROPOSITIONS.map((p) => {
+              const on = sujet.proposition_porteur === p.key
+              return (
+                <button
+                  key={p.key}
+                  title={p.help}
+                  onClick={() => void proposer(on ? null : p.key, commentaire)}
+                  style={{ ...mini, borderColor: on ? p.color : C.line, background: on ? `${p.color}26` : 'transparent', color: on ? C.ink : C.faint, fontWeight: on ? 700 : 500 }}
+                >
+                  {p.icon} {p.label}
+                </button>
+              )
+            })}
+            <input
+              value={commentaire}
+              onChange={(e) => setCommentaire(e.target.value)}
+              onBlur={() => {
+                if (commentaire !== sujet.proposition_commentaire) void proposer(sujet.proposition_porteur, commentaire)
+              }}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') (e.target as HTMLInputElement).blur()
+              }}
+              placeholder={derniere ? `Dernière nouvelle : ${derniere.texte}` : 'Où en est-on ? (commentaire du porteur)'}
+              title={derniere ? `${api.nameOfEmail(derniere.auteur_email)} · ${fmtDateTime(derniere.created_at)} : ${derniere.texte}` : undefined}
+              style={{ ...input, padding: '4px 8px', fontSize: 12, flex: '1 1 220px', minWidth: 160 }}
+            />
+            {recents.length > 0 && (
+              <span title={recents.map((r) => `${api.nameOfEmail(r.auteur_email)} : ${r.texte}`).join('\n')} style={{ fontSize: 11, color: C.muted }}>
+                💬 {recents.length}
+              </span>
+            )}
+          </div>
         )}
-        {recents.length > 3 && (
-          <button style={linkBtn} onClick={() => api.openSujet(sujet.id)}>
-            + {recents.length - 3} autre{recents.length - 3 > 1 ? 's' : ''}
-          </button>
-        )}
-        {questions.length > 0 && <div style={{ marginTop: 4, color: C.gold, fontWeight: 600 }}>❓ {questions.length} question{questions.length > 1 ? 's' : ''} posée{questions.length > 1 ? 's' : ''} pour cette réunion</div>}
       </div>
 
-      <div style={{ display: 'flex', gap: 8, marginTop: 10, flexWrap: 'wrap', alignItems: 'center' }}>
+      {/* Prochain point + priorité */}
+      {!revu || isOpen(sujet) ? (
         <input
-          value={commentaire}
-          onChange={(e) => setCommentaire(e.target.value)}
-          placeholder="Décision / ce qu’on retient (facultatif)"
-          style={{ ...input, flex: '1 1 260px' }}
+          type="date"
+          value={prochain}
+          onChange={(e) => setProchain(e.target.value)}
+          onBlur={async () => {
+            if (!reunion && prochain !== (sujet.prochain_point || '')) {
+              await api.updateSujet(sujet, { prochain_point: prochain || null })
+              await api.reload()
+            }
+          }}
+          title={overdue ? 'Prochain point dépassé' : 'Prochain point'}
+          style={{ ...input, padding: '4px 6px', fontSize: 12, width: 128, flex: '0 0 auto', borderColor: overdue ? C.alert : C.lineStrong }}
         />
-        <label style={{ fontSize: 12, color: C.muted, display: 'flex', alignItems: 'center', gap: 6 }}>
-          prochain point
-          <input type="date" value={prochain} onChange={(e) => setProchain(e.target.value)} style={{ ...input, width: 140 }} />
-        </label>
-        {!estInfo(sujet.nature) && <PrioInline sujet={sujet} reunionId={reunion.id} />}
-      </div>
-      <div style={{ display: 'flex', gap: 6, marginTop: 10, flexWrap: 'wrap' }}>
-        <Btn disabled={busy} color={C.ok} onClick={() => void act('fait')}>
-          ✅ Fait
-        </Btn>
-        <Btn disabled={busy} color="#2D6F86" onClick={() => void act('on_continue')}>
-          ➡️ On continue
-        </Btn>
-        <Btn disabled={busy} color={C.alert} onClick={() => void act('en_attente')}>
-          ⏸️ En attente
-        </Btn>
-        <Btn disabled={busy} color="#7C8597" onClick={() => void act('abandonne')}>
-          ✖️ Abandonner
-        </Btn>
-        <Btn onClick={() => api.openSujet(sujet.id)} style={{ marginLeft: 'auto' }}>
-          Ouvrir la fiche
-        </Btn>
-      </div>
-      <QuickLines
-        reunion={reunion}
-        items={enfantsIci}
-        defaultPiloteId={piloteId}
-        parentId={sujet.id}
-        origine="action_liee"
-        label="＋ Nouvelles actions sur ce sujet"
-        collapsed={!enfantsIci.length}
-      />
-    </Card>
+      ) : (
+        <span style={{ width: 128 }} />
+      )}
+      <span style={{ flex: '0 0 auto', minWidth: 104 }}>{prioriteAttendue(sujet) ? <PrioInline sujet={sujet} reunionId={reunion?.id} /> : null}</span>
+
+      {/* Décision en réunion */}
+      {reunion &&
+        (revu ? (
+          <button
+            style={{ ...linkBtn, fontSize: 12, flex: '0 0 auto' }}
+            onClick={async () => {
+              await supabase.from('piliers_reunion_sujets').delete().eq('reunion_id', reunion.id).eq('sujet_id', sujet.id)
+              await api.reload()
+            }}
+          >
+            Revoir
+          </button>
+        ) : (
+          <div style={{ display: 'flex', gap: 4, flex: '0 0 auto' }}>
+            {(
+              [
+                ['fait', '✅ Fait', C.ok],
+                ['on_continue', '➡️ Continue', '#2D6F86'],
+                ['en_attente', '⏸️ Attente', C.alert],
+                ['abandonne', '✖️ Stop', '#7C8597'],
+              ] as [Issue, string, string][]
+            ).map(([k, l, col]) => {
+              const suggere =
+                (k === 'on_continue' && sujet.proposition_porteur === 'suivre') || (k === 'abandonne' && sujet.proposition_porteur === 'abandonner')
+              return (
+                <button
+                  key={k}
+                  disabled={busy}
+                  onClick={() => void decider(k)}
+                  title={suggere ? 'Proposé par le porteur' : undefined}
+                  style={{ ...mini, borderColor: col, background: suggere ? `${col}40` : `${col}12`, color: C.ink, fontWeight: suggere ? 700 : 600 }}
+                >
+                  {l}
+                </button>
+              )
+            })}
+          </div>
+        ))}
+      <Btn onClick={() => api.openSujet(sujet.id)} style={{ flex: '0 0 auto', padding: '6px 12px' }}>
+        Détail ›
+      </Btn>
+    </div>
   )
 }
 
@@ -1814,7 +1868,7 @@ function TabEntre({ onQuickAdd }: { onQuickAdd: () => void }) {
   const me = api.me!
 
   const mesSujets = api.sujets
-    .filter((s) => isOpen(s) && api.porteurs.some((p) => p.sujet_id === s.id && p.membre_id === me.id))
+    .filter((s) => OPEN_STATUTS.includes(s.statut) && api.porteurs.some((p) => p.sujet_id === s.id && p.membre_id === me.id))
     .sort((a, b) => (a.prochain_point || '9999').localeCompare(b.prochain_point || '9999'))
 
   // Fil depuis la dernière réunion : suivis + sujets créés
@@ -1845,6 +1899,13 @@ function TabEntre({ onQuickAdd }: { onQuickAdd: () => void }) {
           </div>
           <p style={{ color: C.muted, fontSize: 13, marginTop: 0 }}>Les nouvelles demandes (hors suivi des actions déjà connues), dans l’ordre où elles seront abordées.</p>
           <OdjListe sujets={proposes} reunion={null} vide="Aucun sujet proposé pour l’instant." />
+        </Card>
+        <Card style={{ borderLeft: `5px solid #4E7A2A` }}>
+          <h2 style={{ ...h2, marginBottom: 4 }}>🔁 Mes sujets en cours — préparer la revue ({mesSujets.length})</h2>
+          <p style={{ color: C.muted, fontSize: 13, marginTop: 0 }}>
+            Pour chacun : votre proposition (à suivre, à abandonner, à rediscuter) et un commentaire. C’est ce qui sera lu à la prochaine réunion.
+          </p>
+          {mesSujets.length === 0 ? <Empty>Vous ne portez aucun sujet ouvert.</Empty> : <RevueListe sujets={mesSujets} reunion={null} />}
         </Card>
     <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1.1fr)', gap: 20, alignItems: 'start' }}>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
@@ -1894,27 +1955,6 @@ function TabEntre({ onQuickAdd }: { onQuickAdd: () => void }) {
           </div>
         </Card>
 
-        <Card>
-          <h2 style={h2}>Mes sujets ({mesSujets.length})</h2>
-          {mesSujets.length === 0 && <Empty>Vous ne portez aucun sujet ouvert.</Empty>}
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-            {mesSujets.map((s) => {
-              const pil = api.porteurs.some((p) => p.sujet_id === s.id && p.membre_id === me.id && p.role === 'pilote')
-              const overdue = isOverdue(s, today)
-              return (
-                <button key={s.id} onClick={() => api.openSujet(s.id)} style={{ ...rowBtn }}>
-                  <span style={{ width: 16 }}>{pil ? '★' : '·'}</span>
-                  <span style={{ flex: 1, textAlign: 'left' }}>
-                    <span style={{ color: C.faint }}>#{s.numero}</span> {s.titre}
-                  </span>
-                  <span style={{ fontSize: 12, color: overdue ? C.alert : C.muted, fontWeight: overdue ? 700 : 400 }}>
-                    {s.prochain_point ? `${overdue ? 'en retard · ' : ''}${fmtDate(s.prochain_point)}` : 'pas de date'}
-                  </span>
-                </button>
-              )
-            })}
-          </div>
-        </Card>
       </div>
 
       <Card>
