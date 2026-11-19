@@ -43,6 +43,7 @@ import {
   scoreSujet,
   todayIso,
   type ComStatut,
+  type Origine,
   type Issue,
   type Membre,
   type Meteo,
@@ -92,6 +93,9 @@ type NewSujetInput = {
   pilote_id?: string | null
   statut?: Statut
   reunion_origine?: string | null
+  parent_id?: string | null
+  origine?: Origine
+  prochain_point?: string | null
 }
 
 type Api = {
@@ -290,6 +294,9 @@ export default function PiliersPage() {
           domaine: input.domaine || '',
           statut: input.statut || 'a_aborder',
           reunion_origine: input.reunion_origine || null,
+          parent_id: input.parent_id || null,
+          origine: input.origine || 'remonte',
+          prochain_point: input.prochain_point || null,
         })
         .select('*')
         .single()
@@ -527,10 +534,14 @@ function TabReunion() {
   const revue = sujets.filter((s) => {
     const rs = issueOf(s.id)
     if (rs) return !['qualifie', 'pour_info'].includes(rs.issue) && !(rs.issue === 'abandonne' && s.reunion_origine === R.id)
-    return OPEN_STATUTS.includes(s.statut)
+    // les actions nées pendant cette réunion seront revues à la suivante
+    return OPEN_STATUTS.includes(s.statut) && s.reunion_origine !== R.id
   })
-  // 3. Nouveaux : remontés (à aborder) + ceux qualifiés dans cette réunion
+  // 3. Nouveaux : remontés (à aborder) + ceux qualifiés dans cette réunion.
+  // Les actions saisies à la volée (météo, série d'actions d'un sujet) sont
+  // affichées là où elles ont été saisies, pas ici.
   const nouveaux = sujets.filter((s) => {
+    if (s.origine === 'meteo' || s.origine === 'action_liee') return false
     const rs = issueOf(s.id)
     if (rs) return ['qualifie', 'pour_info'].includes(rs.issue) || (rs.issue === 'abandonne' && s.reunion_origine === R.id)
     return s.statut === 'a_aborder'
@@ -598,7 +609,7 @@ function TabReunion() {
           </div>
         </Card>
 
-        <Step id="pil-meteo" n={1} title="Météo" subtitle="Un tour rapide : comment ça va, en un mot.">
+        <Step id="pil-meteo" n={1} title="Météo" subtitle="Un tour rapide : comment ça va, en un mot — et les actions qui en sortent, rattachées à la personne.">
           <MeteoGrid reunion={R} />
         </Step>
 
@@ -742,9 +753,13 @@ function MeteoGrid({ reunion }: { reunion: Reunion }) {
     await api.reload()
   }
   return (
-    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(210px, 1fr))', gap: 10 }}>
+    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: 10 }}>
       {api.membresActifs.map((m) => {
         const mt = api.meteo.find((x) => x.reunion_id === reunion.id && x.membre_id === m.id)
+        // Lignes saisies pendant le tour de météo de ce membre (actions rattachées à lui, infos)
+        const lignes = api.sujets.filter(
+          (s) => s.reunion_origine === reunion.id && s.origine === 'meteo' && api.porteurs.some((p) => p.sujet_id === s.id && p.membre_id === m.id && p.role === 'pilote'),
+        )
         return (
           <Card key={m.id} style={{ padding: 12 }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
@@ -780,6 +795,17 @@ function MeteoGrid({ reunion }: { reunion: Reunion }) {
               }}
               style={{ ...input, width: '100%' }}
             />
+            <QuickLines
+              reunion={reunion}
+              items={lignes}
+              defaultPiloteId={m.id}
+              origine="meteo"
+              allowInfo
+              hidePiloteSelect
+              label="＋ Actions / infos"
+              collapsed={!lignes.length}
+              placeholder={`Action pour ${m.prenom}… puis Entrée`}
+            />
           </Card>
         )
       })}
@@ -797,6 +823,9 @@ function ReviewCard({ sujet, reunion, revu }: { sujet: Sujet; reunion: Reunion; 
   const recents = api.suivisOf(sujet.id).filter((s) => s.type !== 'statut' && (!api.depuis || s.created_at > api.depuis))
   const questions = recents.filter((s) => s.type === 'question')
   const overdue = isOverdue(sujet, today)
+  const piloteId = api.porteursOf(sujet.id).find((p) => p.role === 'pilote')?.membre.id || ''
+  // Actions tirées de ce sujet pendant cette réunion
+  const enfantsIci = api.sujets.filter((s) => s.parent_id === sujet.id && s.reunion_origine === reunion.id)
 
   const act = async (issue: Issue) => {
     setBusy(true)
@@ -817,17 +846,8 @@ function ReviewCard({ sujet, reunion, revu }: { sujet: Sujet; reunion: Reunion; 
   if (revu) {
     const is = ISSUES[revu.issue]
     return (
-      <div
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          gap: 10,
-          padding: '10px 14px',
-          borderRadius: 12,
-          border: `1px solid ${C.line}`,
-          background: C.soft,
-        }}
-      >
+      <div style={{ padding: '10px 14px', borderRadius: 12, border: `1px solid ${C.line}`, background: C.soft }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
         <span style={{ fontSize: 16 }}>{is.icon}</span>
         <SujetTitle sujet={sujet} small />
         <span style={{ fontSize: 12, color: is.color, fontWeight: 700 }}>{is.label}</span>
@@ -843,6 +863,18 @@ function ReviewCard({ sujet, reunion, revu }: { sujet: Sujet; reunion: Reunion; 
         >
           Revoir
         </button>
+      </div>
+      {revu.issue !== 'abandonne' && (
+        <QuickLines
+          reunion={reunion}
+          items={enfantsIci}
+          defaultPiloteId={piloteId}
+          parentId={sujet.id}
+          origine="action_liee"
+          label="＋ Nouvelles actions sur ce sujet"
+          collapsed={!enfantsIci.length}
+        />
+      )}
       </div>
     )
   }
@@ -904,26 +936,47 @@ function ReviewCard({ sujet, reunion, revu }: { sujet: Sujet; reunion: Reunion; 
           Ouvrir la fiche
         </Btn>
       </div>
+      <QuickLines
+        reunion={reunion}
+        items={enfantsIci}
+        defaultPiloteId={piloteId}
+        parentId={sujet.id}
+        origine="action_liee"
+        label="＋ Nouvelles actions sur ce sujet"
+        collapsed={!enfantsIci.length}
+      />
     </Card>
   )
 }
 
 // ---------------------------------------------------------------- 3. Nouveaux
+// (19/11/2026, v2) Carte compacte par défaut : nature + qui + décision en une
+// ligne ; le détail (ressenti, priorité, date, CA, commentaire) est replié.
+// Une action est rattachée par défaut au membre qui a remonté le sujet.
+// « ＋ Actions à en tirer » saisit une série d'actions liées (parent_id).
+function membreOfEmail(api: Api, email: string | null | undefined) {
+  if (!email) return null
+  return api.membres.find((m) => m.email && m.email.toLowerCase() === email.toLowerCase()) || null
+}
+
 function QualifyCard({ sujet, reunion, revu }: { sujet: Sujet; reunion: Reunion; revu: ReunionSujet | null }) {
   const api = useApi()
   const porteurs = api.porteursOf(sujet.id)
+  const auteur = membreOfEmail(api, sujet.created_by)
   const [nature, setNature] = useState<Nature>(sujet.nature)
-  const [pilote, setPilote] = useState<string>(porteurs.find((p) => p.role === 'pilote')?.membre.id || '')
+  const [pilote, setPilote] = useState<string>(porteurs.find((p) => p.role === 'pilote')?.membre.id || (auteur?.actif ? auteur.id : ''))
   const [priorite, setPriorite] = useState<number | null>(sujet.priorite)
   const [prochain, setProchain] = useState(sujet.prochain_point || addDaysIso(reunion.date_reunion, 28))
   const [ca, setCa] = useState(sujet.impacte_ca)
   const [ressenti, setRessenti] = useState<Ressenti>(sujet.ressenti)
   const [commentaire, setCommentaire] = useState('')
+  const [details, setDetails] = useState(false)
   const [busy, setBusy] = useState(false)
+  const enfants = api.sujets.filter((s) => s.parent_id === sujet.id)
 
   const go = async (choice: 'en_cours' | 'a_planifier' | 'pour_info' | 'abandonne') => {
     if ((choice === 'en_cours' || choice === 'a_planifier') && !pilote) {
-      api.notify('Choisissez qui prend le sujet (pilote).', 'err')
+      api.notify('Choisissez qui prend le sujet.', 'err')
       return
     }
     setBusy(true)
@@ -933,7 +986,7 @@ function QualifyCard({ sujet, reunion, revu }: { sujet: Sujet; reunion: Reunion;
       sujet,
       {
         statut,
-        nature: choice === 'pour_info' ? 'info' : nature,
+        nature: choice === 'pour_info' ? 'info' : nature === 'info' ? 'action' : nature,
         priorite,
         impacte_ca: ca,
         ressenti,
@@ -945,7 +998,11 @@ function QualifyCard({ sujet, reunion, revu }: { sujet: Sujet; reunion: Reunion;
       reunion.id,
     )
     if (ok) {
-      if (pilote) {
+      // Les actions liées remontées avec le sujet suivent sa décision
+      for (const e of enfants.filter((x) => x.statut === 'a_aborder')) {
+        await api.updateSujet(e, { statut: choice === 'abandonne' ? 'abandonne' : choice === 'a_planifier' ? 'a_planifier' : 'en_cours', reunion_origine: e.reunion_origine || reunion.id, prochain_point: e.prochain_point || prochain || null }, reunion.id)
+      }
+      if (pilote && choice !== 'abandonne') {
         const others = porteurs.filter((p) => p.membre.id !== pilote).map((p) => ({ membre_id: p.membre.id, role: 'contributeur' as const }))
         await api.setPorteurs(sujet.id, [{ membre_id: pilote, role: 'pilote' }, ...others])
       }
@@ -960,96 +1017,293 @@ function QualifyCard({ sujet, reunion, revu }: { sujet: Sujet; reunion: Reunion;
     const is = ISSUES[revu.issue]
     const p = porteurs.find((x) => x.role === 'pilote')
     return (
-      <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 14px', borderRadius: 12, border: `1px solid ${C.line}`, background: C.soft }}>
-        <span>{is.icon}</span>
-        <SujetTitle sujet={sujet} small />
-        <span style={{ fontSize: 12, color: is.color, fontWeight: 700 }}>{is.label}</span>
-        {p && (
-          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 13, color: C.muted }}>
-            <Avatar membre={p.membre} size={20} /> {p.membre.prenom}
-          </span>
+      <div style={{ borderRadius: 12, border: `1px solid ${C.line}`, background: C.soft, padding: '10px 14px' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+          <span>{is.icon}</span>
+          <SujetTitle sujet={sujet} small />
+          <span style={{ fontSize: 12, color: is.color, fontWeight: 700 }}>{is.label}</span>
+          {p && revu.issue !== 'abandonne' && (
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 13, color: C.muted }}>
+              <Avatar membre={p.membre} size={20} /> {p.membre.prenom}
+            </span>
+          )}
+          {revu.commentaire && <span style={{ fontSize: 13, color: C.muted, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>— {revu.commentaire}</span>}
+          <button
+            style={{ ...linkBtn, marginLeft: 'auto' }}
+            onClick={async () => {
+              await supabase.from('piliers_reunion_sujets').delete().eq('reunion_id', reunion.id).eq('sujet_id', sujet.id)
+              await api.updateSujet(sujet, { statut: 'a_aborder' }, reunion.id)
+              await api.reload()
+            }}
+          >
+            Revoir
+          </button>
+        </div>
+        {revu.issue !== 'abandonne' && (
+          <QuickLines
+            reunion={reunion}
+            items={enfants}
+            defaultPiloteId={p?.membre.id || pilote}
+            parentId={sujet.id}
+            origine="action_liee"
+            label="＋ Actions à en tirer"
+            collapsed={!enfants.length}
+          />
         )}
-        {revu.commentaire && <span style={{ fontSize: 13, color: C.muted, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>— {revu.commentaire}</span>}
-        <button
-          style={{ ...linkBtn, marginLeft: 'auto' }}
-          onClick={async () => {
-            await supabase.from('piliers_reunion_sujets').delete().eq('reunion_id', reunion.id).eq('sujet_id', sujet.id)
-            await api.updateSujet(sujet, { statut: 'a_aborder' }, reunion.id)
-            await api.reload()
-          }}
-        >
-          Revoir
-        </button>
       </div>
     )
   }
 
-  return (
-    <Card style={{ padding: 14, borderLeft: `4px solid ${C.gold}` }}>
-      <div style={{ display: 'flex', gap: 10, alignItems: 'flex-start' }}>
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <SujetTitle sujet={sujet} />
-          <div style={{ fontSize: 12, color: C.faint, marginTop: 2 }}>
-            Remonté par {api.nameOfEmail(sujet.created_by)} le {fmtDate(sujet.created_at.slice(0, 10), { day: 'numeric', month: 'long' })}
-          </div>
-          {sujet.contexte && <div style={{ marginTop: 8, fontSize: 14, lineHeight: 1.5, whiteSpace: 'pre-wrap' }}>{sujet.contexte}</div>}
-          {api.suivisOf(sujet.id)
-            .filter((s) => s.type !== 'statut')
-            .slice(0, 3)
-            .map((s) => (
-              <SuiviLine key={s.id} suivi={s} compact />
-            ))}
-        </div>
-      </div>
+  const NATURES_COURTES = NATURES.filter((n) => n.key !== 'projet' || nature === 'projet')
 
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(230px, 1fr))', gap: 12, marginTop: 12 }}>
-        <Field label="C’est…">
-          <Chips list={NATURES} value={nature} onChange={(v) => setNature(v as Nature)} />
-        </Field>
-        <Field label="Pour les équipes">
-          <Chips list={RESSENTIS} value={ressenti} onChange={(v) => setRessenti(v as Ressenti)} />
-        </Field>
-        <Field label="Qui prend ? (pilote)">
-          <select value={pilote} onChange={(e) => setPilote(e.target.value)} style={{ ...input, width: '100%' }}>
-            <option value="">— choisir —</option>
+  return (
+    <Card style={{ padding: '12px 14px', borderLeft: `4px solid ${C.gold}` }}>
+      <div style={{ display: 'flex', gap: 8, alignItems: 'baseline', flexWrap: 'wrap' }}>
+        <SujetTitle sujet={sujet} small />
+        <span style={{ fontSize: 12, color: C.faint }}>
+          par {api.nameOfEmail(sujet.created_by)} · {fmtDate(sujet.created_at.slice(0, 10))}
+        </span>
+        <button style={{ ...linkBtn, marginLeft: 'auto', fontSize: 12 }} onClick={() => setDetails(!details)}>
+          {details ? 'Moins de détails ▴' : 'Détails ▾'}
+        </button>
+      </div>
+      {sujet.contexte && !details && (
+        <div style={{ fontSize: 13, color: C.muted, marginTop: 4, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{sujet.contexte}</div>
+      )}
+
+      <div style={{ display: 'flex', gap: 6, alignItems: 'center', marginTop: 10, flexWrap: 'wrap' }}>
+        {NATURES_COURTES.map((n) => {
+          const on = n.key === nature
+          return (
+            <button
+              key={n.key}
+              title={n.help}
+              onClick={() => setNature(n.key)}
+              style={{ ...chipBase, padding: '4px 9px', fontSize: 12, borderColor: on ? n.color : C.line, background: on ? `${n.color}26` : 'transparent', color: on ? C.ink : C.muted, fontWeight: on ? 700 : 500 }}
+            >
+              {n.icon} {n.label}
+            </button>
+          )
+        })}
+        {nature !== 'info' && (
+          <select value={pilote} onChange={(e) => setPilote(e.target.value)} style={{ ...input, padding: '5px 8px', fontSize: 13 }} title="Qui prend ?">
+            <option value="">Qui prend ?</option>
             {api.membresActifs.map((m) => (
               <option key={m.id} value={m.id}>
-                {m.prenom} · {m.role}
+                👤 {m.prenom}
               </option>
             ))}
           </select>
-        </Field>
-        <Field label="Priorité · prochain point">
-          <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
-            <PrioPicker value={priorite} onChange={setPriorite} />
-            <input type="date" value={prochain} onChange={(e) => setProchain(e.target.value)} style={{ ...input, width: 140 }} />
+        )}
+        <span style={{ flex: 1 }} />
+        {nature === 'info' ? (
+          <Btn disabled={busy} color="#5E8FB3" onClick={() => void go('pour_info')}>
+            ℹ️ Pris pour info
+          </Btn>
+        ) : (
+          <>
+            <Btn disabled={busy} color="#4E7A2A" onClick={() => void go('en_cours')}>
+              🚀 On lance
+            </Btn>
+            <Btn disabled={busy} color="#5E8FB3" onClick={() => void go('a_planifier')} title="Validé, démarrage plus tard">
+              🗓️ Plus tard
+            </Btn>
+          </>
+        )}
+        <Btn disabled={busy} color="#7C8597" onClick={() => void go('abandonne')} title="On écarte ce sujet">
+          ✖️
+        </Btn>
+      </div>
+
+      {details && (
+        <div style={{ marginTop: 12, padding: 12, borderRadius: 10, background: C.soft, display: 'flex', flexDirection: 'column', gap: 10 }}>
+          {sujet.contexte && <div style={{ fontSize: 14, lineHeight: 1.5, whiteSpace: 'pre-wrap' }}>{sujet.contexte}</div>}
+          {api.suivisOf(sujet.id)
+            .filter((s) => s.type !== 'statut')
+            .slice(0, 4)
+            .map((s) => (
+              <SuiviLine key={s.id} suivi={s} compact />
+            ))}
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(230px, 1fr))', gap: 10 }}>
+            <Field label="Pour les équipes">
+              <Chips list={RESSENTIS} value={ressenti} onChange={(v) => setRessenti(v as Ressenti)} />
+            </Field>
+            <Field label="Priorité · prochain point">
+              <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+                <PrioPicker value={priorite} onChange={setPriorite} />
+                <input type="date" value={prochain} onChange={(e) => setProchain(e.target.value)} style={{ ...input, width: 140 }} />
+              </div>
+            </Field>
           </div>
-        </Field>
-      </div>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+            <CaToggle value={ca} onChange={setCa} />
+            <input value={commentaire} onChange={(e) => setCommentaire(e.target.value)} placeholder="Ce qu’on retient (facultatif)" style={{ ...input, flex: '1 1 240px' }} />
+            <button style={linkBtn} onClick={() => api.openSujet(sujet.id)}>
+              Fiche complète
+            </button>
+          </div>
+        </div>
+      )}
 
-      <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 10, flexWrap: 'wrap' }}>
-        <CaToggle value={ca} onChange={setCa} />
-        <input value={commentaire} onChange={(e) => setCommentaire(e.target.value)} placeholder="Ce qu’on retient (facultatif)" style={{ ...input, flex: '1 1 240px' }} />
-      </div>
-
-      <div style={{ display: 'flex', gap: 6, marginTop: 12, flexWrap: 'wrap' }}>
-        <Btn disabled={busy} color="#4E7A2A" onClick={() => void go('en_cours')}>
-          🚀 On lance
-        </Btn>
-        <Btn disabled={busy} color="#5E8FB3" onClick={() => void go('a_planifier')}>
-          🗓️ À planifier
-        </Btn>
-        <Btn disabled={busy} color="#5E8FB3" onClick={() => void go('pour_info')}>
-          ℹ️ Pris pour info
-        </Btn>
-        <Btn disabled={busy} color="#7C8597" onClick={() => void go('abandonne')}>
-          ✖️ On écarte
-        </Btn>
-        <Btn onClick={() => api.openSujet(sujet.id)} style={{ marginLeft: 'auto' }}>
-          Ouvrir la fiche
-        </Btn>
-      </div>
+      <QuickLines
+        reunion={reunion}
+        items={enfants}
+        defaultPiloteId={pilote}
+        parentId={sujet.id}
+        origine="action_liee"
+        label="＋ Actions à en tirer"
+        collapsed={!enfants.length}
+      />
     </Card>
+  )
+}
+
+// ---------------------------------------------------------------- Lignes rapides
+// (19/11/2026) Saisie d'actions (ou d'infos) à la volée : une ligne = un sujet,
+// Entrée pour valider, collage de plusieurs lignes = plusieurs sujets. Une
+// action est rattachée par défaut au membre indiqué (pilote) et datée pour la
+// réunion suivante ; le détail se complète plus tard dans la fiche.
+function QuickLines({
+  reunion,
+  items,
+  defaultPiloteId,
+  parentId,
+  origine,
+  allowInfo,
+  label,
+  placeholder,
+  collapsed,
+  hidePiloteSelect,
+}: {
+  reunion: Reunion
+  items: Sujet[]
+  defaultPiloteId?: string | null
+  parentId?: string | null
+  origine: Origine
+  allowInfo?: boolean
+  label?: string
+  placeholder?: string
+  collapsed?: boolean
+  hidePiloteSelect?: boolean
+}) {
+  const api = useApi()
+  const [open, setOpen] = useState(!collapsed)
+  const [kind, setKind] = useState<'action' | 'info'>('action')
+  const [texte, setTexte] = useState('')
+  const [pilote, setPilote] = useState<string>('')
+  const [busy, setBusy] = useState(false)
+  const piloteEffectif = pilote || defaultPiloteId || ''
+
+  const add = async (raw: string) => {
+    const lignes = raw
+      .split(/\r?\n/)
+      .map((l) => l.replace(/^\s*[-•*·]\s*/, '').trim())
+      .filter(Boolean)
+    if (!lignes.length) return
+    setBusy(true)
+    for (const titre of lignes) {
+      const info = allowInfo && kind === 'info'
+      const s = await api.createSujet({
+        titre,
+        contexte: '',
+        nature: info ? 'info' : 'action',
+        statut: info ? 'fait' : 'en_cours',
+        pilote_id: piloteEffectif || null,
+        reunion_origine: reunion.id,
+        parent_id: parentId || null,
+        origine,
+        prochain_point: info ? null : addDaysIso(reunion.date_reunion, 28),
+        domaine: (piloteEffectif && api.membreById.get(piloteEffectif)?.domaine) || '',
+      })
+      if (s) {
+        await supabase
+          .from('piliers_reunion_sujets')
+          .upsert({ reunion_id: reunion.id, sujet_id: s.id, issue: info ? 'pour_info' : 'qualifie', commentaire: '', revu_le: new Date().toISOString() })
+      }
+    }
+    setTexte('')
+    await api.reload()
+    setBusy(false)
+  }
+
+  if (!open) {
+    return (
+      <button style={{ ...linkBtn, fontSize: 12, marginTop: 8 }} onClick={() => setOpen(true)}>
+        {label || '＋ Ajouter des actions'}
+      </button>
+    )
+  }
+
+  return (
+    <div style={{ marginTop: 10, display: 'flex', flexDirection: 'column', gap: 4 }}>
+      {items.map((s) => {
+        const p = api.porteursOf(s.id).find((x) => x.role === 'pilote')
+        return (
+          <div key={s.id} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, padding: '3px 2px' }}>
+            <span style={{ width: 18 }}>{s.nature === 'info' ? 'ℹ️' : s.statut === 'fait' ? '✅' : '🎯'}</span>
+            <button
+              onClick={() => api.openSujet(s.id)}
+              style={{ background: 'none', border: 'none', padding: 0, color: C.ink, cursor: 'pointer', textAlign: 'left', flex: 1, fontSize: 13, fontFamily: FONT_BODY }}
+            >
+              {s.titre}
+            </button>
+            {p && <Avatar membre={p.membre} size={18} />}
+            <button
+              title="Retirer cette ligne"
+              style={{ ...linkBtn, color: C.faint, fontSize: 14 }}
+              onClick={async () => {
+                const { error } = await supabase.from('piliers_sujets').delete().eq('id', s.id)
+                if (error) api.notify(error.message, 'err')
+                await api.reload()
+              }}
+            >
+              ×
+            </button>
+          </div>
+        )
+      })}
+      <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+        {allowInfo && (
+          <button
+            onClick={() => setKind(kind === 'action' ? 'info' : 'action')}
+            title="Basculer action / info"
+            style={{ ...chipBase, padding: '4px 8px', fontSize: 12, borderColor: kind === 'action' ? '#4E7A2A' : '#5E8FB3', color: C.ink, flex: '0 0 auto' }}
+          >
+            {kind === 'action' ? '🎯 Action' : 'ℹ️ Info'}
+          </button>
+        )}
+        <input
+          value={texte}
+          disabled={busy}
+          onChange={(e) => setTexte(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') {
+              e.preventDefault()
+              void add(texte)
+            }
+          }}
+          onPaste={(e) => {
+            const txt = e.clipboardData.getData('text')
+            if (txt.includes('\n')) {
+              e.preventDefault()
+              void add(txt)
+            }
+          }}
+          placeholder={kind === 'info' && allowInfo ? 'Une info partagée… puis Entrée' : placeholder || 'Une action… puis Entrée (coller plusieurs lignes = plusieurs actions)'}
+          style={{ ...input, padding: '6px 9px', fontSize: 13, flex: 1, minWidth: 0 }}
+        />
+        {!hidePiloteSelect && kind === 'action' && (
+          <select value={piloteEffectif} onChange={(e) => setPilote(e.target.value)} title="Qui porte l’action" style={{ ...input, padding: '5px 6px', fontSize: 12, flex: '0 0 auto', maxWidth: 120 }}>
+            <option value="">Personne</option>
+            {api.membresActifs.map((m) => (
+              <option key={m.id} value={m.id}>
+                {m.prenom}
+              </option>
+            ))}
+          </select>
+        )}
+      </div>
+    </div>
   )
 }
 
@@ -1057,11 +1311,15 @@ function InlineAdd({ reunion }: { reunion: Reunion }) {
   const api = useApi()
   const [titre, setTitre] = useState('')
   const [busy, setBusy] = useState(false)
-  const add = async () => {
-    if (!titre.trim()) return
+  const add = async (raw: string) => {
+    const lignes = raw
+      .split(/\r?\n/)
+      .map((l) => l.replace(/^\s*[-•*·]\s*/, '').trim())
+      .filter(Boolean)
+    if (!lignes.length) return
     setBusy(true)
-    const s = await api.createSujet({ titre, contexte: '', nature: 'question', reunion_origine: reunion.id })
-    if (s) setTitre('')
+    for (const t of lignes) await api.createSujet({ titre: t, contexte: '', nature: 'question', reunion_origine: reunion.id, origine: 'seance' })
+    setTitre('')
     await api.reload()
     setBusy(false)
   }
@@ -1069,14 +1327,22 @@ function InlineAdd({ reunion }: { reunion: Reunion }) {
     <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
       <input
         value={titre}
+        disabled={busy}
         onChange={(e) => setTitre(e.target.value)}
         onKeyDown={(e) => {
-          if (e.key === 'Enter') void add()
+          if (e.key === 'Enter') void add(titre)
         }}
-        placeholder="Un sujet arrive en séance ? Tapez-le ici puis Entrée"
+        onPaste={(e) => {
+          const txt = e.clipboardData.getData('text')
+          if (txt.includes('\n')) {
+            e.preventDefault()
+            void add(txt)
+          }
+        }}
+        placeholder="Un sujet arrive en séance ? Tapez-le puis Entrée (ou collez une liste)"
         style={{ ...input, flex: 1 }}
       />
-      <Btn disabled={busy || !titre.trim()} onClick={() => void add()}>
+      <Btn disabled={busy || !titre.trim()} onClick={() => void add(titre)}>
         Ajouter
       </Btn>
     </div>
@@ -2127,10 +2393,19 @@ function QuickAddModal({ onClose }: { onClose: () => void }) {
   const api = useApi()
   const [titre, setTitre] = useState('')
   const [contexte, setContexte] = useState('')
+  const [showContexte, setShowContexte] = useState(false)
   const [nature, setNature] = useState<Nature>('question')
   const [ca, setCa] = useState(false)
   const [pilote, setPilote] = useState('')
+  const [actions, setActions] = useState('')
+  const [showActions, setShowActions] = useState(false)
   const [busy, setBusy] = useState(false)
+
+  // (19/11/2026) Une action / un projet est rattaché par défaut à la personne qui le remonte.
+  const choisirNature = (n: Nature) => {
+    setNature(n)
+    if ((n === 'action' || n === 'projet') && !pilote && api.me) setPilote(api.me.id)
+  }
 
   const submit = async () => {
     setBusy(true)
@@ -2142,6 +2417,15 @@ function QuickAddModal({ onClose }: { onClose: () => void }) {
       pilote_id: pilote || null,
       domaine: (pilote ? api.membreById.get(pilote)?.domaine : api.me?.domaine) || '',
     })
+    if (s) {
+      const lignes = actions
+        .split(/\r?\n/)
+        .map((l) => l.replace(/^\s*[-•*·]\s*/, '').trim())
+        .filter(Boolean)
+      for (const t of lignes) {
+        await api.createSujet({ titre: t, contexte: '', nature: 'action', pilote_id: pilote || api.me?.id || null, parent_id: s.id, origine: 'action_liee' })
+      }
+    }
     await api.reload()
     setBusy(false)
     if (s) {
@@ -2153,23 +2437,74 @@ function QuickAddModal({ onClose }: { onClose: () => void }) {
   return (
     <Modal onClose={onClose} title="Remonter un sujet pour la prochaine réunion">
       <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-        <input autoFocus value={titre} onChange={(e) => setTitre(e.target.value)} placeholder="Le sujet en une phrase" style={{ ...input, fontSize: 16, fontWeight: 600 }} />
-        <textarea value={contexte} onChange={(e) => setContexte(e.target.value)} rows={4} placeholder="Un peu de contexte (facultatif) : ce qui se passe, pourquoi c’est important, ce qu’on attend du groupe" style={{ ...input, resize: 'vertical', lineHeight: 1.5 }} />
-        <Field label="C’est…">
-          <Chips list={NATURES} value={nature} onChange={(v) => setNature(v as Nature)} showHelp />
-        </Field>
-        <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
-          <CaToggle value={ca} onChange={setCa} />
-          <select value={pilote} onChange={(e) => setPilote(e.target.value)} style={{ ...input, flex: 1 }}>
-            <option value="">Qui pourrait le porter ? (facultatif)</option>
-            {api.membresActifs.map((m) => (
-              <option key={m.id} value={m.id}>
-                {m.prenom} · {m.role}
-              </option>
-            ))}
-          </select>
+        <input
+          autoFocus
+          value={titre}
+          onChange={(e) => setTitre(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' && titre.trim() && !busy) void submit()
+          }}
+          placeholder="Le sujet en une phrase — Entrée pour l’ajouter"
+          style={{ ...input, fontSize: 16, fontWeight: 600 }}
+        />
+        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
+          {NATURES.map((n) => {
+            const on = n.key === nature
+            return (
+              <button
+                key={n.key}
+                title={n.help}
+                onClick={() => choisirNature(n.key)}
+                style={{ ...chipBase, borderColor: on ? n.color : C.line, background: on ? `${n.color}26` : 'transparent', color: on ? C.ink : C.muted, fontWeight: on ? 700 : 500 }}
+              >
+                {n.icon} {n.label}
+              </button>
+            )
+          })}
         </div>
-        <div style={{ fontSize: 12, color: C.muted }}>Le reste (enjeux, priorité, porteurs, date du prochain point) se décide ensemble en réunion.</div>
+        <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+          {nature !== 'info' && (
+            <select value={pilote} onChange={(e) => setPilote(e.target.value)} style={{ ...input, flex: 1 }}>
+              <option value="">Qui le porte ? (facultatif)</option>
+              {api.membresActifs.map((m) => (
+                <option key={m.id} value={m.id}>
+                  {m.prenom} · {m.role}
+                </option>
+              ))}
+            </select>
+          )}
+          <CaToggle value={ca} onChange={setCa} />
+        </div>
+        <div style={{ display: 'flex', gap: 14 }}>
+          {!showContexte && (
+            <button style={linkBtn} onClick={() => setShowContexte(true)}>
+              ＋ Un peu de contexte
+            </button>
+          )}
+          {!showActions && nature !== 'info' && (
+            <button style={linkBtn} onClick={() => setShowActions(true)}>
+              ＋ Une série d’actions
+            </button>
+          )}
+        </div>
+        {showContexte && (
+          <textarea
+            value={contexte}
+            onChange={(e) => setContexte(e.target.value)}
+            rows={3}
+            placeholder="Ce qui se passe, pourquoi c’est important, ce qu’on attend du groupe"
+            style={{ ...input, resize: 'vertical', lineHeight: 1.5 }}
+          />
+        )}
+        {showActions && nature !== 'info' && (
+          <textarea
+            value={actions}
+            onChange={(e) => setActions(e.target.value)}
+            rows={4}
+            placeholder={'Une action par ligne, rattachées au porteur ci-dessus\n- Appeler le fournisseur\n- Préparer le chiffrage'}
+            style={{ ...input, resize: 'vertical', lineHeight: 1.5 }}
+          />
+        )}
         <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
           <Btn onClick={onClose}>Annuler</Btn>
           <Btn primary disabled={busy || !titre.trim()} onClick={() => void submit()}>
@@ -2468,6 +2803,9 @@ function SujetTitle({ sujet, small }: { sujet: Sujet; small?: boolean }) {
       <span style={{ color: C.faint, fontWeight: 500 }}>#{sujet.numero} </span>
       {sujet.impacte_ca && <span title="Impacte le CA">⚡ </span>}
       {sujet.titre}
+      {sujet.parent_id && api.sujetById.get(sujet.parent_id) && (
+        <span style={{ color: C.faint, fontWeight: 500, fontSize: 12 }}> ↳ tirée de #{api.sujetById.get(sujet.parent_id)!.numero}</span>
+      )}
     </button>
   )
 }

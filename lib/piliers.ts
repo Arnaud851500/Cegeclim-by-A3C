@@ -42,6 +42,7 @@ export type Nature = 'info' | 'question' | 'decision' | 'action' | 'projet'
 export type Statut = 'a_aborder' | 'a_planifier' | 'en_cours' | 'en_attente' | 'fait' | 'abandonne'
 export type Ressenti = 'irritant' | 'attendu' | 'changement' | 'neutre'
 export type ComStatut = 'a_preparer' | 'pret' | 'diffuse'
+export type Origine = 'remonte' | 'seance' | 'meteo' | 'action_liee'
 
 export type Sujet = {
   id: string
@@ -65,6 +66,9 @@ export type Sujet = {
   communication_message: string
   communication_diffusee_le: string | null
   reunion_origine: string | null
+  /** Action tirée d'un autre sujet (série d'actions saisie en réunion). */
+  parent_id: string | null
+  origine: Origine
   created_by: string | null
   created_at: string
   updated_by: string | null
