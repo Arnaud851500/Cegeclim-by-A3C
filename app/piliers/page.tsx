@@ -548,6 +548,18 @@ function TabReunion() {
   })
 
   const revueFaits = revue.filter((s) => issueOf(s.id)).length
+  // (19/11/2026) Clôture bloquée tant que chaque sujet de la réunion n'est pas tranché
+  // (statut) et priorisé (sauf info, fait, abandonné).
+  const vus = new Set<string>()
+  const blocages: { sujet: Sujet; statut: boolean; priorite: boolean }[] = []
+  ;[...revue, ...nouveaux, ...sujets.filter((s) => s.reunion_origine === R.id)].forEach((s) => {
+    if (vus.has(s.id)) return
+    vus.add(s.id)
+    const rs = issueOf(s.id)
+    const statut = !rs && (revue.includes(s) || nouveaux.includes(s))
+    const priorite = isOpen(s) && s.nature !== 'info' && !s.priorite && rs?.issue !== 'abandonne'
+    if (statut || priorite) blocages.push({ sujet: s, statut, priorite })
+  })
   const nouveauxFaits = nouveaux.filter((s) => issueOf(s.id)).length
   const meteoFaite = api.meteo.filter((m) => m.reunion_id === R.id && m.humeur).length
   const total = revue.length + nouveaux.length
@@ -660,7 +672,7 @@ function TabReunion() {
         </Step>
 
         <Step id="pil-cloture" n={5} title="Clôture" subtitle="Synthèse en quelques lignes et date de la prochaine réunion.">
-          <Cloture reunion={R} stats={{ revueFaits, revueTotal: revue.length, nouveauxFaits, nouveauxTotal: nouveaux.length, meteoFaite }} />
+          <Cloture reunion={R} blocages={blocages} stats={{ revueFaits, revueTotal: revue.length, nouveauxFaits, nouveauxTotal: nouveaux.length, meteoFaite }} />
         </Step>
       </div>
 
@@ -853,6 +865,7 @@ function ReviewCard({ sujet, reunion, revu }: { sujet: Sujet; reunion: Reunion; 
         <span style={{ fontSize: 12, color: is.color, fontWeight: 700 }}>{is.label}</span>
         {revu.commentaire && <span style={{ fontSize: 13, color: C.muted, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>— {revu.commentaire}</span>}
         {sujet.prochain_point && isOpen(sujet) && <span style={{ fontSize: 12, color: C.muted, marginLeft: 'auto' }}>prochain point {fmtDate(sujet.prochain_point)}</span>}
+        {isOpen(sujet) && sujet.nature !== 'info' && <PrioInline sujet={sujet} reunionId={reunion.id} />}
         <button
           onClick={async () => {
             await supabase.from('piliers_reunion_sujets').delete().eq('reunion_id', reunion.id).eq('sujet_id', sujet.id)
@@ -918,6 +931,7 @@ function ReviewCard({ sujet, reunion, revu }: { sujet: Sujet; reunion: Reunion; 
           prochain point
           <input type="date" value={prochain} onChange={(e) => setProchain(e.target.value)} style={{ ...input, width: 140 }} />
         </label>
+        {sujet.nature !== 'info' && <PrioInline sujet={sujet} reunionId={reunion.id} />}
       </div>
       <div style={{ display: 'flex', gap: 6, marginTop: 10, flexWrap: 'wrap' }}>
         <Btn disabled={busy} color={C.ok} onClick={() => void act('fait')}>
@@ -979,6 +993,10 @@ function QualifyCard({ sujet, reunion, revu }: { sujet: Sujet; reunion: Reunion;
       api.notify('Choisissez qui prend le sujet.', 'err')
       return
     }
+    if ((choice === 'en_cours' || choice === 'a_planifier') && !priorite) {
+      api.notify('Donnez une priorité (P1, P2 ou P3).', 'err')
+      return
+    }
     setBusy(true)
     const statut: Statut = choice === 'pour_info' ? 'fait' : choice
     const issue: Issue = choice === 'pour_info' ? 'pour_info' : choice === 'abandonne' ? 'abandonne' : 'qualifie'
@@ -1027,6 +1045,7 @@ function QualifyCard({ sujet, reunion, revu }: { sujet: Sujet; reunion: Reunion;
               <Avatar membre={p.membre} size={20} /> {p.membre.prenom}
             </span>
           )}
+          {isOpen(sujet) && sujet.nature !== 'info' && <PrioInline sujet={sujet} reunionId={reunion.id} />}
           {revu.commentaire && <span style={{ fontSize: 13, color: C.muted, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>— {revu.commentaire}</span>}
           <button
             style={{ ...linkBtn, marginLeft: 'auto' }}
@@ -1095,6 +1114,7 @@ function QualifyCard({ sujet, reunion, revu }: { sujet: Sujet; reunion: Reunion;
             ))}
           </select>
         )}
+        {nature !== 'info' && <PrioPicker small required value={priorite} onChange={setPriorite} />}
         <span style={{ flex: 1 }} />
         {nature === 'info' ? (
           <Btn disabled={busy} color="#5E8FB3" onClick={() => void go('pour_info')}>
@@ -1128,11 +1148,8 @@ function QualifyCard({ sujet, reunion, revu }: { sujet: Sujet; reunion: Reunion;
             <Field label="Pour les équipes">
               <Chips list={RESSENTIS} value={ressenti} onChange={(v) => setRessenti(v as Ressenti)} />
             </Field>
-            <Field label="Priorité · prochain point">
-              <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
-                <PrioPicker value={priorite} onChange={setPriorite} />
-                <input type="date" value={prochain} onChange={(e) => setProchain(e.target.value)} style={{ ...input, width: 140 }} />
-              </div>
+            <Field label="Prochain point">
+              <input type="date" value={prochain} onChange={(e) => setProchain(e.target.value)} style={{ ...input, width: 140 }} />
             </Field>
           </div>
           <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
@@ -1247,6 +1264,7 @@ function QuickLines({
             >
               {s.titre}
             </button>
+            {isOpen(s) && s.nature !== 'info' && <PrioInline sujet={s} reunionId={reunion.id} />}
             {p && <Avatar membre={p.membre} size={18} />}
             <button
               title="Retirer cette ligne"
@@ -1446,15 +1464,22 @@ function ComCard({ sujet }: { sujet: Sujet }) {
 function Cloture({
   reunion,
   stats,
+  blocages,
 }: {
   reunion: Reunion
   stats: { revueFaits: number; revueTotal: number; nouveauxFaits: number; nouveauxTotal: number; meteoFaite: number }
+  blocages: { sujet: Sujet; statut: boolean; priorite: boolean }[]
 }) {
   const api = useApi()
   const [synthese, setSynthese] = useState(reunion.synthese)
-  const [prochaine, setProchaine] = useState(addDaysIso(reunion.date_reunion, 28))
+  // Une réunion suivante déjà planifiée (ex. réunion rouverte) est réutilisée
+  const suivante = api.reunions
+    .filter((r) => r.id !== reunion.id && r.statut !== 'cloturee' && r.date_reunion > reunion.date_reunion)
+    .sort((x, y) => x.date_reunion.localeCompare(y.date_reunion))[0]
+  const [prochaine, setProchaine] = useState(suivante?.date_reunion || addDaysIso(reunion.date_reunion, 28))
   const [busy, setBusy] = useState(false)
-  const reste = stats.revueTotal - stats.revueFaits + (stats.nouveauxTotal - stats.nouveauxFaits)
+  const nbStatut = blocages.filter((b) => b.statut).length
+  const nbPrio = blocages.filter((b) => b.priorite).length
 
   return (
     <Card>
@@ -1463,6 +1488,31 @@ function Cloture({
         <span>🔁 Actions revues : {stats.revueFaits}/{stats.revueTotal}</span>
         <span>📥 Nouveaux traités : {stats.nouveauxFaits}/{stats.nouveauxTotal}</span>
       </div>
+
+      {blocages.length > 0 ? (
+        <div style={{ border: `1px solid ${C.alert}`, borderRadius: 12, padding: 12, marginBottom: 12 }}>
+          <div style={{ fontWeight: 700, color: C.alert, marginBottom: 6 }}>
+            Avant de clôturer : {nbStatut > 0 && `${nbStatut} sujet${nbStatut > 1 ? 's' : ''} à trancher`}
+            {nbStatut > 0 && nbPrio > 0 && ' · '}
+            {nbPrio > 0 && `${nbPrio} priorité${nbPrio > 1 ? 's' : ''} à donner`}
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+            {blocages.map((b) => (
+              <div key={b.sujet.id} style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', padding: '4px 0', borderBottom: `1px solid ${C.line}` }}>
+                <SujetTitle sujet={b.sujet} small />
+                <PorteursInline sujetId={b.sujet.id} small />
+                <span style={{ flex: 1 }} />
+                {b.statut && <Tag color={C.alert}>statut à trancher</Tag>}
+                {b.priorite && <PrioInline sujet={b.sujet} reunionId={reunion.id} />}
+              </div>
+            ))}
+          </div>
+          {nbStatut > 0 && <div style={{ fontSize: 12, color: C.muted, marginTop: 6 }}>Les statuts se tranchent dans les étapes 2 et 3 (Fait, On continue, On lance, Pris pour info…).</div>}
+        </div>
+      ) : (
+        <div style={{ color: C.ok, fontSize: 14, marginBottom: 12, fontWeight: 600 }}>✓ Tous les sujets sont tranchés et priorisés.</div>
+      )}
+
       <textarea
         value={synthese}
         onChange={(e) => setSynthese(e.target.value)}
@@ -1473,11 +1523,6 @@ function Cloture({
         placeholder="Les 3 messages clés de la réunion…"
         style={{ ...input, width: '100%', resize: 'vertical' }}
       />
-      {reste > 0 && (
-        <div style={{ color: C.alert, fontSize: 13, marginTop: 8 }}>
-          {reste} sujet{reste > 1 ? 's' : ''} non traité{reste > 1 ? 's' : ''} : ils resteront à l’ordre du jour de la réunion suivante.
-        </div>
-      )}
       <div style={{ display: 'flex', gap: 10, alignItems: 'center', marginTop: 12, flexWrap: 'wrap' }}>
         <label style={{ fontSize: 13, color: C.muted, display: 'flex', alignItems: 'center', gap: 8 }}>
           Prochaine réunion le
@@ -1486,19 +1531,23 @@ function Cloture({
         <Btn
           primary
           big
-          disabled={busy}
+          disabled={busy || blocages.length > 0}
+          title={blocages.length ? 'Tranchez et priorisez tous les sujets avant de clôturer' : undefined}
           onClick={async () => {
-            if (!window.confirm('Clôturer la réunion ? Le compte rendu sera disponible dans « Réunions passées ».')) return
+            if (!window.confirm('Clôturer la réunion ? Le compte rendu sera disponible dans « Réunions passées » (elle pourra être rouverte).')) return
             setBusy(true)
             const up = await supabase
               .from('piliers_reunions')
               .update({ statut: 'cloturee', synthese, cloturee_le: new Date().toISOString() })
               .eq('id', reunion.id)
             if (up.error) api.notify(up.error.message, 'err')
-            else if (prochaine) await supabase.from('piliers_reunions').insert({ date_reunion: prochaine })
+            else if (prochaine) {
+              if (suivante) await supabase.from('piliers_reunions').update({ date_reunion: prochaine }).eq('id', suivante.id)
+              else await supabase.from('piliers_reunions').insert({ date_reunion: prochaine })
+            }
             await api.reload()
             setBusy(false)
-            api.notify('Réunion clôturée — la suivante est prête')
+            if (!up.error) api.notify('Réunion clôturée — la suivante est prête')
           }}
         >
           ✓ Clôturer et préparer la suivante
@@ -2070,6 +2119,17 @@ function CompteRendu({ reunion }: { reunion: Reunion }) {
           📋 Copier
         </Btn>
         <Btn
+          onClick={async () => {
+            if (!window.confirm('Rouvrir cette réunion ? Elle redevient la réunion en cours (onglet « Prochaine réunion ») ; les décisions déjà prises sont conservées.')) return
+            const { error } = await supabase.from('piliers_reunions').update({ statut: 'en_cours', cloturee_le: null }).eq('id', reunion.id)
+            if (error) api.notify(error.message, 'err')
+            else api.notify('Réunion rouverte — elle est dans l’onglet « Prochaine réunion »')
+            await api.reload()
+          }}
+        >
+          ↺ Rouvrir
+        </Btn>
+        <Btn
           onClick={() => {
             const body = txt.length > 1800 ? `${txt.slice(0, 1800)}\n…\n(compte rendu complet dans le compagnon : Réunion Piliers › Réunions passées)` : txt
             window.location.href = `mailto:${mails}?subject=${encodeURIComponent(`Compte rendu réunion Piliers — ${fmtDate(reunion.date_reunion, { day: 'numeric', month: 'long', year: 'numeric' })}`)}&body=${encodeURIComponent(body)}`
@@ -2207,7 +2267,7 @@ function SujetDrawer({ sujet, onClose }: { sujet: Sujet; onClose: () => void }) 
 
         <div style={{ flex: 1, overflowY: 'auto', padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: 16 }}>
           <input value={d.titre} onChange={(e) => set('titre', e.target.value)} style={{ ...input, fontSize: 18, fontWeight: 700, fontFamily: FONT_TITLE }} />
-          <textarea value={d.contexte} onChange={(e) => set('contexte', e.target.value)} rows={4} placeholder="Contexte : de quoi parle-t-on, pourquoi maintenant, chiffres, liens…" style={{ ...input, resize: 'vertical', lineHeight: 1.5 }} />
+          <textarea value={d.contexte} onChange={(e) => set('contexte', e.target.value)} rows={4} placeholder="Contexte : de quoi parle-t-on, pourquoi maintenant, chiffres, liens…" style={{ ...input, resize: 'vertical', lineHeight: 1.5, minHeight: 96, flexShrink: 0 }} />
 
           <Field label="Où en est-on ?">
             <Chips list={STATUTS} value={d.statut} onChange={(v) => set('statut', v as Statut)} />
@@ -2895,9 +2955,25 @@ function Chips({
   )
 }
 
-function PrioPicker({ value, onChange, withHelp }: { value: number | null; onChange: (v: number | null) => void; withHelp?: boolean }) {
+function PrioPicker({
+  value,
+  onChange,
+  withHelp,
+  small,
+  required,
+}: {
+  value: number | null
+  onChange: (v: number | null) => void
+  withHelp?: boolean
+  small?: boolean
+  required?: boolean
+}) {
+  const manque = required && !value
   return (
-    <div style={{ display: 'inline-flex', gap: 4 }}>
+    <div
+      title={manque ? 'Priorité à donner' : undefined}
+      style={{ display: 'inline-flex', gap: 4, padding: manque ? 2 : 0, borderRadius: 999, outline: manque ? `2px dashed ${C.alert}` : 'none', outlineOffset: 1 }}
+    >
       {PRIORITES.map((p) => {
         const on = value === p.key
         return (
@@ -2905,7 +2981,14 @@ function PrioPicker({ value, onChange, withHelp }: { value: number | null; onCha
             key={p.key}
             title={p.help}
             onClick={() => onChange(on ? null : p.key)}
-            style={{ ...chipBase, borderColor: on ? p.color : C.line, background: on ? `${p.color}26` : 'transparent', color: on ? C.ink : C.muted, fontWeight: on ? 700 : 500 }}
+            style={{
+              ...chipBase,
+              ...(small ? { padding: '2px 7px', fontSize: 11 } : {}),
+              borderColor: on ? p.color : C.line,
+              background: on ? `${p.color}26` : 'transparent',
+              color: on ? C.ink : C.muted,
+              fontWeight: on ? 700 : 500,
+            }}
           >
             {p.label}
             {withHelp ? ` · ${p.help}` : ''}
@@ -2913,6 +2996,22 @@ function PrioPicker({ value, onChange, withHelp }: { value: number | null; onCha
         )
       })}
     </div>
+  )
+}
+
+/** Priorité modifiable en un clic, enregistrée tout de suite (lignes compactes, clôture). */
+function PrioInline({ sujet, reunionId }: { sujet: Sujet; reunionId?: string | null }) {
+  const api = useApi()
+  return (
+    <PrioPicker
+      small
+      required={isOpen(sujet) && sujet.nature !== 'info'}
+      value={sujet.priorite}
+      onChange={async (v) => {
+        await api.updateSujet(sujet, { priorite: v }, reunionId || null)
+        await api.reload()
+      }}
+    />
   )
 }
 
