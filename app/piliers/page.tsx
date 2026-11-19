@@ -538,21 +538,24 @@ function TabReunion() {
   const issueOf = (sujetId: string) => revusIci.find((rs) => rs.sujet_id === sujetId) || null
 
   // 2. Revue : actions ouvertes + celles déjà revues dans cette réunion
-  const revue = sujets.filter((s) => {
-    const rs = issueOf(s.id)
-    if (rs) return !['qualifie', 'pour_info'].includes(rs.issue) && !(rs.issue === 'abandonne' && s.reunion_origine === R.id)
-    // les actions nées pendant cette réunion seront revues à la suivante
-    return OPEN_STATUTS.includes(s.statut) && s.reunion_origine !== R.id
-  })
-  // 3. Nouveaux sujets proposés (demandes) : remontés entre deux réunions ou
-  // pendant le tour de météo, + ceux déjà tranchés dans cette réunion. Les
-  // actions tirées d'un sujet restent rattachées à leur sujet.
+  // (19/11/2026, v4) Règle de répartition :
+  //  - pavé 2 = sujets déjà vus lors d'une réunion PRÉCÉDENTE (nés dans une
+  //    réunion antérieure ou passés en revue dans une réunion antérieure) ;
+  //  - pavé 3 = tout le reste : sujets mis à l'ODJ (même si leur statut a été
+  //    changé entre-temps dans la fiche) et sujets ajoutés pendant la réunion.
+  const dateDe = (reunionId: string | null) => (reunionId ? api.reunions.find((r) => r.id === reunionId)?.date_reunion || null : null)
+  const vuAvant = (s: Sujet) => {
+    const origine = dateDe(s.reunion_origine)
+    if (origine && origine < R.date_reunion) return true
+    return reunionSujets.some((rs) => rs.sujet_id === s.id && (dateDe(rs.reunion_id) || '9999') < R.date_reunion)
+  }
+  const revue = sujets.filter((s) => vuAvant(s) && (OPEN_STATUTS.includes(s.statut) || !!issueOf(s.id)))
   const nouveaux = sujets.filter((s) => {
-    if (s.origine === 'action_liee') return false
-    const rs = issueOf(s.id)
-    if (rs) return ['qualifie', 'pour_info'].includes(rs.issue) || (rs.issue === 'abandonne' && s.reunion_origine === R.id)
-    return s.statut === 'a_aborder'
+    if (vuAvant(s) || s.origine === 'action_liee') return false
+    return s.statut === 'a_aborder' || s.reunion_origine === R.id || !!issueOf(s.id) || (isOpen(s) && !s.reunion_origine)
   })
+  // Un sujet du pavé 3 est tranché dès qu'il a quitté « À aborder »
+  const tranche = (s: Sujet) => !!issueOf(s.id) || (nouveaux.includes(s) && s.statut !== 'a_aborder')
 
   const revueFaits = revue.filter((s) => issueOf(s.id)).length
   // (19/11/2026) Clôture bloquée tant que chaque sujet de la réunion n'est pas tranché
@@ -563,11 +566,11 @@ function TabReunion() {
     if (vus.has(s.id)) return
     vus.add(s.id)
     const rs = issueOf(s.id)
-    const statut = !rs && (revue.includes(s) || nouveaux.includes(s))
+    const statut = (revue.includes(s) && !rs) || (nouveaux.includes(s) && !tranche(s))
     const priorite = prioriteAttendue(s) && !s.priorite && rs?.issue !== 'abandonne'
     if (statut || priorite) blocages.push({ sujet: s, statut, priorite })
   })
-  const nouveauxFaits = nouveaux.filter((s) => issueOf(s.id)).length
+  const nouveauxFaits = nouveaux.filter((s) => tranche(s)).length
   const meteoFaite = api.meteo.filter((m) => m.reunion_id === R.id && m.humeur).length
   const total = revue.length + nouveaux.length
   const fait = revueFaits + nouveauxFaits
@@ -594,10 +597,10 @@ function TabReunion() {
             </div>
             <div style={{ display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' }}>
               <button onClick={() => document.getElementById('pil-nouveaux')?.scrollIntoView({ behavior: 'smooth' })} style={{ ...chipBase, borderColor: C.gold, color: C.ink, fontWeight: 700 }}>
-                📥 {nouveaux.length} nouveau{nouveaux.length > 1 ? 'x' : ''} sujet{nouveaux.length > 1 ? 's' : ''} proposé{nouveaux.length > 1 ? 's' : ''}
+                📥 {nouveaux.length} sujet{nouveaux.length > 1 ? 's' : ''} à l’ordre du jour
               </button>
               <button onClick={() => document.getElementById('pil-revue')?.scrollIntoView({ behavior: 'smooth' })} style={{ ...chipBase, borderColor: '#4E7A2A', color: C.ink, fontWeight: 700 }}>
-                🔁 {revue.length} action{revue.length > 1 ? 's' : ''} en suivi
+                🔁 {revue.length} point{revue.length > 1 ? 's' : ''} de la réunion précédente
               </button>
             </div>
           </div>
@@ -661,11 +664,11 @@ function TabReunion() {
         <Step
           id="pil-revue"
           n={2}
-          title="Suivi des actions en cours"
+          title="Revue des actions et points de la réunion précédente"
           subtitle={
             derniere
-              ? `Actions déjà connues : ce qui a bougé depuis la réunion du ${fmtDate(derniere.date_reunion, { day: 'numeric', month: 'long' })}, porteur par porteur.`
-              : 'Actions déjà connues, porteur par porteur.'
+              ? `Ce qui a été décidé ou évoqué le ${fmtDate(derniere.date_reunion, { day: 'numeric', month: 'long' })} : où on en est, porteur par porteur.`
+              : 'Ce qui a été décidé ou évoqué lors des réunions précédentes, porteur par porteur.'
           }
         >
           {groupes.length === 0 && <Empty>Aucune action ouverte. Les sujets pris en charge aujourd’hui apparaîtront ici à la prochaine réunion.</Empty>}
@@ -688,7 +691,7 @@ function TabReunion() {
           ))}
         </Step>
 
-        <Step id="pil-nouveaux" n={3} title="Nouveaux sujets proposés" subtitle="Les demandes mises à l’ordre du jour (entre deux réunions ou pendant la météo) : on tranche le statut et la priorité, ligne par ligne.">
+        <Step id="pil-nouveaux" n={3} title="Sujets à l’ordre du jour et ajoutés en séance" subtitle="Les sujets mis à l’ordre du jour avant la réunion, pendant la météo ou en cours de réunion : on tranche le statut et la priorité, ligne par ligne.">
           <OdjListe sujets={[...nouveaux].sort((a, b) => a.numero - b.numero)} reunion={R} />
           <InlineAdd reunion={R} />
         </Step>
@@ -708,8 +711,8 @@ function TabReunion() {
           <div style={{ fontSize: 12, textTransform: 'uppercase', letterSpacing: 1, color: C.muted, marginBottom: 10 }}>Ordre du jour</div>
           {[
             { id: 'pil-meteo', label: '1. Météo', done: meteoFaite, tot: membresActifs.length },
-            { id: 'pil-revue', label: '2. Revue des actions', done: revueFaits, tot: revue.length },
-            { id: 'pil-nouveaux', label: '3. Nouveaux sujets', done: nouveauxFaits, tot: nouveaux.length },
+            { id: 'pil-revue', label: '2. Réunion précédente', done: revueFaits, tot: revue.length },
+            { id: 'pil-nouveaux', label: '3. Ordre du jour', done: nouveauxFaits, tot: nouveaux.length },
             { id: 'pil-com', label: '4. Communication', done: -1, tot: 0 },
             { id: 'pil-cloture', label: '5. Clôture', done: -1, tot: 0 },
           ].map((it) => (
@@ -1072,7 +1075,9 @@ function SujetLigne({ sujet, reunion, last }: { sujet: Sujet; reunion: Reunion |
     setBusy(false)
   }
 
-  const tag = rs
+  // En réunion, un sujet de l'ODJ est tranché dès qu'il a quitté « À aborder »
+  // (sur la ligne ou dans sa fiche).
+  const tag = rs || (reunion && sujet.statut !== 'a_aborder')
     ? { label: 'Tranché', icon: '✓', color: C.ok }
     : sujet.statut === 'a_aborder'
       ? { label: 'À aborder', icon: '📥', color: C.gold }
