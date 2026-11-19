@@ -16,6 +16,15 @@
  *  En unités : les articles « comptés » de chaque gamme (groupes extérieurs, UI DRV pour System Free) ;
  *  en euros : toutes les familles, articles non rattachés compris (« Autres articles Hitachi »).
  *
+ * Comptage en unités (choix du 19/11/2026) : il reproduit le « Réalisé 2025 » d'Hitachi, contrôlé sur nos
+ * réceptions 2025 (RAC Mono 2 243 vs 2 259, Multi 1 061 vs 1 064, Yutampo 687 vs 687). Il diffère du drapeau
+ * « quantité pertinente » SAGE sur 4 familles : groupes Airhome 200 (00AH200) et Triple C (00TRIPLCUE)
+ * comptés bien que non pertinents SAGE ; ballons Yutampo (00YUTAMPUI) non comptés, Hitachi ne comptant que
+ * les groupes ; UI System Free (00FREEUI) comptées, l'objectif étant en UI. Écarts signalés en orange ;
+ * décocher « compter en unités » dans la règle pour revenir au drapeau SAGE.
+ * Les « Autres articles Hitachi » (non rattachés) portent aussi les lignes négatives de régularisation
+ * (−353 k€ au 19/11/2026), conservées dans le total en euros.
+ *
  * Clic sur une gamme : rattachement des familles SAGE et des familles / sous-familles BLG
  * (règles hitachi_engagement_regles), articles comptés en unités, références de la gamme.
  *

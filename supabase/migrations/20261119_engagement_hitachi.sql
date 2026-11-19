@@ -598,3 +598,34 @@ grant execute on function public.delete_hitachi_engagement_regle(bigint) to auth
 select cron.unschedule(jobid) from cron.job where jobname = 'hitachi-engagement-refresh';
 select cron.schedule('hitachi-engagement-refresh', '24 4,7-21 * * *',
   $$SET statement_timeout = '600s'; select public.refresh_hitachi_engagement(extract(year from current_date)::integer);$$);
+
+-- ----------------------------------------------------------------------------
+-- Explication de texte (demandée par Arnaud le 19/11/2026), portée en commentaires
+-- de base pour rester lisible depuis le Requêteur / l'éditeur SQL.
+-- ----------------------------------------------------------------------------
+comment on table public.hitachi_engagement is
+'Engagement annuel Hitachi (annexe 6 « Objectifs du 1er janvier au 31 décembre »). objectif_ca = objectif de CA achats HT hors DEEE, BFA 1 % du CA HT si 100 % atteint (barème évolutif annexe 7 non appliqué dans l''écran). Écran /stock/engagement-hitachi, accès réservé à Arnaud (hitachi_engagement_autorise).';
+
+comment on table public.hitachi_engagement_gammes is
+'Gammes de l''annexe 6. obj_s1 / obj_s2 = objectifs quantitatifs par semestre (groupes extérieurs ; UI DRV pour System Free). realise_n1_* = « Réalisé CY N-1 » communiqué par Hitachi. Les lignes est_total (RAC Total, Total PAC Air / Eau) portent l''objectif de leurs gammes filles (parent) : RAC Mono / Multi n''ont pas d''objectif propre. RAC_UI et AUTRES sont suivies en euros seulement.';
+
+comment on table public.hitachi_engagement_regles is
+'Rattachement des articles aux gammes, éditable depuis l''écran (clic sur une gamme). Critères cumulables : famille SAGE, famille et sous-famille BLG, motif de référence LIKE (ex. RAS-%FS%NME%), motif d''exclusion. Chaque article prend la première règle qui correspond, toutes gammes confondues : priorité croissante, puis la plus précise (motif, sous-famille BLG, famille BLG). compte_qte = article compté dans les unités de la gamme. Choix du 19/11/2026 : le comptage reproduit le « Réalisé 2025 » d''Hitachi (contrôlé sur nos réceptions 2025 : RAC Mono 2 243 vs 2 259, Multi 1 061 vs 1 064, Yutampo 687 vs 687) ; il diffère du drapeau « quantité pertinente » SAGE sur 4 familles : groupes Airhome 200 (00AH200) et Triple C (00TRIPLCUE) comptés bien que non pertinents SAGE, ballons Yutampo (00YUTAMPUI) non comptés car Hitachi ne compte que les groupes, UI System Free (00FREEUI) comptées car l''objectif est en UI. Écarts signalés en orange dans l''écran ; décocher « compter en unités » pour revenir au drapeau SAGE.';
+
+comment on table public.hitachi_engagement_articles is
+'Univers articles de l''engagement, reconstruit par refresh_hitachi_engagement : références SAGE du fournisseur (ou d''une famille SAGE citée dans les règles), références achetées / commandées au fournisseur, articles BLG du fournisseur. Porte la famille SAGE, la famille et sous-famille BLG (article BLG trouvé par la ligne de CDF, la référence ou la référence interne), le prix d''achat (SAGE, sinon dernier prix / PMP BLG) et le drapeau quantité pertinente de la famille SAGE.';
+
+comment on table public.hitachi_engagement_mesures is
+'Mesures par référence et par année, reconstruites par refresh_hitachi_engagement (pg_cron « hitachi-engagement-refresh » à h+24 de 7 h à 21 h et à 4 h 24 UTC, après la synchro BLG ; bouton « Actualiser »). Achats : ach_recu_* = lignes de CDF BLG du fournisseur livrées dans l''année (quantité livrée à sa date de livraison, valorisée au prix d''achat net de la ligne), S1 = janvier–juin ; ach_n1_* = idem N-1 ; ach_ferme_* = CDF SAGE ouvertes (sage.bdcf type 12, montant net cahtnet) à livrer d''ici le 31/12, celles en retard ou sans date étant supposées livrées demain (ach_ferme_q_hyp), _apres = livraison prévue après le 31/12 (ex. opération 2027). Ventes : ven_bl_* = BL de l''année (indicateur_flux_articles_mensuel, CA et coût = CA − marge) ; ven_ferme_* = CDC à livrer (interne.v_cdc_lignes_global) d''ici le 31/12, date passée = à livrer, valorisées en CA et au prix d''achat. Unités = articles comptés (compte_qte) ; euros = toutes familles, y compris les articles non rattachés (« Autres articles Hitachi », où tombent aussi les lignes négatives de régularisation : −353 k€ au 19/11/2026).';
+
+comment on table public.hitachi_engagement_refresh is
+'Horodatage et durée du dernier refresh_hitachi_engagement par année, avec la fraîcheur des sources (réceptions BLG, CDF SAGE, flux BL).';
+
+comment on function public.refresh_hitachi_engagement(integer) is
+'Reconstruit hitachi_engagement_articles et hitachi_engagement_mesures pour l''année (10 à 20 s à froid, l''extraction des réceptions BLG étant la partie lente). Appelée par pg_cron et par le bouton « Actualiser » de l''écran.';
+
+comment on function public.get_hitachi_engagement(integer) is
+'Lecture de l''écran Engagement Hitachi : applique les règles de rattachement aux articles stockés et agrège les mesures par gamme × famille SAGE × famille / sous-famille BLG × règle (< 1 s). Verdicts calculés dans l''écran : « Atteint » sur le réel seul, « Avec le ferme » si réel + ferme couvrent l''objectif, « Manque N » = reste à commander / vendre, « Manqué » = semestre clos sous l''objectif.';
+
+comment on function public.get_hitachi_engagement_refs(integer, text) is
+'Détail par référence d''une gamme (fenêtre de rattachement), mêmes règles que get_hitachi_engagement.';
