@@ -46,6 +46,13 @@
  * complète en tableau triable par code, désignation, masse d'achat ou propositions, avec recherche ;
  * périmètre des volumes Tous / FMS / Agences / FMS + Agences séparés (ventes : dépôt FMS de la facture ;
  * achats : CDF livrées à FMS ; agences = total − FMS). Migration 20261119l_tarifs_volumes_fms_agences.sql.
+ *
+ * ÉVOLUTION (19/11/2026, 11h) : masses d'achat corrigées (« valeurs folles » : AIRZONE 4,14 M€, Aspen 2 M€
+ * dont DIVERS 1,53 M€, APPLIMO −200 k€). Liste des fournisseurs : montant HT des CDF BLG passées sur 12 mois,
+ * par flux de destination FMS / agences (+ part FMS, nb de CDF, estimation ventes × prix en info).
+ * Écran fournisseur : la masse estimée ne compte que les articles dont le fournisseur est principal, avec
+ * réf. fournisseur et prix > 0 (hors DIVERS, TRANSPORT, REGUL…) ; KPI « Commandé 12 mois » FMS / agences.
+ * Migration 20261119m_tarifs_liste_masse_cdf.sql.
  */
 
 import React, { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
@@ -68,6 +75,7 @@ const BUCKET = 'tarifs-fournisseurs'
 type FournisseurListe = {
   fournisseur: string; nom: string | null; sommeil: string | null; nb_articles: number; nb_actifs: number; nb_principal: number
   nb_articles_paliers: number; masse_achat_12m: number; nb_propositions: number; derniere_proposition: string | null
+  masse_fms_12m?: number; masse_agences_12m?: number; nb_cdf_12m?: number; masse_estimee_12m?: number
 }
 type Article = {
   reference: string; designation: string | null; famille: string | null; marque: string | null; sommeil: boolean
@@ -263,6 +271,10 @@ function volumes(art: Article | null, base: Base): { tot: number; fms: number; a
   const tot = Math.max(0, base === 'ventes' ? n0(art.qte_ventes_12m) : n0(art.qte_achats_12m))
   const fms = Math.min(tot, Math.max(0, base === 'ventes' ? n0(art.qte_ventes_12m_fms) : n0(art.qte_achats_12m_fms)))
   return { tot, fms, ag: Math.max(0, tot - fms) }
+}
+/** Article compté dans la masse d'achat : fournisseur principal, réf. fournisseur, prix positif (hors DIVERS, TRANSPORT, REGUL…). */
+function compteDansMasse(a: Article): boolean {
+  return a.principal && !!(a.ref_fournisseur || '').trim() && n0(a.prix_net) > 0
 }
 function volume(art: Article | null, base: Base, perim: Perim = 'tous'): number {
   const v = volumes(art, base)
@@ -895,7 +907,7 @@ function TarifsFournisseurs() {
       .filter((a) => voirSommeil || !a.sommeil)
       .filter((a) => !seulementVentes || a.qte_ventes_12m > 0 || a.qte_achats_12m > 0)
       .filter((a) => !q || [a.reference, a.designation, a.ref_fournisseur, a.famille].some((s) => (s || '').toUpperCase().includes(q)))
-      .sort((a, b) => volume(b, base, perim) * n0(b.prix_net) - volume(a, base, perim) * n0(a.prix_net) || a.reference.localeCompare(b.reference))
+      .sort((a, b) => Number(compteDansMasse(b)) - Number(compteDansMasse(a)) || volume(b, base, perim) * n0(b.prix_net) - volume(a, base, perim) * n0(a.prix_net) || a.reference.localeCompare(b.reference))
   }, [donnees, recherche, voirSommeil, seulementVentes, base, perim])
 
   const synActuel = useMemo(() => {
@@ -903,10 +915,10 @@ function TarifsFournisseurs() {
     for (const a of articlesActuels) {
       s.nb++
       const v = volume(a, base, perim)
-      s.masse += v * n0(a.prix_net)
+      if (compteDansMasse(a)) s.masse += v * n0(a.prix_net)
       if (a.paliers?.length) s.paliers++
       if (a.prix_nouveau_sage) s.programme++
-      if (a.prix_vente && a.prix_net) { s.pvVol += v * a.prix_vente; s.paVol += v * a.prix_net }
+      if (a.prix_vente && a.prix_net && compteDansMasse(a)) { s.pvVol += v * a.prix_vente; s.paVol += v * a.prix_net }
     }
     return s
   }, [articlesActuels, base, perim])
@@ -987,6 +999,7 @@ function TarifsFournisseurs() {
             <div className="flex flex-wrap items-center gap-2 border-b border-[#EFECE5] px-3 py-2">
               <h2 className="text-[14px] font-bold">Fournisseurs</h2>
               <input value={rechFrs} onChange={(e) => setRechFrs(e.target.value)} placeholder="Rechercher (code ou nom)…" className={`${ctl} w-[280px]`} />
+              <span className="rounded-lg bg-[#F4F3F0] px-2.5 py-1 text-[12px]">Commandé 12 m : <b>{fmtEur(fournisseursAffiches.reduce((t, f) => t + n0(f.masse_achat_12m), 0))}</b> · FMS <b>{fmtEur(fournisseursAffiches.reduce((t, f) => t + n0(f.masse_fms_12m), 0))}</b> · agences <b>{fmtEur(fournisseursAffiches.reduce((t, f) => t + n0(f.masse_agences_12m), 0))}</b></span>
               <span className="text-[11.5px] text-[#8A8474]">{fmtNum(fournisseursAffiches.length)} fournisseur(s) ayant des articles dans SAGE — cliquez un en-tête pour trier ; ou déposez directement un fichier de tarif (le fournisseur est reconnu par ses références).</span>
             </div>
             <div className="max-h-[75vh] overflow-auto">
@@ -997,7 +1010,11 @@ function TarifsFournisseurs() {
                       <th key={c} className="cursor-pointer select-none px-3 py-1.5" onClick={() => setTriFrs((t) => ({ col: c, sens: t.col === c ? (t.sens === 1 ? -1 : 1) : 1 }))}>{l}{triFrs.col === c ? (triFrs.sens === 1 ? ' ↑' : ' ↓') : ''}</th>
                     ))}
                     <th className="px-3 py-1.5 text-right">Articles actifs</th><th className="px-3 py-1.5 text-right">À paliers</th>
-                    <th className="cursor-pointer select-none px-3 py-1.5 text-right" onClick={() => setTriFrs((t) => ({ col: 'masse', sens: t.col === 'masse' ? (t.sens === 1 ? -1 : 1) : -1 }))}>Masse d’achat 12 m{triFrs.col === 'masse' ? (triFrs.sens === 1 ? ' ↑' : ' ↓') : ''}</th>
+                    <th className="cursor-pointer select-none px-3 py-1.5 text-right" title="Montant HT des commandes fournisseurs BLG passées sur 12 mois glissants" onClick={() => setTriFrs((t) => ({ col: 'masse', sens: t.col === 'masse' ? (t.sens === 1 ? -1 : 1) : -1 }))}>Commandé 12 m{triFrs.col === 'masse' ? (triFrs.sens === 1 ? ' ↑' : ' ↓') : ''}</th>
+                    <th className="px-3 py-1.5 text-right" title="CDF livrées au dépôt FMS">dont FMS</th>
+                    <th className="px-3 py-1.5 text-right" title="CDF livrées en agence (tous les autres lieux de livraison)">dont agences</th>
+                    <th className="px-3 py-1.5 text-right">CDF</th>
+                    <th className="px-3 py-1.5 text-right" title="Ventes facturées 12 mois × prix net SAGE, articles dont le fournisseur est principal (hors articles techniques)">Estimé (ventes)</th>
                     <th className="cursor-pointer select-none px-3 py-1.5 text-right" onClick={() => setTriFrs((t) => ({ col: 'prop', sens: t.col === 'prop' ? (t.sens === 1 ? -1 : 1) : -1 }))}>Propositions{triFrs.col === 'prop' ? (triFrs.sens === 1 ? ' ↑' : ' ↓') : ''}</th>
                   </tr>
                 </thead>
@@ -1009,6 +1026,10 @@ function TarifsFournisseurs() {
                       <td className="px-3 py-1.5 text-right">{fmtNum(f.nb_actifs)}</td>
                       <td className="px-3 py-1.5 text-right">{f.nb_articles_paliers ? fmtNum(f.nb_articles_paliers) : ''}</td>
                       <td className="px-3 py-1.5 text-right font-bold">{f.masse_achat_12m ? fmtEur(f.masse_achat_12m) : '—'}</td>
+                      <td className="whitespace-nowrap px-3 py-1.5 text-right">{f.masse_fms_12m ? <>{fmtEur(f.masse_fms_12m)}<span className="ml-1 text-[10.5px] text-[#8A8474]">{Math.round((100 * f.masse_fms_12m) / (f.masse_achat_12m || 1))} %</span></> : '—'}</td>
+                      <td className="px-3 py-1.5 text-right">{f.masse_agences_12m ? fmtEur(f.masse_agences_12m) : '—'}</td>
+                      <td className="px-3 py-1.5 text-right text-[#5F5A4E]">{f.nb_cdf_12m ? fmtNum(f.nb_cdf_12m) : ''}</td>
+                      <td className="px-3 py-1.5 text-right text-[#5F5A4E]">{f.masse_estimee_12m ? fmtEur(f.masse_estimee_12m) : '—'}</td>
                       <td className="px-3 py-1.5 text-right">{f.nb_propositions ? `${f.nb_propositions} · ${fmtDate(f.derniere_proposition)}` : ''}</td>
                     </tr>
                   ))}
@@ -1063,9 +1084,11 @@ function TarifsFournisseurs() {
             {/* ── Tarif actuel ── */}
             {vue === 'actuel' && (
               <>
-                <section className="grid grid-cols-2 gap-2 md:grid-cols-3 xl:grid-cols-6">
+                <section className="grid grid-cols-2 gap-2 md:grid-cols-4 xl:grid-cols-7">
                   <Kpi label="Articles affichés" value={fmtNum(synActuel.nb)} sub={`${fournisseurCourant?.nb_articles ?? donnees.articles.length} rattachés au fournisseur dans SAGE`} />
-                  <Kpi label="Masse d’achat annuelle" value={fmtEur(synActuel.masse)} sub={libelleBase} />
+                  <Kpi label="Commandé 12 mois (CDF)" value={fmtEur(fournisseurCourant?.masse_achat_12m ?? null)}
+                    sub={fournisseurCourant ? `FMS ${fmtEur(fournisseurCourant.masse_fms_12m ?? 0)} · agences ${fmtEur(fournisseurCourant.masse_agences_12m ?? 0)} · ${fmtNum(fournisseurCourant.nb_cdf_12m ?? 0)} CDF` : 'commandes fournisseurs BLG'} />
+                  <Kpi label="Masse estimée" value={fmtEur(synActuel.masse)} sub={`${libelleBase} × prix net SAGE`} />
                   <Kpi label="Coef. moyen pondéré" value={synActuel.paVol > 0 ? fmtNum(synActuel.pvVol / synActuel.paVol, 2) : '—'} sub="PV fiche / prix net, pondéré par le volume" />
                   <Kpi label="Marge théorique" value={synActuel.pvVol > 0 ? fmtPct((synActuel.pvVol - synActuel.paVol) / synActuel.pvVol, 1, false) : '—'} sub="au PV de la fiche article" />
                   <Kpi label="Articles à paliers" value={fmtNum(synActuel.paliers)} sub="prix par quantité dans SAGE" />
@@ -1123,7 +1146,7 @@ function TarifsFournisseurs() {
                                 <td className="px-2 py-1 text-right" title={a.nb_lignes_cdf_12m ? `${a.nb_lignes_cdf_12m} ligne(s) de CDF (dont ${a.nb_lignes_cdf_12m_fms ?? 0} livrées à FMS), ${fmtNum(a.qte_moy_ligne_cdf, 1)} en moyenne` : ''}>{fmtNum(volume(a, 'achats', perim))}</td>
                               </>
                             )}
-                            <td className="px-2 py-1 text-right font-bold">{fmtEur(volume(a, base, perim) * n0(a.prix_net))}</td>
+                            <td className="px-2 py-1 text-right font-bold" title={compteDansMasse(a) ? '' : 'Non compté dans la masse (fournisseur secondaire, sans réf. fournisseur ou prix ≤ 0)'}>{compteDansMasse(a) ? fmtEur(volume(a, base, perim) * n0(a.prix_net)) : <span className="font-normal text-[#8A8474]">({fmtEur(volume(a, base, perim) * n0(a.prix_net))})</span>}</td>
                           </tr>
                         ))}
                         {!articlesActuels.length && <tr><td colSpan={17} className="px-3 py-6 text-center text-[#8A8474]">Aucun article.</td></tr>}
