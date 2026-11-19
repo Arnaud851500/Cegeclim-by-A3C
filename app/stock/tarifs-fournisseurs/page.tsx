@@ -36,6 +36,11 @@
  * du tarif) : posée automatiquement « paire » ↔ « l'unité », modifiable dans la fiche ; prix et paliers
  * ramenés à l'unité SAGE avant comparaison. Écart > 30 % signalé ⚠ (unité / conditionnement à vérifier).
  * Migration : supabase/migrations/20261119j_tarifs_conversion_unite.sql.
+ *
+ * ÉVOLUTION (19/11/2026, 10h30) : filtre par défaut = lignes appariées dont l'article a été acheté ou
+ * vendu sur 12 mois (sans mouvement, l'évolution du tarif est sans conséquence) ; une proposition dont le
+ * fournisseur diffère de celui de l'URL recharge la page sur son fournisseur (sinon prix SAGE vides :
+ * cas de la proposition Aspen corrigée en base alors que la page était ouverte sur CEGECLIM).
  */
 
 import React, { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
@@ -233,6 +238,10 @@ function quantiteReference(art: Article | null, qref: QRef): number {
   if (qref === 'unitaire' || !art) return 1
   const q = n0(art.qte_moy_ligne_cdf)
   return q >= 1 ? Math.round(q) : 1
+}
+/** Article acheté ou vendu sur les 12 derniers mois : sans mouvement, l'évolution du tarif est sans conséquence. */
+function avecMouvement(a: Article): boolean {
+  return n0(a.qte_achats_12m) > 0 || n0(a.qte_ventes_12m) > 0
 }
 function volume(art: Article | null, base: Base): number {
   if (!art) return 0
@@ -485,7 +494,7 @@ function TarifsFournisseurs() {
 
   const [base, setBase] = useState<Base>('ventes')
   const [qref, setQref] = useState<QRef>('unitaire')
-  const [filtre, setFiltre] = useState<'tous' | 'apparies' | EtatLigne | 'absents' | 'fortes' | 'suspects'>('apparies')
+  const [filtre, setFiltre] = useState<'tous' | 'apparies' | 'actifs' | EtatLigne | 'absents' | 'fortes' | 'suspects'>('actifs')
   const [suggestion, setSuggestion] = useState<Suggestion | null>(null)
   const [saisieFrsProp, setSaisieFrsProp] = useState('')
   const [seuilFort, setSeuilFort] = useState(5)
@@ -537,6 +546,13 @@ function TarifsFournisseurs() {
     if (frsUrl) void charger(frsUrl, propUrl)
     else setDonnees(null)
   }, [frsUrl, propUrl, charger])
+
+  // Proposition rattachée à un autre fournisseur que celui de l'URL (ex. fournisseur corrigé) :
+  // on recharge sur le bon fournisseur, sinon les prix SAGE affichés seraient ceux de l'autre fournisseur.
+  useEffect(() => {
+    const prop = donnees?.proposition
+    if (prop && frsUrl && prop.fournisseur !== frsUrl) naviguer(prop.fournisseur, prop.id, vue)
+  }, [donnees?.proposition, frsUrl, naviguer, vue])
 
   // Fournisseur suggéré par les références d'une proposition (bandeau si différent)
   useEffect(() => {
@@ -793,6 +809,7 @@ function TarifsFournisseurs() {
     let l = comp.lignes.filter((x) => {
       if (filtre === 'fortes') { if (x.evol === null || Math.abs(x.evol) * 100 < seuilFort || x.etat === 'doublon' || x.etat === 'ignoree') return false }
       else if (filtre === 'apparies') { if (!x.art) return false }
+      else if (filtre === 'actifs') { if (!x.art || !avecMouvement(x.art) || x.etat === 'doublon' || x.etat === 'ignoree') return false }
       else if (filtre === 'suspects') { if (!x.suspect || x.etat === 'doublon' || x.etat === 'ignoree') return false }
       else if (filtre !== 'tous' && filtre !== 'absents' && x.etat !== filtre) return false
       if (q && ![x.l.ref_fournisseur, x.l.designation, x.art?.reference, x.art?.designation, x.gamme].some((s) => (s || '').toUpperCase().includes(q))) return false
@@ -1135,13 +1152,13 @@ function TarifsFournisseurs() {
                   <Kpi label="Masse d’achat" value={fmtEur(syn.masse)} sub={`→ ${fmtEur(syn.masse + syn.impact)} au nouveau tarif`} />
                   <Kpi label="Marge si PV inchangé" value={syn.margeNew !== null ? fmtPct(syn.margeNew, 1, false) : '—'}
                     sub={syn.margeAct !== null && syn.margeNew !== null ? `contre ${fmtPct(syn.margeAct, 1, false)} (${fmtNum((syn.margeNew - syn.margeAct) * 100, 1)} pt)` : 'PV fiche article'} />
-                  <Kpi label="Hausses" value={fmtNum(syn.nbHausses)} color="#A3401C" onClick={() => setFiltre(filtre === 'hausse' ? 'apparies' : 'hausse')} actif={filtre === 'hausse'} sub={`${fmtNum(syn.nbStables)} stables`} />
-                  <Kpi label="Baisses" value={fmtNum(syn.nbBaisses)} color="#2F6F33" onClick={() => setFiltre(filtre === 'baisse' ? 'apparies' : 'baisse')} actif={filtre === 'baisse'} />
+                  <Kpi label="Hausses" value={fmtNum(syn.nbHausses)} color="#A3401C" onClick={() => setFiltre(filtre === 'hausse' ? 'actifs' : 'hausse')} actif={filtre === 'hausse'} sub={`${fmtNum(syn.nbStables)} stables`} />
+                  <Kpi label="Baisses" value={fmtNum(syn.nbBaisses)} color="#2F6F33" onClick={() => setFiltre(filtre === 'baisse' ? 'actifs' : 'baisse')} actif={filtre === 'baisse'} />
                   <Kpi label="Lignes appariées" value={`${fmtNum(syn.nbApparies)} / ${fmtNum(syn.nbLignes)}`} color={syn.nbApparies ? '#111820' : '#A3401C'}
-                    sub={`${fmtNum(syn.nbNouveaux)} hors référentiel SAGE (clic)`} onClick={() => setFiltre(filtre === 'nouveau' ? 'apparies' : 'nouveau')} actif={filtre === 'nouveau'} />
+                    sub={`${fmtNum(comp.lignes.filter((x) => x.art && avecMouvement(x.art) && x.etat !== 'doublon' && x.etat !== 'ignoree').length)} avec achats/ventes 12 m · ${fmtNum(syn.nbNouveaux)} hors réf. SAGE`} onClick={() => setFiltre(filtre === 'nouveau' ? 'actifs' : 'nouveau')} actif={filtre === 'nouveau'} />
                   <Kpi label="Absents du fichier" value={fmtNum(comp.absents.length)} color={comp.absents.length ? '#96600F' : undefined}
                     sub={`articles SAGE actifs · ${fmtEur(comp.absents.reduce((s, a) => s + volume(a, base) * n0(a.prix_net), 0))}/an`}
-                    onClick={() => setFiltre(filtre === 'absents' ? 'apparies' : 'absents')} actif={filtre === 'absents'} />
+                    onClick={() => setFiltre(filtre === 'absents' ? 'actifs' : 'absents')} actif={filtre === 'absents'} />
                 </section>
 
                 {parGamme.length > 1 && (
@@ -1166,7 +1183,8 @@ function TarifsFournisseurs() {
                   <div className="flex flex-wrap items-center gap-2 border-b border-[#EFECE5] px-3 py-2">
                     <input value={recherche} onChange={(e) => setRecherche(e.target.value)} placeholder="Rechercher (réf., désignation, gamme)…" className={`${ctl} w-[300px]`} />
                     <select value={filtre} onChange={(e) => setFiltre(e.target.value as typeof filtre)} className={ctl}>
-                      <option value="apparies">Lignes appariées à un article SAGE</option>
+                      <option value="actifs">Appariées avec achats ou ventes sur 12 mois</option>
+                      <option value="apparies">Toutes les lignes appariées à un article SAGE</option>
                       <option value="tous">Toutes les lignes du fichier</option>
                       <option value="hausse">Hausses</option>
                       <option value="baisse">Baisses</option>
