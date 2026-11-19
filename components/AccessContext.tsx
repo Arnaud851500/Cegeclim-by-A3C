@@ -61,6 +61,9 @@ export type AccessRights = {
   can_allocation_ro: boolean
   /** (2026-10-26) Droit de profil : écran Allocation limité aux agences du périmètre, en lecture. */
   can_allocation_airh2o: boolean
+  /** (2026-11-19) Rubrique « Réunion Piliers / Feuille de route » : membre actif de
+   * piliers_membres (rpc piliers_suis_membre), contrôlé aussi par RLS. */
+  can_piliers: boolean
 }
 
 type AccessContextType = {
@@ -206,6 +209,7 @@ export const defaultRights: AccessRights = {
   show_alert_dates_interdites: false,
   can_allocation_ro: false,
   can_allocation_airh2o: false,
+  can_piliers: false,
 }
 
 const AccessContext = createContext<AccessContextType>({
@@ -270,6 +274,7 @@ const PAGE_ACCESS_CHECKS: Array<[string, keyof AccessRights]> = [
   ['/hotline', 'can_hotline'],
   ['/guides-blg', 'can_guides_blg'],
   ['/guides-compagnon', 'can_guides_blg'],
+  ['/piliers', 'can_piliers'],
 ]
 
 function isPathAllowed(path: string, rights: AccessRights) {
@@ -473,11 +478,18 @@ export function AccessProvider({ children }: { children: React.ReactNode }) {
   const refreshAccess = useCallback(async () => {
     setLoading(true)
     const result = await fetchAccess()
+    // Réunion Piliers (19/11/2026) : droit nominatif tenu dans piliers_membres.
+    let canPiliers = false
+    if (result.email) {
+      const { data: membre, error: piliersError } = await supabase.rpc('piliers_suis_membre')
+      if (piliersError) console.error('ACCESS - piliers_suis_membre', piliersError)
+      canPiliers = membre === true
+    }
     setEmail(result.email)
     // Allocation AirH2O : vue complète + saisie (liste nominative) ou vue agence en lecture
     // (droit can_dashboard ou droit de profil can_allocation_airh2o) — 26/10/2026.
     // Hotline (02/11/2026) : l'expert a aussi la console et les tickets.
-    setRights({ ...result.rights, can_hotline: result.rights.can_hotline || result.rights.can_hotline_expert, can_allocation_ro: peutVoirAllocationRo(result.email) || result.rights.can_allocation_airh2o || result.rights.can_dashboard })
+    setRights({ ...result.rights, can_piliers: canPiliers, can_hotline: result.rights.can_hotline || result.rights.can_hotline_expert, can_allocation_ro: peutVoirAllocationRo(result.email) || result.rights.can_allocation_airh2o || result.rights.can_dashboard })
     setLoading(false)
   }, [])
 

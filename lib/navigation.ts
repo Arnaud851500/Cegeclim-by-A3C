@@ -78,6 +78,10 @@
 // sa fenêtre propose le guide BLG (/guides-blg) ou le guide du compagnon (/guides-compagnon,
 // chapitres HTML rangés par pavé dans guides-compagnon/<id du pavé>/, migration
 // 20261115a_guides_compagnon.sql). Même droit can_guides_blg pour les deux.
+// ÉVOLUTION (2026-11-19) : nouveau bloc « Réunion Piliers / Feuille de route » (/piliers) —
+// réservé aux membres de la réunion mensuelle des Piliers (droit calculé can_piliers =
+// membre actif de piliers_membres, rpc piliers_suis_membre ; RLS côté base).
+// Migration 20261119a_reunion_piliers.sql.
 // Le bloc « Mes alertes » de l'accueil n'est pas ici : il n'a pas de page, il
 // ouvre le Centre d'alertes (components/AlertsContext.tsx + ClientRootShell).
 
@@ -142,6 +146,18 @@ export const ACCUEIL_PATH = '/accueil'
 // Arborescence
 // ----------------------------------------------------------------------------
 export const NAV_BLOCS: NavBloc[] = [
+  {
+    id: 'piliers',
+    label: 'Réunion Piliers / Feuille de route',
+    subtitle: 'Actions, décisions, sujets entre deux réunions',
+    icon: '🏛️',
+    icons: ['🏛️', '🧭'],
+    gradient: ['#7A5EA8', '#4A3870'],
+    iconBg: 'rgba(255,255,255,0.18)',
+    pages: [
+      { label: 'Réunion Piliers / Feuille de route', path: '/piliers', activeLabel: 'Réunion Piliers / Feuille de route', accessKey: 'can_piliers', description: 'Déroulé de la réunion (météo, revue des actions, nouveaux sujets, communication), feuille de route partagée et sujets à remonter entre deux réunions — réservé aux membres.' },
+    ],
+  },
   {
     id: 'activite',
     label: 'Mon activité',
