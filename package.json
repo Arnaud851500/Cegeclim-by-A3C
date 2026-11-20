@@ -25,6 +25,7 @@
     "react-dom": "19.2.4",
     "react-leaflet": "^5.0.0",
     "recharts": "^3.8.1",
+    "tus-js-client": "^4.3.1",
     "xlsx": "^0.18.5",
     "xlsx-js-style": "^1.2.0"
   },
