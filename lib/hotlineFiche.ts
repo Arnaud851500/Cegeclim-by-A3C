@@ -8,6 +8,7 @@
 // COMMENTAIRE_INTERNE), qui ne sortent jamais de l'outil.
 // ============================================================================
 
+import { isoVersCourte } from '@/components/hotline/ChampDateCourte'
 import { supabase } from '@/lib/supabaseClient'
 import {
   AXES_CLASSIF,
@@ -16,7 +17,6 @@ import {
   chargerEtapes,
   chargerPieces,
   estInterne,
-  fmtDate,
   fmtDateHeure,
   fmtTel,
   libelleClassif,
@@ -102,7 +102,7 @@ export async function telechargerFicheTicket(ticketId: string) {
           ['Groupe extérieur (GE)', [t.modele_ge, t.serie_ge && `n° ${t.serie_ge}`].filter(Boolean).join(' - ')],
           ['Unité intérieure (UI)', [t.reference_article, t.numero_serie && `n° ${t.numero_serie}`].filter(Boolean).join(' - ')],
         ]) as Array<[string, string]>),
-    ['Mise en service', t.date_mes ? fmtDate(t.date_mes) : ''],
+    ['Mise en service', isoVersCourte(t.date_mes)],
   ]
   if (classif) {
     AXES_CLASSIF.forEach(({ axe, label }) => {

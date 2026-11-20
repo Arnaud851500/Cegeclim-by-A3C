@@ -54,6 +54,9 @@ import FenetreNiveau from '@/components/hotline/FenetreNiveau'
 import ChampSerie from '@/components/hotline/ChampSerie'
 import ChampModele from '@/components/hotline/ChampModele'
 import ZoneTexte from '@/components/hotline/ZoneTexte'
+import ChampDateCourte, { isoVersCourte } from '@/components/hotline/ChampDateCourte'
+import RechercheSuite from '@/components/hotline/RechercheSuite'
+import TexteTickets from '@/components/hotline/TexteTickets'
 import { telechargerFicheTicket } from '@/lib/hotlineFiche'
 import ClassificationTicket, { CLASSIF_FORM_VIDE, patchClassif, useClassification, valeursDepuisTicket, type ValeursClassif } from '@/components/hotline/ClassificationTicket'
 import {
@@ -320,6 +323,71 @@ function HotlineConsole() {
   // Ticket de l'historique affiché en fenêtre flottante (04/11/2026).
   const [ticketHisto, setTicketHisto] = useState<string | null>(null)
   const fermerTicketHisto = useCallback(() => setTicketHisto(null), [])
+  // (20/11/2026) « Suite au ticket » : le nouveau ticket reprend les informations
+  // de la colonne de gauche du ticket choisi ; l'appelant identifié (3CX) est
+  // conservé, et le motif de l'appel est prérempli « Suite au ticket TICK… ».
+  function suiteAuTicket(t: Ticket) {
+    setTicketHisto(null)
+    if (ticket) {
+      setCommentaire((c) => (c.trim() ? `${c}\n` : '') + `Suite au ticket ${t.numero}`)
+      return
+    }
+    if (!telCle(telephone) && t.telephone_appelant) setTelephone(t.telephone_appelant)
+    setForm((f) => ({
+      ...f,
+      filiere: t.filiere,
+      gamme: t.gamme || f.gamme,
+      motif: t.motif,
+      numero_tiers: f.numero_tiers || t.numero_tiers || '',
+      intitule_tiers: f.intitule_tiers || t.intitule_tiers || '',
+      contact_nom: f.contact_nom || t.contact_nom || '',
+      contact_email: f.contact_email || t.contact_email || '',
+      chantier: t.chantier || '',
+      numero_serie: t.numero_serie || '',
+      reference_article: t.reference_article || '',
+      modele_ge: t.modele_ge || '',
+      serie_ge: t.serie_ge || '',
+      nature: t.nature || f.nature,
+      code_defaut: t.code_defaut || '',
+      date_mes: t.date_mes || '',
+      description: `Suite au ticket ${t.numero}`,
+      ...formSoleil(t),
+    }))
+    // Le client / chantier vient du ticket repris : pas d'alerte « ticket déjà ouvert » sur ce couple.
+    doublonIgnore.current = `${String(t.numero_tiers || '').toUpperCase()}|${String(t.chantier || '').trim().toUpperCase()}`
+    setInfo(`Informations reprises du ticket ${t.numero} : compléter puis « Ouvrir le ticket ».`)
+    window.setTimeout(() => setInfo(null), 4000)
+  }
+
+  // (20/11/2026) Saisie du chantier : si un ticket non clos existe déjà pour ce
+  // client et ce chantier, fenêtre flottante pour proposer de le reprendre.
+  const [doublons, setDoublons] = useState<Ticket[]>([])
+  const doublonIgnore = useRef('')
+  const cleDoublon = !ticket && form.numero_tiers.trim() && form.chantier.trim().length >= 3 ? `${form.numero_tiers.trim().toUpperCase()}|${form.chantier.trim().toUpperCase()}` : ''
+  useEffect(() => {
+    let actif = true
+    const h = window.setTimeout(async () => {
+      if (!cleDoublon || cleDoublon === doublonIgnore.current) {
+        if (actif) setDoublons([])
+        return
+      }
+      const [tiers, chantier] = cleDoublon.split('|')
+      const { data } = await supabase
+        .from('hotline_tickets')
+        .select('*')
+        .ilike('numero_tiers', tiers)
+        .ilike('chantier', chantier.replace(/[%_]/g, (c) => `\\${c}`))
+        .neq('statut', 'RESOLU')
+        .order('opened_at', { ascending: false })
+        .limit(5)
+      if (actif) setDoublons((data || []) as Ticket[])
+    }, 700)
+    return () => {
+      actif = false
+      window.clearTimeout(h)
+    }
+  }, [cleDoublon])
+
   // (14/11/2026) Cas similaires résolus (même code défaut, même modèle…) avec leur solution.
   const [casSimilaires, setCasSimilaires] = useState<CasSimilaire[]>([])
   const cleCas = JSON.stringify([
@@ -1135,7 +1203,7 @@ function HotlineConsole() {
                     <div className="border-b border-[#EFEDE8] bg-[#ECEEF1] px-4 py-1.5 text-[12px] font-bold tracking-[0.04em] text-[#3F4650]">🧪 TICKET TEST — exclu des statistiques, supprimable</div>
                   ) : null}
                   <div className="px-3 py-3">
-                    <HistoriqueTicket ticket={ticket} etapes={etapes} hauteurMax={420} />
+                    <HistoriqueTicket ticket={ticket} etapes={etapes} hauteurMax={420} onOuvrirTicket={setTicketHisto} />
                   </div>
                 </div>
               ) : null
@@ -1254,7 +1322,9 @@ function HotlineConsole() {
                   {fmtDateHeure(e.at)} · {String(e.auteur || '').split('@')[0]}
                 </span>
               </div>
-              <div className="whitespace-pre-line text-slate-900">{e.libelle}</div>
+              <div className="whitespace-pre-line text-slate-900">
+                <TexteTickets texte={e.libelle} onOuvrir={setTicketHisto} />
+              </div>
             </li>
           ))}
         </ul>
@@ -1309,9 +1379,7 @@ function HotlineConsole() {
               <span>1 · Appel {ticket ? `· ${ticket.numero}` : '· création du ticket'}</span>
               {ticket && statut ? (
                 <span className="flex items-center gap-1.5">
-                  <span className="rounded-md bg-white px-1 py-0.5">
-                    <Pastille {...statut} />
-                  </span>
+                  <Pastille {...statut} />
                   <span className="rounded-md bg-white/15 px-1.5 py-0.5 text-[12px]">N{ticket.niveau}</span>
                   {ticket.est_test ? <span className="rounded bg-[#5F6670] px-1.5 py-px text-[10px] font-bold text-white">TEST</span> : null}
                 </span>
@@ -1375,6 +1443,8 @@ function HotlineConsole() {
                   </div>
                 )
               ) : null}
+
+              {!ticket ? <RechercheSuite onChoisir={suiteAuTicket} onVoir={setTicketHisto} /> : null}
 
               <div className="flex rounded-lg border border-[#D8D3C8] bg-white p-0.5 text-[13px]">
                 {FILIERES.filter((f) => !environnement || f.value === environnement || f.value === form.filiere || f.value === ticket?.filiere).map((f) => (
@@ -1552,7 +1622,7 @@ function HotlineConsole() {
                   </div>
                   <label className="mt-2 flex items-center gap-2 text-[11px] font-semibold text-slate-500">
                     Mise en service le
-                    <input type="date" value={form.date_mes} onChange={(e) => patch({ date_mes: e.target.value })} className="h-8 rounded-lg border border-[#D8D3C8] bg-white px-2 text-[12px] text-slate-900" />
+                    <ChampDateCourte value={form.date_mes} onChange={(v) => patch({ date_mes: v })} className="h-8 rounded-lg border border-[#D8D3C8] bg-white px-2 text-[12px] text-slate-900" />
                   </label>
                 </div>
               ) : (
@@ -1616,7 +1686,7 @@ function HotlineConsole() {
                 </div>
                 <label className="mt-2 flex items-center gap-2 text-[11px] font-semibold text-slate-500">
                   Mise en service le
-                  <input type="date" value={form.date_mes} onChange={(e) => patch({ date_mes: e.target.value })} className="h-8 rounded-lg border border-[#D8D3C8] bg-white px-2 text-[12px] text-slate-900" />
+                  <ChampDateCourte value={form.date_mes} onChange={(v) => patch({ date_mes: v })} className="h-8 rounded-lg border border-[#D8D3C8] bg-white px-2 text-[12px] text-slate-900" />
                 </label>
               </div>
               )}
@@ -2014,7 +2084,58 @@ function HotlineConsole() {
         </div>
       </main>
 
-      {ticketHisto ? <FenetreTicket id={ticketHisto} onFermer={fermerTicketHisto} email={email || ''} collaborateurs={collaborateurs} /> : null}
+      {doublons.length && !ticketHisto ? (
+        <div className="fixed inset-0 z-[70] flex items-start justify-center bg-black/30 px-4 pt-24" onClick={() => setDoublons([])}>
+          <div className="w-full max-w-[560px] rounded-2xl border-2 border-[#E0B872] bg-white shadow-2xl" onClick={(e) => e.stopPropagation()}>
+            <div className="rounded-t-[14px] bg-[#B4761A] px-5 py-3 text-[15px] font-bold text-white">
+              Ticket déjà ouvert pour ce client et ce chantier
+            </div>
+            <div className="space-y-2 p-5">
+              <p className="text-[13px] text-slate-600">
+                {form.intitule_tiers || form.numero_tiers} · <span className="font-bold text-[#D9480F]">{form.chantier}</span> : {doublons.length > 1 ? `${doublons.length} tickets non clôturés existent` : 'un ticket non clôturé existe'}. Le reprendre plutôt que d’en ouvrir un nouveau ?
+              </p>
+              {doublons.map((d) => (
+                <div key={d.id} className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-[#E2DFD8] bg-[#FAF9F7] px-3 py-2 text-[13px]">
+                  <div className="min-w-0">
+                    <div className="font-semibold text-slate-900">
+                      {d.numero} · {fmtDateHeure(d.opened_at)} <Pastille {...styleStatut(d.statut)} />
+                    </div>
+                    <div className="truncate text-slate-500">{[d.contact_nom, d.description].filter(Boolean).join(' · ') || '—'}</div>
+                  </div>
+                  <div className="flex shrink-0 gap-2">
+                    <button type="button" onClick={() => setTicketHisto(d.id)} className="rounded-lg border border-[#D8D3C8] px-2.5 py-1.5 text-[12px] font-semibold text-slate-600">
+                      Voir
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setDoublons([])
+                        window.location.assign(`/hotline?ticket=${d.id}`)
+                      }}
+                      className="rounded-lg bg-[#B4761A] px-2.5 py-1.5 text-[12px] font-bold text-white hover:bg-[#9A6414]"
+                    >
+                      Reprendre ce ticket
+                    </button>
+                  </div>
+                </div>
+              ))}
+              <div className="pt-1 text-right">
+                <button
+                  type="button"
+                  onClick={() => {
+                    doublonIgnore.current = cleDoublon
+                    setDoublons([])
+                  }}
+                  className="text-[13px] font-semibold text-slate-500 underline"
+                >
+                  Non, créer un nouveau ticket
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
+      {ticketHisto ? <FenetreTicket id={ticketHisto} onFermer={fermerTicketHisto} email={email || ''} collaborateurs={collaborateurs} onSuite={suiteAuTicket} /> : null}
 
       {ticket && fenetreNiveau ? (
         <FenetreNiveau
@@ -2262,7 +2383,21 @@ function ListeRepliable<T>({ items, cle, render }: { items: T[]; cle: (item: T, 
 }
 
 // ── Fenêtre flottante d'un ticket de l'historique (04/11/2026) ─────────────────
-function FenetreTicket({ id, onFermer, email, collaborateurs }: { id: string; onFermer: () => void; email: string; collaborateurs: Collaborateurs }) {
+function FenetreTicket({
+  id,
+  onFermer,
+  email,
+  collaborateurs,
+  onSuite,
+}: {
+  /** Id du ticket, ou son n° (TICK… / TEST…) quand il est cité dans un commentaire. */
+  id: string
+  onFermer: () => void
+  email: string
+  collaborateurs: Collaborateurs
+  /** (20/11/2026) Créer un nouveau ticket « Suite au ticket ». */
+  onSuite?: (t: Ticket) => void
+}) {
   const [t, setT] = useState<Ticket | null>(null)
   const [relance, setRelance] = useState<'non' | 'encours' | 'faite'>('non')
   async function relancer() {
@@ -2284,11 +2419,13 @@ function FenetreTicket({ id, onFermer, email, collaborateurs }: { id: string; on
     let actif = true
     void (async () => {
       try {
-        const { data, error } = await supabase.from('hotline_tickets').select('*').eq('id', id).maybeSingle()
+        const parNumero = /^(TICK|TEST|HT-)/i.test(id)
+        const { data, error } = await supabase.from('hotline_tickets').select('*').eq(parNumero ? 'numero' : 'id', parNumero ? id.toUpperCase() : id).maybeSingle()
         if (error) throw error
         if (!actif) return
-        setT((data as Ticket) || null)
-        const liste = await chargerEtapes(id)
+        if (!data) throw new Error(`Ticket ${id} introuvable.`)
+        setT(data as Ticket)
+        const liste = await chargerEtapes((data as Ticket).id)
         if (actif) setEtapesFenetre(liste)
       } catch (e) {
         if (actif) setErreurFenetre(messageErreur(e))
@@ -2333,7 +2470,7 @@ function FenetreTicket({ id, onFermer, email, collaborateurs }: { id: string; on
                 ['Chantier', t.chantier],
                 ['Nature', libelleNature(t.nature)],
                 ['Code défaut', t.code_defaut],
-                ['Mise en service', t.date_mes ? fmtDate(t.date_mes) : ''],
+                ['Mise en service', isoVersCourte(t.date_mes)],
                 ['GE', [t.modele_ge, t.serie_ge && `n° ${t.serie_ge}`].filter(Boolean).join(' · ')],
                 ['UI', [t.reference_article, t.numero_serie && `n° ${t.numero_serie}`].filter(Boolean).join(' · ')],
               ].map(([k, v]) => (
@@ -2370,6 +2507,16 @@ function FenetreTicket({ id, onFermer, email, collaborateurs }: { id: string; on
             <Link href={`/hotline/tickets?id=${t.id}`} target="_blank" className="text-[13px] font-semibold text-slate-500 underline">
               Fiche complète (nouvel onglet)
             </Link>
+            {onSuite ? (
+              <button
+                type="button"
+                onClick={() => onSuite(t)}
+                title="Nouveau ticket reprenant les informations de celui-ci, motif « Suite au ticket … »"
+                className="rounded-lg bg-[#1E4E8C] px-3 py-1.5 text-[13px] font-semibold text-white hover:bg-[#163B6B]"
+              >
+                ↪ Nouveau ticket « Suite au ticket {t.numero} »
+              </button>
+            ) : null}
             <Link href={`/hotline?ticket=${t.id}`} target="_blank" className="rounded-lg bg-[#B4761A] px-3 py-1.5 text-[13px] font-semibold text-white hover:bg-[#9A6414]">
               Reprendre ce ticket (nouvel onglet)
             </Link>

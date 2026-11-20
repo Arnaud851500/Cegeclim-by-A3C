@@ -30,6 +30,7 @@ import PiecesJointes from '@/components/hotline/PiecesJointes'
 import HistoriqueTicket from '@/components/hotline/HistoriqueTicket'
 import FenetreNiveau from '@/components/hotline/FenetreNiveau'
 import ZoneTexte from '@/components/hotline/ZoneTexte'
+import { isoVersCourte } from '@/components/hotline/ChampDateCourte'
 import { telechargerFicheTicket } from '@/lib/hotlineFiche'
 import { construireCsv, nomFichierExport, regrouperCommentaires } from '@/lib/hotlineCsv'
 import FiltresClassification, { FILTRE_CLASSIF_VIDE, type FiltreClassif } from '@/components/hotline/FiltresClassification'
@@ -778,7 +779,7 @@ function FicheTicket({
                   ['GE', [ticket.modele_ge, ticket.serie_ge && `n° ${ticket.serie_ge}`].filter(Boolean).join(' · ')],
                   ['UI', [ticket.reference_article, ticket.numero_serie && `n° ${ticket.numero_serie}`].filter(Boolean).join(' · ')],
                 ]),
-            ['Mise en service', ticket.date_mes ? new Date(ticket.date_mes).toLocaleDateString('fr-FR') : ''],
+            ['Mise en service', isoVersCourte(ticket.date_mes)],
             ['Assigné à', nomCollaborateur(ticket.assigne_a, collaborateurs)],
             ['1re action', fmtDuree(ticket.opened_at, ticket.first_action_at)],
             ['Résolution', fmtDuree(ticket.opened_at, ticket.resolved_at)],

@@ -16,6 +16,7 @@
  * ticket (/hotline/tickets), la fenêtre d'historique et la fiche imprimable.
  */
 
+import TexteTickets from '@/components/hotline/TexteTickets'
 import { useEffect, useMemo, useRef } from 'react'
 import { ETAPE_LIBELLES, estInterne, fmtDateHeure, type Etape, type Ticket } from '@/lib/hotline'
 
@@ -46,6 +47,7 @@ export default function HistoriqueTicket({
   masquerInternes = false,
   hauteurMax = 460,
   impression = false,
+  onOuvrirTicket,
 }: {
   ticket: TicketMini
   etapes: Etape[]
@@ -53,6 +55,8 @@ export default function HistoriqueTicket({
   /** Hauteur maximale (px) avant défilement ; 0 = pas de limite. */
   hauteurMax?: number
   impression?: boolean
+  /** (20/11/2026) Clic sur un n° de ticket cité (« Suite au ticket TICK… »). */
+  onOuvrirTicket?: (numero: string) => void
 }) {
   const fin = useRef<HTMLDivElement | null>(null)
 
@@ -88,7 +92,9 @@ export default function HistoriqueTicket({
               {fmtDateHeure(note.at)} · {String(note.auteur || '').split('@')[0]}
             </span>
           </div>
-          <div className="whitespace-pre-wrap text-slate-900">{note.texte}</div>
+          <div className="whitespace-pre-wrap text-slate-900">
+            <TexteTickets texte={note.texte} onOuvrir={onOuvrirTicket} />
+          </div>
         </div>
       ) : (
         <div className="rounded-lg border border-dashed border-[#D8D3C8] px-3 py-2 text-[12px] text-slate-500">Aucune note rapide (motif de l’appel non saisi).</div>
@@ -118,7 +124,9 @@ export default function HistoriqueTicket({
                   {fmtDateHeure(e.at)} · {e.auteur.split('@')[0]}
                 </span>
               </div>
-              <div className="whitespace-pre-wrap">{e.libelle}</div>
+              <div className="whitespace-pre-wrap">
+                <TexteTickets texte={e.libelle} onOuvrir={onOuvrirTicket} />
+              </div>
             </div>
           )
         }
