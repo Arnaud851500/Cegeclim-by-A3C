@@ -267,14 +267,14 @@ function lireDispo(d: Dispo | undefined, aujourdhui: string): Lecture {
       return {
         couleur: 'rouge',
         date: d.date_dispo_complete,
-        titre: `Commande d’appro à passer — ${fmtDate(d.date_dispo_complete)}`,
+        titre: `Appro à passer — ${fmtDate(d.date_dispo_complete)}`,
         detail: [`délai d’appro ${d.delai_appro_jours ?? '?'} j`, partiel].filter(Boolean).join(' · '),
       }
     case 'BLOQUE_APPRO':
       return {
         couleur: 'rouge',
         date: null,
-        titre: 'Non promettable — article bloqué en appro',
+        titre: 'Non promettable — bloqué appro',
         detail: [d.blocage_source === 'SAGE' ? 'blocage appro SAGE' : d.blocage_source === 'MANUEL' ? 'arrêt appro manuel' : null, partiel].filter(Boolean).join(' · ') || null,
       }
     default:
@@ -895,29 +895,31 @@ function LigneVue({
   const alerte = estArticle ? alertePr(l) : null
   const lim = limitante && coche
 
+  const details = [
+    estArticle && coche ? lecture?.detail : null,
+    estArticle && coche && dispo ? `stock dispo ${fmtQte(dispo.stock_dispo)}` : null,
+  ].filter(Boolean).join(' · ')
+
   return (
     <div
       className={`qlLigne ${coche ? '' : 'off'} ${lim ? 'limitante' : ''}`}
       style={{ borderLeftColor: c.trait, background: lim ? undefined : c.fond, ...(lim ? { ['--ql-lim' as string]: c.trait } : {}) }}
     >
-      <label className="qlCase">
-        <input type="checkbox" checked={coche} onChange={onBascule} />
-      </label>
+      <input className="qlCase" type="checkbox" checked={coche} onChange={onBascule} />
 
-      <div className="qlArt">
-        {lim && <div className="qlLimBandeau" style={{ background: c.trait }}>⚑ RÉFÉRENCE LIMITANTE — fixe la date du devis</div>}
-        <div className="qlRef">
-          <span className="qlMono qlRefCode">{l.ref}</span>
-          {l.sommeil && <span className="qlBadge qlBadgeErr">en sommeil</span>}
-          {l.type === 'INCONNU' && <span className="qlBadge qlBadgeErr">inconnue dans SAGE</span>}
-        </div>
-        <div className="qlDesign">{l.designation || '—'}</div>
+      <div className="qlRefCol">
+        {lim && <span className="qlLimBadge" style={{ background: c.trait }}>⚑ LIMITANTE</span>}
+        <span className="qlMono qlRefCode">{l.ref}</span>
+        {l.sommeil && <span className="qlBadge qlBadgeErr">sommeil</span>}
+        {l.type === 'INCONNU' && <span className="qlBadge qlBadgeErr">inconnue</span>}
       </div>
+
+      <div className="qlDesign" title={l.designation || ''}>{l.designation || '—'}</div>
 
       <div className="qlQte">
         <span className="qlQteVal">{fmtQte(l.qte)}</span>
         {estArticle && qteTotaleRef !== null && qteTotaleRef > l.qte && coche && (
-          <span className="qlQteTot" title="Quantité totale de cette référence dans les lignes cochées">/ {fmtQte(qteTotaleRef)} au total</span>
+          <span className="qlQteTot" title="Quantité totale de cette référence dans les lignes cochées">/{fmtQte(qteTotaleRef)}</span>
         )}
       </div>
 
@@ -925,24 +927,23 @@ function LigneVue({
         {estArticle && coche ? (
           <>
             <span className="qlPill" style={{ background: c.trait }}>{lecture?.titre ?? '…'}</span>
-            {lecture?.detail && <div className="qlDispoDetail">{lecture.detail}</div>}
-            {dispo && <div className="qlDispoDetail">stock dispo {fmtQte(dispo.stock_dispo)}</div>}
+            {details && <span className="qlDispoDetail">{details}</span>}
           </>
         ) : l.type === 'INCONNU' ? (
           <span className="qlPill" style={{ background: COULEURS.rouge.trait }}>Référence à corriger</span>
         ) : (
-          <div className="qlDispoDetail">retirée</div>
+          <span className="qlDispoDetail">retirée</span>
         )}
       </div>
 
       <div className="qlPrix">
         {alerte && (
-          <div className={`qlEcartPr ${alerte.pct > 0 ? 'hausse' : 'baisse'}`} title={`PR du devis ${fmtEur(l.prDevis)} → ${l.prActuelSource === 'PUMP' ? 'PUMP' : 'dernier achat'} ${fmtEur(l.prActuel)}`}>
-            <span className="qlEcartLabel">PR {alerte.pct > 0 ? 'en hausse' : 'en baisse'}</span>
-            <b>{fmtPct(alerte.pct)}</b>
-            <b>{alerte.valeur > 0 ? '+' : ''}{fmtEur(alerte.valeur, 0)}</b>
-            <span className="qlEcartDetail">{fmtEur(l.prDevis)} → {fmtEur(l.prActuel)} / u.</span>
-          </div>
+          <span
+            className={`qlEcartPr ${alerte.pct > 0 ? 'hausse' : 'baisse'}`}
+            title={`PR du devis ${fmtEur(l.prDevis)} → ${l.prActuelSource === 'PUMP' ? 'PUMP' : 'dernier achat'} ${fmtEur(l.prActuel)} par unité`}
+          >
+            PR <b>{fmtPct(alerte.pct)}</b> · <b>{alerte.valeur > 0 ? '+' : ''}{fmtEur(alerte.valeur, 0)}</b>
+          </span>
         )}
       </div>
     </div>
@@ -954,18 +955,18 @@ function LigneVue({
 // ─────────────────────────────────────────────────────────────────────────
 
 const CSS = `
-.ql { color: var(--cg-ink); font-family: inherit; max-width: 1280px; margin: 0 auto; padding: 22px 26px 40px; }
+.ql { color: var(--cg-ink); font-family: inherit; max-width: 1920px; margin: 0 auto; padding: 14px 22px 32px; }
 .qlCompact { padding: 12px 10px 28px; }
-.qlHead { margin-bottom: 16px; }
+.qlHead { margin-bottom: 10px; display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 18px; }
 .qlKicker { font-size: 11px; letter-spacing: 0.18em; font-weight: 700; color: var(--cg-sauge); }
-.qlTitre { font-size: 30px; font-weight: 700; margin: 4px 0 6px; letter-spacing: -0.01em; }
-.qlLead { margin: 0; font-size: 14px; color: rgba(var(--cg-ink-rgb),0.66); max-width: 880px; line-height: 1.5; }
-.qlOnglets { display: inline-flex; gap: 4px; padding: 4px; border-radius: 12px; background: rgba(var(--cg-ink-rgb),0.06); margin-bottom: 12px; }
-.qlOnglets button { border: 0; background: transparent; color: rgba(var(--cg-ink-rgb),0.7); font: inherit; font-size: 14px; font-weight: 600; padding: 8px 14px; border-radius: 9px; cursor: pointer; }
+.qlTitre { font-size: 26px; font-weight: 700; margin: 0; letter-spacing: -0.01em; }
+.qlLead { margin: 0; font-size: 13px; color: rgba(var(--cg-ink-rgb),0.6); flex-basis: 100%; line-height: 1.45; }
+.qlOnglets { display: inline-flex; gap: 4px; padding: 3px; border-radius: 12px; background: rgba(var(--cg-ink-rgb),0.06); margin-bottom: 8px; }
+.qlOnglets button { border: 0; background: transparent; color: rgba(var(--cg-ink-rgb),0.7); font: inherit; font-size: 14px; font-weight: 600; padding: 6px 14px; border-radius: 9px; cursor: pointer; }
 .qlOnglets button.on { background: var(--cg-ink); color: var(--cg-bg); }
-.qlSaisie { margin-bottom: 14px; }
+.qlSaisie { margin-bottom: 10px; }
 .qlRecherche { position: relative; display: flex; gap: 8px; max-width: 760px; }
-.qlInput, .qlTexte { flex: 1; width: 100%; font: inherit; font-size: 16px; color: var(--cg-ink); background: rgba(var(--cg-ink-rgb),0.05); border: 1px solid rgba(var(--cg-ink-rgb),0.18); border-radius: 12px; padding: 12px 14px; outline: none; }
+.qlInput, .qlTexte { flex: 1; width: 100%; font: inherit; font-size: 16px; color: var(--cg-ink); background: rgba(var(--cg-ink-rgb),0.05); border: 1px solid rgba(var(--cg-ink-rgb),0.18); border-radius: 12px; padding: 9px 14px; outline: none; }
 .qlInput:focus, .qlTexte:focus { border-color: var(--cg-accent); }
 .qlTexte { display: block; max-width: 760px; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 14px; resize: vertical; }
 .qlActions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
@@ -986,60 +987,59 @@ const CSS = `
 .qlMono { font-family: 'IBM Plex Mono', ui-monospace, monospace; font-weight: 600; }
 .qlMsg { margin: 8px 0; padding: 10px 12px; border-radius: 10px; background: rgba(var(--cg-ink-rgb),0.06); font-size: 13.5px; }
 .qlErr { background: var(--cg-danger-bg); color: var(--cg-danger-text); border: 1px solid var(--cg-danger-border); }
-.qlVerdict { display: flex; flex-wrap: wrap; gap: 16px; justify-content: space-between; border: 1px solid; border-left-width: 6px; border-radius: 16px; padding: 16px 18px; margin: 6px 0 10px; }
+.qlVerdict { display: flex; flex-wrap: wrap; gap: 12px 24px; justify-content: space-between; border: 1px solid; border-left-width: 6px; border-radius: 14px; padding: 10px 16px; margin: 4px 0 8px; }
 .qlVerdictMain { flex: 1 1 420px; min-width: 0; }
 .qlVerdictLabel { font-size: 13px; color: rgba(var(--cg-ink-rgb),0.7); display: flex; align-items: center; gap: 8px; }
-.qlVerdictDate { font-size: 26px; font-weight: 700; margin: 4px 0 6px; letter-spacing: -0.01em; }
-.qlVerdictSous { font-size: 13.5px; margin-top: 4px; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.qlVerdictDate { font-size: 24px; font-weight: 700; margin: 2px 0 4px; letter-spacing: -0.01em; }
+.qlVerdictSous { font-size: 13px; margin-top: 2px; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
 .qlLimitante { font-family: 'IBM Plex Mono', ui-monospace, monospace; font-weight: 700; padding: 2px 8px; border-radius: 999px; background: rgba(var(--cg-ink-rgb),0.12); }
-.qlVerdictCote { display: flex; flex-direction: column; align-items: flex-end; gap: 6px; flex: 0 1 300px; }
+.qlVerdictCote { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; flex: 0 1 340px; }
 .qlPuce { font-size: 12.5px; font-weight: 600; padding: 4px 10px; border-radius: 999px; }
 .qlPuceWarn { background: rgba(214,154,74,0.18); color: var(--cg-warn-ink); }
 .qlPuceErr { background: var(--cg-danger-bg); color: var(--cg-danger-text); }
 .qlMarge { font-size: 12.5px; text-align: right; color: rgba(var(--cg-ink-rgb),0.75); line-height: 1.5; }
-.qlLegende { display: flex; flex-wrap: wrap; gap: 14px; font-size: 12px; color: rgba(var(--cg-ink-rgb),0.6); margin: 4px 0 10px; align-items: center; }
+.qlLegende { display: flex; flex-wrap: wrap; gap: 14px; font-size: 12px; color: rgba(var(--cg-ink-rgb),0.6); margin: 2px 0 6px; align-items: center; }
 .qlLegende i { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 5px; vertical-align: -1px; }
 .qlLegende .qlAide { margin: 0; }
-.qlLignes { display: flex; flex-direction: column; gap: 12px; }
-.qlBloc { border: 1px solid rgba(var(--cg-ink-rgb),0.1); border-radius: 14px; overflow: hidden; background: rgba(var(--cg-ink-rgb),0.02); }
-.qlBlocTete { display: flex; align-items: center; gap: 10px; padding: 10px 14px; background: rgba(var(--cg-ink-rgb),0.06); cursor: pointer; font-weight: 700; font-size: 13.5px; }
+.qlLignes { display: flex; flex-direction: column; gap: 8px; }
+.qlBloc { border: 1px solid rgba(var(--cg-ink-rgb),0.1); border-radius: 10px; overflow: hidden; background: rgba(var(--cg-ink-rgb),0.02); }
+.qlBlocTete { display: flex; align-items: center; gap: 10px; padding: 6px 14px; background: rgba(var(--cg-ink-rgb),0.06); cursor: pointer; font-weight: 700; font-size: 13.5px; }
 .qlBlocTete input { width: 17px; height: 17px; }
 .qlBlocNom { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .qlBlocDate { font-size: 12px; font-weight: 600; border: 1px solid rgba(var(--cg-ink-rgb),0.2); border-radius: 999px; padding: 2px 9px; white-space: nowrap; color: rgba(var(--cg-ink-rgb),0.6); }
-.qlCommentaire { font-size: 12.5px; font-style: italic; color: rgba(var(--cg-ink-rgb),0.5); padding: 6px 14px 2px 46px; }
-.qlLigne { display: grid; grid-template-columns: 32px minmax(220px, 1.6fr) 90px minmax(230px, 1.3fr) minmax(170px, 0.9fr); gap: 14px; align-items: center; padding: 12px 16px; border-left: 8px solid; border-top: 1px solid rgba(var(--cg-ink-rgb),0.07); }
+.qlCommentaire { font-size: 12px; font-style: italic; color: rgba(var(--cg-ink-rgb),0.5); padding: 2px 14px 2px 42px; }
+.qlLigne { display: grid; grid-template-columns: 22px minmax(150px, 210px) minmax(180px, 1fr) 64px minmax(330px, 1.1fr) minmax(150px, 190px); gap: 12px; align-items: center; padding: 5px 14px; border-left: 6px solid; border-top: 1px solid rgba(var(--cg-ink-rgb),0.07); min-height: 36px; }
 .qlLigne.off { opacity: 0.4; background: transparent !important; }
-.qlLigne.limitante { background: color-mix(in srgb, var(--ql-lim) 22%, transparent); box-shadow: inset 0 0 0 3px var(--ql-lim); padding-top: 14px; padding-bottom: 16px; }
-.qlLigne.limitante .qlRefCode { font-size: 19px; }
-.qlLigne.limitante .qlPill { font-size: 16px; padding: 7px 14px; }
-.qlLimBandeau { display: inline-block; color: #fff; font-size: 12px; font-weight: 800; letter-spacing: 0.06em; padding: 3px 10px; border-radius: 6px; margin-bottom: 6px; }
-.qlRefCode { font-size: 16px; }
-.qlPill { display: inline-block; color: #fff; font-size: 14.5px; font-weight: 700; padding: 5px 12px; border-radius: 999px; line-height: 1.3; }
-.qlLigneMini { display: flex; align-items: center; gap: 10px; padding: 4px 16px 4px 22px; border-top: 1px solid rgba(var(--cg-ink-rgb),0.05); font-size: 12px; color: rgba(var(--cg-ink-rgb),0.45); }
+.qlLigne.limitante { background: color-mix(in srgb, var(--ql-lim) 24%, transparent); box-shadow: inset 0 0 0 2px var(--ql-lim); }
+.qlLigne.limitante .qlRefCode { font-size: 15.5px; }
+.qlCase { width: 16px; height: 16px; margin: 0; }
+.qlRefCol { display: flex; align-items: center; gap: 6px; min-width: 0; flex-wrap: wrap; }
+.qlRefCode { font-size: 14px; white-space: nowrap; }
+.qlLimBadge { color: #fff; font-size: 10.5px; font-weight: 800; letter-spacing: 0.05em; padding: 2px 7px; border-radius: 5px; white-space: nowrap; }
+.qlPill { display: inline-block; color: #fff; font-size: 13px; font-weight: 700; padding: 3px 10px; border-radius: 999px; line-height: 1.35; white-space: nowrap; }
+.qlLigneMini { display: flex; align-items: center; gap: 10px; padding: 1px 14px 1px 20px; border-top: 1px solid rgba(var(--cg-ink-rgb),0.04); font-size: 11.5px; color: rgba(var(--cg-ink-rgb),0.42); }
 .qlLigneMini.off { opacity: 0.5; }
-.qlLigneMini input { width: 14px; height: 14px; }
-.qlLigneMini .qlMono { font-size: 12px; }
+.qlLigneMini input { width: 13px; height: 13px; margin: 0; }
+.qlLigneMini .qlMono { font-size: 11.5px; }
 .qlMiniDesign { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .qlMiniTag { font-size: 11px; white-space: nowrap; }
-.qlEcartPr { display: inline-flex; flex-wrap: wrap; justify-content: flex-end; gap: 4px 8px; align-items: baseline; padding: 6px 10px; border-radius: 10px; font-size: 13px; }
+.qlEcartPr { display: inline-block; white-space: nowrap; padding: 2px 9px; border-radius: 8px; font-size: 12.5px; }
 .qlEcartPr.hausse { background: rgba(200,55,45,0.14); color: var(--cg-danger-text); border: 1px solid rgba(200,55,45,0.45); }
 .qlEcartPr.baisse { background: rgba(46,139,87,0.12); color: var(--cg-ok-text); border: 1px solid rgba(46,139,87,0.4); }
-.qlEcartPr b { font-size: 14px; }
-.qlEcartLabel { font-weight: 600; }
-.qlEcartDetail { flex-basis: 100%; text-align: right; font-size: 11.5px; opacity: 0.8; }
 .qlCase input { width: 17px; height: 17px; margin-top: 2px; }
 .qlArt { min-width: 0; }
 .qlRef { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; font-size: 14px; }
-.qlDesign { font-size: 12.5px; color: rgba(var(--cg-ink-rgb),0.6); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.qlDesign { font-size: 12.5px; color: rgba(var(--cg-ink-rgb),0.62); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 .qlBadge { font-size: 11px; font-weight: 700; padding: 1px 7px; border-radius: 999px; background: rgba(var(--cg-ink-rgb),0.1); color: rgba(var(--cg-ink-rgb),0.75); }
 .qlBadgeLim { background: var(--cg-warn); color: #1b1206; }
 .qlBadgeErr { background: var(--cg-danger-bg); color: var(--cg-danger-text); }
 .qlQte { text-align: right; font-variant-numeric: tabular-nums; }
-.qlQteVal { font-size: 16px; font-weight: 700; }
-.qlQteTot { display: block; font-size: 11px; color: rgba(var(--cg-ink-rgb),0.5); }
+.qlQteVal { font-size: 15px; font-weight: 700; }
+.qlQteTot { font-size: 11px; color: rgba(var(--cg-ink-rgb),0.5); margin-left: 2px; }
 .qlDispoTitre { font-size: 13.5px; font-weight: 700; }
-.qlDispoDetail { font-size: 12.5px; color: rgba(var(--cg-ink-rgb),0.65); margin-top: 4px; }
-.qlPrix { font-size: 12.5px; text-align: right; font-variant-numeric: tabular-nums; line-height: 1.5; color: rgba(var(--cg-ink-rgb),0.8); }
+.qlDispo { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.qlDispoDetail { font-size: 12px; color: rgba(var(--cg-ink-rgb),0.6); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.qlPrix { font-size: 12.5px; text-align: right; font-variant-numeric: tabular-nums; line-height: 1.3; color: rgba(var(--cg-ink-rgb),0.8); }
 .qlPrixDoux { color: rgba(var(--cg-ink-rgb),0.6); }
 .qlPrixAlerte { color: var(--cg-warn-ink); font-weight: 600; }
 .qlRemise { color: rgba(var(--cg-ink-rgb),0.5); font-weight: 400; }
@@ -1047,8 +1047,10 @@ const CSS = `
 .qlSpin { width: 12px; height: 12px; border-radius: 50%; border: 2px solid rgba(var(--cg-ink-rgb),0.25); border-top-color: var(--cg-ink); animation: qlTourne 0.8s linear infinite; display: inline-block; }
 @keyframes qlTourne { to { transform: rotate(360deg); } }
 @media (max-width: 900px) {
-  .qlLigne { grid-template-columns: 28px 1fr auto; }
-  .qlDispo, .qlPrix { grid-column: 2 / -1; text-align: left; }
+  .qlLigne { grid-template-columns: 22px 1fr auto; gap: 4px 10px; padding: 6px 10px; }
+  .qlDesign { grid-column: 2 / -1; grid-row: 2; }
+  .qlDispo, .qlPrix { grid-column: 2 / -1; text-align: left; flex-wrap: wrap; }
+  .qlDispoDetail { white-space: normal; }
   .qlVerdictCote { align-items: flex-start; flex-basis: 100%; }
   .qlMarge { text-align: left; }
   .qlVerdictDate { font-size: 21px; }
