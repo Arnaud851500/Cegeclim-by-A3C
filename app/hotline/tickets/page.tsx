@@ -106,7 +106,6 @@ export default function HotlineTicketsWrapper() {
 }
 
 function HotlineTickets() {
-  const router = useRouter()
   const params = useSearchParams()
   const selectedId = params.get('id')
   const { email } = useAccess()
@@ -314,8 +313,11 @@ function HotlineTickets() {
     return c
   }, [tickets, email])
 
+  // (20/11/2026) Ouverture / fermeture de la fiche par l'API History native (prise
+  // en compte par useSearchParams) : pas d'aller-retour serveur, donc pas de fiche
+  // « bloquée » quand un déploiement a eu lieu pendant que l'écran était ouvert.
   function ouvrir(id: string | null) {
-    router.replace(id ? `/hotline/tickets?id=${id}` : '/hotline/tickets', { scroll: false })
+    window.history.replaceState(null, '', id ? `/hotline/tickets?id=${id}` : '/hotline/tickets')
   }
 
   return (
