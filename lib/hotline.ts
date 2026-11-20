@@ -852,10 +852,11 @@ export async function mettreEnAttenteClient(ticketId: string, precision?: string
 export async function messagerieTelephonique(ticket: Pick<Ticket, 'id' | 'statut'> & { rappel_par?: string | null }) {
   await ajouterEtape(ticket.id, 'COMMENTAIRE', '📞 Messagerie téléphonique : message laissé au client', { details: { messagerie: true } })
   // (20/11/2026) Le rappel demandé est fait (message laissé) : la demande de rappel est levée.
-  const patch: Partial<Ticket> = {}
+  // Le compteur « le client rappelle » repart à zéro (le client vient d'être rappelé).
+  const patch: Partial<Ticket> = { nb_rappels_client: 0 }
   if (ticket.statut !== 'RESOLU' && ticket.statut !== 'ESCALADE') patch.statut = 'ATTENTE_CLIENT'
   if (ticket.rappel_par) patch.rappel_par = null
-  if (Object.keys(patch).length) await majTicket(ticket.id, patch)
+  if (ticket.statut !== 'RESOLU') await majTicket(ticket.id, patch)
 }
 
 /** Présence : le ticket est ouvert dans la console de `email` (null = libéré). Sans toucher updated_at. */
