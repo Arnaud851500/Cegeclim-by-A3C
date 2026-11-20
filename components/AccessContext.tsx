@@ -64,6 +64,9 @@ export type AccessRights = {
   /** (2026-11-19) Rubrique « Réunion Piliers / Feuille de route » : membre actif de
    * piliers_membres (rpc piliers_suis_membre), contrôlé aussi par RLS. */
   can_piliers: boolean
+  /** (2026-11-20) Écran « Engagement Hitachi » : profil Direction, profil « Piliers et visu large »,
+   * membres des Piliers et Arnaud (rpc hitachi_engagement_autorise, même règle côté base). */
+  can_engagement_hitachi: boolean
 }
 
 type AccessContextType = {
@@ -210,6 +213,7 @@ export const defaultRights: AccessRights = {
   can_allocation_ro: false,
   can_allocation_airh2o: false,
   can_piliers: false,
+  can_engagement_hitachi: false,
 }
 
 const AccessContext = createContext<AccessContextType>({
@@ -259,7 +263,7 @@ const PAGE_ACCESS_CHECKS: Array<[string, keyof AccessRights]> = [
   ['/stock/controle-mystock', 'can_appro'],
   ['/stock/plan-expedition-fms/agences', 'can_stocks'],
   ['/stock/plan-expedition-fms', 'can_superuser'],
-  ['/stock/engagement-hitachi', 'can_superuser'],
+  ['/stock/engagement-hitachi', 'can_engagement_hitachi'],
   ['/stock/reconstruction', 'can_appro'],
   ['/stock/groupes', 'can_appro'],
   ['/stocks-disponibilites2', 'can_appro'],
@@ -481,16 +485,20 @@ export function AccessProvider({ children }: { children: React.ReactNode }) {
     const result = await fetchAccess()
     // Réunion Piliers (19/11/2026) : droit nominatif tenu dans piliers_membres.
     let canPiliers = false
+    let canHitachi = false
     if (result.email) {
       const { data: membre, error: piliersError } = await supabase.rpc('piliers_suis_membre')
       if (piliersError) console.error('ACCESS - piliers_suis_membre', piliersError)
       canPiliers = membre === true
+      const { data: hitachi, error: hitachiError } = await supabase.rpc('hitachi_engagement_autorise')
+      if (hitachiError) console.error('ACCESS - hitachi_engagement_autorise', hitachiError)
+      canHitachi = hitachi === true
     }
     setEmail(result.email)
     // Allocation AirH2O : vue complète + saisie (liste nominative) ou vue agence en lecture
     // (droit can_dashboard ou droit de profil can_allocation_airh2o) — 26/10/2026.
     // Hotline (02/11/2026) : l'expert a aussi la console et les tickets.
-    setRights({ ...result.rights, can_piliers: canPiliers, can_hotline: result.rights.can_hotline || result.rights.can_hotline_expert, can_allocation_ro: peutVoirAllocationRo(result.email) || result.rights.can_allocation_airh2o || result.rights.can_dashboard })
+    setRights({ ...result.rights, can_piliers: canPiliers, can_engagement_hitachi: canHitachi, can_hotline: result.rights.can_hotline || result.rights.can_hotline_expert, can_allocation_ro: peutVoirAllocationRo(result.email) || result.rights.can_allocation_airh2o || result.rights.can_dashboard })
     setLoading(false)
   }, [])
 

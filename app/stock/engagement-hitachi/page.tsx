@@ -37,7 +37,10 @@ import React, { Suspense, useCallback, useEffect, useMemo, useState } from 'reac
 import { supabase } from '@/lib/supabaseClient'
 import { useAccess } from '@/components/AccessContext'
 
-const COMPTES_AUTORISES = ['a.valanchauskas@cegeclim-energies.com', 'valancha@gmail.com']
+// 20/11/2026 : écran ouvert en lecture au profil Direction, au profil « Piliers et visu large » et aux
+// membres des Piliers (droit calculé can_engagement_hitachi = rpc hitachi_engagement_autorise).
+// Les règles de rattachement restent modifiables par ces seuls comptes (hitachi_engagement_editeur).
+const COMPTES_EDITEURS = ['a.valanchauskas@cegeclim-energies.com', 'valancha@gmail.com']
 
 // ─────────────────────────────────────────────────────────────────────────
 // Types
@@ -160,8 +163,9 @@ function Badge({ v }: { v: Verdict | null }) {
 // ─────────────────────────────────────────────────────────────────────────
 
 function EngagementHitachi() {
-  const { loading: accessLoading, email } = useAccess()
-  const autorise = COMPTES_AUTORISES.includes((email || '').trim().toLowerCase())
+  const { loading: accessLoading, email, rights } = useAccess()
+  const editeurRegles = COMPTES_EDITEURS.includes((email || '').trim().toLowerCase())
+  const autorise = editeurRegles || !!rights.can_engagement_hitachi
 
   const [annee, setAnnee] = useState<number>(new Date().getFullYear())
   const [data, setData] = useState<Donnees | null>(null)
@@ -255,7 +259,7 @@ function EngagementHitachi() {
       <main className="flex min-h-screen items-center justify-center bg-[#F4F3F0] p-6 text-center">
         <div className="rounded-xl border border-[#E5E1D8] bg-white px-6 py-5">
           <div className="text-[17px] font-bold">Accès réservé</div>
-          <p className="mt-1 text-[13px] text-[#5E5A44]">Le suivi de l’engagement Hitachi n’est pas encore ouvert.</p>
+          <p className="mt-1 text-[13px] text-[#5E5A44]">Le suivi de l’engagement Hitachi est réservé au profil Direction et aux Piliers.</p>
         </div>
       </main>
     )
@@ -604,6 +608,7 @@ function EngagementHitachi() {
           gammes={gammes}
           regles={data.regles}
           catalogue={data.catalogue}
+          editable={editeurRegles}
           onClose={() => setEditeur(null)}
           onChange={() => charger(annee)}
         />
@@ -640,8 +645,8 @@ type Brouillon = {
   exclure_motif: string; compte_qte: boolean; priorite: number; commentaire: string; gamme_code: string
 }
 
-function EditeurGamme({ annee, gamme, gammes, regles, catalogue, onClose, onChange }: {
-  annee: number; gamme: Gamme; gammes: Gamme[]; regles: Regle[]; catalogue: Catalogue[]; onClose: () => void; onChange: () => Promise<void> | void
+function EditeurGamme({ annee, gamme, gammes, regles, catalogue, editable, onClose, onChange }: {
+  annee: number; gamme: Gamme; gammes: Gamme[]; regles: Regle[]; catalogue: Catalogue[]; editable: boolean; onClose: () => void; onChange: () => Promise<void> | void
 }) {
   const [brouillon, setBrouillon] = useState<Brouillon | null>(null)
   const [occupe, setOccupe] = useState(false)
@@ -750,7 +755,11 @@ function EditeurGamme({ annee, gamme, gammes, regles, catalogue, onClose, onChan
         <section className="mt-3 rounded-xl border border-[#E5E1D8] bg-white">
           <div className="flex items-center justify-between border-b border-[#EFECE5] px-3 py-2">
             <p className="text-[12px] font-bold">Règles de rattachement</p>
-            <button type="button" onClick={() => setBrouillon(nouveau())} className="rounded-md bg-[#0B1220] px-2.5 py-1 text-[11.5px] font-semibold text-white">+ Ajouter</button>
+            {editable ? (
+              <button type="button" onClick={() => setBrouillon(nouveau())} className="rounded-md bg-[#0B1220] px-2.5 py-1 text-[11.5px] font-semibold text-white">+ Ajouter</button>
+            ) : (
+              <span className="text-[11px] text-[#8A8474]">Consultation seule</span>
+            )}
           </div>
           <table className="w-full text-[12px]">
             <thead>
@@ -771,8 +780,12 @@ function EditeurGamme({ annee, gamme, gammes, regles, catalogue, onClose, onChan
                   <td className="px-2 py-1.5 text-right tabular-nums">{r.priorite}</td>
                   <td className="px-2 py-1.5 text-[#5E5A44]">{r.commentaire}</td>
                   <td className="whitespace-nowrap px-2 py-1.5 text-right">
-                    <button type="button" onClick={() => setBrouillon(depuis(r))} className="mr-2 text-[#245A9E] hover:underline">Modifier</button>
-                    <button type="button" onClick={() => supprimer(r.id)} disabled={occupe} className="text-rose-700 hover:underline">Supprimer</button>
+                    {editable && (
+                      <>
+                        <button type="button" onClick={() => setBrouillon(depuis(r))} className="mr-2 text-[#245A9E] hover:underline">Modifier</button>
+                        <button type="button" onClick={() => supprimer(r.id)} disabled={occupe} className="text-rose-700 hover:underline">Supprimer</button>
+                      </>
+                    )}
                   </td>
                 </tr>
               ))}
@@ -842,7 +855,7 @@ function EditeurGamme({ annee, gamme, gammes, regles, catalogue, onClose, onChan
             <Classements
               lignes={autres}
               regles={regles}
-              action={(c) => (
+              action={editable ? (c) => (
                 <button
                   type="button"
                   className="text-[#245A9E] hover:underline"
@@ -850,7 +863,7 @@ function EditeurGamme({ annee, gamme, gammes, regles, catalogue, onClose, onChan
                 >
                   Rattacher ici
                 </button>
-              )}
+              ) : undefined}
             />
           </section>
         )}

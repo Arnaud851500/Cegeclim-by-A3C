@@ -31,6 +31,9 @@
 // Portefeuille commandes fournisseurs (droit can_superuser ; page et RPC réservées à Arnaud).
 // ÉVOLUTION (2026-11-19) : « Tarifs fournisseurs » (/stock/tarifs-fournisseurs, can_appro) — tarif d'achat SAGE
 // et comparaison des propositions de tarif déposées. Migration 20261119e_tarifs_fournisseurs.sql.
+// ÉVOLUTION (2026-11-20) : « Engagement Hitachi » ouvert au profil Direction, au profil « Piliers et
+// visu large » et aux membres des Piliers (droit calculé can_engagement_hitachi, rpc
+// hitachi_engagement_autorise) ; règles de rattachement modifiables par Arnaud seul.
 // ÉVOLUTION (2026-11-19) : « Engagement Hitachi » (/stock/engagement-hitachi), droit can_superuser,
 // page et RPC réservées à Arnaud (hitachi_engagement_autorise). Migration 20261119_engagement_hitachi.sql.
 // ÉVOLUTION (2026-11-05) : « Plan d’expédition – vue agence » (/stock/plan-expedition-fms/agences), même droit.
@@ -252,7 +255,7 @@ export const NAV_BLOCS: NavBloc[] = [
       { label: 'Tarifs fournisseurs', path: '/stock/tarifs-fournisseurs', activeLabel: 'Tarifs fournisseurs', accessKey: 'can_appro', description: 'Prix d’achat actuels SAGE (paliers, coef., PV) et comparaison immédiate des propositions de tarif déposées (Excel, CSV, PDF) : évolution % et impact € sur la masse d’achat annuelle.' },
       { label: 'Contrôle stock FMS – MyStock', path: '/stock/controle-mystock', activeLabel: 'Contrôle stock FMS – MyStock', accessKey: 'can_appro', description: 'Image de stock MyStock du prestataire FMS comparée au stock SAGE du dépôt FMS de fin de journée J : écarts, BL du jour, valeur, suivi des écarts.' },
       { label: 'Plan d’expédition FMS', path: '/stock/plan-expedition-fms', activeLabel: 'Plan d’expédition FMS', accessKey: 'can_superuser', description: 'Arrivages containers : ce qui peut partir de FMS dès maintenant (groupes extérieurs, cuivre, volumineux), ce qui attend les réceptions, préconisations par agence et planning de charge FMS (accès réservé).' },
-      { label: 'Engagement Hitachi', path: '/stock/engagement-hitachi', activeLabel: 'Engagement Hitachi', accessKey: 'can_superuser', description: 'Objectifs annuels Hitachi (annexe 6) : CA et quantités par gamme, situation à date en achats (reçu + ferme) et en ventes (BL + CDC à livrer), rattachement des familles (accès réservé).' },
+      { label: 'Engagement Hitachi', path: '/stock/engagement-hitachi', activeLabel: 'Engagement Hitachi', accessKey: 'can_engagement_hitachi', description: 'Objectifs annuels Hitachi (annexe 6) : CA et quantités par gamme, situation à date en achats (reçu + ferme) et en ventes (BL + CDC à livrer), vue annexe 6 — Direction et Piliers.' },
       { label: 'Plan d’expédition – vue agence', path: '/stock/plan-expedition-fms/agences', activeLabel: 'Plan d’expédition – vue agence', accessKey: 'can_stocks', description: 'Par agence (commercial) : commandes rangées par dépôt de départ, frise des livraisons avec GE / UI / palettes, manques et complétude, glisser-déposer date ou dépôt, scission des envois — limité aux agences de l’utilisateur.' },
       { label: 'Projection stock', path: '/stocks-disponibilites2', accessKey: 'can_appro', description: 'Stock projeté par référence, hypothèses mensuelles et substitutions.' },
       { label: 'Reconstitution Stock', path: '/stock/reconstruction', accessKey: 'can_appro', description: 'Reconstruction du stock projeté et vérification des promesses.' },
