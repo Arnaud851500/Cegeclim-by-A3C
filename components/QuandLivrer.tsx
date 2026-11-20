@@ -127,7 +127,23 @@ export type QuandLivrerProps = {
 // Utilitaires
 // ─────────────────────────────────────────────────────────────────────────
 
-const SEUIL_ECART_PCT = 5
+// Écart de prix de revient signalé (Arnaud, 20/11/2026) : plus de 10 % ET plus
+// de 10 € sur la ligne (écart unitaire × quantité), dans un sens ou dans l'autre.
+const SEUIL_ECART_PR_PCT = 10
+const SEUIL_ECART_PR_EUR = 10
+
+function alertePr(l: { prDevis: number | null; prActuel: number | null; qte: number }) {
+  const pct = ecartPctBrut(l.prDevis, l.prActuel)
+  if (pct === null || l.prDevis === null || l.prActuel === null) return null
+  const valeur = (l.prActuel - l.prDevis) * (l.qte || 0)
+  if (Math.abs(pct) <= SEUIL_ECART_PR_PCT || Math.abs(valeur) <= SEUIL_ECART_PR_EUR) return null
+  return { pct, valeur }
+}
+
+function ecartPctBrut(avant: number | null, apres: number | null) {
+  if (avant === null || apres === null || avant <= 0 || apres <= 0) return null
+  return ((apres - avant) / avant) * 100
+}
 
 function num(v: unknown): number | null {
   if (v === null || v === undefined || v === '') return null
@@ -161,11 +177,6 @@ function fmtQte(n: number | null | undefined) {
 function fmtEur(n: number | null | undefined, dec = 2) {
   if (n === null || n === undefined) return '—'
   return n.toLocaleString('fr-FR', { minimumFractionDigits: dec, maximumFractionDigits: dec }) + ' €'
-}
-
-function ecartPct(avant: number | null, apres: number | null) {
-  if (avant === null || apres === null || avant <= 0 || apres <= 0) return null
-  return ((apres - avant) / avant) * 100
 }
 
 function fmtPct(p: number) {
@@ -271,10 +282,12 @@ function lireDispo(d: Dispo | undefined, aujourdhui: string): Lecture {
   }
 }
 
+// Couleurs pleines (lisibles en clair comme en sombre) : trait = bordure et
+// pastille, fond = teinte de la ligne, encre = texte sur fond de page.
 const COULEURS: Record<Couleur, { trait: string; fond: string; encre: string }> = {
-  vert: { trait: 'var(--cg-ok)', fond: 'var(--cg-ok-bg)', encre: 'var(--cg-ok-text)' },
-  orange: { trait: 'var(--cg-warn)', fond: 'rgba(214,154,74,0.14)', encre: 'var(--cg-warn-ink)' },
-  rouge: { trait: 'var(--cg-danger)', fond: 'var(--cg-danger-bg)', encre: 'var(--cg-danger-text)' },
+  vert: { trait: '#2E8B57', fond: 'rgba(46,139,87,0.10)', encre: 'var(--cg-ok-text)' },
+  orange: { trait: '#D9861C', fond: 'rgba(217,134,28,0.13)', encre: 'var(--cg-warn-ink)' },
+  rouge: { trait: '#C8372D', fond: 'rgba(200,55,45,0.13)', encre: 'var(--cg-danger-text)' },
   neutre: { trait: 'rgba(var(--cg-ink-rgb),0.18)', fond: 'transparent', encre: 'rgba(var(--cg-ink-rgb),0.6)' },
 }
 
@@ -531,14 +544,8 @@ export default function QuandLivrer({ compact = false, initialDevis, initialList
     const articles = selection.filter((l) => l.ref && l.type !== 'COMMENTAIRE')
     const sommeil = articles.filter((l) => l.sommeil)
     const inconnues = articles.filter((l) => l.type === 'INCONNU')
-    const ecartTarif = articles.filter((l) => {
-      const p = ecartPct(l.puDevis, l.puActuel)
-      return p !== null && Math.abs(p) >= SEUIL_ECART_PCT
-    })
-    const ecartPr = articles.filter((l) => {
-      const p = ecartPct(l.prDevis, l.prActuel)
-      return p !== null && p >= SEUIL_ECART_PCT
-    })
+    const ecartPr = articles.filter((l) => l.type === 'ARTICLE' && alertePr(l) !== null)
+    const ecartPrValeur = ecartPr.reduce((t, l) => t + (alertePr(l)?.valeur ?? 0), 0)
     // Marge sur les lignes cochées qui portent un montant.
     let montant = 0
     let coutDevis = 0
@@ -556,7 +563,7 @@ export default function QuandLivrer({ compact = false, initialDevis, initialList
       coutActuel += (prA ?? 0) * l.qte
     }
     return {
-      sommeil, inconnues, ecartTarif, ecartPr,
+      sommeil, inconnues, ecartPr, ecartPrValeur,
       marge: avecMontant ? { montant, margeDevis: prDevisComplet ? montant - coutDevis : null, margeActuelle: montant - coutActuel } : null,
     }
   }, [selection])
@@ -754,8 +761,11 @@ export default function QuandLivrer({ compact = false, initialDevis, initialList
               )}
               {controles.inconnues.length > 0 && <div className="qlPuce qlPuceErr">{controles.inconnues.length} réf. inconnue{controles.inconnues.length > 1 ? 's' : ''}</div>}
               {controles.sommeil.length > 0 && <div className="qlPuce qlPuceErr">{controles.sommeil.length} article{controles.sommeil.length > 1 ? 's' : ''} en sommeil</div>}
-              {controles.ecartTarif.length > 0 && <div className="qlPuce qlPuceWarn">{controles.ecartTarif.length} écart{controles.ecartTarif.length > 1 ? 's' : ''} de tarif ≥ {SEUIL_ECART_PCT} %</div>}
-              {controles.ecartPr.length > 0 && <div className="qlPuce qlPuceWarn">{controles.ecartPr.length} hausse{controles.ecartPr.length > 1 ? 's' : ''} de PR ≥ {SEUIL_ECART_PCT} %</div>}
+              {controles.ecartPr.length > 0 && (
+                <div className="qlPuce qlPuceWarn" title={`Écart de prix de revient > ${SEUIL_ECART_PR_PCT} % et > ${SEUIL_ECART_PR_EUR} € sur la ligne`}>
+                  {controles.ecartPr.length} écart{controles.ecartPr.length > 1 ? 's' : ''} de PR &gt; {SEUIL_ECART_PR_PCT} % · {controles.ecartPrValeur > 0 ? '+' : ''}{fmtEur(controles.ecartPrValeur, 0)}
+                </div>
+              )}
               {devis && controles.marge && (
                 <div className="qlMarge">
                   <div>Montant coché : <b>{fmtEur(controles.marge.montant, 0)}</b></div>
@@ -855,7 +865,7 @@ export default function QuandLivrer({ compact = false, initialDevis, initialList
 // ─────────────────────────────────────────────────────────────────────────
 
 function LigneVue({
-  l, coche, onBascule, lecture, dispo, qteTotaleRef, limitante, avecPrixDevis,
+  l, coche, onBascule, lecture, dispo, qteTotaleRef, limitante,
 }: {
   l: Ligne
   coche: boolean
@@ -867,24 +877,39 @@ function LigneVue({
   avecPrixDevis: boolean
 }) {
   const estArticle = l.type === 'ARTICLE'
-  const couleur: Couleur = !coche ? 'neutre' : l.type === 'INCONNU' ? 'rouge' : estArticle ? lecture?.couleur ?? 'neutre' : 'neutre'
+
+  // Lignes non stockées (n° de série, prestations, textes) : une ligne discrète.
+  if (l.type === 'NON_STOCKE') {
+    return (
+      <div className={`qlLigneMini ${coche ? '' : 'off'}`}>
+        <input type="checkbox" checked={coche} onChange={onBascule} />
+        <span className="qlMono">{l.ref}</span>
+        <span className="qlMiniDesign">{l.designation}</span>
+        <span className="qlMiniTag">non stocké · hors calcul</span>
+      </div>
+    )
+  }
+
+  const couleur: Couleur = !coche ? 'neutre' : l.type === 'INCONNU' ? 'rouge' : lecture?.couleur ?? 'neutre'
   const c = COULEURS[couleur]
-  const eTarif = ecartPct(l.puDevis, l.puActuel)
-  const ePr = ecartPct(l.prDevis, l.prActuel)
+  const alerte = estArticle ? alertePr(l) : null
+  const lim = limitante && coche
 
   return (
-    <div className={`qlLigne ${coche ? '' : 'off'} ${limitante && coche ? 'limitante' : ''}`} style={{ borderLeftColor: c.trait }}>
+    <div
+      className={`qlLigne ${coche ? '' : 'off'} ${lim ? 'limitante' : ''}`}
+      style={{ borderLeftColor: c.trait, background: lim ? undefined : c.fond, ...(lim ? { ['--ql-lim' as string]: c.trait } : {}) }}
+    >
       <label className="qlCase">
         <input type="checkbox" checked={coche} onChange={onBascule} />
       </label>
 
       <div className="qlArt">
+        {lim && <div className="qlLimBandeau" style={{ background: c.trait }}>⚑ RÉFÉRENCE LIMITANTE — fixe la date du devis</div>}
         <div className="qlRef">
-          <span className="qlMono">{l.ref}</span>
-          {limitante && coche && <span className="qlBadge qlBadgeLim">⚑ limitante</span>}
+          <span className="qlMono qlRefCode">{l.ref}</span>
           {l.sommeil && <span className="qlBadge qlBadgeErr">en sommeil</span>}
           {l.type === 'INCONNU' && <span className="qlBadge qlBadgeErr">inconnue dans SAGE</span>}
-          {l.type === 'NON_STOCKE' && <span className="qlBadge">non stocké</span>}
         </div>
         <div className="qlDesign">{l.designation || '—'}</div>
       </div>
@@ -896,34 +921,27 @@ function LigneVue({
         )}
       </div>
 
-      <div className="qlDispo" style={{ color: c.encre }}>
+      <div className="qlDispo">
         {estArticle && coche ? (
           <>
-            <div className="qlDispoTitre">{lecture?.titre ?? '…'}</div>
+            <span className="qlPill" style={{ background: c.trait }}>{lecture?.titre ?? '…'}</span>
             {lecture?.detail && <div className="qlDispoDetail">{lecture.detail}</div>}
             {dispo && <div className="qlDispoDetail">stock dispo {fmtQte(dispo.stock_dispo)}</div>}
           </>
         ) : l.type === 'INCONNU' ? (
-          <div className="qlDispoTitre">Référence à corriger</div>
+          <span className="qlPill" style={{ background: COULEURS.rouge.trait }}>Référence à corriger</span>
         ) : (
-          <div className="qlDispoDetail">{coche ? 'hors calcul' : 'retirée'}</div>
+          <div className="qlDispoDetail">retirée</div>
         )}
       </div>
 
       <div className="qlPrix">
-        {avecPrixDevis && l.puDevis !== null && l.puDevis !== 0 && (
-          <div className={eTarif !== null && Math.abs(eTarif) >= SEUIL_ECART_PCT ? 'qlPrixAlerte' : ''}>
-            Tarif {fmtEur(l.puDevis)}
-            {l.puActuel !== null && eTarif !== null && Math.abs(eTarif) >= 0.05 && <> → {fmtEur(l.puActuel)} <b>{fmtPct(eTarif)}</b></>}
-            {l.remise ? <span className="qlRemise"> · rem. {fmtQte(l.remise)} %</span> : null}
-          </div>
-        )}
-        {!avecPrixDevis && l.puActuel !== null && <div>Tarif {fmtEur(l.puActuel)}</div>}
-        {estArticle && (l.prDevis !== null || l.prActuel !== null) && (
-          <div className={ePr !== null && ePr >= SEUIL_ECART_PCT ? 'qlPrixAlerte' : 'qlPrixDoux'}>
-            {avecPrixDevis && l.prDevis !== null ? <>PR {fmtEur(l.prDevis)}</> : 'PR'}
-            {l.prActuel !== null && (avecPrixDevis && l.prDevis !== null ? (ePr !== null && Math.abs(ePr) >= 0.05 ? <> → {fmtEur(l.prActuel)} <b>{fmtPct(ePr)}</b></> : null) : <> {fmtEur(l.prActuel)}</>)}
-            {l.prActuel !== null && <span className="qlRemise"> ({l.prActuelSource === 'PUMP' ? 'PUMP' : 'dern. achat'})</span>}
+        {alerte && (
+          <div className={`qlEcartPr ${alerte.pct > 0 ? 'hausse' : 'baisse'}`} title={`PR du devis ${fmtEur(l.prDevis)} → ${l.prActuelSource === 'PUMP' ? 'PUMP' : 'dernier achat'} ${fmtEur(l.prActuel)}`}>
+            <span className="qlEcartLabel">PR {alerte.pct > 0 ? 'en hausse' : 'en baisse'}</span>
+            <b>{fmtPct(alerte.pct)}</b>
+            <b>{alerte.valeur > 0 ? '+' : ''}{fmtEur(alerte.valeur, 0)}</b>
+            <span className="qlEcartDetail">{fmtEur(l.prDevis)} → {fmtEur(l.prActuel)} / u.</span>
           </div>
         )}
       </div>
@@ -989,9 +1007,26 @@ const CSS = `
 .qlBlocNom { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .qlBlocDate { font-size: 12px; font-weight: 600; border: 1px solid rgba(var(--cg-ink-rgb),0.2); border-radius: 999px; padding: 2px 9px; white-space: nowrap; color: rgba(var(--cg-ink-rgb),0.6); }
 .qlCommentaire { font-size: 12.5px; font-style: italic; color: rgba(var(--cg-ink-rgb),0.5); padding: 6px 14px 2px 46px; }
-.qlLigne { display: grid; grid-template-columns: 32px minmax(200px, 1.5fr) 90px minmax(200px, 1.3fr) minmax(190px, 1fr); gap: 12px; align-items: start; padding: 10px 14px; border-left: 5px solid; border-top: 1px solid rgba(var(--cg-ink-rgb),0.06); }
-.qlLigne.off { opacity: 0.45; }
-.qlLigne.limitante { background: rgba(214,154,74,0.10); box-shadow: inset 0 0 0 1px rgba(214,154,74,0.45); }
+.qlLigne { display: grid; grid-template-columns: 32px minmax(220px, 1.6fr) 90px minmax(230px, 1.3fr) minmax(170px, 0.9fr); gap: 14px; align-items: center; padding: 12px 16px; border-left: 8px solid; border-top: 1px solid rgba(var(--cg-ink-rgb),0.07); }
+.qlLigne.off { opacity: 0.4; background: transparent !important; }
+.qlLigne.limitante { background: color-mix(in srgb, var(--ql-lim) 22%, transparent); box-shadow: inset 0 0 0 3px var(--ql-lim); padding-top: 14px; padding-bottom: 16px; }
+.qlLigne.limitante .qlRefCode { font-size: 19px; }
+.qlLigne.limitante .qlPill { font-size: 16px; padding: 7px 14px; }
+.qlLimBandeau { display: inline-block; color: #fff; font-size: 12px; font-weight: 800; letter-spacing: 0.06em; padding: 3px 10px; border-radius: 6px; margin-bottom: 6px; }
+.qlRefCode { font-size: 16px; }
+.qlPill { display: inline-block; color: #fff; font-size: 14.5px; font-weight: 700; padding: 5px 12px; border-radius: 999px; line-height: 1.3; }
+.qlLigneMini { display: flex; align-items: center; gap: 10px; padding: 4px 16px 4px 22px; border-top: 1px solid rgba(var(--cg-ink-rgb),0.05); font-size: 12px; color: rgba(var(--cg-ink-rgb),0.45); }
+.qlLigneMini.off { opacity: 0.5; }
+.qlLigneMini input { width: 14px; height: 14px; }
+.qlLigneMini .qlMono { font-size: 12px; }
+.qlMiniDesign { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.qlMiniTag { font-size: 11px; white-space: nowrap; }
+.qlEcartPr { display: inline-flex; flex-wrap: wrap; justify-content: flex-end; gap: 4px 8px; align-items: baseline; padding: 6px 10px; border-radius: 10px; font-size: 13px; }
+.qlEcartPr.hausse { background: rgba(200,55,45,0.14); color: var(--cg-danger-text); border: 1px solid rgba(200,55,45,0.45); }
+.qlEcartPr.baisse { background: rgba(46,139,87,0.12); color: var(--cg-ok-text); border: 1px solid rgba(46,139,87,0.4); }
+.qlEcartPr b { font-size: 14px; }
+.qlEcartLabel { font-weight: 600; }
+.qlEcartDetail { flex-basis: 100%; text-align: right; font-size: 11.5px; opacity: 0.8; }
 .qlCase input { width: 17px; height: 17px; margin-top: 2px; }
 .qlArt { min-width: 0; }
 .qlRef { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; font-size: 14px; }
@@ -1003,7 +1038,7 @@ const CSS = `
 .qlQteVal { font-size: 16px; font-weight: 700; }
 .qlQteTot { display: block; font-size: 11px; color: rgba(var(--cg-ink-rgb),0.5); }
 .qlDispoTitre { font-size: 13.5px; font-weight: 700; }
-.qlDispoDetail { font-size: 12px; opacity: 0.85; margin-top: 2px; }
+.qlDispoDetail { font-size: 12.5px; color: rgba(var(--cg-ink-rgb),0.65); margin-top: 4px; }
 .qlPrix { font-size: 12.5px; text-align: right; font-variant-numeric: tabular-nums; line-height: 1.5; color: rgba(var(--cg-ink-rgb),0.8); }
 .qlPrixDoux { color: rgba(var(--cg-ink-rgb),0.6); }
 .qlPrixAlerte { color: var(--cg-warn-ink); font-weight: 600; }
