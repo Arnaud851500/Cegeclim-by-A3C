@@ -8,7 +8,8 @@
  * Éditions :
  *   - pdfListeComptage : liste à compter d'un dépôt (1er, 2e ou 3e comptage) —
  *     réf. CEGECLIM, réf. fournisseur, désignation, qté en stock, case de saisie,
- *     PUMP, case commentaire ; initiales de l'inventoriste et signature ;
+ *     PUMP, case commentaire ; cadre « équipe (initiales) / date / feuille x/y » en tête
+ *     de CHAQUE page (feuilles réparties entre plusieurs équipes), pagination en pied ;
  *   - pdfEcarts : écarts d'un ou plusieurs dépôts avec les comptages, la valeur
  *     au PUMP et la décision des achats ;
  *   - excelEcarts : écarts validés prêts à saisir dans SAGE (+ détail + synthèse).
@@ -109,6 +110,8 @@ export type LignePilotage = {
   nb_comptages: number
   q1: number | null; q2: number | null; q3: number | null
   com1: string | null; com2: string | null; com3: string | null
+  /** Équipe (initiales) ayant compté la ligne à chaque comptage (20/11/2026). */
+  ini1?: string | null; ini2?: string | null; ini3?: string | null
   saisi1_par?: string | null; saisi1_le?: string | null
   saisi2_par?: string | null; saisi2_le?: string | null
   saisi3_par?: string | null; saisi3_le?: string | null
@@ -141,6 +144,10 @@ export type LigneSaisie = {
   depot_stock_libelle?: string | null
   qte: number | null
   commentaire: string | null
+  /** Équipe (initiales) ayant saisi la ligne au comptage en cours. */
+  initiales?: string | null
+  /** Équipes des comptages précédents (sans leurs quantités) : ne peuvent pas recompter la ligne. */
+  equipes_prec?: string | null
 }
 
 export type ListeSaisie = InvDepot & { numero: number; lignes: LigneSaisie[] }
@@ -203,6 +210,21 @@ export function fmtDateHeure(v: string | null | undefined): string {
   return Number.isNaN(d.getTime()) ? '—' : d.toLocaleString('fr-FR', { dateStyle: 'short', timeStyle: 'short' })
 }
 
+/** Équipe de comptage : membres séparés par « / » (ex. « pjc + av » → « PJC/AV »), même règle que inv_normaliser_initiales. */
+export function normaliserEquipe(v: string): string {
+  return v.toUpperCase().split(/[^A-ZÀ-Ÿ]+/).filter(Boolean).join('/')
+}
+
+export function membresEquipe(v: string | null | undefined): string[] {
+  return v ? normaliserEquipe(v).split('/').filter(Boolean) : []
+}
+
+/** Inventoristes communs à deux équipes (règle : une ligne ne se recompte pas par les mêmes personnes). */
+export function membresCommuns(a: string | null | undefined, b: string | null | undefined): string[] {
+  const mb = new Set(membresEquipe(b))
+  return membresEquipe(a).filter((m) => mb.has(m))
+}
+
 /** Lit une saisie « 12 », « 12,5 », « 1 200 ». Vide = null ; invalide = NaN. */
 export function lireQuantite(v: string): number | null {
   const t = v.replace(/\s/g, '').replace(',', '.')
@@ -229,6 +251,10 @@ export function qteComptage(l: LignePilotage, n: number): number | null {
 
 export function comComptage(l: LignePilotage, n: number): string | null {
   return n === 1 ? l.com1 : n === 2 ? l.com2 : l.com3
+}
+
+export function iniComptage(l: LignePilotage, n: number): string | null {
+  return (n === 1 ? l.ini1 : n === 2 ? l.ini2 : l.ini3) ?? null
 }
 
 export function commentairesLigne(l: LignePilotage): string {
@@ -297,65 +323,79 @@ function telecharger(doc: jsPDF, nom: string) {
 // PDF — liste de comptage
 // ─────────────────────────────────────────────────────────────────────────
 
-export function pdfListeComptage(liste: ListeSaisie, opts: { avecSaisies?: boolean } = {}) {
+export function pdfListeComptage(
+  liste: ListeSaisie,
+  opts: { avecSaisies?: boolean; lignes?: LigneSaisie[]; selection?: string } = {},
+) {
   const numero = liste.numero
-  const comptage = liste.comptages.find((c) => c.numero === numero)
   const doc = new jsPDF({ orientation: 'landscape', unit: 'mm', format: 'a4' })
   const w = doc.internal.pageSize.getWidth()
   const titre = `${liste.campagne?.libelle || 'Inventaire'} - ${liste.depot_libelle}`
   const sousTitre = `${ORDINAL[numero]} comptage - inventaire du ${fmtDate(liste.campagne?.date_inventaire)} - stock SAGE du ${fmtDateHeure(liste.stock_sage_le)}`
+    + (opts.selection ? ` - sélection : ${opts.selection}` : '')
+  const avec = !!opts.avecSaisies
 
+  // Cadre équipe sur chaque page : chaque feuille peut être confiée à une équipe différente.
   const entete = () => {
     enteteCegeclim(doc, titre, sousTitre)
-    // Cadre inventoriste
     doc.setDrawColor(60); doc.setLineWidth(0.3)
-    doc.rect(w - 86, 5, 78, 13)
-    doc.setFontSize(8)
-    doc.text('Inventoriste (initiales) :', w - 84, 10)
-    doc.setFont('helvetica', 'bold'); doc.setFontSize(11)
-    doc.text(p(comptage?.initiales || ''), w - 48, 10.5)
+    doc.rect(w - 112, 4, 104, 16)
     doc.setFont('helvetica', 'normal'); doc.setFontSize(8)
-    doc.text('Date / heure :', w - 84, 16)
+    doc.text(p('Équipe (initiales, ex. PJC/AV) :'), w - 110, 9)
+    doc.line(w - 62, 9.6, w - 34, 9.6)
+    doc.text('Date / heure :', w - 110, 16)
+    doc.line(w - 88, 16.6, w - 34, 16.6)
   }
 
-  const lignes = [...liste.lignes]
+  const lignes = opts.lignes ? [...opts.lignes] : [...liste.lignes]
+  const nbCol = avec ? 8 : 7
   const body: Array<Array<string | { content: string; colSpan?: number; styles?: Record<string, unknown> }>> = []
   let macro = ''
   for (const l of lignes) {
     const m = sectionLigne(l)
     if (m !== macro) {
       macro = m
-      body.push([{ content: p(l.transit ? `${m} : ${AIDE_TRANSIT}` : m), colSpan: 7,
+      body.push([{ content: p(l.transit ? `${m} : ${AIDE_TRANSIT}` : m), colSpan: nbCol,
         styles: l.transit ? { fillColor: [232, 240, 251], fontStyle: 'bold', textColor: [29, 79, 145] } : { fillColor: [238, 235, 226], fontStyle: 'bold', textColor: [60, 56, 46] } }])
     }
-    body.push([
+    const row = [
       p(l.reference) + (l.hors_liste ? ' (hors liste)' : '') + (l.transit ? ' (transit)' : ''),
       p(l.ref_fournisseur || ''),
       p(l.designation || ''),
       pQte(l.qte_theorique),
-      opts.avecSaisies && l.qte !== null ? pQte(l.qte) : '',
+      avec && l.qte !== null ? pQte(l.qte) : '',
       pEuro(l.pump),
-      opts.avecSaisies ? p(l.commentaire || '') : '',
-    ])
+      avec ? p(l.commentaire || '') : '',
+    ]
+    if (avec) row.splice(5, 0, p(l.qte !== null ? l.initiales || '' : ''))
+    body.push(row)
   }
+
+  const head = avec
+    ? [['Réf. CEGECLIM', 'Réf. fournisseur', 'Désignation', 'Qté stock', 'Qté comptée', 'Équipe', 'PUMP', 'Commentaire']]
+    : [['Réf. CEGECLIM', 'Réf. fournisseur', 'Désignation', 'Qté stock', 'Qté comptée', 'PUMP', 'Commentaire']]
+  const columnStyles: Record<number, Record<string, unknown>> = avec
+    ? {
+        0: { cellWidth: 36, fontStyle: 'bold' }, 1: { cellWidth: 32 }, 2: { cellWidth: 'auto' },
+        3: { cellWidth: 17, halign: 'right' }, 4: { cellWidth: 22, halign: 'center', minCellHeight: 7.5 },
+        5: { cellWidth: 20, halign: 'center' }, 6: { cellWidth: 22, halign: 'right' }, 7: { cellWidth: 52 },
+      }
+    : {
+        0: { cellWidth: 38, fontStyle: 'bold' }, 1: { cellWidth: 34 }, 2: { cellWidth: 'auto' },
+        3: { cellWidth: 18, halign: 'right' }, 4: { cellWidth: 24, halign: 'center', minCellHeight: 7.5 },
+        5: { cellWidth: 24, halign: 'right' }, 6: { cellWidth: 62 },
+      }
 
   autoTable(doc, {
     startY: 25,
-    head: [['Réf. CEGECLIM', 'Réf. fournisseur', 'Désignation', 'Qté stock', 'Qté comptée', 'PUMP', 'Commentaire']],
+    head,
     body,
     theme: 'grid',
     margin: { top: 25, right: 8, bottom: 12, left: 8 },
     styles: { font: 'helvetica', fontSize: 8, cellPadding: 1.6, valign: 'middle', lineColor: [170, 170, 170], lineWidth: 0.15 },
     headStyles: { fillColor: [17, 24, 32], textColor: 255, fontStyle: 'bold', fontSize: 8 },
-    columnStyles: {
-      0: { cellWidth: 38, fontStyle: 'bold' },
-      1: { cellWidth: 34 },
-      2: { cellWidth: 'auto' },
-      3: { cellWidth: 18, halign: 'right' },
-      4: { cellWidth: 24, halign: 'center', minCellHeight: 7.5 },
-      5: { cellWidth: 24, halign: 'right' },
-      6: { cellWidth: 62 },
-    },
+    columnStyles,
+    showHead: 'everyPage',
     rowPageBreak: 'avoid',
     willDrawPage: () => entete(),
   })
@@ -365,15 +405,24 @@ export function pdfListeComptage(liste: ListeSaisie, opts: { avecSaisies?: boole
   let y = finalY + 8
   if (y > doc.internal.pageSize.getHeight() - 30) { doc.addPage(); entete(); y = 30 }
   doc.setFont('helvetica', 'normal'); doc.setFontSize(9)
-  doc.text(`${lignes.length} ligne(s) à compter. Toutes les lignes doivent être comptées, y compris à 0.`, 8, y)
-  doc.text('Articles trouvés hors liste : les noter ci-dessous puis les ajouter à l\'écran (1er comptage).', 8, y + 5)
+  const nbArt = lignes.length
+  doc.text(p(`${nbArt} ligne(s) à compter${opts.selection ? ' (sélection)' : ''}. Toutes les lignes doivent être comptées, y compris à 0.`), 8, y)
+  doc.text(p('Articles trouvés hors liste : les noter ci-dessous puis les ajouter à l\'écran (1er comptage).'), 8, y + 5)
   doc.setDrawColor(120)
   doc.rect(8, y + 8, 160, 16)
-  doc.text('Signature de l\'inventoriste :', 180, y + 12)
+  doc.text(p('Signature de l\'équipe :'), 180, y + 12)
   doc.rect(180, y + 14, 70, 12)
 
+  // Feuille x / y dans le cadre équipe de chaque page (+ pied de page).
+  const total = doc.getNumberOfPages()
+  for (let i = 1; i <= total; i++) {
+    doc.setPage(i)
+    doc.setFont('helvetica', 'bold'); doc.setFontSize(10)
+    doc.text(`Feuille ${i} / ${total}`, w - 10, 9, { align: 'right' })
+  }
+  doc.setFont('helvetica', 'normal')
   piedDePage(doc, `${titre} - ${ORDINAL[numero]} comptage - édité le ${fmtDateHeure(new Date().toISOString())}`)
-  telecharger(doc, `inventaire_${slug(liste.depot_libelle)}_comptage${numero}.pdf`)
+  telecharger(doc, `inventaire_${slug(liste.depot_libelle)}_comptage${numero}${opts.selection ? '_selection' : ''}.pdf`)
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -393,7 +442,7 @@ export function pdfEcarts(lignes: LignePilotage[], opts: { campagne: string; dat
   let depotCourant = ''
 
   const entete = () => enteteCegeclim(doc, `${titre} - ${depotCourant}`,
-    `${opts.dateInventaire ? `Inventaire du ${fmtDate(opts.dateInventaire)} - ` : ''}écart = dernier comptage - stock théorique, valorisé au PUMP du dépôt`)
+    `${opts.dateInventaire ? `Inventaire du ${fmtDate(opts.dateInventaire)} - ` : ''}écart = dernier comptage - stock théorique, valorisé au PUMP du dépôt - sous chaque comptage : équipe`)
 
   for (const [depot, ls] of parDepot) {
     if (!premiere) doc.addPage()
@@ -411,9 +460,9 @@ export function pdfEcarts(lignes: LignePilotage[], opts: { campagne: string; dat
         p(l.ref_fournisseur || ''),
         p(l.designation || ''),
         pQte(l.qte_theorique),
-        l.q1 === null ? '' : pQte(l.q1),
-        l.nb_comptages >= 2 ? pQte(l.q2) : '',
-        l.nb_comptages >= 3 ? pQte(l.q3) : '',
+        l.q1 === null ? '' : pQte(l.q1) + (l.ini1 ? `\n${p(l.ini1)}` : ''),
+        l.nb_comptages >= 2 ? pQte(l.q2) + (l.ini2 ? `\n${p(l.ini2)}` : '') : '',
+        l.nb_comptages >= 3 ? pQte(l.q3) + (l.ini3 ? `\n${p(l.ini3)}` : '') : '',
         pQte(l.qte_finale),
         (n0(l.ecart) > 0 ? '+' : '') + pQte(l.ecart),
         pEuro(l.pump),
@@ -431,8 +480,8 @@ export function pdfEcarts(lignes: LignePilotage[], opts: { campagne: string; dat
       footStyles: { fillColor: [238, 235, 226], textColor: [30, 30, 30], fontStyle: 'bold' },
       columnStyles: {
         0: { cellWidth: 30, fontStyle: 'bold' }, 1: { cellWidth: 24 }, 2: { cellWidth: 'auto' },
-        3: { cellWidth: 12, halign: 'right' }, 4: { cellWidth: 11, halign: 'right' }, 5: { cellWidth: 11, halign: 'right' },
-        6: { cellWidth: 11, halign: 'right' }, 7: { cellWidth: 13, halign: 'right', fontStyle: 'bold' },
+        3: { cellWidth: 12, halign: 'right' }, 4: { cellWidth: 14, halign: 'right' }, 5: { cellWidth: 14, halign: 'right' },
+        6: { cellWidth: 14, halign: 'right' }, 7: { cellWidth: 13, halign: 'right', fontStyle: 'bold' },
         8: { cellWidth: 13, halign: 'right', fontStyle: 'bold' }, 9: { cellWidth: 20, halign: 'right' },
         10: { cellWidth: 23, halign: 'right', fontStyle: 'bold' }, 11: { cellWidth: 20 }, 12: { cellWidth: 46 },
       },
@@ -531,6 +580,9 @@ export async function excelEcarts(lignes: LignePilotage[], suivi: SuiviDepot[], 
     { header: 'Comptage 1', key: 'q1', width: 11, style: { numFmt: qte } },
     { header: 'Comptage 2', key: 'q2', width: 11, style: { numFmt: qte } },
     { header: 'Comptage 3', key: 'q3', width: 11, style: { numFmt: qte } },
+    { header: 'Équipe C1', key: 'i1', width: 10 },
+    { header: 'Équipe C2', key: 'i2', width: 10 },
+    { header: 'Équipe C3', key: 'i3', width: 10 },
     { header: 'Qté retenue', key: 'fin', width: 11, style: { numFmt: qte } },
     { header: 'Écart', key: 'ecart', width: 10, style: { numFmt: qte } },
     { header: 'PUMP', key: 'pump', width: 12, style: { numFmt: euro } },
@@ -544,6 +596,7 @@ export async function excelEcarts(lignes: LignePilotage[], suivi: SuiviDepot[], 
       reference: l.reference, ref_f: l.ref_fournisseur, designation: l.designation,
       macro: l.famille_macro, famille: l.famille, fourn: l.fournisseur_nom || l.fournisseur, hl: l.hors_liste ? 'Oui' : '', tr: l.transit ? 'Oui' : '',
       theo: n0(l.qte_theorique), q1: l.q1, q2: l.nb_comptages >= 2 ? l.q2 : null, q3: l.nb_comptages >= 3 ? l.q3 : null,
+      i1: l.ini1 || '', i2: l.nb_comptages >= 2 ? l.ini2 || '' : '', i3: l.nb_comptages >= 3 ? l.ini3 || '' : '',
       fin: l.qte_finale, ecart: l.ecart, pump: n0(l.pump), val: l.valeur_ecart,
       decision: l.decision ? libelleDecision(l.decision) : 'À décider', com: commentairesLigne(l),
     })

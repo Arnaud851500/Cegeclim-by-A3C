@@ -13,7 +13,7 @@
  *  3. Activer : ouvre le 1er comptage dans l'écran de saisie de l'agence.
  *  4. Suivi : avancement des saisies par dépôt, écarts valorisés au PUMP (actualisé
  *     toutes les 30 s).
- *  5. Détail d'un dépôt : comptages 1 / 2 / 3 avec initiales et commentaires ; par ligne,
+ *  5. Détail d'un dépôt : comptages 1 / 2 / 3 avec équipes (initiales par ligne) et commentaires ; par ligne,
  *     valider l'écart, le refuser (non passé dans SAGE) ou envoyer en 2e puis 3e comptage ;
  *     rouvrir un comptage clôturé par erreur ; valider l'inventaire du dépôt.
  *  6. Éditions : liste de comptage et écarts en PDF, export Excel des écarts validés pour
@@ -292,6 +292,7 @@ function PilotageInventaire() {
         id: l.id, reference: l.reference, ref_fournisseur: l.ref_fournisseur, designation: l.designation,
         famille: l.famille, famille_macro: l.famille_macro, qte_theorique: l.qte_theorique, pump: l.pump,
         hors_liste: l.hors_liste, transit: l.transit, depot_stock: l.depot_stock, depot_stock_libelle: l.depot_stock_libelle, qte: n === 1 ? l.q1 : n === 2 ? l.q2 : l.q3, commentaire: n === 1 ? l.com1 : n === 2 ? l.com2 : l.com3,
+        initiales: n === 1 ? l.ini1 : n === 2 ? l.ini2 : l.ini3,
       })),
     }
     pdfListeComptage(liste, { avecSaisies: false })
@@ -730,7 +731,13 @@ function PilotageInventaire() {
                           if (l.nb_comptages < n && !(n === 1)) return <span className="text-[#C9C4B6]">·</span>
                           const v = n === 1 ? l.q1 : n === 2 ? l.q2 : l.q3
                           const pending = detail.statut === 'comptage' && detail.comptage_courant === n && l.nb_comptages >= n
-                          return v === null ? <span className="text-[#8A8474]">{pending ? 'en cours' : '—'}</span> : <span className={v !== l.qte_theorique ? 'font-bold text-[#96600F]' : ''}>{fmtQte(v)}</span>
+                          const ini = n === 1 ? l.ini1 : n === 2 ? l.ini2 : l.ini3
+                          return v === null ? <span className="text-[#8A8474]">{pending ? 'en cours' : '—'}</span> : (
+                            <span title={ini ? `Compté par ${ini}` : undefined}>
+                              <span className={v !== l.qte_theorique ? 'font-bold text-[#96600F]' : ''}>{fmtQte(v)}</span>
+                              {ini && <span className="block text-[10px] font-semibold leading-3 text-[#8A8474]">{ini}</span>}
+                            </span>
+                          )
                         }
                         return (
                           <tr key={l.id} className={`border-t border-[#EFECE4] ${bg}`}>
