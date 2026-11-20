@@ -48,7 +48,6 @@ import {
   COLLABORATEURS_VIDE,
   nomCollaborateur,
   demanderRappel,
-  rappelEffectue,
   redescendre,
   escalader,
   chargerMonEnvironnement,
@@ -539,6 +538,11 @@ function HotlineTickets() {
                               <Pastille label={sev.label} tone={sev.tone} bg={sev.bg} />
                             </div>
                           ) : null}
+                          {t.nb_rappels_client ? (
+                            <div className="mt-0.5" title="Nombre de fois où le client a rappelé (bouton « Le client rappelle »)">
+                              <Pastille label={`🔁 ${t.nb_rappels_client} rappel${t.nb_rappels_client > 1 ? 's' : ''} client`} tone="#5B3F8C" bg="#ECE5F8" />
+                            </div>
+                          ) : null}
                         </td>
                         <td className={`px-3 py-1.5 ${compact} ${autre ? 'font-extrabold text-[#C81E1E]' : 'font-semibold text-slate-900'}`} title={autre ? `Ouvert en ce moment par ${nomCollaborateur(autre, collaborateurs)}` : undefined}>
                           {t.numero}
@@ -825,11 +829,6 @@ function FicheTicket({
             ))}
             {ticket.rappel_par && !n1.some((c) => c.email === ticket.rappel_par) ? <option value={ticket.rappel_par}>{nomCollaborateur(ticket.rappel_par, collaborateurs)}</option> : null}
           </select>
-          {ticket.rappel_par ? (
-            <button type="button" disabled={busy} onClick={() => run(() => rappelEffectue(ticket.id, String(email || '').split('@')[0], commentaire.trim()))} className="font-semibold underline disabled:opacity-40">
-              Rappel effectué
-            </button>
-          ) : null}
           {actif ? (
             <button
               type="button"

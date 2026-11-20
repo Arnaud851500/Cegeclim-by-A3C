@@ -240,6 +240,8 @@ export type Ticket = {
   consulte_le?: string | null
   /** (13/11/2026) Ticket de test, numéroté TEST… et supprimable. */
   est_test?: boolean
+  /** (20/11/2026) Nombre de « le client rappelle » (trigger sur les étapes RAPPEL de relance). */
+  nb_rappels_client?: number
 }
 
 export type Etape = {
@@ -847,9 +849,13 @@ export async function mettreEnAttenteClient(ticketId: string, precision?: string
 }
 
 /** Journalisation rapide : appel tombé sur la messagerie (hotliner et heure enregistrés). */
-export async function messagerieTelephonique(ticket: Pick<Ticket, 'id' | 'statut'>) {
+export async function messagerieTelephonique(ticket: Pick<Ticket, 'id' | 'statut'> & { rappel_par?: string | null }) {
   await ajouterEtape(ticket.id, 'COMMENTAIRE', '📞 Messagerie téléphonique : message laissé au client', { details: { messagerie: true } })
-  if (ticket.statut !== 'RESOLU' && ticket.statut !== 'ESCALADE') await majTicket(ticket.id, { statut: 'ATTENTE_CLIENT' })
+  // (20/11/2026) Le rappel demandé est fait (message laissé) : la demande de rappel est levée.
+  const patch: Partial<Ticket> = {}
+  if (ticket.statut !== 'RESOLU' && ticket.statut !== 'ESCALADE') patch.statut = 'ATTENTE_CLIENT'
+  if (ticket.rappel_par) patch.rappel_par = null
+  if (Object.keys(patch).length) await majTicket(ticket.id, patch)
 }
 
 /** Présence : le ticket est ouvert dans la console de `email` (null = libéré). Sans toucher updated_at. */

@@ -612,6 +612,12 @@ function HotlineConsole() {
         const statut = t.statut === 'ATTENTE_CLIENT' ? t.statut : ('EN_COURS' as const)
         const qui = String(email || '').split('@')[0]
         await majTicket(t.id, { assigne_a: email || t.assigne_a, statut })
+        // (20/11/2026) Reprendre le ticket dans la console lève la demande de rappel.
+        if (t.rappel_par) {
+          await rappelEffectue(t.id, qui, 'reprise dans la console')
+          t.rappel_par = null
+          setForm((f) => ({ ...f, rappel_par: '' }))
+        }
         // (16/11/2026) Pas de nouvelle ligne « Repris dans la console » si la même
         // personne a déjà agi sur le ticket dans l'heure.
         const ilYaUneHeure = Date.now() - 60 * 60 * 1000
@@ -1034,7 +1040,12 @@ function HotlineConsole() {
       }
       if (commentaire.trim()) await ajouterEtape(ticket.id, 'COMMENTAIRE', commentaire.trim())
       if (commentaireInterne.trim()) await ajouterEtape(ticket.id, 'COMMENTAIRE_INTERNE', commentaireInterne.trim())
-      if (nom === 'messagerie') await messagerieTelephonique(ticket)
+      if (nom === 'messagerie') {
+        await messagerieTelephonique(ticket)
+        // La demande de rappel est levée (le rappel a été tenté).
+        setTicket({ ...ticket, rappel_par: null, statut: ticket.statut !== 'ESCALADE' ? 'ATTENTE_CLIENT' : ticket.statut })
+        patch({ rappel_par: '' })
+      }
       else await mettreEnAttenteClient(ticket.id)
       setCommentaire('')
       setCommentaireInterne('')
@@ -1746,25 +1757,6 @@ function HotlineConsole() {
                     📞 À rappeler par <span className="font-semibold">{nomCollaborateur(ticket.rappel_par, collaborateurs)}</span>
                     {ticket.rappel_demande_le ? <span className="text-[11px] text-slate-500"> depuis le {fmtDateHeure(ticket.rappel_demande_le)}</span> : null}
                   </span>
-                  <button
-                    type="button"
-                    disabled={busy}
-                    onClick={async () => {
-                      setBusy(true)
-                      try {
-                        await rappelEffectue(ticket.id, String(email || '').split('@')[0])
-                        patch({ rappel_par: '' })
-                        await rafraichirEtapes(ticket.id)
-                      } catch (e) {
-                        setErreur(messageErreur(e))
-                      } finally {
-                        setBusy(false)
-                      }
-                    }}
-                    className="shrink-0 font-semibold underline disabled:opacity-40"
-                  >
-                    Rappel effectué
-                  </button>
                 </div>
               ) : null}
               {ticket && !verrouille ? (
