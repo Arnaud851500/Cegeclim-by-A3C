@@ -72,6 +72,7 @@ import {
   mettreEnAttenteClient,
   serieOnduleurCourt,
   relancerRappel,
+  signalerConsultation,
   COMPTES_IMPORT_HISTORIQUE,
   serieBatterieCourt,
   type Collaborateurs,
@@ -623,6 +624,22 @@ function FicheTicket({
   const peutSupprimer = SUPPRESSION_AUTORISEE.includes(String(email || '').toLowerCase())
   const [ticket, setTicket] = useState<Ticket | null>(null)
   const [etapes, setEtapes] = useState<Etape[]>([])
+  // (20/11/2026) Fiche ouverte = ticket « en main » : comme dans la console, le n°
+  // passe en rouge chez les autres hotliners (rafraîchi chaque minute).
+  const idPresence = ticket && ticket.id === id && !estResolu(ticket) ? ticket.id : null
+  useEffect(() => {
+    if (!idPresence || !email) return
+    const tid = idPresence
+    void signalerConsultation(tid, email)
+    const h = window.setInterval(() => void signalerConsultation(tid, email), 60_000)
+    const liberer = () => void signalerConsultation(tid, null)
+    window.addEventListener('pagehide', liberer)
+    return () => {
+      window.clearInterval(h)
+      window.removeEventListener('pagehide', liberer)
+      liberer()
+    }
+  }, [idPresence, email])
   const [commentaire, setCommentaire] = useState('')
   const [commentaireInterne, setCommentaireInterne] = useState('')
   const [fenetreNiveau, setFenetreNiveau] = useState<'escalade' | 'redescente' | null>(null)
