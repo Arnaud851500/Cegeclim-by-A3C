@@ -122,6 +122,9 @@ type Ligne = {
   derniere_action: { action: string; alerte_code: string | null; commentaire: string | null; le: string; par: string | null } | null
   date_premiere: string | null; date_derniere: string | null; nb_dates: number; blocs: Bloc[]
   nb_blocs_depasses: number; montant_depasse: number; nb_cdc_horizon: number
+  // Reliquat : nb_lignes / qte / montant_ht = reste à livrer ; « reçu » = BLF/FAF rattachés à la CDF
+  reste_articles?: string[]; est_reliquat?: boolean
+  nb_lignes_recues?: number; qte_recue?: number; montant_recu?: number; derniere_reception?: string | null
   rdv?: RdvFms | null   // RDV de déchargement FMS en vigueur (chargé à part, v_appro_cdf_rdv_fms_actuel)
   rdvSage?: RdvSage | null  // RDV confirmé lu dans les commentaires de la CDF SAGE (v_appro_cdf_rdv_fms_sage)
 }
@@ -1292,6 +1295,9 @@ function PortefeuilleCdf() {
         { h: 'CDC en attente', f: (r) => r.nb_cdc }, { h: '1re livraison CDC', f: (r) => fmtDate(r.premiere_livraison_cdc) },
         { h: familleF ? `Lignes ${familleF}` : 'Lignes', f: (r) => r.nb_lignes }, { h: familleF ? `Pièces ${familleF}` : 'Pièces', f: (r) => r.qte },
         { h: familleF ? `Montant HT ${familleF}` : 'Montant HT', f: (r) => r.montant_ht },
+        { h: 'Reliquat', f: (r) => (r.est_reliquat ? 'Oui' : '') },
+        { h: 'Articles restants', f: (r) => (r.reste_articles || []).join(', '), w: 40 },
+        { h: 'Lignes déjà reçues', f: (r) => r.nb_lignes_recues || '' }, { h: 'Montant déjà reçu HT', f: (r) => r.montant_recu || '' },
         { h: 'Alertes', f: (r) => r.alertes.map((a) => ALERTE[a].label).join(', '), w: 40 },
         { h: 'Commentaires SAGE', f: (r) => r.commentaires.join(' | '), w: 60 },
       ]
@@ -1463,7 +1469,7 @@ function PortefeuilleCdf() {
                 <Th k="numero" f="numero">CDF</Th><Th k="fournisseur" f="fournisseur">Fournisseur</Th><Th f="reference">Référence</Th>
                 <Th k="date_commande" f="commande">Commande</Th><Th k="date_livraison" f="livraison">Livraison</Th><Th f="statut">Statut</Th>
                 <Th f="container">Container</Th><Th k="eta_port" f="bateau">Bateau · ETA</Th><Th k="marge_jours" f="marge">Marge</Th><Th k="rdv" f="rdv">RDV FMS</Th>
-                <Th k="nb_cdc" f="cdc" cls="text-right">CDC</Th><Th k="montant_ht" f="montant" cls="text-right">Montant HT</Th><Th k="alertes" f="alertes">Alertes</Th><Th f="action">Dernière action</Th>
+                <Th k="nb_cdc" f="cdc" cls="text-right">CDC</Th><Th k="montant_ht" f="montant" cls="text-right">Reste à livrer HT</Th><Th k="alertes" f="alertes">Alertes</Th><Th f="action">Dernière action</Th>
               </tr>
             </thead>
             <tbody>
@@ -1505,7 +1511,20 @@ function PortefeuilleCdf() {
                     : r.verdict ? <Badge cls={VERDICT[r.verdict].cls}>{r.marge_jours} j · {VERDICT[r.verdict].label}</Badge> : <span className="text-[#C9C3B5]">—</span>}</td>
                   <td className="whitespace-nowrap px-2 py-1"><RdvCellule r={r} auj={auj} onChange={majRdv} /></td>
                   <td className="whitespace-nowrap px-2 py-1 text-right">{r.nb_cdc ? <span title={`1re livraison client ${fmtDate(r.premiere_livraison_cdc)}`}><b>{fmtNum(r.nb_cdc)}</b>{r.nb_cdc_tardives ? <span className="ml-1 text-[10.5px] text-orange-700">({fmtNum(r.nb_cdc_tardives)} tard.)</span> : ''}</span> : <span className="text-[#C9C3B5]">—</span>}</td>
-                  <td className="whitespace-nowrap px-2 py-1 text-right" title={familleF ? `${fmtNum(r.nb_lignes)} ligne(s) ${familleF} · ${fmtNum(r.qte)} pièces` : `${fmtNum(r.nb_lignes)} ligne(s) · ${fmtNum(r.qte)} pièces`}>{fmtNum(r.montant_ht)}</td>
+                  <td className="whitespace-nowrap px-2 py-1 text-right"
+                    title={[
+                      `Reste à livrer : ${fmtNum(r.nb_lignes)} ligne(s)${familleF ? ` ${familleF}` : ''} · ${fmtNum(r.qte)} pièces · ${fmtNum(r.montant_ht)} € HT`,
+                      r.reste_articles?.length ? `Articles restants : ${r.reste_articles.join(', ')}${r.nb_lignes > r.reste_articles.length ? '…' : ''}` : '',
+                      r.est_reliquat ? `Déjà reçu : ${fmtNum(r.nb_lignes_recues)} ligne(s) · ${fmtNum(r.montant_recu)} € HT${r.derniere_reception ? ` (dernière réception ${fmtDate(r.derniere_reception)})` : ''}` : '',
+                    ].filter(Boolean).join('\n')}>
+                    <div><span className="mr-1.5 text-[10.5px] text-[#8A8474]">{fmtNum(r.nb_lignes)} l.</span>{fmtNum(r.montant_ht)}</div>
+                    {r.est_reliquat && (
+                      <div className="text-[10.5px]">
+                        <span className="mr-1 rounded bg-amber-100 px-1 font-bold text-amber-800">Reliquat</span>
+                        <span className="text-[#8A8474]">reçu {fmtNum(r.nb_lignes_recues)} l. · {fmtNum(r.montant_recu)}</span>
+                      </div>
+                    )}
+                  </td>
                   <td className="px-2 py-1"><span className="inline-flex flex-wrap gap-1">{r.alertes.map((a) => <Badge key={a} cls={ALERTE[a].cls} title={ALERTE[a].title}>{libelleAlerte(a, r)}</Badge>)}</span></td>
                   <td className="max-w-[200px] truncate px-2 py-1 text-[11px] text-[#5E5A44]" title={r.derniere_action?.commentaire || ''}>
                     {r.derniere_action ? <>{fmtDate(r.derniere_action.le)} · {r.derniere_action.action === 'confirme' ? '✓' : r.derniere_action.action === 'relance' ? '📨' : '💬'} {r.derniere_action.commentaire || ''}</> : ''}
