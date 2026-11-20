@@ -172,6 +172,7 @@ function EngagementHitachi() {
   const [vue, setVue] = useState<'unites' | 'euros'>('unites')
   const [ouverts, setOuverts] = useState<Set<string>>(new Set())
   const [editeur, setEditeur] = useState<string | null>(null)
+  const [annexe, setAnnexe] = useState(false)
 
   const charger = useCallback(async (an: number) => {
     setChargement(true)
@@ -290,6 +291,9 @@ function EngagementHitachi() {
                 </button>
               ))}
             </div>
+            <button type="button" onClick={() => setAnnexe(true)} disabled={!data?.engagement} className="h-8 rounded-md border border-[#C8102E] bg-white px-3 text-[12px] font-semibold text-[#C8102E] hover:bg-[#FDECEE] disabled:opacity-50" title="Le contrat sous la forme de l’annexe 6 Hitachi, avec le réel du compagnon sous chaque bloc">
+              Vue annexe 6
+            </button>
             <button type="button" onClick={actualiser} disabled={actualisation} className="h-8 rounded-md bg-[#0B1220] px-3 text-[12px] font-semibold text-white disabled:opacity-50">
               {actualisation ? 'Actualisation…' : '⟳ Actualiser'}
             </button>
@@ -577,6 +581,21 @@ function EngagementHitachi() {
           </>
         )}
       </div>
+
+      {annexe && data?.engagement && (
+        <VueAnnexe6
+          annee={annee}
+          engagement={data.engagement}
+          gammes={gammes}
+          parGamme={parGamme}
+          lignes={data.lignes}
+          total={total}
+          s1Clos={s1Clos}
+          aujourdhui={aujourdhui}
+          sources={data.refresh}
+          onClose={() => setAnnexe(false)}
+        />
+      )}
 
       {editeur && data && (
         <EditeurGamme
@@ -931,5 +950,349 @@ export default function EngagementHitachiPage() {
     <Suspense fallback={<main className="min-h-screen bg-[#F4F3F0] p-6 text-[13px] text-[#8A8474]">Chargement…</main>}>
       <EngagementHitachi />
     </Suspense>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Vue « Annexe 6 » (20/11/2026, demandée par Arnaud) : le contrat présenté comme
+// le document Hitachi (mêmes blocs, mêmes colonnes), avec sous chaque bloc les
+// lignes du réel calculé par le compagnon.
+// ─────────────────────────────────────────────────────────────────────────
+
+const ANNEXE_COLONNES: { code: string; libelle: string; bfa?: 1 | 2 }[] = [
+  { code: 'ACC', libelle: 'Accessoires' },
+  { code: 'RAC_MONO', libelle: 'RAC Mono' },
+  { code: 'RAC_MULTI', libelle: 'RAC Multi' },
+  { code: 'RAC_TOTAL', libelle: 'RAC Total', bfa: 1 },
+  { code: 'YUTAKI_S', libelle: 'Yutaki S / AirH2O 600' },
+  { code: 'YUTAKI_M', libelle: 'YUTAKI-M/ AirH2O 800' },
+  { code: 'AIRH2O400', libelle: 'AirH2O 400' },
+  { code: 'PAC_TOTAL', libelle: 'TOTAL PAC Air / Eau' },
+  { code: 'YUTAMPO', libelle: 'YUTAMPO' },
+  { code: 'PACKAGE', libelle: 'PRIMAIRY / IVX / UTOPIA PRIME' },
+  { code: 'SETFREE_MINI', libelle: 'Air 365 - Set Free Mini', bfa: 2 },
+  { code: 'SYSTEM_FREE', libelle: 'System Free (UI DRV)' },
+]
+
+function VueAnnexe6({ annee, engagement, gammes, parGamme, lignes, total, s1Clos, aujourdhui, sources, onClose }: {
+  annee: number; engagement: Engagement; gammes: Gamme[]; parGamme: Map<string, Agg>; lignes: Ligne[]; total: Agg
+  s1Clos: boolean; aujourdhui: Date; sources: Donnees['refresh']; onClose: () => void
+}) {
+  const ROUGE = '#E2232E'
+  const g = (code: string) => gammes.find((x) => x.code === code)
+  const a = (code: string) => parGamme.get(code) || aggVide()
+  const dateJour = aujourdhui.toLocaleDateString('fr-FR')
+
+  // ── Euros par semestre (achats reçus + ferme) ──
+  const vRecu = (x: Agg, s: 1 | 2) => (s === 1 ? x.v.ach_recu_v_s1 : x.v.ach_recu_v_s2)
+  const vFerme = (x: Agg, s: 1 | 2) => (s === 1 ? x.v.ach_ferme_v_s1 : x.v.ach_ferme_v_s2)
+  const qRecu = (x: Agg, s: 1 | 2) => (s === 1 ? x.q.ach_recu_q_s1 : x.q.ach_recu_q_s2)
+  const qFerme = (x: Agg, s: 1 | 2) => (s === 1 ? x.q.ach_ferme_q_s1 : x.q.ach_ferme_q_s2)
+  const qVente = (x: Agg, s: 1 | 2) => (s === 1 ? x.q.ven_bl_q_s1 + x.q.ven_ferme_q_s1 : x.q.ven_bl_q_s2 + x.q.ven_ferme_q_s2)
+  const obj = (gm: Gamme | undefined, s: 1 | 2) => (gm ? (s === 1 ? gm.obj_s1 : gm.obj_s2) : null)
+  const n1 = (gm: Gamme | undefined, s: 1 | 2) => (gm ? (s === 1 ? gm.realise_n1_s1 : gm.realise_n1_s2) : null)
+
+  // ── CA ──
+  const objCa = n(engagement.objectif_ca)
+  const caRecu = total.v.ach_recu_v_s1 + total.v.ach_recu_v_s2
+  const caFerme = total.v.ach_ferme_v_s1 + total.v.ach_ferme_v_s2
+  const caProj = caRecu + caFerme
+  // Barème évolutif de l'annexe 7 non fourni : on en reste au 1 % du CA (exemple de l'annexe : 102,8 % → 105,6 %).
+  const bfaCa = (ca: number) => (objCa && ca >= objCa ? ca * 0.01 : 0)
+
+  // ── BFA croissance S1 : RAC Total (CA RAC + CA Light commercial) × 1 % ──
+  const rac = a('RAC_TOTAL')
+  const racObj = n(g('RAC_TOTAL')?.obj_s1)
+  const racQ = qRecu(rac, 1) + (s1Clos ? 0 : qFerme(rac, 1))
+  const racCa = vRecu(rac, 1) + (s1Clos ? 0 : vFerme(rac, 1))
+  const lightCa = vRecu(a('PACKAGE'), 1) + (s1Clos ? 0 : vFerme(a('PACKAGE'), 1))
+  // ── BFA croissance S2 : Set Free Mini → 1 % × (CA GE Air 365 + GE Set Free Mini + 60 % CA UI DRV) ──
+  const sfm = a('SETFREE_MINI')
+  const sfmObj = n(g('SETFREE_MINI')?.obj_s2)
+  const sfmQ = qRecu(sfm, 2) + qFerme(sfm, 2)
+  const sfLignes = lignes.filter((l) => l.gamme === 'SYSTEM_FREE')
+  const v2 = (l: Ligne) => n(l.ach_recu_v_s2) + n(l.ach_ferme_v_s2)
+  const caUiDrv = sfLignes.filter((l) => l.compte_qte).reduce((s, l) => s + v2(l), 0)
+  const caGeAir365 = sfLignes.filter((l) => !l.compte_qte).reduce((s, l) => s + v2(l), 0)
+  const caGeSfm = vRecu(sfm, 2) + vFerme(sfm, 2)
+  const baseBfaS2 = caGeAir365 + caGeSfm + 0.6 * caUiDrv
+
+  const pctCls = (p: number | null) => (p === null ? '' : p >= 1 ? 'bg-[#E3F2E6] text-[#1F6B3A]' : p >= 0.9 ? 'bg-[#FBF1DC] text-[#8A5A11]' : 'bg-[#FBE6E3] text-[#A32C2C]')
+
+  const bord = 'border border-[#3A3A3A]'
+  const cell = `${bord} px-1 py-1 text-center align-middle`
+  const lab = `${bord} px-2 py-1 text-center align-middle`
+  const bandeau = (texte: string, span: number) => (
+    <td colSpan={span} className={`${bord} py-0.5 text-center text-[10.5px] font-semibold text-white`} style={{ background: ROUGE }}>{texte}</td>
+  )
+  const ajout = 'bg-[#EEF3F8]'
+  const ajoutLab = `${lab} ${ajout} text-left text-[11px] font-semibold text-[#245A9E]`
+
+  // Ligne d'un bloc quantitatif (un semestre)
+  function cellules(s: 1 | 2, rendu: (code: string, gm: Gamme | undefined, x: Agg) => React.ReactNode, cls = '') {
+    return ANNEXE_COLONNES.map((c) => {
+      const surligne = c.bfa === s ? 'bg-[#F6E9EC]' : ''
+      return <td key={`${s}-${c.code}`} className={`${cell} ${cls} ${surligne} whitespace-nowrap tabular-nums`}>{rendu(c.code, g(c.code), a(c.code))}</td>
+    })
+  }
+  const quantif = (code: string) => code !== 'ACC'
+  const nb = (v: number | null | undefined, gras = false) => (v === null || v === undefined ? '' : <span className={gras ? 'font-bold' : ''}>{fmtNum(v)}</span>)
+  const tiret = '–'
+
+  /** Les 8 lignes d'un semestre (cellules seulement) : N-1, objectif, puis les lignes ajoutées du réel. */
+  const blocQuantitatif = (s: 1 | 2): React.ReactNode[][] => {
+    const clos = s === 1 && s1Clos
+    const proj = (x: Agg) => qRecu(x, s) + (clos ? 0 : qFerme(x, s))
+    return [
+      cellules(s, (code, gm) => <span className="italic">{quantif(code) ? nb(n1(gm, s)) : tiret}</span>),
+      cellules(s, (code, gm) => (quantif(code) ? nb(obj(gm, s), code === 'RAC_TOTAL' || code === 'SETFREE_MINI') : tiret)),
+      cellules(s, (code, _gm, x) => (quantif(code) ? fmtNum(qRecu(x, s)) : tiret), ajout),
+      cellules(s, (code, _gm, x) => (quantif(code) && !clos ? fmtNum(qFerme(x, s)) : tiret), ajout),
+      cellules(s, (code, gm, x) => {
+        if (!quantif(code)) return tiret
+        const o = obj(gm, s)
+        const r = proj(x)
+        if (!o) return '' // RAC Mono / Multi : objectif porté par RAC Total
+        const p = r / o
+        return <span className={`inline-block rounded px-1 font-bold ${pctCls(p)}`} title={`${fmtNum(r)} / ${fmtNum(o)} (${r - o >= 0 ? '+' : ''}${fmtNum(r - o)})`}>{fmtPct(p)}</span>
+      }, ajout),
+      cellules(s, (code, gm, x) => {
+        if (!quantif(code)) return tiret
+        const o = obj(gm, s)
+        if (!o) return ''
+        const e = proj(x) - o
+        return <span className={e >= 0 ? 'text-[#1F6B3A]' : 'font-semibold text-[#A32C2C]'}>{e >= 0 ? `+${fmtNum(e)}` : fmtNum(e)}</span>
+      }, ajout),
+      cellules(s, (_code, _gm, x) => fmtEur(vRecu(x, s) + (clos ? 0 : vFerme(x, s))), `${ajout} text-[10.5px]`),
+      cellules(s, (code, _gm, x) => (quantif(code) ? fmtNum(qVente(x, s)) : tiret), `${ajout} text-[#5E5A44]`),
+    ]
+  }
+
+  const enteteColonnes = () => ANNEXE_COLONNES.map((c) => (
+    <td key={c.code} className={`${cell} text-[10px] font-bold leading-tight`}>{c.libelle}</td>
+  ))
+
+  const enteteRemises1 = (k: string) => [
+        <td key={`${k}a`} rowSpan={2} className={`${cell} text-[10px] font-bold`}>Accessoires</td>,
+        <td key={`${k}r`} colSpan={3} className={`${cell} text-[10px] font-bold`}>RAC</td>,
+        <td key={`${k}h`} colSpan={4} className={`${cell} text-[10px] font-bold`}>HEATING</td>,
+        <td key={`${k}p`} className={`${cell} text-[10px] font-bold`}>PACKAGE</td>,
+        <td key={`${k}v`} colSpan={3} className={`${cell} text-[10px] font-bold`}>VRF</td>,
+  ]
+  const enteteRemises2 = (k: string) => ([
+          ['RAC Mono / Multi', 2], ['TRIPLE C', 1], ['YUTAKI-S / AirH2O 600 /YUTAKI-M/ AirH2O 800', 2], ['AirH2O 400', 1], ['YUTAMPO', 1],
+          ['Light Commercial / Primairy / UTOPIA Prime / IVX Premium pour Dx Kit', 1], ['IVX Confort · IVX Prime et Centrifuges', 1], ['Air 365 - Set Free Mini', 1], ['System Free', 1],
+        ] as [string, number][]).map(([l, sp]) => <td key={k + l} colSpan={sp} className={`${cell} text-[9.5px] font-bold leading-tight`}>{l}</td>)
+  // Grille des remises de l'annexe ramenée aux 12 colonnes d'un semestre : Acc · RAC Mono/Multi ×2 · Triple C ·
+  // Yutaki ×2 · 400 · Yutampo · Package · IVX (Confort + Prime, regroupés) · Set Free Mini · System Free.
+  const ligneRemise = (k: 'std' | 'stock') => (
+    <>
+      <td className={cell}>{k === 'std' ? '65,5%' : '69,0%'}</td>
+      <td colSpan={3} className={cell}>{k === 'std' ? '65,5%' : '69,0%'}</td>
+      <td colSpan={2} className={cell}>{k === 'std' ? '63,3%' : '68,5%'}</td>
+      <td className={cell}>{k === 'std' ? '63,3%' : '-'}</td>
+      <td className={cell}>{k === 'std' ? '63,3%' : '68,5%'}</td>
+      <td className={cell}>{k === 'std' ? '70,0%' : '73,0%'}</td>
+      <td colSpan={3} className={cell}>{k === 'std' ? '70,0%' : '76,0%'}</td>
+    </>
+  )
+  const ligneContainers = () => (
+    <>
+      <td className={cell}>74,5%</td>
+      <td colSpan={3} className={cell}>74,5%</td>
+      <td className={cell}>-</td><td className={cell}>-</td>
+      <td className={cell}>68,5%</td>
+      <td className={cell}>69,8%</td>
+      <td className={cell}>74,5%</td>
+      <td className={cell}>-</td><td className={cell}>-</td><td className={cell}>-</td>
+    </>
+  )
+
+  const statutBfa = (atteint: boolean, reste: number) => (
+    <span className={`inline-block rounded px-2 py-0.5 font-bold ${atteint ? 'bg-[#E3F2E6] text-[#1F6B3A]' : 'bg-[#FBE6E3] text-[#A32C2C]'}`}>
+      {atteint ? 'Objectif atteint' : `Manque ${fmtNum(reste)} groupes`}
+    </span>
+  )
+
+  return (
+    <div className="fixed inset-0 z-50 overflow-auto bg-black/40 p-3" onClick={onClose}>
+      <div className="mx-auto w-full max-w-[1700px] rounded-lg bg-white p-4 text-[11.5px] text-black shadow-2xl" onClick={(e) => e.stopPropagation()} style={{ fontFamily: 'Arial, Helvetica, sans-serif' }}>
+        <div className="mb-2 flex items-center justify-between gap-3">
+          <p className="text-[11px] text-[#5E5A44]">
+            Annexe 6 Hitachi — lignes <span className={`${ajout} rounded px-1 font-semibold text-[#245A9E]`}>en bleu</span> ajoutées par le compagnon au {dateJour}
+            {sources?.refreshed_at && <> (données du {fmtDateHeure(sources.refreshed_at)})</>} : achats reçus = commandes fournisseur BLG livrées ; ferme = CDF SAGE à recevoir d’ici la fin du semestre ; ventes = BL + CDC à livrer.
+          </p>
+          <div className="flex shrink-0 gap-2">
+            <button type="button" onClick={() => window.print()} className="rounded-md border border-[#E5E1D8] px-3 py-1.5 text-[12px] font-semibold">Imprimer</button>
+            <button type="button" onClick={onClose} className="rounded-md bg-[#0B1220] px-3 py-1.5 text-[12px] font-semibold text-white">Fermer</button>
+          </div>
+        </div>
+
+        <div className="overflow-x-auto">
+          <table className="w-full min-w-[1500px] border-collapse border-2 border-[#3A3A3A]">
+            <colgroup>
+              <col style={{ width: 150 }} />
+              {Array.from({ length: 24 }).map((_, i) => <col key={i} />)}
+            </colgroup>
+            <tbody>
+              {/* En-tête */}
+              <tr>
+                <td className={`${lab} font-bold`}>Année / Période</td>
+                <td colSpan={24} className={`${cell} py-2 text-[14px] font-bold`}>OBJECTIFS du 1er Janvier {annee} au 31 décembre {annee} - (ANNEXE 6)</td>
+              </tr>
+              <tr>
+                <td className={`${lab} font-bold`}>CONCESSIONNAIRE</td>
+                <td colSpan={24} className={`${cell} py-2 text-[18px] font-bold`}>CEGECLIM</td>
+              </tr>
+
+              {/* Objectif CA */}
+              <tr><td className={bord} style={{ background: ROUGE }} />{bandeau('OBJECTIF CA (€) HT et Hors DEEE', 24)}</tr>
+              <tr>
+                <td className={lab}>OBJECTIF CA (HT et hors DEEE)</td>
+                <td colSpan={24} className={`${cell} py-1.5 text-[17px] font-bold`}>{fmtNum(objCa)} €</td>
+              </tr>
+              <tr>
+                <td className={ajoutLab}>Achats reçus au {dateJour}</td>
+                <td colSpan={8} className={`${cell} ${ajout} font-bold`}>{fmtNum(Math.round(caRecu))} €</td>
+                <td colSpan={8} className={`${cell} ${ajout}`}>Ferme à recevoir d’ici le 31/12 : <b>{fmtNum(Math.round(caFerme))} €</b></td>
+                <td colSpan={8} className={`${cell} ${ajout}`}>
+                  Reçu + ferme : <b>{fmtNum(Math.round(caProj))} €</b>{' '}
+                  <span className={`ml-1 inline-block rounded px-1.5 font-bold ${pctCls(objCa ? caProj / objCa : null)}`}>{fmtPct(objCa ? caProj / objCa : null)}</span>
+                  <span className="ml-2 text-[#5E5A44]">(réel seul {fmtPct(objCa ? caRecu / objCa : null)})</span>
+                </td>
+              </tr>
+
+              {/* Objectifs quantitatifs */}
+              <tr><td className={bord} style={{ background: ROUGE }} />{bandeau(`OBJECTIFS QUANTITATIFS - 1er Semestre ${annee}`, 12)}{bandeau(`OBJECTIFS QUANTITATIFS - 2ème Semestre ${annee}`, 12)}</tr>
+              <tr><td className={`${lab} font-bold`}>GAMMES</td>{enteteColonnes()}{enteteColonnes()}</tr>
+              {(() => {
+                const s1 = blocQuantitatif(1)
+                const s2 = blocQuantitatif(2)
+                const libelles: [string, boolean][] = [
+                  [`Réalisé CY ${annee - 1}`, false],
+                  [`OBJECTIFS QUANTITATIFS CY ${annee}`, false],
+                  ['Achats reçus (unités)', true],
+                  ['Ferme à recevoir d’ici fin de semestre', true],
+                  ['% objectif (reçu + ferme)', true],
+                  ['Écart à l’objectif (unités)', true],
+                  ['Achats reçus + ferme (€)', true],
+                  ['Ventes BL + CDC à livrer (unités)', true],
+                ]
+                return libelles.map(([lib, aj], i) => (
+                  <tr key={lib}>
+                    <td className={aj ? ajoutLab : `${lab} ${i === 0 ? 'italic' : ''}`}>{lib}</td>
+                    {s1[i]}
+                    {s2[i]}
+                  </tr>
+                ))
+              })()}
+
+              {/* Remises */}
+              <tr><td className={bord} style={{ background: ROUGE }} />{bandeau('CONDITIONS COMMERCIALES CATEGORIE 1 - REMISES', 12)}{bandeau('CONDITIONS COMMERCIALES CATEGORIE 1 - REMISES', 12)}</tr>
+              <tr>
+                <td rowSpan={2} className={`${lab} font-bold`}>GAMMES</td>
+                {enteteRemises1('s1')}
+                {enteteRemises1('s2')}
+              </tr>
+              <tr>
+                {enteteRemises2('s1')}
+                {enteteRemises2('s2')}
+              </tr>
+              <tr><td className={lab}>Remise Standard</td>{ligneRemise('std')}{ligneRemise('std')}</tr>
+              <tr><td className={lab}>Remise de Stock M-3<br /><span className="text-[10px]">* Voir Convention Unique {annee}</span></td>{ligneRemise('stock')}{ligneRemise('stock')}</tr>
+              <tr><td className={lab}>Remise Containers<br /><span className="text-[10px]">* Voir Convention Unique {annee}</span></td>{ligneContainers()}{ligneContainers()}</tr>
+
+              {/* BFA croissance */}
+              <tr><td className={bord} style={{ background: ROUGE }} />{bandeau('Bonifications Fin d’Année (BFA) Croissance', 24)}</tr>
+              <tr>
+                <td rowSpan={3} className={`${lab} text-[10.5px]`}>BFA CROISSANCE QUANTITATIVE PRODUITS</td>
+                <td colSpan={12} className={`${cell} py-2 text-[10.5px] font-bold`}>RAC Total (mono + multi)</td>
+                <td colSpan={12} className={`${cell} py-2 text-[10.5px] font-bold`}>AIR 365 - SET FREE MINI</td>
+              </tr>
+              <tr>
+                <td colSpan={12} className={`${cell} py-3 text-[11px] leading-snug`}>
+                  La BFA sera déclenchée à l’atteinte de 100% de l’objectif quantitatif<br />
+                  Cette bonification n’est pas plafonnée et est évolutive. (voir annexe 7 jointe)<br />
+                  L’objectif quantitatif fixé par gamme en Année N ne peut être inférieur au réalisé de l’année N-1.<br /><br />
+                  La comptabilisation se fait sur le nombre de groupes extérieurs.<br />
+                  Bonification à l’atteinte de l’objectif : 1% du CA HT de la gamme correspondante<br /><br />
+                  BFA = CA RAC + CA Light commercial x 1%
+                </td>
+                <td colSpan={12} className={`${cell} py-3 text-[11px] leading-snug`}>
+                  La BFA sera déclenchée à l’atteinte de 100% de l’objectif quantitatif<br />
+                  Cette bonification n’est pas plafonnée et est évolutive. (voir annexe 7 jointe)<br />
+                  L’objectif quantitatif fixé par gamme en Année N ne peut être inférieur au réalisé de l’année N-1.<br /><br />
+                  La comptabilisation se fait sur le nombre de groupes extérieurs.<br />
+                  Bonification à l’atteinte de l’objectif : 1% du CA HT de la gamme correspondante<br /><br />
+                  <b>BFA</b> = (CA GE AIR365 + GE Set FREE MINI + 60% CA UI DRV) x 1%
+                </td>
+              </tr>
+              <tr>
+                <td colSpan={12} className={`${cell} ${ajout} py-2 text-left text-[11px] leading-relaxed`}>
+                  <b className="text-[#245A9E]">Au {dateJour} — S1 {s1Clos ? 'clos' : 'en cours'} :</b> {fmtNum(racQ)} groupes RAC pour un objectif de {fmtNum(racObj)} ({fmtPct(racObj ? racQ / racObj : null)}){' '}
+                  {statutBfa(racQ >= racObj, racObj - racQ)}<br />
+                  CA RAC S1 {fmtNum(Math.round(racCa))} € + CA Light commercial (Primairy / IVX / Utopia) {fmtNum(Math.round(lightCa))} € →{' '}
+                  <b>BFA estimée {racQ >= racObj ? `${fmtNum(Math.round((racCa + lightCa) * 0.01))} €` : '0 €'}</b>
+                </td>
+                <td colSpan={12} className={`${cell} ${ajout} py-2 text-left text-[11px] leading-relaxed`}>
+                  <b className="text-[#245A9E]">Au {dateJour} — S2 en cours (reçu + ferme) :</b> {fmtNum(sfmQ)} groupes Set Free Mini pour un objectif de {fmtNum(sfmObj)} ({fmtPct(sfmObj ? sfmQ / sfmObj : null)}){' '}
+                  {statutBfa(sfmQ >= sfmObj, sfmObj - sfmQ)}<br />
+                  CA GE Air 365 {fmtNum(Math.round(caGeAir365))} € + GE Set Free Mini {fmtNum(Math.round(caGeSfm))} € + 60 % × UI DRV {fmtNum(Math.round(caUiDrv))} € = {fmtNum(Math.round(baseBfaS2))} € →{' '}
+                  <b>BFA {sfmQ >= sfmObj ? 'estimée' : 'potentielle'} {fmtNum(Math.round(baseBfaS2 * 0.01))} €</b>
+                </td>
+              </tr>
+
+              {/* BFA CA */}
+              <tr><td className={bord} style={{ background: ROUGE }} />{bandeau('Bonification Fin d’Année (BFA) sur CA', 24)}</tr>
+              <tr>
+                <td rowSpan={2} className={`${lab} text-[10.5px]`}>OBJECTIF CHIFFRE D’AFFAIRES</td>
+                <td colSpan={24} className={`${cell} py-2 text-[11px] leading-snug`}>
+                  <b className="text-[13px]">Objectif Annuel : {fmtNum(objCa)}€ HT et Hors DEEE</b><br />
+                  La BFA sera déclenchée à l’atteinte de 100% de l’objectif annuel de chiffre d’affaires, la bonification déclenchée sera de 1% du CA HT réalisé. (Hors commandes en dérogations YYTI-F)<br />
+                  Cette bonification n’est pas plafonnée et est évolutive. (voir annexe 7 jointe)<br />
+                  Ex : si CA de 14,9 M€ (Soit 102,8 % de son objectif) il sera reversé 105,6% de sa bonification = 14,9 M€ * 1,056% = 157 344 €
+                </td>
+              </tr>
+              <tr>
+                <td colSpan={24} className={`${cell} ${ajout} py-2 text-[11px]`}>
+                  <b className="text-[#245A9E]">Au {dateJour} :</b> achats reçus {fmtNum(Math.round(caRecu))} € ({fmtPct(objCa ? caRecu / objCa : null)}) · reçu + ferme {fmtNum(Math.round(caProj))} € ({fmtPct(objCa ? caProj / objCa : null)}) →{' '}
+                  <b>BFA CA estimée {fmtNum(Math.round(bfaCa(caProj)))} €</b> (1 % ; coefficient évolutif de l’annexe 7 non appliqué
+                  {objCa && caProj > objCa ? `, ici ${fmtPct(caProj / objCa)} de l’objectif` : ''}) · sur le réel seul : {fmtNum(Math.round(bfaCa(caRecu)))} €
+                </td>
+              </tr>
+
+              {/* Budget promotion */}
+              <tr><td className={bord} style={{ background: ROUGE }} />{bandeau('BUDGET COMMUNICATION ET PROMOTION DE LA MARQUE', 24)}</tr>
+              <tr>
+                <td className={`${lab} text-[10.5px]`}>Budget promotion</td>
+                <td colSpan={24} className={`${cell} py-2 text-[11px]`}>
+                  1% du CA réalisé sur la période du 01/01/{annee} au 31/12/{annee}.<br />
+                  * Voir l’annexe de la Convention Unique relative aux conditions de prestation de service et de promotion de la marque HITACHI.
+                </td>
+              </tr>
+              <tr>
+                <td className={ajoutLab}>Au {dateJour}</td>
+                <td colSpan={24} className={`${cell} ${ajout} py-1.5 text-[11px]`}>
+                  Budget sur achats reçus : <b>{fmtNum(Math.round(caRecu * 0.01))} €</b> · sur reçu + ferme : <b>{fmtNum(Math.round(caProj * 0.01))} €</b>
+                </td>
+              </tr>
+              <tr>
+                <td className={`${lab} text-[10.5px]`}>Conditions de règlement</td>
+                <td colSpan={24} className={`${cell} py-2 text-[11px]`}>30 jours fin de mois le 15 par virement</td>
+              </tr>
+              <tr>
+                <td className={lab}>Bon pour Accord</td>
+                <td colSpan={12} className={`${bord} px-2 py-2 text-left align-top text-[11px] leading-6`}>
+                  Pour Hitachi<br />Date : <span className="italic">18/06/{annee}</span><br />Nom : <span className="italic">P. BERRY</span><br />Tampon et Signature : JOHNSON CONTROLS HITACHI AIR CONDITIONING EUROPE SAS
+                </td>
+                <td colSpan={12} className={`${bord} px-2 py-2 text-left align-top text-[11px] leading-6`}>
+                  Pour le Concessionnaire<br />Date :<br />Nom :<br />Tampon et Signature
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
   )
 }
