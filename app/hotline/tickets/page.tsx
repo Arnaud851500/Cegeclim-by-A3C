@@ -59,7 +59,6 @@ import {
   fmtDuree,
   fmtTel,
   issueRequise,
-  libelleClassif,
   libelleFiliere,
   libelleGamme,
   libelleMotif,
@@ -85,7 +84,7 @@ import {
 type FiltreStatut = 'ACTIFS' | Statut | 'TOUS'
 
 /** (13/11/2026) Colonnes triables de la liste. */
-type ColTri = 'statut' | 'numero' | 'opened_at' | 'filiere' | 'classif' | 'client' | 'description' | 'chantier' | 'niveau' | 'assigne' | 'duree'
+type ColTri = 'statut' | 'numero' | 'opened_at' | 'filiere' | 'client' | 'description' | 'chantier' | 'niveau' | 'assigne' | 'duree'
 const RANG_STATUT: Record<string, number> = { OUVERT: 0, EN_COURS: 1, ATTENTE_CLIENT: 2, ESCALADE: 3, RESOLU: 4, CLOS: 4 }
 const STATUTS_ACTIFS: Statut[] = ['OUVERT', 'EN_COURS', 'ATTENTE_CLIENT', 'ESCALADE']
 
@@ -215,9 +214,7 @@ function HotlineTickets() {
         case 'opened_at':
           return t.opened_at
         case 'filiere':
-          return `${libelleFiliere(t.filiere)} ${libelleMotif(t.motif)}`
-        case 'classif':
-          return [libelleClassif(classif, 'symptome', t.symptome), libelleClassif(classif, 'organe', t.organe), libelleClassif(classif, 'issue', t.issue)].filter(Boolean).join(' ')
+          return `${libelleMotif(t.motif)} ${libelleNature(t.nature)} ${libelleGamme(t.gamme)}`
         case 'client':
           return (t.intitule_tiers || t.numero_tiers || '').toLowerCase()
         case 'description':
@@ -241,7 +238,7 @@ function HotlineTickets() {
       const r = typeof va === 'number' && typeof vb === 'number' ? va - vb : String(va).localeCompare(String(vb), 'fr', { numeric: true })
       return r * tri.sens || String(b.opened_at).localeCompare(String(a.opened_at))
     })
-  }, [tickets, recherche, tri, classif, collaborateurs])
+  }, [tickets, recherche, tri, collaborateurs])
 
   // Présence (13/11/2026) : tickets ouverts dans la console d'un hotliner,
   // relus toutes les 30 s sans recharger toute la liste.
@@ -262,6 +259,9 @@ function HotlineTickets() {
       window.clearInterval(h)
     }
   }, [])
+  // (20/11/2026) Lignes sur 2 lignes : pas de retour à la ligne dans les cellules,
+  // sauf quand la fiche du ticket sélectionné réduit la largeur de la liste.
+  const compact = selectedId ? '' : 'whitespace-nowrap'
   const autreHotliner = (t: Ticket) => {
     const p = presences.get(t.id)
     return p && consulteParUnAutre(p, email) ? p.consulte_par : null
@@ -334,17 +334,32 @@ function HotlineTickets() {
         }
       />
 
-      <div className="border-b border-[#E2DFD8] bg-[#F4F3F0]">
-        <div className="mx-auto flex w-full max-w-[1760px] flex-wrap items-center gap-2 px-4 py-2 md:px-8">
-          <div className="flex rounded-lg border border-[#D8D3C8] bg-white p-0.5 text-[13px]">
+      <div className="mx-auto flex w-full max-w-[1760px] flex-wrap items-center gap-2 px-4 pt-3 md:px-8">
+        <span className="inline-flex items-center gap-1.5 rounded-full border border-[#E2DFD8] bg-white px-3 py-1 text-[12px] text-slate-600">
+          <span className="text-[14px] font-bold text-slate-900">{filtres.length}</span> ticket{filtres.length > 1 ? 's' : ''} affiché{filtres.length > 1 ? 's' : ''}
+        </span>
+        <button
+          type="button"
+          onClick={() => setMesRappels((v) => !v)}
+          title="Afficher seulement les tickets dont le client est à rappeler par moi (cliquer à nouveau pour tout afficher)"
+          className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-[12px] font-semibold ${mesRappels ? 'border-[#7A5EA8] bg-[#ECE5F8] text-[#5B3F8C]' : 'border-[#D9CCEB] bg-[#F7F4FC] text-[#5B3F8C] hover:border-[#7A5EA8]'}`}
+        >
+          📞 <span className="text-[14px] font-bold">{compteurs.rappels}</span> rappel{compteurs.rappels > 1 ? 's' : ''} pour moi
+          {mesRappels ? <span className="font-normal">· filtre actif ✕</span> : null}
+        </button>
+      </div>
+
+      <div className="mt-3 border-y border-[#E2DFD8] bg-[#F4F3F0]">
+        <div className="mx-auto flex w-full max-w-[1760px] flex-wrap items-center gap-2 px-4 py-2 md:px-8 xl:flex-nowrap">
+          <div className="flex shrink-0 rounded-lg border border-[#D8D3C8] bg-white p-0.5 text-[13px]">
             {(['TOUTES', ...FILIERES.map((f) => f.value)] as Array<Filiere | 'TOUTES'>).map((f) => (
               <button key={f} type="button" onClick={() => setFiliere(f)} className={`rounded-md px-3 py-1 font-semibold ${filiere === f ? 'bg-[#0B1220] text-white' : 'text-slate-600'}`}>
                 {f === 'TOUTES' ? 'Toutes filières' : libelleFiliere(f)}
               </button>
             ))}
           </div>
-          <select value={statut} onChange={(e) => setStatut(e.target.value as FiltreStatut)} className="h-8 rounded-lg border border-[#D8D3C8] bg-white px-2 text-[13px]">
-            <option value="ACTIFS">Non résolus (non pris, en cours, attente client, escaladés)</option>
+          <select value={statut} onChange={(e) => setStatut(e.target.value as FiltreStatut)} className="h-8 shrink-0 rounded-lg border border-[#D8D3C8] bg-white px-2 text-[13px]">
+            <option value="ACTIFS">Non résolus</option>
             {(Object.keys(STATUTS) as Statut[]).map((s) => (
               <option key={s} value={s}>
                 {STATUTS[s].label}
@@ -358,15 +373,11 @@ function HotlineTickets() {
             <option value={2}>Niveau 2</option>
             <option value={3}>Niveau 3</option>
           </select>
-          <label className="flex items-center gap-1.5 text-[12px] text-slate-600">
+          <label className="flex shrink-0 items-center gap-1.5 text-[12px] text-slate-600">
             <input type="checkbox" checked={mesTickets} onChange={(e) => setMesTickets(e.target.checked)} className="h-3.5 w-3.5 accent-[#B4761A]" />
             Mes tickets
           </label>
-          <label className="flex items-center gap-1.5 text-[12px] font-semibold text-[#5B3F8C]">
-            <input type="checkbox" checked={mesRappels} onChange={(e) => setMesRappels(e.target.checked)} className="h-3.5 w-3.5 accent-[#7A5EA8]" />
-            📞 Mes rappels
-          </label>
-          <div className="flex items-center gap-1.5 text-[12px] text-slate-600">
+          <div className="flex shrink-0 items-center gap-1.5 text-[12px] text-slate-600">
             <span className="font-semibold">Créés du</span>
             <input type="date" value={du} max={au || undefined} onChange={(e) => setDu(e.target.value)} className="h-9 rounded-lg border border-[#D8D3C8] bg-white px-2 text-[12px] text-slate-900" />
             <span className="font-semibold">au</span>
@@ -423,7 +434,7 @@ function HotlineTickets() {
             value={recherche}
             onChange={(e) => setRecherche(e.target.value)}
             placeholder="N° ticket, client, chantier, n° de série…"
-            className="ml-auto h-8 w-full max-w-[320px] rounded-lg border border-[#D8D3C8] bg-white px-2.5 text-[13px] outline-none focus:border-[#B4761A]"
+            className="h-9 min-w-[200px] flex-1 rounded-lg border border-[#D8D3C8] bg-white px-2.5 text-[13px] outline-none focus:border-[#B4761A]"
           />
         </div>
         <div className="mx-auto flex w-full max-w-[1760px] flex-wrap items-center gap-2 px-4 pb-2 md:px-8">
@@ -453,30 +464,6 @@ function HotlineTickets() {
       <main className="mx-auto w-full max-w-[1760px] px-4 py-5 md:px-8">
         {erreur ? <HotlineErreur message={erreur} onClose={() => setErreur(null)} /> : null}
 
-        <div className="mb-4 grid grid-cols-2 gap-3 md:grid-cols-6">
-          {[
-            { label: 'Tickets affichés', value: filtres.length },
-            { label: 'Niveau 1', value: compteurs.n1 },
-            { label: 'Niveau 2', value: compteurs.n2 },
-            { label: 'Niveau 3', value: compteurs.n3 },
-            { label: 'En escalade', value: compteurs.escalades },
-          ].map((k) => (
-            <div key={k.label} className="rounded-xl border border-[#E2DFD8] bg-white px-4 py-3">
-              <div className="text-[11px] font-semibold uppercase tracking-[0.05em] text-slate-500">{k.label}</div>
-              <div className="mt-1 text-[22px] font-bold text-slate-900">{k.value}</div>
-            </div>
-          ))}
-          <button
-            type="button"
-            onClick={() => setMesRappels((v) => !v)}
-            className={`rounded-xl border bg-white px-4 py-3 text-left hover:border-[#7A5EA8] ${mesRappels ? 'border-[#7A5EA8] ring-2 ring-[#D9CCEB]' : 'border-[#E2DFD8]'}`}
-            title="Tickets dont le client est à rappeler par moi"
-          >
-            <div className="text-[11px] font-semibold uppercase tracking-[0.05em] text-[#5B3F8C]">📞 Rappels pour moi</div>
-            <div className="mt-1 text-[22px] font-bold text-[#5B3F8C]">{compteurs.rappels}</div>
-          </button>
-        </div>
-
         <div className={`grid grid-cols-1 gap-4 ${selectedId ? 'xl:grid-cols-[minmax(0,1fr)_520px]' : ''}`}>
           <section className="min-w-0 rounded-2xl border border-[#E2DFD8] bg-white">
             <div className="flex flex-wrap items-center gap-3 border-b border-[#EFEDE8] px-3 py-2 text-[11px] text-slate-600">
@@ -488,17 +475,16 @@ function HotlineTickets() {
               ))}
               <span className="font-extrabold text-[#C81E1E]">TICK… en rouge = ouvert par un autre hotliner</span>
             </div>
-            <div className="overflow-x-auto">
-              <table className="w-full min-w-[1400px] text-[13px]">
-                <thead className="bg-[#FAF9F7] text-[11px] uppercase tracking-[0.05em] text-slate-500">
+            <div className="max-h-[calc(100vh-230px)] overflow-auto">
+              <table className={`w-full text-[13px] ${selectedId ? 'min-w-[1100px]' : 'min-w-[1250px]'}`}>
+                <thead className="sticky top-0 z-10 bg-[#FAF9F7] text-[11px] uppercase tracking-[0.05em] text-slate-500 shadow-[0_1px_0_#E2DFD8]">
                   <tr>
                     {(
                       [
                         ['statut', 'Statut', 'text-left'],
                         ['numero', 'Ticket', 'text-left'],
                         ['opened_at', 'Ouvert', 'text-left'],
-                        ['filiere', 'Filière · motif', 'text-left'],
-                        ['classif', 'Classification', 'text-left'],
+                        ['filiere', 'Motif', 'text-left'],
                         ['client', 'Client', 'text-left'],
                         ['description', 'Motif de l’appel', 'text-left'],
                         ['chantier', 'Chantier / n° série', 'text-left'],
@@ -507,7 +493,7 @@ function HotlineTickets() {
                         ['duree', 'Durée', 'text-right'],
                       ] as Array<[ColTri, string, string]>
                     ).map(([col, label, align]) => (
-                      <th key={col} className={`px-3 py-2 ${align}`}>
+                      <th key={col} className={`bg-[#FAF9F7] px-3 py-2 ${align}`}>
                         <button
                           type="button"
                           onClick={() => trierPar(col)}
@@ -524,19 +510,20 @@ function HotlineTickets() {
                 <tbody>
                   {loading ? (
                     <tr>
-                      <td colSpan={11} className="px-3 py-10 text-center text-slate-500">
+                      <td colSpan={10} className="px-3 py-10 text-center text-slate-500">
                         Chargement des tickets…
                       </td>
                     </tr>
                   ) : !filtres.length ? (
                     <tr>
-                      <td colSpan={11} className="px-3 py-10 text-center text-slate-500">
+                      <td colSpan={10} className="px-3 py-10 text-center text-slate-500">
                         Aucun ticket pour ces filtres.
                       </td>
                     </tr>
                   ) : (
                     filtres.map((t) => {
                       const autre = autreHotliner(t)
+                      const sev = styleSeverite(t.severite)
                       return (
                       <tr
                         key={t.id}
@@ -544,52 +531,50 @@ function HotlineTickets() {
                         style={{ background: t.id === selectedId ? '#FDF7EA' : styleStatut(t.statut).row }}
                         className={`cursor-pointer border-t border-[#EFEDE8] hover:brightness-[0.97] ${t.id === selectedId ? 'outline outline-2 -outline-offset-2 outline-[#B4761A]' : ''}`}
                       >
-                        <td className="px-3 py-2">
+                        <td className={`px-3 py-1.5 ${compact}`}>
                           <Pastille {...styleStatut(t.statut)} />
-                          {styleSeverite(t.severite) ? (
-                            <div className="mt-1">
-                              <Pastille label={styleSeverite(t.severite)!.label} tone={styleSeverite(t.severite)!.tone} bg={styleSeverite(t.severite)!.bg} />
+                          {sev ? (
+                            <div className="mt-0.5">
+                              <Pastille label={sev.label} tone={sev.tone} bg={sev.bg} />
                             </div>
                           ) : null}
                         </td>
-                        <td className={`px-3 py-2 ${autre ? 'font-extrabold text-[#C81E1E]' : 'font-semibold text-slate-900'}`} title={autre ? `Ouvert en ce moment par ${nomCollaborateur(autre, collaborateurs)}` : undefined}>
+                        <td className={`px-3 py-1.5 ${compact} ${autre ? 'font-extrabold text-[#C81E1E]' : 'font-semibold text-slate-900'}`} title={autre ? `Ouvert en ce moment par ${nomCollaborateur(autre, collaborateurs)}` : undefined}>
                           {t.numero}
                           {t.est_test ? <span className="ml-1.5 rounded bg-[#5F6670] px-1 py-px text-[10px] font-bold text-white">TEST</span> : null}
-                          {autre ? <div className="text-[11px] font-bold text-[#C81E1E]">● {nomCollaborateur(autre, collaborateurs)}</div> : null}
-                          {t.rappel_par ? (
-                            <div className="text-[11px] font-semibold text-[#5B3F8C]" title="Client à rappeler">
-                              📞 {nomCollaborateur(t.rappel_par, collaborateurs)}
+                          {autre || t.rappel_par ? (
+                            <div className="text-[11px]">
+                              {autre ? <span className="font-bold text-[#C81E1E]">● {nomCollaborateur(autre, collaborateurs)} </span> : null}
+                              {t.rappel_par ? (
+                                <span className="font-semibold text-[#5B3F8C]" title="Client à rappeler">
+                                  📞 {nomCollaborateur(t.rappel_par, collaborateurs)}
+                                </span>
+                              ) : null}
                             </div>
                           ) : null}
                         </td>
-                        <td className="px-3 py-2 text-slate-600">{fmtDateHeure(t.opened_at)}</td>
-                        <td className="px-3 py-2 text-slate-700">
-                          {libelleFiliere(t.filiere)} <span className="text-slate-500">· {libelleMotif(t.motif)}</span>
+                        <td className={`px-3 py-1.5 text-slate-600 ${compact}`}>{fmtDateHeure(t.opened_at)}</td>
+                        <td className={`px-3 py-1.5 text-slate-700 ${compact}`}>
+                          {libelleMotif(t.motif)}
                           {t.nature || t.gamme ? <div className="text-[11px] text-slate-500">{[libelleNature(t.nature), libelleGamme(t.gamme)].filter(Boolean).join(' · ')}</div> : null}
                         </td>
-                        <td className="max-w-[260px] px-3 py-2 text-[12px]">
-                          {t.symptome || t.organe || t.issue ? (
-                            <>
-                              <div className="text-slate-800">{[libelleClassif(classif, 'symptome', t.symptome), libelleClassif(classif, 'organe', t.organe)].filter(Boolean).join(' · ') || '—'}</div>
-                              {t.issue ? <div className="font-semibold text-[#1E4E8C]">→ {libelleClassif(classif, 'issue', t.issue)}</div> : null}
-                            </>
-                          ) : (
-                            <span className="text-slate-400">—</span>
-                          )}
+                        <td className={`px-3 py-1.5 ${selectedId ? '' : 'max-w-[260px]'}`}>
+                          <div className={`font-medium text-slate-900 ${selectedId ? '' : 'truncate'}`} title={t.intitule_tiers || undefined}>
+                            {t.intitule_tiers || t.numero_tiers || fmtTel(t.telephone_appelant) || '—'}
+                          </div>
+                          {t.contact_nom ? <div className={`text-[11px] text-slate-500 ${selectedId ? '' : 'truncate'}`}>{t.contact_nom}</div> : null}
                         </td>
-                        <td className="px-3 py-2">
-                          <div className="font-medium text-slate-900">{t.intitule_tiers || t.numero_tiers || fmtTel(t.telephone_appelant) || '—'}</div>
-                          {t.contact_nom ? <div className="text-[11px] text-slate-500">{t.contact_nom}</div> : null}
-                        </td>
-                        <td className="max-w-[300px] px-3 py-2 text-[12px] text-slate-700">
+                        <td className="max-w-[300px] px-3 py-1.5 text-[12px] text-slate-700">
                           <div className="line-clamp-2" title={t.description || undefined}>
                             {t.description || <span className="text-slate-400">—</span>}
                           </div>
                         </td>
-                        <td className="px-3 py-2 text-slate-600">{[t.chantier, t.numero_serie].filter(Boolean).join(' · ') || '—'}</td>
-                        <td className="px-3 py-2 text-center font-semibold">N{t.niveau}</td>
-                        <td className="px-3 py-2 text-[12px] text-slate-500">{t.assigne_a ? nomCollaborateur(t.assigne_a, collaborateurs) : '—'}</td>
-                        <td className="px-3 py-2 text-right text-slate-600">{fmtDuree(t.opened_at, t.resolved_at || t.closed_at || new Date().toISOString())}</td>
+                        <td className={`px-3 py-1.5 text-slate-600 ${selectedId ? '' : 'max-w-[220px]'}`}>
+                          <div className="line-clamp-2">{[t.chantier, t.numero_serie].filter(Boolean).join(' · ') || '—'}</div>
+                        </td>
+                        <td className="px-3 py-1.5 text-center font-semibold">N{t.niveau}</td>
+                        <td className={`px-3 py-1.5 text-[12px] text-slate-500 ${compact}`}>{t.assigne_a ? nomCollaborateur(t.assigne_a, collaborateurs) : '—'}</td>
+                        <td className={`px-3 py-1.5 text-right text-slate-600 ${compact}`}>{fmtDuree(t.opened_at, t.resolved_at || t.closed_at || new Date().toISOString())}</td>
                       </tr>
                       )
                     })
