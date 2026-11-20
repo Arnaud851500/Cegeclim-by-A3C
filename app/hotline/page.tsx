@@ -611,7 +611,8 @@ function HotlineConsole() {
         // (« en attente client » reste en attente jusqu'à la prochaine action).
         const statut = t.statut === 'ATTENTE_CLIENT' ? t.statut : ('EN_COURS' as const)
         const qui = String(email || '').split('@')[0]
-        await majTicket(t.id, { assigne_a: email || t.assigne_a, statut })
+        // (20/11/2026) La reprise remet à zéro le compteur « le client rappelle ».
+        await majTicket(t.id, { assigne_a: email || t.assigne_a, statut, nb_rappels_client: 0 })
         // (20/11/2026) Reprendre le ticket dans la console lève la demande de rappel.
         if (t.rappel_par) {
           await rappelEffectue(t.id, qui, 'reprise dans la console')

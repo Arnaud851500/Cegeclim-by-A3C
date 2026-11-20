@@ -203,7 +203,16 @@ function HotlineTickets() {
             .filter(Boolean)
             .some((v) => String(v).toLowerCase().includes(q)),
         )
-    if (!tri) return liste
+    // (20/11/2026) Tri par défaut : nombre de « le client rappelle » décroissant,
+    // puis Non pris / En cours / Attente client (escaladés et résolus ensuite),
+    // puis du plus récent au plus ancien.
+    if (!tri)
+      return [...liste].sort(
+        (a, b) =>
+          (b.nb_rappels_client || 0) - (a.nb_rappels_client || 0) ||
+          (RANG_STATUT[a.statut] ?? 9) - (RANG_STATUT[b.statut] ?? 9) ||
+          String(b.opened_at).localeCompare(String(a.opened_at)),
+      )
     const maintenant = Date.now()
     const cle = (t: Ticket): string | number => {
       switch (tri.col) {
