@@ -563,6 +563,8 @@ function EngagementHitachi() {
               </table>
             </section>
 
+            <OrigineDonnees sources={data.refresh?.sources || null} />
+
             {/* Règles de lecture — mises en commentaire à la demande d'Arnaud (19/11/2026), conservées pour mémoire :
             <section className="rounded-xl border border-[#E5E1D8] bg-white px-4 py-3 text-[11.5px] leading-relaxed text-[#5E5A44]">
               <p className="mb-1 text-[10.5px] font-bold uppercase tracking-[0.1em] text-[#8A8474]">Lecture</p>
@@ -1305,7 +1307,60 @@ function VueAnnexe6({ annee, engagement, gammes, parGamme, lignes, total, s1Clos
             </tbody>
           </table>
         </div>
+        <div className="mt-3"><OrigineDonnees sources={sources?.sources || null} ouvert /></div>
       </div>
     </div>
+  )
+}
+
+/** Origine des chiffres (20/11/2026, demandé par Arnaud) : environnement, document et valorisation. */
+function OrigineDonnees({ sources, ouvert = false }: { sources: Record<string, string | null> | null; ouvert?: boolean }) {
+  const lignes: [string, string, string][] = [
+    [
+      'Achats reçus',
+      'BLG — commandes fournisseur (CDF) Hitachi fH0001',
+      'Lignes livrées : quantité livrée à sa date de livraison (réception). Valeur = quantité × prix d’achat net de la ligne, c’est-à-dire tarif × (1 − remise de la ligne) : les remises standard / stock M-3 / containers portées sur la CDF sont déduites. Les régularisations tarifaires saisies en lignes (REGULTARIFHIT…) viennent en négatif dans « Autres articles Hitachi ». Ne sont pas déduits : BFA, avoirs et remises hors ligne. Contrôle au 20/11 : 18,97 M€ reçus pour 18,83 M€ de factures fournisseur BLG.',
+    ],
+    [
+      'Achats ferme',
+      'SAGE — CDF non réceptionnées (bdcf, type 12)',
+      'Quantité restant à recevoir, montant HT net de la remise de la ligne, date de livraison SAGE ; CDF en retard ou sans date supposées reçues demain. Les CDF datées après le 31/12 sont mises à part.',
+    ],
+    [
+      'Ventes BL',
+      'SAGE — bons de livraison de l’année (facturés ou non), flux articles du compagnon',
+      'CA HT net des remises client. Valeur d’achat = CA − marge SAGE (prix de revient de la ligne).',
+    ],
+    [
+      'CDC à livrer',
+      'SAGE — bons de commande clients non livrés (portefeuille SAGE, pas BLG)',
+      'Quantité restant à livrer, date de livraison d’ici le 31/12 (date passée = à livrer). CA HT de la ligne ; valeur d’achat = quantité × dernier prix d’achat de l’article (SAGE, à défaut BLG). Les préparations de livraison (PL) ne sont comptées ni en BL ni en CDC.',
+    ],
+    [
+      'Objectifs',
+      'Annexe 6 signée par Hitachi le 18/06/2026',
+      'Objectifs, réalisé 2025, remises et règles de BFA saisis tels quels. Rattachement articles → gammes : familles SAGE et familles / sous-familles BLG (clic sur une gamme).',
+    ],
+  ]
+  return (
+    <details open={ouvert} className="rounded-xl border border-[#E5E1D8] bg-white px-4 py-2.5 text-[11.5px] text-[#5E5A44]">
+      <summary className="cursor-pointer text-[10.5px] font-bold uppercase tracking-[0.1em] text-[#8A8474]">Origine des chiffres</summary>
+      <table className="mt-2 w-full border-collapse">
+        <tbody>
+          {lignes.map(([quoi, ou, comment]) => (
+            <tr key={quoi} className="border-t border-[#F3F1EC] align-top">
+              <td className="whitespace-nowrap py-1.5 pr-3 font-bold text-[#3A362E]">{quoi}</td>
+              <td className="py-1.5 pr-3 font-semibold text-[#245A9E]">{ou}</td>
+              <td className="py-1.5 leading-relaxed">{comment}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      {sources && (
+        <p className="mt-1.5 text-[10.5px] text-[#8A8474]">
+          Fraîcheur : CDF BLG synchronisées le {fmtDateHeure(sources.recus_blg)} · CDF SAGE chargées le {fmtDateHeure(sources.cdf_sage)} · BL du flux articles le {fmtDateHeure(sources.bl_flux)} (CDC : portefeuille SAGE du dernier import).
+        </p>
+      )}
+    </details>
   )
 }
