@@ -31,6 +31,9 @@ import { themed } from '@/lib/theme'
 // la liste concernée ; un clic sur le titre ouvre le Centre d'alertes.
 // Mode clair : les blocs passent en teintes claires (couleur du bloc sur
 // l'icône), via useTheme() ; le reste suit les variables de lib/theme.ts.
+// ÉVOLUTION (2026-11-20) : raccourci « Quand puis-je livrer ? » (mini bloc pleine
+// largeur sous le titre, droit can_stocks) : n° de devis → /quand-livrer?devis=…,
+// ou « Coller une liste » → /quand-livrer en mode liste.
 // ÉVOLUTION (2026-09-15 soir) : bloc « Mes alertes » — pas une page mais la
 // fenêtre flottante « Centre d'alertes » (ClientRootShell), qui reprend en
 // grand les pastilles du bandeau. Il apparaît après « Mes tâches » dès que le
@@ -145,6 +148,8 @@ export default function AccueilPage() {
           Choisissez un bloc pour ouvrir un écran ; le bouton MENU du bandeau vous ramène ici.
         </div>
       </div>
+
+      {rights.can_stocks && <RaccourciQuandLivrer onOpen={(url) => router.push(url)} />}
 
       {blocs.length === 0 ? (
         <div style={styles.empty}>
@@ -672,5 +677,55 @@ function AlertsBloc({
         })}
       </span>
     </div>
+  )
+}
+
+// ── Raccourci « Quand puis-je livrer ? » (20/11/2026) ───────────────────────
+function RaccourciQuandLivrer({ onOpen }: { onOpen: (url: string) => void }) {
+  const [numero, setNumero] = useState('')
+  return (
+    <form
+      className="cgcQlBar"
+      onSubmit={(e) => {
+        e.preventDefault()
+        const n = numero.trim()
+        onOpen(n ? `/quand-livrer?devis=${encodeURIComponent(n.toUpperCase())}` : '/quand-livrer')
+      }}
+      style={{
+        display: 'flex',
+        flexWrap: 'wrap',
+        alignItems: 'center',
+        gap: 14,
+        margin: '0 0 18px',
+        padding: '16px 20px',
+        borderRadius: 22,
+        background: 'linear-gradient(120deg, #C1683C 0%, #8E4524 100%)',
+        color: '#fff',
+        boxShadow: '0 10px 28px rgba(0,0,0,calc(0.28 * var(--cg-shadow-k)))',
+      }}
+    >
+      <span style={{ fontSize: 30, lineHeight: 1 }} aria-hidden="true">🚚</span>
+      <span style={{ display: 'flex', flexDirection: 'column', flex: '1 1 220px', minWidth: 0 }}>
+        <span style={{ fontSize: 20, fontWeight: 700 }}>Quand puis-je livrer ?</span>
+        <span style={{ fontSize: 13, opacity: 0.85 }}>Avant de créer la commande : date au plus tôt d’un devis ou d’une liste d’articles.</span>
+      </span>
+      <input
+        value={numero}
+        onChange={(e) => setNumero(e.target.value)}
+        placeholder="N° de devis…"
+        aria-label="N° de devis"
+        style={{ flex: '0 1 220px', minWidth: 160, font: 'inherit', fontSize: 16, padding: '11px 14px', borderRadius: 12, border: '1px solid rgba(255,255,255,0.45)', background: 'rgba(255,255,255,0.14)', color: '#fff', outline: 'none' }}
+      />
+      <button type="submit" style={{ font: 'inherit', fontSize: 15, fontWeight: 700, padding: '11px 18px', borderRadius: 12, border: 0, background: '#fff', color: '#8E4524', cursor: 'pointer' }}>
+        Contrôler
+      </button>
+      <button
+        type="button"
+        onClick={() => onOpen('/quand-livrer?liste=')}
+        style={{ font: 'inherit', fontSize: 14, fontWeight: 600, padding: '11px 14px', borderRadius: 12, border: '1px solid rgba(255,255,255,0.5)', background: 'transparent', color: '#fff', cursor: 'pointer' }}
+      >
+        📋 Coller une liste
+      </button>
+    </form>
   )
 }

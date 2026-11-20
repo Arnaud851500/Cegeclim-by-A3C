@@ -233,6 +233,7 @@ const PAGE_ACCESS_CHECKS: Array<[string, keyof AccessRights]> = [
   ['/atelier-analyse', 'can_autorisation'],
   ['/approvisionnements', 'can_dashboard'],
   ['/portefeuille-livraison', 'can_stocks'],
+  ['/quand-livrer', 'can_stocks'],
   ['/synthese_multi_clients', 'can_dashboard'],
   ['/focus_mensuel', 'can_dashboard'],
   ['/tableaux-de-bord/vision-tci', 'can_dashboard'],

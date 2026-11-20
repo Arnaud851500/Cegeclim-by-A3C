@@ -456,6 +456,27 @@ export default function MobileHome({
          publiées pour le mobile, à feuilleter), fine ligne « à jour » sinon. */}
       <MobileALaUne />
 
+      {/* ÉVOLUTION (2026-11-20) : raccourci « Quand puis-je livrer ? » (droit
+         can_stocks), pleine largeur au-dessus de la grille. */}
+      {rights.can_stocks && (
+        <button
+          type="button"
+          onClick={() => onNavigate('livrer')}
+          style={{
+            display: 'flex', alignItems: 'center', gap: 12, width: '100%', textAlign: 'left',
+            border: '1px solid rgba(255,255,255,0.18)', borderRadius: 18, padding: '14px 16px', marginBottom: 12,
+            background: 'linear-gradient(120deg, #C1683C, #8E4524)', color: '#fff', fontFamily: 'var(--font-body)',
+          }}
+        >
+          <span style={{ fontSize: 26 }} aria-hidden="true">🚚</span>
+          <span style={{ display: 'flex', flexDirection: 'column', flex: 1, minWidth: 0 }}>
+            <span style={{ fontSize: 17, fontWeight: 700 }}>Quand puis-je livrer ?</span>
+            <span style={{ fontSize: 12.5, opacity: 0.85 }}>Date au plus tôt d’un devis ou d’une liste</span>
+          </span>
+          <span style={{ fontSize: 22, opacity: 0.7 }} aria-hidden="true">›</span>
+        </button>
+      )}
+
       {/* Une seule grille 2 colonnes pour TOUT (boutons vocaux inclus) --
          garantit une largeur strictement identique entre les cartes vocales
          et les cartes de navigation en dessous. Résumé vocal à gauche,

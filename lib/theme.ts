@@ -39,6 +39,7 @@ export const LIGHT_READY_PATHS: string[] = [
   '/admin/performance-extraction', // Performance des extractions (15/10/2026)
   '/financement', // Financement CEE et sous-écrans (16/10/2026, contenu déjà clair, bandeau thémé)
   '/piliers', // Réunion Piliers / Feuille de route (19/11/2026, écrit en variables de thème)
+  '/quand-livrer', // Quand puis-je livrer ? (20/11/2026, écrit en variables de thème)
   '/hotline', // Hotline technique et sous-écrans (02/11/2026, contenu clair, bandeau thémé)
 ]
 

@@ -31,9 +31,11 @@ import { MOBILE_OPEN_STOCK_EVENT, type ActualiteType, type MobileOpenStockDetail
 import { logMobileView } from '@/lib/mobileActivityLog'
 // ÉVOLUTION (2026-10-09) : zoom à deux doigts optionnel (préférence « 🎙️ Voix »)
 import { useZoomMobile } from '@/lib/zoomMobile'
+import QuandLivrer from '@/components/QuandLivrer'
 
 
-export type MobileScreen = 'home' | 'activite' | 'clients' | 'rdv' | 'alertes' | 'prospects' | 'stock' | 'Admin' | 'actualites' | 'hotline'
+// ÉVOLUTION (2026-11-20) : écran 'livrer' = « Quand puis-je livrer ? » (components/QuandLivrer).
+export type MobileScreen = 'home' | 'activite' | 'clients' | 'rdv' | 'alertes' | 'prospects' | 'stock' | 'Admin' | 'actualites' | 'hotline' | 'livrer'
 
 /**
  * Une entrée de la pile de navigation : un écran, plus la "cible" qui l'a
@@ -43,7 +45,7 @@ export type MobileScreen = 'home' | 'activite' | 'clients' | 'rdv' | 'alertes' |
  * -> client A -> ... ) ne se marchent pas dessus.
  */
 const PILE_STORAGE_KEY = 'cgc.mobile.pile'
-const ECRANS_VALIDES: MobileScreen[] = ['activite', 'clients', 'rdv', 'alertes', 'prospects', 'stock', 'Admin', 'actualites', 'hotline']
+const ECRANS_VALIDES: MobileScreen[] = ['activite', 'clients', 'rdv', 'alertes', 'prospects', 'stock', 'Admin', 'actualites', 'hotline', 'livrer']
 
 type PileEntree = {
   key: number
@@ -413,6 +415,7 @@ export default function MobileShell() {
             )}
             {entree.screen === 'Admin' && <MobileAdminPanel />}
             {entree.screen === 'hotline' && <MobileHotline />}
+            {entree.screen === 'livrer' && <QuandLivrer compact />}
             {entree.screen === 'actualites' &&
               (entree.cibleActu ? (
                 <MobileActualiteLecture id={entree.cibleActu} />
@@ -449,6 +452,8 @@ function screenTitle(screen: MobileScreen) {
       return 'Fil d’actu'
     case 'hotline':
       return 'Hotline - Ticketing'
+    case 'livrer':
+      return 'Quand puis-je livrer ?'
     default:
       return ''
   }

@@ -89,6 +89,10 @@
 // réservé aux membres de la réunion mensuelle des Piliers (droit calculé can_piliers =
 // membre actif de piliers_membres, rpc piliers_suis_membre ; RLS côté base).
 // Migration 20261119a_reunion_piliers.sql.
+// ÉVOLUTION (2026-11-20) : « Quand puis-je livrer ? » (/quand-livrer, can_stocks) en tête de
+// Stocks & logistique — contrôle avant commande d'un devis ou d'une liste collée (date au plus
+// tôt par ligne, référence limitante, sommeil, écarts de tarif / PR). Aussi en raccourci sur
+// l'accueil PC et mobile. Migration 20261120c_quand_puis_je_livrer.sql.
 // Le bloc « Mes alertes » de l'accueil n'est pas ici : il n'a pas de page, il
 // ouvre le Centre d'alertes (components/AlertsContext.tsx + ClientRootShell).
 
@@ -245,6 +249,7 @@ export const NAV_BLOCS: NavBloc[] = [
     gradient: ['#8B8767', '#5E5A44'],
     iconBg: 'rgba(255,255,255,0.18)',
     pages: [
+      { label: 'Quand puis-je livrer ?', path: '/quand-livrer', activeLabel: 'Quand puis-je livrer ?', accessKey: 'can_stocks', description: 'Avant de créer la commande : date de livraison au plus tôt d’un devis (par bloc) ou d’une liste d’articles collée / photographiée, référence limitante, articles en sommeil, écarts de tarif et de PR.' },
       { label: 'Portefeuille de commandes', path: '/portefeuille-livraison', activeLabel: 'Portefeuille cde', accessKey: 'can_stocks', description: 'CDC à livrer, contrôle des frais de port, couverture stock.' },
       { label: 'Références en pénurie', path: '/stock/penurie', activeLabel: 'Références en pénurie', accessKey: 'can_appro', description: 'Prochaine date de dispo pour une nouvelle commande client (stock, CDC, CDF, délai d’appro) — vue commandes clients et vue appro.' },
       { label: 'Équivalences R/O AirH2O', path: '/stock/equivalences-ro', activeLabel: 'Équivalences R/O AirH2O 600 / 800', accessKey: 'can_stocks', description: 'Groupes AirH2O 600 / 800 par taille et par usage (S, S + ECS, Combi, monobloc H) : solution actuelle et solutions d’anciennes générations en stock, composant limitant, quantité réalisable et écart de prix, en glisser-déposer.' },
