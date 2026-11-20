@@ -73,6 +73,12 @@ export type SuiviDepot = InvDepot & {
   nb_a_compter: number
   nb_saisies: number
   valeur_theorique: number
+  /** Unités à compter (somme du stock théorique SAGE des lignes, transit compris). */
+  qte_theorique?: number
+  qte_transit?: number
+  /** Unités des lignes du comptage ouvert : théoriques / déjà saisies. */
+  qte_a_compter?: number
+  qte_saisie?: number
   nb_ecarts: number
   nb_ecarts_a_decider: number
   nb_valides: number

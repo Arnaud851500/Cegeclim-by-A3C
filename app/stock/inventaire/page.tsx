@@ -23,6 +23,9 @@
  * réceptionné) inclus par défaut dans la liste du dépôt destinataire, section « En transit », écart
  * passé sur le dépôt transit (migration 20261101b_inventaire_transit.sql).
  *
+ * 20/11/2026 : quantités d'unités à compter (stock théorique SAGE des listes) dans les indicateurs, le suivi
+ * par dépôt, le détail et la préparation (migration 20261120_inventaire_quantites_unites.sql).
+ *
  * Accès : droit can_appro (ou can_autorisation), contrôlé aussi par chaque RPC.
  * Sources : RPC inv_* (supabase/migrations/20261101_inventaire_annuel.sql).
  */
@@ -45,7 +48,7 @@ type Ctx = {
 type Option = { code: string; libelle?: string | null; nom?: string | null; macro?: string; nb_refs: number; valeur: number }
 type Options = {
   familles_macro: Option[]; familles: Option[]; fournisseurs: Option[]
-  depots: Array<{ depot_num: string; nb_refs: number; valeur: number; transit_libelle?: string | null; transit_nb_refs?: number | null; transit_valeur?: number | null }>
+  depots: Array<{ depot_num: string; nb_refs: number; valeur: number; qte?: number | null; transit_libelle?: string | null; transit_nb_refs?: number | null; transit_valeur?: number | null; transit_qte?: number | null }>
 }
 type DetailDepot = InvDepot & { lignes: LignePilotage[] }
 type FiltreLignes = 'ecarts' | 'a_decider' | 'recomptage' | 'non_saisies' | 'hors_liste' | 'transit' | 'toutes'
@@ -296,13 +299,14 @@ function PilotageInventaire() {
 
   // ── Calculs ────────────────────────────────────────────────────────────
   const totaux = useMemo(() => {
-    const t = { prep: 0, comptage: 0, analyse: 0, valide: 0, lignes: 0, aCompter: 0, saisies: 0, valeur: 0, ecarts: 0, aDecider: 0, net: 0, plus: 0, moins: 0, valideNet: 0 }
+    const t = { prep: 0, comptage: 0, analyse: 0, valide: 0, lignes: 0, aCompter: 0, saisies: 0, valeur: 0, unites: 0, unitesTransit: 0, unitesACompter: 0, unitesSaisies: 0, ecarts: 0, aDecider: 0, net: 0, plus: 0, moins: 0, valideNet: 0 }
     for (const d of suivi) {
       if (d.statut === 'preparation') t.prep++
       else if (d.statut === 'comptage') t.comptage++
       else if (d.statut === 'analyse') t.analyse++
       else t.valide++
       t.lignes += d.nb_lignes; t.aCompter += d.nb_a_compter; t.saisies += d.nb_saisies; t.valeur += n0(d.valeur_theorique)
+      t.unites += n0(d.qte_theorique); t.unitesTransit += n0(d.qte_transit); t.unitesACompter += n0(d.qte_a_compter); t.unitesSaisies += n0(d.qte_saisie)
       t.ecarts += d.nb_ecarts; t.aDecider += d.nb_ecarts_a_decider; t.net += n0(d.valeur_ecart_net)
       t.plus += n0(d.valeur_ecart_plus); t.moins += n0(d.valeur_ecart_moins); t.valideNet += n0(d.valeur_validee_net)
     }
@@ -404,9 +408,11 @@ function PilotageInventaire() {
         {campagne && (
           <>
             {/* Indicateurs */}
-            <section className="grid grid-cols-2 gap-2 md:grid-cols-4 xl:grid-cols-7">
+            <section className="grid grid-cols-2 gap-2 md:grid-cols-4 xl:grid-cols-8">
               <Kpi label="Dépôts" value={fmtNum(suivi.length)} sub={`${totaux.prep} prép. · ${totaux.comptage} comptage · ${totaux.analyse} analyse · ${totaux.valide} validé(s)`} />
               <Kpi label="Lignes à inventorier" value={fmtNum(totaux.lignes)} sub={`valeur théorique ${fmtEuro(totaux.valeur)}`} />
+              <Kpi label="Unités à compter" value={fmtQte(totaux.unites)}
+                sub={totaux.unitesACompter ? `comptage ouvert : ${fmtQte(totaux.unitesSaisies)} saisies / ${fmtQte(totaux.unitesACompter)} théo.` : totaux.unitesTransit ? `dont ${fmtQte(totaux.unitesTransit)} en transit` : 'stock théorique SAGE des listes'} />
               <Kpi label="Saisies en cours" value={totaux.aCompter ? `${fmtNum(totaux.saisies)} / ${fmtNum(totaux.aCompter)}` : '—'} sub={totaux.aCompter ? `${Math.round((totaux.saisies / totaux.aCompter) * 100)} % des lignes ouvertes` : 'aucun comptage ouvert'} />
               <Kpi label="Écarts" value={fmtNum(totaux.ecarts)} sub={`${fmtNum(totaux.aDecider)} à décider`} tone={totaux.aDecider ? 'warn' : undefined} />
               <Kpi label="Écarts positifs" value={fmtEuro(totaux.plus)} tone="ok" />
@@ -441,10 +447,10 @@ function PilotageInventaire() {
                                 className={`rounded-lg border px-2.5 py-1.5 text-left text-[12px] ${on ? 'border-[#111820] bg-[#111820] text-white' : 'border-[#E5E1D8] bg-white hover:border-[#B4761A]'}`}>
                                 <div className="font-bold">{d.central ? 'FMS (central)' : d.nom_court || d.libelle}</div>
                                 <div className={on ? 'text-white/70' : 'text-[#8A8474]'}>
-                                  {fmtNum(o?.nb_refs)} réf. · {fmtEuro(o?.valeur)}{st ? ` · ${libelleStatut(st)}` : ''}
+                                  {fmtNum(o?.nb_refs)} réf. · {fmtQte(o?.qte)} u. · {fmtEuro(o?.valeur)}{st ? ` · ${libelleStatut(st)}` : ''}
                                 </div>
                                 {o?.transit_nb_refs ? (
-                                  <div className={on ? 'text-[#B9CFEE]' : 'text-[#1D4F91]'}>+ transit : {fmtNum(o.transit_nb_refs)} réf. · {fmtEuro(o.transit_valeur)}</div>
+                                  <div className={on ? 'text-[#B9CFEE]' : 'text-[#1D4F91]'}>+ transit : {fmtNum(o.transit_nb_refs)} réf. · {fmtQte(o.transit_qte)} u. · {fmtEuro(o.transit_valeur)}</div>
                                 ) : null}
                               </button>
                             )
@@ -538,13 +544,13 @@ function PilotageInventaire() {
                     <tr>
                       <th className="px-3 py-2">Dépôt</th><th className="px-2 py-2">Statut</th><th className="px-2 py-2">Périmètre</th>
                       <th className="px-2 py-2">Comptages</th><th className="px-2 py-2">Avancement</th>
-                      <th className="px-2 py-2 text-right">Lignes</th><th className="px-2 py-2 text-right">Valeur théo.</th>
+                      <th className="px-2 py-2 text-right">Lignes</th><th className="px-2 py-2 text-right" title="Unités à compter : somme du stock théorique SAGE des lignes (transit compris)">Unités</th><th className="px-2 py-2 text-right">Valeur théo.</th>
                       <th className="px-2 py-2 text-right">Écarts</th><th className="px-2 py-2 text-right">À décider</th>
                       <th className="px-2 py-2 text-right">Écart net</th><th className="px-2 py-2">Stock SAGE du</th><th className="px-2 py-2" />
                     </tr>
                   </thead>
                   <tbody>
-                    {suivi.length === 0 && <tr><td colSpan={12} className="px-3 py-6 text-center text-[#8A8474]">Aucune liste : ouvrez « Préparer les listes d’inventaire ».</td></tr>}
+                    {suivi.length === 0 && <tr><td colSpan={13} className="px-3 py-6 text-center text-[#8A8474]">Aucune liste : ouvrez « Préparer les listes d’inventaire ».</td></tr>}
                     {suivi.map((d) => {
                       const perim = [d.familles_macro.length ? `Macro ${d.familles_macro.join(', ')}` : '', d.familles.length ? `${d.familles.length} famille(s)` : '',
                         d.fournisseurs.length ? `Fourn. ${d.fournisseurs.join(', ')}` : '', d.inclure_stock_nul ? 'stock nul inclus' : '',
@@ -573,6 +579,10 @@ function PilotageInventaire() {
                             )}
                           </td>
                           <td className="px-2 py-2 text-right">{fmtNum(d.nb_lignes)}{d.nb_hors_liste ? <span className="text-[#96600F]" title="Articles ajoutés hors liste"> +{d.nb_hors_liste}</span> : null}</td>
+                          <td className="whitespace-nowrap px-2 py-2 text-right" title={d.qte_transit ? `dont ${fmtQte(d.qte_transit)} en transit` : undefined}>
+                            {fmtQte(d.qte_theorique)}
+                            {d.qte_a_compter ? <div className="text-[10.5px] text-[#1D4F91]">{fmtQte(d.qte_saisie)} saisies / {fmtQte(d.qte_a_compter)}</div> : null}
+                          </td>
                           <td className="px-2 py-2 text-right">{fmtEuro(d.valeur_theorique)}</td>
                           <td className="px-2 py-2 text-right">{fmtNum(d.nb_ecarts)}</td>
                           <td className={`px-2 py-2 text-right font-bold ${d.nb_ecarts_a_decider ? 'text-[#B4761A]' : 'text-[#8A8474]'}`}>{fmtNum(d.nb_ecarts_a_decider)}</td>
@@ -642,8 +652,10 @@ function PilotageInventaire() {
                 </div>
 
                 {suiviDetail && (
-                  <div className="grid grid-cols-2 gap-2 px-4 py-3 md:grid-cols-4 xl:grid-cols-7">
+                  <div className="grid grid-cols-2 gap-2 px-4 py-3 md:grid-cols-4 xl:grid-cols-8">
                     <Kpi label="Lignes" value={fmtNum(suiviDetail.nb_lignes)} sub={suiviDetail.nb_hors_liste ? `dont ${suiviDetail.nb_hors_liste} hors liste` : undefined} />
+                    <Kpi label="Unités à compter" value={fmtQte(suiviDetail.qte_theorique)}
+                      sub={suiviDetail.qte_a_compter ? `${ORDINAL[detail.comptage_courant]} comptage : ${fmtQte(suiviDetail.qte_saisie)} saisies / ${fmtQte(suiviDetail.qte_a_compter)} théo.` : suiviDetail.qte_transit ? `dont ${fmtQte(suiviDetail.qte_transit)} en transit` : undefined} />
                     <Kpi label="Valeur théorique" value={fmtEuro(suiviDetail.valeur_theorique)} />
                     <Kpi label="Saisies" value={suiviDetail.nb_a_compter ? `${fmtNum(suiviDetail.nb_saisies)} / ${fmtNum(suiviDetail.nb_a_compter)}` : '—'} sub={detail.statut === 'comptage' ? `${ORDINAL[detail.comptage_courant]} comptage` : undefined} />
                     <Kpi label="Écarts" value={fmtNum(suiviDetail.nb_ecarts)} sub={`${suiviDetail.nb_valides} validé(s) · ${suiviDetail.nb_refuses} refusé(s)`} />
