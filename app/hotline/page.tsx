@@ -257,6 +257,19 @@ const ZONES = {
 }
 const titreCarte = 'border-b border-[#EFEDE8] px-4 py-3 text-[14px] font-bold text-slate-900'
 
+// (20/11/2026) Un seul onglet console par poste : 3CX ouvre un onglet à chaque
+// sonnerie. L'onglet ouvert par 3CX transmet l'appel à la console déjà ouverte
+// (verrou navigator.locks + BroadcastChannel) puis se referme.
+const CANAL_CONSOLE = 'cegeclim-hotline-console'
+const VERROU_CONSOLE = 'cegeclim-hotline-console'
+const DOUBLON_APPEL_MS = 120_000
+
+/** Ligne appelée transmise par 3CX ; ignorée si la variable n'a pas été remplacée (%CalledNumber%). */
+function ligneValide(value: string | null | undefined) {
+  const v = String(value || '').trim()
+  return v && !v.includes('%') && telCle(v) ? v : ''
+}
+
 export default function HotlineConsoleWrapper() {
   return (
     <Suspense fallback={<div className="p-10 text-sm text-slate-500">Chargement…</div>}>
@@ -270,7 +283,13 @@ function HotlineConsole() {
   const { email } = useAccess()
 
   const [telephone, setTelephone] = useState(params.get('tel') || '')
-  const [ligneAppelee] = useState(params.get('ligne') || '')
+  const [ligneAppelee, setLigneAppelee] = useState(ligneValide(params.get('ligne')))
+  // Onglet ouvert par 3CX : 'verif' le temps de savoir si une console est déjà
+  // ouverte, 'transmis' si l'appel lui a été passé, 'console' sinon.
+  const [relais, setRelais] = useState<'verif' | 'console' | 'transmis'>(params.get('tel') ? 'verif' : 'console')
+  const [appelEntrant, setAppelEntrant] = useState<{ tel: string; ligne: string } | null>(null)
+  const dernierAppelRecu = useRef<{ cle: string; at: number }>({ cle: telCle(params.get('tel')), at: Date.now() })
+  const recevoirAppelRef = useRef<(tel: string, ligne: string) => void>(() => undefined)
   const [lignes, setLignes] = useState<Ligne[]>([])
   const [arbres, setArbres] = useState<Arbre[]>([])
   const [appelants, setAppelants] = useState<AppelantGroupe[] | null>(null)
@@ -635,8 +654,77 @@ function HotlineConsole() {
 
   const telInitial = useRef(params.get('tel') || '')
   useEffect(() => {
-    if (telInitial.current) void identifier(telInitial.current)
-  }, [identifier])
+    if (relais !== 'console' || !telInitial.current) return
+    const tel = telInitial.current
+    telInitial.current = ''
+    void identifier(tel)
+  }, [identifier, relais])
+
+  // Onglet ouvert par 3CX : une console est-elle déjà ouverte sur ce poste ?
+  useEffect(() => {
+    if (relais !== 'verif') return
+    const tel = params.get('tel') || ''
+    const ligne = params.get('ligne') || ''
+    if (typeof BroadcastChannel === 'undefined' || !navigator.locks) {
+      setRelais('console')
+      return
+    }
+    let fini = false
+    const canal = new BroadcastChannel(CANAL_CONSOLE)
+    const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`
+    const devenirConsole = () => {
+      if (fini) return
+      fini = true
+      canal.close()
+      setRelais('console')
+    }
+    canal.onmessage = (ev: MessageEvent) => {
+      if (fini || ev.data?.type !== 'pris' || ev.data?.id !== id) return
+      fini = true
+      canal.close()
+      setRelais('transmis')
+      window.setTimeout(() => window.close(), 200)
+    }
+    navigator.locks
+      .query()
+      .then((etat) => {
+        if (fini) return
+        const occupe = (etat.held || []).some((l) => l.name === VERROU_CONSOLE)
+        if (!occupe) return devenirConsole()
+        canal.postMessage({ type: 'appel', id, tel, ligne })
+        window.setTimeout(devenirConsole, 2000)
+      })
+      .catch(devenirConsole)
+    return () => {
+      if (!fini) {
+        fini = true
+        canal.close()
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  // Console ouverte : la plus ancienne détient le verrou et reçoit les appels
+  // transmis par les onglets 3CX.
+  useEffect(() => {
+    if (relais !== 'console' || typeof BroadcastChannel === 'undefined' || !navigator.locks) return
+    const ctrl = new AbortController()
+    navigator.locks
+      .request(VERROU_CONSOLE, { signal: ctrl.signal }, () => new Promise<void>((resolve) => {
+        const canal = new BroadcastChannel(CANAL_CONSOLE)
+        canal.onmessage = (ev: MessageEvent) => {
+          if (ev.data?.type !== 'appel') return
+          canal.postMessage({ type: 'pris', id: ev.data.id })
+          recevoirAppelRef.current(String(ev.data.tel || ''), String(ev.data.ligne || ''))
+        }
+        ctrl.signal.addEventListener('abort', () => {
+          canal.close()
+          resolve()
+        })
+      }))
+      .catch(() => undefined)
+    return () => ctrl.abort()
+  }, [relais])
 
   function choisirAppelant(a: AppelantGroupe) {
     patch({ numero_tiers: a.numero_tiers || '', intitule_tiers: a.intitule || '', contact_nom: a.contact || '', contact_email: a.email || '' })
@@ -1165,6 +1253,8 @@ function HotlineConsole() {
 
   function nouvelAppel() {
     setTelephone('')
+    setLigneAppelee('')
+    setAppelEntrant(null)
     setAppelants(null)
     setForm({ ...FORM_VIDE, filiere: environnement })
     setReprise(REPRISE_VIDE)
@@ -1180,6 +1270,34 @@ function HotlineConsole() {
     setEstTest(false)
     dernierRepris.current = ''
     window.history.replaceState(null, '', '/hotline')
+  }
+
+  function prendreAppel(tel: string, ligne: string) {
+    nouvelAppel()
+    const l = ligneValide(ligne)
+    setLigneAppelee(l)
+    setTelephone(tel)
+    window.history.replaceState(null, '', `/hotline?tel=${encodeURIComponent(tel)}${l ? `&ligne=${encodeURIComponent(l)}` : ''}`)
+    void identifier(tel)
+  }
+
+  // Appel transmis par un onglet 3CX : pris directement si la console est libre,
+  // sinon proposé dans un bandeau. Les sonneries répétées du même numéro sont ignorées.
+  recevoirAppelRef.current = (tel: string, ligne: string) => {
+    const cle = telCle(tel)
+    const maintenant = Date.now()
+    if (cle && cle === dernierAppelRecu.current.cle && maintenant - dernierAppelRecu.current.at < DOUBLON_APPEL_MS) return
+    dernierAppelRecu.current = { cle, at: maintenant }
+    const occupe = Boolean(ticket) || Boolean(form.numero_tiers) || Boolean(telCle(telephone) && telCle(telephone) !== cle)
+    if (occupe) setAppelEntrant({ tel, ligne })
+    else prendreAppel(tel, ligne)
+    if (document.title.startsWith('📞')) return
+    const titre = document.title
+    document.title = `📞 ${fmtTel(tel)} – appel entrant`
+    window.setTimeout(() => {
+      document.title = titre
+    }, 15_000)
+    window.focus()
   }
 
   const statut = ticket ? styleStatut(ticket.statut) : null
@@ -1349,6 +1467,23 @@ function HotlineConsole() {
   const filiereCourante = ticket?.filiere || form.filiere
   const collaborateursN1 = collaborateurs.liste.filter((c) => c.niveau === 1 && (!c.filiere || !filiereCourante || c.filiere === filiereCourante))
 
+  if (relais !== 'console') {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-[#F4F3F0] p-6">
+        <div className="max-w-md rounded-2xl border border-[#E2DFD8] bg-white px-6 py-5 text-center text-[14px] text-slate-700">
+          {relais === 'verif' ? (
+            'Appel entrant…'
+          ) : (
+            <>
+              <div className="font-bold text-slate-900">Appel transmis à la console déjà ouverte</div>
+              <div className="mt-1 text-[13px] text-slate-500">{fmtTel(params.get('tel'))} — vous pouvez fermer cet onglet.</div>
+            </>
+          )}
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div className="min-h-screen bg-[#F4F3F0] pb-16">
       <HotlineHeader
@@ -1381,6 +1516,27 @@ function HotlineConsole() {
       />
 
       <main className="mx-auto w-full max-w-[1760px] px-4 py-5 md:px-8">
+        {appelEntrant ? (
+          <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border-2 border-[#1E4E8C] bg-[#EEF3FA] px-4 py-3">
+            <span className="text-[14px] font-bold text-[#1E4E8C]">📞 Nouvel appel : {fmtTel(appelEntrant.tel)}</span>
+            <span className="flex gap-2">
+              <button
+                type="button"
+                onClick={() => prendreAppel(appelEntrant.tel, appelEntrant.ligne)}
+                className="h-9 rounded-lg bg-[#1E4E8C] px-3 text-sm font-semibold text-white hover:bg-[#173E70]"
+              >
+                Prendre l’appel
+              </button>
+              <button
+                type="button"
+                onClick={() => setAppelEntrant(null)}
+                className="h-9 rounded-lg border border-[#1E4E8C] px-3 text-sm font-semibold text-[#1E4E8C]"
+              >
+                Ignorer
+              </button>
+            </span>
+          </div>
+        ) : null}
         {erreur ? <HotlineErreur message={erreur} onClose={() => setErreur(null)} /> : null}
         {info ? <div className="mb-4 rounded-xl border border-[#CDE5D1] bg-[#EEF7EF] px-4 py-2.5 text-[13px] text-[#2F6B3A]">{info}</div> : null}
 
