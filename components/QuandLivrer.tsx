@@ -96,6 +96,9 @@ type Dispo = {
   blocage_appro: boolean
   blocage_source: string | null
   delai_appro_jours: number | null
+  delai_source?: 'REFERENCE' | 'CONSTATE' | 'PARAMETRE' | null
+  delai_parametre_jours?: number | null
+  nb_receptions?: number | null
 }
 
 type InfoArticle = {
@@ -127,17 +130,42 @@ export type QuandLivrerProps = {
 // Utilitaires
 // ─────────────────────────────────────────────────────────────────────────
 
-// Écart de prix de revient signalé (Arnaud, 20/11/2026) : plus de 10 % ET plus
-// de 10 € sur la ligne (écart unitaire × quantité), dans un sens ou dans l'autre.
-const SEUIL_ECART_PR_PCT = 10
-const SEUIL_ECART_PR_EUR = 10
+// Écarts de prix signalés (Arnaud, 20-21/11/2026) : plus de 10 % ET plus de 10 €
+// sur la ligne, dans un sens ou dans l'autre.
+//  - ligne au tarif remisé (remise > 0) : écart entre le tarif de base du devis
+//    et le tarif actuel ; manque à gagner = écart × (1 − remise) × quantité,
+//    c.-à-d. la différence réelle sur le prix remisé facturé au client ;
+//  - ligne en prix net (sans remise) : écart entre le PR du devis et le PUMP actuel.
+const SEUIL_ECART_PCT = 10
+const SEUIL_ECART_EUR = 10
+// Une référence dont la valeur dans le document est sous ce seuil est un
+// « accessoire » : la date hors accessoires est donnée à part dans le verdict.
+const SEUIL_ACCESSOIRE_EUR = 100
 
-function alertePr(l: { prDevis: number | null; prActuel: number | null; qte: number }) {
+type AlertePrix = { type: 'TARIF' | 'PR'; pct: number; valeur: number }
+
+function alertePrix(l: { puDevis: number | null; puActuel: number | null; remise: number | null; prDevis: number | null; prActuel: number | null; qte: number }): AlertePrix | null {
+  const remise = l.remise ?? 0
+  if (remise >= 100) return null
+  if (remise > 0) {
+    const pct = ecartPctBrut(l.puDevis, l.puActuel)
+    if (pct === null || l.puDevis === null || l.puActuel === null) return null
+    const valeur = (l.puActuel - l.puDevis) * (1 - remise / 100) * (l.qte || 0)
+    if (Math.abs(pct) <= SEUIL_ECART_PCT || Math.abs(valeur) <= SEUIL_ECART_EUR) return null
+    return { type: 'TARIF', pct, valeur }
+  }
   const pct = ecartPctBrut(l.prDevis, l.prActuel)
   if (pct === null || l.prDevis === null || l.prActuel === null) return null
   const valeur = (l.prActuel - l.prDevis) * (l.qte || 0)
-  if (Math.abs(pct) <= SEUIL_ECART_PR_PCT || Math.abs(valeur) <= SEUIL_ECART_PR_EUR) return null
-  return { pct, valeur }
+  if (Math.abs(pct) <= SEUIL_ECART_PCT || Math.abs(valeur) <= SEUIL_ECART_EUR) return null
+  return { type: 'PR', pct, valeur }
+}
+
+function valeurLigne(l: { prActuel: number | null; puActuel: number | null; remise: number | null; montant: number | null; qte: number }) {
+  if (l.prActuel !== null) return l.prActuel * (l.qte || 0)
+  if (l.montant !== null) return l.montant
+  if (l.puActuel !== null) return l.puActuel * (1 - (l.remise ?? 0) / 100) * (l.qte || 0)
+  return 0
 }
 
 function ecartPctBrut(avant: number | null, apres: number | null) {
@@ -268,7 +296,7 @@ function lireDispo(d: Dispo | undefined, aujourdhui: string): Lecture {
         couleur: 'rouge',
         date: d.date_dispo_complete,
         titre: `Appro à passer — ${fmtDate(d.date_dispo_complete)}`,
-        detail: [`délai d’appro ${d.delai_appro_jours ?? '?'} j`, partiel].filter(Boolean).join(' · '),
+        detail: [`délai ${d.delai_source === 'CONSTATE' ? 'constaté' : d.delai_source === 'REFERENCE' ? 'de la réf.' : 'paramétré'} ${d.delai_appro_jours ?? '?'} j`, partiel].filter(Boolean).join(' · '),
       }
     case 'BLOQUE_APPRO':
       return {
@@ -487,6 +515,15 @@ export default function QuandLivrer({ compact = false, initialDevis, initialList
     return m
   }, [selection])
 
+  const valeurParRef = useMemo(() => {
+    const m = new Map<string, number>()
+    for (const l of selection) {
+      if (l.type !== 'ARTICLE' || !l.ref) continue
+      m.set(l.ref, (m.get(l.ref) || 0) + valeurLigne(l))
+    }
+    return m
+  }, [selection])
+
   const cleSelection = useMemo(() => JSON.stringify(Array.from(qteParRef.entries()).sort()), [qteParRef])
 
   useEffect(() => {
@@ -495,7 +532,7 @@ export default function QuandLivrer({ compact = false, initialDevis, initialList
     const id = ++requete.current
     setCalcul(true)
     const t = setTimeout(async () => {
-      const { data, error } = await supabase.rpc('get_dispo_lignes_quantites', { p_lignes: payload })
+      const { data, error } = await supabase.rpc('get_quand_livrer_dispo', { p_lignes: payload })
       if (id !== requete.current) return
       setCalcul(false)
       if (error) { setErreur(`Calcul de dispo impossible : ${error.message}`); return }
@@ -537,15 +574,30 @@ export default function QuandLivrer({ compact = false, initialDevis, initialList
     const limitantes = dateMax && dateMax > aujourdhui
       ? refs.filter((r) => dispo.get(r)?.statut !== 'BLOQUE_APPRO' && lectures.get(r)?.date === dateMax)
       : []
-    return { refs, lectures, pret, dateMax, couleur, bloquees, aCommander, limitantes: new Set([...limitantes, ...bloquees]) }
-  }, [qteParRef, dispo, aujourdhui])
+    // Date hors accessoires : références dont la valeur dans le document < seuil.
+    const equipements = refs.filter((r) => (valeurParRef.get(r) ?? 0) >= SEUIL_ACCESSOIRE_EUR)
+    let dateEquip: string | null = null
+    let equipBloque = false
+    for (const r of equipements) {
+      if (dispo.get(r)?.statut === 'BLOQUE_APPRO') { equipBloque = true; continue }
+      const dte = lectures.get(r)?.date
+      if (dte && (!dateEquip || dte > dateEquip)) dateEquip = dte
+    }
+    if (equipements.length && !dateEquip && !equipBloque) dateEquip = aujourdhui
+    const accessoiresRetardants = refs.filter((r) => (valeurParRef.get(r) ?? 0) < SEUIL_ACCESSOIRE_EUR && (
+      dispo.get(r)?.statut === 'BLOQUE_APPRO' || (lectures.get(r)?.date ?? '') > (dateEquip ?? aujourdhui)))
+    const horsAccessoires = pret && equipements.length > 0 && !equipBloque && dateEquip && accessoiresRetardants.length > 0
+      ? { date: dateEquip, refs: accessoiresRetardants }
+      : null
+    return { refs, lectures, pret, dateMax, couleur, bloquees, aCommander, limitantes: new Set([...limitantes, ...bloquees]), horsAccessoires }
+  }, [qteParRef, valeurParRef, dispo, aujourdhui])
 
   const controles = useMemo(() => {
     const articles = selection.filter((l) => l.ref && l.type !== 'COMMENTAIRE')
     const sommeil = articles.filter((l) => l.sommeil)
     const inconnues = articles.filter((l) => l.type === 'INCONNU')
-    const ecartPr = articles.filter((l) => l.type === 'ARTICLE' && alertePr(l) !== null)
-    const ecartPrValeur = ecartPr.reduce((t, l) => t + (alertePr(l)?.valeur ?? 0), 0)
+    const ecartPrix = articles.filter((l) => l.type === 'ARTICLE' && alertePrix(l) !== null)
+    const ecartPrixValeur = ecartPrix.reduce((t, l) => t + (alertePrix(l)?.valeur ?? 0), 0)
     // Marge sur les lignes cochées qui portent un montant.
     let montant = 0
     let coutDevis = 0
@@ -563,7 +615,7 @@ export default function QuandLivrer({ compact = false, initialDevis, initialList
       coutActuel += (prA ?? 0) * l.qte
     }
     return {
-      sommeil, inconnues, ecartPr, ecartPrValeur,
+      sommeil, inconnues, ecartPrix, ecartPrixValeur,
       marge: avecMontant ? { montant, margeDevis: prDevisComplet ? montant - coutDevis : null, margeActuelle: montant - coutActuel } : null,
     }
   }, [selection])
@@ -751,6 +803,13 @@ export default function QuandLivrer({ compact = false, initialDevis, initialList
                   Non promettable{synthese.dateMax ? ' en plus' : ''} : {synthese.bloquees.map((r) => <span key={r} className="qlLimitante">⛔ {r}</span>)}
                 </div>
               )}
+              {synthese.horsAccessoires && (
+                <div className="qlVerdictSous qlHorsAcc">
+                  Sans les accessoires (moins de {SEUIL_ACCESSOIRE_EUR} € dans le document) :{' '}
+                  <b>{synthese.horsAccessoires.date <= aujourdhui ? 'livrable dès aujourd’hui' : `livrable le ${fmtDate(synthese.horsAccessoires.date)}`}</b>
+                  {' '}— à traiter à part : {synthese.horsAccessoires.refs.join(', ')}
+                </div>
+              )}
               {synthese.pret && synthese.aCommander.length > 0 && (
                 <div className="qlVerdictSous">🛒 Commande d’appro à passer : {synthese.aCommander.join(', ')}</div>
               )}
@@ -761,9 +820,12 @@ export default function QuandLivrer({ compact = false, initialDevis, initialList
               )}
               {controles.inconnues.length > 0 && <div className="qlPuce qlPuceErr">{controles.inconnues.length} réf. inconnue{controles.inconnues.length > 1 ? 's' : ''}</div>}
               {controles.sommeil.length > 0 && <div className="qlPuce qlPuceErr">{controles.sommeil.length} article{controles.sommeil.length > 1 ? 's' : ''} en sommeil</div>}
-              {controles.ecartPr.length > 0 && (
-                <div className="qlPuce qlPuceWarn" title={`Écart de prix de revient > ${SEUIL_ECART_PR_PCT} % et > ${SEUIL_ECART_PR_EUR} € sur la ligne`}>
-                  {controles.ecartPr.length} écart{controles.ecartPr.length > 1 ? 's' : ''} de PR &gt; {SEUIL_ECART_PR_PCT} % · {controles.ecartPrValeur > 0 ? '+' : ''}{fmtEur(controles.ecartPrValeur, 0)}
+              {controles.ecartPrix.length > 0 && (
+                <div
+                  className={`qlPuce ${controles.ecartPrixValeur > 0 ? 'qlPuceErr' : 'qlPuceWarn'}`}
+                  title={`Lignes dont le tarif de base (ou le PR pour les prix nets) a bougé de plus de ${SEUIL_ECART_PCT} % et de plus de ${SEUIL_ECART_EUR} € sur la ligne, remise du devis appliquée`}
+                >
+                  {controles.ecartPrix.length} écart{controles.ecartPrix.length > 1 ? 's' : ''} de prix · {controles.ecartPrixValeur > 0 ? 'manque à gagner ' : 'gain '}{fmtEur(Math.abs(controles.ecartPrixValeur), 0)}
                 </div>
               )}
               {devis && controles.marge && (
@@ -892,7 +954,7 @@ function LigneVue({
 
   const couleur: Couleur = !coche ? 'neutre' : l.type === 'INCONNU' ? 'rouge' : lecture?.couleur ?? 'neutre'
   const c = COULEURS[couleur]
-  const alerte = estArticle ? alertePr(l) : null
+  const alerte = estArticle ? alertePrix(l) : null
   const lim = limitante && coche
 
   const details = [
@@ -940,9 +1002,11 @@ function LigneVue({
         {alerte && (
           <span
             className={`qlEcartPr ${alerte.pct > 0 ? 'hausse' : 'baisse'}`}
-            title={`PR du devis ${fmtEur(l.prDevis)} → ${l.prActuelSource === 'PUMP' ? 'PUMP' : 'dernier achat'} ${fmtEur(l.prActuel)} par unité`}
+            title={alerte.type === 'TARIF'
+              ? `Tarif de base ${fmtEur(l.puDevis)} au devis → ${fmtEur(l.puActuel)} aujourd’hui ; remise ${fmtQte(l.remise)} % ; ${alerte.valeur > 0 ? 'manque à gagner' : 'gain'} = écart × (1 − remise) × quantité`
+              : `Prix net sans remise : PR du devis ${fmtEur(l.prDevis)} → ${l.prActuelSource === 'PUMP' ? 'PUMP' : 'dernier achat'} ${fmtEur(l.prActuel)} par unité`}
           >
-            PR <b>{fmtPct(alerte.pct)}</b> · <b>{alerte.valeur > 0 ? '+' : ''}{fmtEur(alerte.valeur, 0)}</b>
+            {alerte.type === 'TARIF' ? 'Tarif' : 'PR'} <b>{fmtPct(alerte.pct)}</b> · <b>{alerte.valeur > 0 ? '−' : '+'}{fmtEur(Math.abs(alerte.valeur), 0)}</b>
           </span>
         )}
       </div>
@@ -1023,6 +1087,7 @@ const CSS = `
 .qlLigneMini .qlMono { font-size: 11.5px; }
 .qlMiniDesign { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .qlMiniTag { font-size: 11px; white-space: nowrap; }
+.qlHorsAcc { padding: 4px 10px; border-radius: 8px; background: rgba(var(--cg-ink-rgb),0.08); }
 .qlEcartPr { display: inline-block; white-space: nowrap; padding: 2px 9px; border-radius: 8px; font-size: 12.5px; }
 .qlEcartPr.hausse { background: rgba(200,55,45,0.14); color: var(--cg-danger-text); border: 1px solid rgba(200,55,45,0.45); }
 .qlEcartPr.baisse { background: rgba(46,139,87,0.12); color: var(--cg-ok-text); border: 1px solid rgba(46,139,87,0.4); }
