@@ -34,6 +34,10 @@
  *     sans code lisible, ≥ 80 % des n° de ligne dans la liste ; n° de ligne inconnu de la liste = erreur
  *     de ligne (pas de repli sur la référence). Seules les anciennes feuilles sans code ni n° passent
  *     par le nom du dépôt du titre.
+ *   - 23/11/2026 (ligne 16222 : 17 écrasé par 1) : listes rechargées à chaque intégration et relues
+ *     juste avant l'enregistrement ; chaque écriture passe la quantité vue à la revue
+ *     (inv_saisir p_verifier_avant / p_qte_avant) : si la ligne a changé entre-temps, refus en base
+ *     et revue rafraîchie avec l'alerte « déjà saisie ».
  */
 
 import React, { useEffect, useMemo, useRef, useState } from 'react'
@@ -133,6 +137,8 @@ type Ecriture = {
   equipe: string
   horsListe: boolean
   libelle: string
+  /** Quantité en base vue à la revue pour ce comptage (verrou : l'écriture est refusée si elle a changé). */
+  qteAvant: number | null
 }
 
 const norm = (v: string) => v.toUpperCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^A-Z0-9]/g, '')
@@ -181,7 +187,8 @@ function verifierPage(lu: FeuilleLue, liste: ListeSaisie): { ok: boolean; messag
   if (code) {
     if (code.numero !== liste.numero) return { ok: false, message: `Feuille du ${ORDINAL[code.numero]} comptage (${lu.entete.code_liste}) : la liste est au ${ORDINAL[liste.numero]} comptage.` }
     if (code.prefixe === cible) return { ok: true, message: `code ${attendu} ✓${nos.length ? ` · ${dansListe}/${nos.length} n° de ligne ✓` : ''}` }
-    if (distance(code.prefixe, cible) <= 1 && nosOk) return { ok: true, message: `code lu ${lu.entete.code_liste} (1 caractère mal lu) confirmé par ${dansListe}/${nos.length} n° de ligne de la liste` }
+    // Les n° de ligne sont uniques à chaque liste : ils confirment un code dont quelques caractères sont mal lus.
+    if (distance(code.prefixe, cible) <= 3 && nosOk) return { ok: true, message: `code lu ${lu.entete.code_liste} (mal lu) confirmé par ${dansListe}/${nos.length} n° de ligne de la liste ${attendu}` }
     return { ok: false, message: `La feuille porte la liste ${lu.entete.code_liste || '?'} : ce n’est pas la liste ${attendu} (${liste.depot_libelle}).` }
   }
   if (nos.length) {
@@ -224,6 +231,9 @@ export default function ImportFeuilles({ depots, depotFixe, equipeParDefaut, onF
 
   async function lancer(fichiers: File[]) {
     if (!fichiers.length) return
+    // Listes toujours relues pour une nouvelle intégration (saisies faites entre-temps).
+    chargees.current = new Set()
+    setListes({})
     setErreur(null); setEtape('lecture')
     try {
       const imgs = await pagesEnImages(fichiers, setProgres)
@@ -294,7 +304,7 @@ export default function ImportFeuilles({ depots, depotFixe, equipeParDefaut, onF
   // ── Calcul de la revue : rapprochement, cumul des quantités, contrôles ─────────────
   const { calculs, ecritures, stats } = useMemo(() => {
     const pageParCle = new Map(pages.map((p) => [p.cle, p]))
-    type Run = { val: number | null; equipe: string | null; dbCom: string; garderDbCom: boolean; coms: string[]; sources: string[]; ecr: Ecriture | null }
+    type Run = { db: number | null; val: number | null; equipe: string | null; dbCom: string; garderDbCom: boolean; coms: string[]; sources: string[]; ecr: Ecriture | null }
     const runs = new Map<string, Run>()
     const out = new Map<string, Calcul>()
     for (const r of lignes) {
@@ -378,7 +388,7 @@ export default function ImportFeuilles({ depots, depotFixe, equipeParDefaut, onF
       c.cleCible = cle
       let run = runs.get(cle)
       if (!run) {
-        run = { val: c.ligne?.qte ?? null, equipe: c.ligne?.initiales ?? null, dbCom: c.ligne?.commentaire || '', garderDbCom: true, coms: [], sources: [], ecr: null }
+        run = { db: c.ligne?.qte ?? null, val: c.ligne?.qte ?? null, equipe: c.ligne?.initiales ?? null, dbCom: c.ligne?.commentaire || '', garderDbCom: true, coms: [], sources: [], ecr: null }
         if (run.val !== null) run.sources.push(`${fmtQte(run.val)} (${run.equipe || 'saisi'})`)
         runs.set(cle, run)
       }
@@ -395,7 +405,7 @@ export default function ImportFeuilles({ depots, depotFixe, equipeParDefaut, onF
       const ref = c.ligne?.reference || r.ref.toUpperCase().trim()
       run.ecr = {
         cle, invDepotId: p.cibleId, numero: liste.numero, ligneId: c.ligne?.id ?? null, ref, qte: run.val, com: null, equipe: c.equipe,
-        horsListe: !c.ligne, libelle: `${liste.depot_libelle} · ${ref}`,
+        horsListe: !c.ligne, libelle: `${liste.depot_libelle} · ${ref}`, qteAvant: run.db,
       }
       const coms = Array.from(new Set([...(run.garderDbCom && run.dbCom ? [run.dbCom] : []), ...run.coms]))
       const cumul = run.sources.length > 1 ? `cumul ${run.sources.join(' + ')}` : ''
@@ -427,6 +437,27 @@ export default function ImportFeuilles({ depots, depotFixe, equipeParDefaut, onF
 
   async function enregistrer() {
     setEtape('enregistrement'); setErreur(null)
+    // 1. Relecture des listes : une saisie faite entre-temps (tablette, autre intégration) relance la revue.
+    setProgres('Vérification des saisies faites entre-temps…')
+    const ids = Array.from(new Set(ecritures.map((e) => e.invDepotId)))
+    const fraiches: Record<string, ListeSaisie> = {}
+    for (const id of ids) {
+      const { data, error } = await supabase.rpc('inv_saisie_liste', { p_inv_depot_id: id })
+      if (error) { setErreur(messageErreur(error)); setEtape('revue'); return }
+      fraiches[id] = data as ListeSaisie
+    }
+    const changees = ecritures.filter((e) => {
+      if (e.ligneId === null) return false
+      const l = fraiches[e.invDepotId]?.lignes.find((x) => x.id === e.ligneId)
+      return !l || (l.qte ?? null) !== e.qteAvant
+    })
+    if (changees.length) {
+      setListes((cur) => ({ ...cur, ...fraiches }))
+      setAjoutsVus(false)
+      setErreur(`${changees.length} ligne(s) ont été saisies entre-temps (${changees.slice(0, 5).map((e) => e.ref).join(', ')}${changees.length > 5 ? '…' : ''}) : la revue est mise à jour avec les quantités actuelles — vérifier les ajouts proposés puis valider à nouveau.`)
+      setEtape('revue')
+      return
+    }
     let ok = 0
     const erreurs: Array<{ libelle: string; msg: string }> = []
     let faites = 0
@@ -438,11 +469,14 @@ export default function ImportFeuilles({ depots, depotFixe, equipeParDefaut, onF
           if (error) throw error
           id = (data as { id: number }).id
         }
-        const { error } = await supabase.rpc('inv_saisir', { p_ligne_id: id, p_numero: e.numero, p_qte: e.qte, p_commentaire: e.com, p_initiales: e.equipe })
+        const { error } = await supabase.rpc('inv_saisir', {
+          p_ligne_id: id, p_numero: e.numero, p_qte: e.qte, p_commentaire: e.com, p_initiales: e.equipe,
+          p_verifier_avant: true, p_qte_avant: e.ligneId === null ? null : e.qteAvant,
+        })
         if (error) throw error
         ok++
       } catch (err) {
-        erreurs.push({ libelle: e.libelle, msg: messageErreur(err) })
+        erreurs.push({ libelle: e.libelle, msg: messageErreur(err).replace(/^MODIFIEE_ENTRE_TEMPS:\s*/, 'non enregistrée — ') })
       } finally {
         faites++
         setProgres(`Enregistrement : ${faites} / ${ecritures.length}…`)
@@ -514,7 +548,7 @@ export default function ImportFeuilles({ depots, depotFixe, equipeParDefaut, onF
               </ul>
             )}
             <div className="flex gap-2">
-              <button type="button" className={btn} onClick={() => { setPages([]); setLignes([]); setResultat(null); setEtape('choix') }}>Intégrer d’autres feuilles</button>
+              <button type="button" className={btn} onClick={() => { setPages([]); setLignes([]); setResultat(null); setListes({}); chargees.current = new Set(); setEtape('choix') }}>Intégrer d’autres feuilles</button>
               <button type="button" className="h-9 rounded-lg bg-[#111820] px-4 text-[13px] font-bold text-white" onClick={onFermer}>Terminer</button>
             </div>
           </div>

@@ -360,8 +360,8 @@ export function pdfListeComptage(
   const entete = () => {
     enteteCegeclim(doc, titre, sousTitre)
     // Code de liste lisible par l'intégration des feuilles scannées
-    doc.setFont('courier', 'bold'); doc.setFontSize(10.5); doc.setTextColor(0)
-    doc.text(`Liste ${code}`, w - 118, 8, { align: 'right' })
+    doc.setFont('courier', 'bold'); doc.setFontSize(13); doc.setTextColor(0)
+    doc.text(`Liste ${code}`, w - 116, 9, { align: 'right' })
     doc.setDrawColor(60); doc.setLineWidth(0.3)
     doc.rect(w - 112, 4, 104, 16)
     doc.setFont('helvetica', 'normal'); doc.setFontSize(8)
