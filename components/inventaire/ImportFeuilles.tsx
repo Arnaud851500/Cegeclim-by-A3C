@@ -28,6 +28,12 @@
  *   - 23/11/2026 (idée d'Arnaud) : n° de ligne imprimé (colonne « N° » = inventaire_lignes.id) :
  *     rapprochement d'abord par ce numéro ; s'il concorde avec la référence lue (à une erreur de
  *     lecture près), pas de contrôle de décalage. Anciennes feuilles : rapprochement par référence.
+ *   - 23/11/2026 (Arnaud : « il faut que le numéro de la liste corresponde aussi ») : contrôle de
+ *     page BLOQUANT (verifierPage) — code « INV-xxxxxxxx-Cn » lu = liste cible et comptage en cours ;
+ *     1 caractère d'écart toléré seulement si ≥ 80 % des n° de ligne de la page sont dans la liste ;
+ *     sans code lisible, ≥ 80 % des n° de ligne dans la liste ; n° de ligne inconnu de la liste = erreur
+ *     de ligne (pas de repli sur la référence). Seules les anciennes feuilles sans code ni n° passent
+ *     par le nom du dépôt du titre.
  */
 
 import React, { useEffect, useMemo, useRef, useState } from 'react'
@@ -37,7 +43,7 @@ import {
   type LigneSaisie, type ListeSaisie,
 } from '@/lib/inventaire'
 import {
-  cleRef, enParallele, equipesDe, lireFeuille, pagesEnImages, refsProches, trouverLigne,
+  cleRef, distance, enParallele, equipesDe, lireFeuille, pagesEnImages, refsProches, trouverLigne,
   type EtatLu, type FeuilleLue,
 } from '@/lib/inventaireImport'
 
@@ -162,6 +168,29 @@ function comptageFeuille(lu: FeuilleLue | null): number | null {
   return lireCodeListe(lu.entete.code_liste)?.numero ?? lu.entete.comptage ?? null
 }
 
+/** Contrôle bloquant de la page : la feuille appartient-elle bien à cette liste et à ce comptage ? */
+function verifierPage(lu: FeuilleLue, liste: ListeSaisie): { ok: boolean; message: string } {
+  const cible = liste.id.replace(/-/g, '').slice(0, 8).toUpperCase()
+  const attendu = codeListe(liste.id, liste.numero)
+  const code = lireCodeListe(lu.entete.code_liste)
+  const nos = lu.lignes.map((l) => l.no).filter((x): x is number => typeof x === 'number')
+  const ids = new Set(liste.lignes.map((l) => l.id))
+  const dansListe = nos.filter((n) => ids.has(n)).length
+  const partNos = nos.length ? dansListe / nos.length : 0
+  const nosOk = nos.length > 0 && partNos >= 0.8
+  if (code) {
+    if (code.numero !== liste.numero) return { ok: false, message: `Feuille du ${ORDINAL[code.numero]} comptage (${lu.entete.code_liste}) : la liste est au ${ORDINAL[liste.numero]} comptage.` }
+    if (code.prefixe === cible) return { ok: true, message: `code ${attendu} ✓${nos.length ? ` · ${dansListe}/${nos.length} n° de ligne ✓` : ''}` }
+    if (distance(code.prefixe, cible) <= 1 && nosOk) return { ok: true, message: `code lu ${lu.entete.code_liste} (1 caractère mal lu) confirmé par ${dansListe}/${nos.length} n° de ligne de la liste` }
+    return { ok: false, message: `La feuille porte la liste ${lu.entete.code_liste || '?'} : ce n’est pas la liste ${attendu} (${liste.depot_libelle}).` }
+  }
+  if (nos.length) {
+    if (nosOk) return { ok: true, message: `code de liste illisible · ${dansListe}/${nos.length} n° de ligne de la liste ✓` }
+    return { ok: false, message: `Code de liste illisible et seulement ${dansListe}/${nos.length} n° de ligne appartiennent à la liste ${attendu} : feuille d’une autre liste ?` }
+  }
+  return { ok: true, message: 'ancienne feuille sans code ni n° de ligne : liste retrouvée par le nom du dépôt, contrôle renforcé par référence' }
+}
+
 export default function ImportFeuilles({ depots, depotFixe, equipeParDefaut, onFermer, onEnregistre }: Props) {
   const [etape, setEtape] = useState<Etape>('choix')
   const [progres, setProgres] = useState('')
@@ -276,6 +305,8 @@ export default function ImportFeuilles({ depots, depotFixe, equipeParDefaut, onF
       if (!p || !p.lu) { c.erreur = 'page non lue'; continue }
       if (!p.cibleId) { c.erreur = 'liste à choisir pour la page'; continue }
       if (!liste) { c.info = 'chargement de la liste…'; continue }
+      const vp = verifierPage(p.lu, liste)
+      if (!vp.ok) { c.erreur = `page bloquée : ${vp.message}`; continue }
       // Rapprochement : n° de ligne imprimé d'abord (clé stable), puis référence lue.
       const parNo = !r.verifiee && r.no !== null ? liste.lignes.find((x) => x.id === r.no) || null : null
       const parRef = trouverLigne(liste.lignes, r.ref)
@@ -286,6 +317,10 @@ export default function ImportFeuilles({ depots, depotFixe, equipeParDefaut, onF
         c.ligne = parRef
         c.verif = `Ligne à vérifier sur le scan : n° ${r.no} lu (= ${parNo.reference}) mais référence ${r.ref}`
         c.propositions = [parNo.reference]
+      } else if (!r.verifiee && r.no !== null) {
+        // N° imprimé lu mais inconnu de la liste : jamais de repli silencieux sur la référence.
+        c.erreur = `n° de ligne ${r.no} absent de la liste${parRef ? ` (la référence lue correspond à ${parRef.reference} : corriger la référence pour confirmer)` : ''}`
+        continue
       } else c.ligne = parRef
       // Contrôle de décalage : ancres imprimées de la ligne de l'écriture vs ligne de la liste.
       if (!cleSure && !c.verif && !r.verifiee && (r.qteLue !== null || r.etat !== 'vide')) {
@@ -516,6 +551,10 @@ export default function ImportFeuilles({ depots, depotFixe, equipeParDefaut, onF
                               {liste && nf && nf !== liste.numero && <span className="font-semibold text-red-700"> · la liste est au {ORDINAL[liste.numero]} comptage</span>}
                             </div>
                             {p.alerteCible && <div className="text-[11px] font-semibold text-[#96600F]">⚠ {p.alerteCible}</div>}
+                            {liste && p.lu && (() => {
+                              const vp = verifierPage(p.lu, liste)
+                              return <div className={`text-[11px] font-semibold ${vp.ok ? 'text-[#2F6F33]' : 'text-[#B42318]'}`}>{vp.ok ? '✓ ' : '⛔ Page bloquée : '}{vp.message}</div>
+                            })()}
                             <div className="mt-1 flex items-center gap-1.5">
                               <span className="text-[#8A8474]">Équipe(s)</span>
                               <input value={p.equipes} onChange={(e) => majPage(p.cle, { equipes: e.target.value.toUpperCase() })} placeholder="ex. PJC/AV, LD" className={`${ctl} w-40 font-bold tracking-wider`} />
