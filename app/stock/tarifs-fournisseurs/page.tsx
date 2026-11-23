@@ -66,7 +66,7 @@
  * / Prix tarif (dates d'application retirées à la demande d'Arnaud le 23/11/2026, 9h). ID BLG = blg.article_part.id (appariement reference puis internal_reference, comme
  * v_appro_article_blg_cles), Fournisseur = code fournisseur BLG (blg.article_supplier.name, ex. fH0001).
  * Fenêtre de paramétrage : prix retenu (tarif actuel : prix tarif SAGE ou prix net ; proposition : prix public du fichier
- * ou prix du 1er palier, ramené à l'unité SAGE). Les articles sans ID BLG ou sans prix partent dans un 2e fichier
+ * ou prix d'achat du 1er palier — par défaut depuis le 23/11/2026 —, ramené à l'unité SAGE). Les articles sans ID BLG ou sans prix partent dans un 2e fichier
  * « _non_exportes.csv ». Format CSV (demande d'Arnaud, 23/11/2026, 8h45) : « ; », virgule décimale,
  * UTF-8 avec BOM. RPC get_tarif_ids_blg — migration 20261123a_tarifs_export_blg.sql.
  */
@@ -551,8 +551,8 @@ type IdsBlg = { fournisseur_blg: string | null; fournisseur_blg_titre: string | 
 const LIBELLES_PRIX_BLG: Record<PrixBlg, string> = {
   tarif: 'Prix tarif SAGE (avant remise)',
   net: 'Prix net SAGE (après remise)',
-  public: 'Prix public du fichier',
-  palier: 'Prix d’achat du 1er palier du fichier',
+  public: 'Prix public du fichier (prix catalogue, avant remise fournisseur)',
+  palier: 'Prix d’achat du fichier (1er palier, colonne « Nouveau » de la comparaison)',
 }
 
 function dateIso(d: Date): string {
@@ -632,7 +632,7 @@ async function exporterImportBlg(d: Donnees, cfg: ExportBlg, lignes: LigneBlg[])
 function FenetreExportBlg({ cfg, setCfg, nbLignes, onAnnuler, onValider, occupe }: {
   cfg: ExportBlg; setCfg: (c: ExportBlg) => void; nbLignes: number; onAnnuler: () => void; onValider: () => void; occupe: boolean
 }) {
-  const choix: PrixBlg[] = cfg.source === 'actuel' ? ['tarif', 'net'] : ['public', 'palier']
+  const choix: PrixBlg[] = cfg.source === 'actuel' ? ['tarif', 'net'] : ['palier', 'public']
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={onAnnuler}>
       <div className="w-full max-w-[520px] rounded-xl bg-white p-5 shadow-xl" onClick={(e) => e.stopPropagation()}>
@@ -1075,8 +1075,8 @@ function TarifsFournisseurs() {
       setExportBlg({ source, prix: 'tarif' })
       return
     }
-    const avecPublic = !!comp?.lignes.some((x) => x.art && x.l.prix_public !== null && x.l.prix_public !== undefined)
-    setExportBlg({ source, prix: avecPublic ? 'public' : 'palier' })
+    // Prix d'achat du 1er palier par défaut (23/11/2026, Arnaud : FP3349 exporté au prix public 105,07 au lieu de 59,93)
+    setExportBlg({ source, prix: 'palier' })
   }
   const lignesBlg = useMemo(() => (exportBlg ? lignesExportBlg(exportBlg, articlesActuels, comp) : []), [exportBlg, articlesActuels, comp])
   async function validerExportBlg() {
