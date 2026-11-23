@@ -26,6 +26,9 @@
  * 20/11/2026 : quantités d'unités à compter (stock théorique SAGE des listes) dans les indicateurs, le suivi
  * par dépôt, le détail et la préparation (migration 20261120_inventaire_quantites_unites.sql).
  *
+ * 23/11/2026 : avancement des saisies exprimé en nombre de références (et non en unités, demandé par
+ * Arnaud) ; les unités restent affichées comme volume à compter (stock théorique SAGE).
+ *
  * 23/11/2026 : « Intégrer des feuilles PDF » — point d'entrée central des feuilles de comptage scannées :
  * la liste de chaque page est retrouvée par l'en-tête (code « Liste INV-… », sinon dépôt du titre),
  * puis même revue et même validation que depuis l'écran de saisie (components/inventaire/ImportFeuilles.tsx).
@@ -306,14 +309,14 @@ function PilotageInventaire() {
 
   // ── Calculs ────────────────────────────────────────────────────────────
   const totaux = useMemo(() => {
-    const t = { prep: 0, comptage: 0, analyse: 0, valide: 0, lignes: 0, aCompter: 0, saisies: 0, valeur: 0, unites: 0, unitesTransit: 0, unitesACompter: 0, unitesSaisies: 0, ecarts: 0, aDecider: 0, net: 0, plus: 0, moins: 0, valideNet: 0 }
+    const t = { prep: 0, comptage: 0, analyse: 0, valide: 0, lignes: 0, aCompter: 0, saisies: 0, valeur: 0, unites: 0, unitesTransit: 0, ecarts: 0, aDecider: 0, net: 0, plus: 0, moins: 0, valideNet: 0 }
     for (const d of suivi) {
       if (d.statut === 'preparation') t.prep++
       else if (d.statut === 'comptage') t.comptage++
       else if (d.statut === 'analyse') t.analyse++
       else t.valide++
       t.lignes += d.nb_lignes; t.aCompter += d.nb_a_compter; t.saisies += d.nb_saisies; t.valeur += n0(d.valeur_theorique)
-      t.unites += n0(d.qte_theorique); t.unitesTransit += n0(d.qte_transit); t.unitesACompter += n0(d.qte_a_compter); t.unitesSaisies += n0(d.qte_saisie)
+      t.unites += n0(d.qte_theorique); t.unitesTransit += n0(d.qte_transit)
       t.ecarts += d.nb_ecarts; t.aDecider += d.nb_ecarts_a_decider; t.net += n0(d.valeur_ecart_net)
       t.plus += n0(d.valeur_ecart_plus); t.moins += n0(d.valeur_ecart_moins); t.valideNet += n0(d.valeur_validee_net)
     }
@@ -421,8 +424,8 @@ function PilotageInventaire() {
               <Kpi label="Dépôts" value={fmtNum(suivi.length)} sub={`${totaux.prep} prép. · ${totaux.comptage} comptage · ${totaux.analyse} analyse · ${totaux.valide} validé(s)`} />
               <Kpi label="Lignes à inventorier" value={fmtNum(totaux.lignes)} sub={`valeur théorique ${fmtEuro(totaux.valeur)}`} />
               <Kpi label="Unités à compter" value={fmtQte(totaux.unites)}
-                sub={totaux.unitesACompter ? `comptage ouvert : ${fmtQte(totaux.unitesSaisies)} saisies / ${fmtQte(totaux.unitesACompter)} théo.` : totaux.unitesTransit ? `dont ${fmtQte(totaux.unitesTransit)} en transit` : 'stock théorique SAGE des listes'} />
-              <Kpi label="Saisies en cours" value={totaux.aCompter ? `${fmtNum(totaux.saisies)} / ${fmtNum(totaux.aCompter)}` : '—'} sub={totaux.aCompter ? `${Math.round((totaux.saisies / totaux.aCompter) * 100)} % des lignes ouvertes` : 'aucun comptage ouvert'} />
+                sub={totaux.unitesTransit ? `stock théorique SAGE, dont ${fmtQte(totaux.unitesTransit)} en transit` : 'stock théorique SAGE des listes'} />
+              <Kpi label="Saisies en cours" value={totaux.aCompter ? `${fmtNum(totaux.saisies)} / ${fmtNum(totaux.aCompter)}` : '—'} sub={totaux.aCompter ? `références saisies · ${Math.round((totaux.saisies / totaux.aCompter) * 100)} % des comptages ouverts` : 'aucun comptage ouvert'} />
               <Kpi label="Écarts" value={fmtNum(totaux.ecarts)} sub={`${fmtNum(totaux.aDecider)} à décider`} tone={totaux.aDecider ? 'warn' : undefined} />
               <Kpi label="Écarts positifs" value={fmtEuro(totaux.plus)} tone="ok" />
               <Kpi label="Écarts négatifs" value={fmtEuro(totaux.moins)} tone={totaux.moins < 0 ? 'alerte' : undefined} />
@@ -590,7 +593,6 @@ function PilotageInventaire() {
                           <td className="px-2 py-2 text-right">{fmtNum(d.nb_lignes)}{d.nb_hors_liste ? <span className="text-[#96600F]" title="Articles ajoutés hors liste"> +{d.nb_hors_liste}</span> : null}</td>
                           <td className="whitespace-nowrap px-2 py-2 text-right" title={d.qte_transit ? `dont ${fmtQte(d.qte_transit)} en transit` : undefined}>
                             {fmtQte(d.qte_theorique)}
-                            {d.qte_a_compter ? <div className="text-[10.5px] text-[#1D4F91]">{fmtQte(d.qte_saisie)} saisies / {fmtQte(d.qte_a_compter)}</div> : null}
                           </td>
                           <td className="px-2 py-2 text-right">{fmtEuro(d.valeur_theorique)}</td>
                           <td className="px-2 py-2 text-right">{fmtNum(d.nb_ecarts)}</td>
@@ -664,9 +666,10 @@ function PilotageInventaire() {
                   <div className="grid grid-cols-2 gap-2 px-4 py-3 md:grid-cols-4 xl:grid-cols-8">
                     <Kpi label="Lignes" value={fmtNum(suiviDetail.nb_lignes)} sub={suiviDetail.nb_hors_liste ? `dont ${suiviDetail.nb_hors_liste} hors liste` : undefined} />
                     <Kpi label="Unités à compter" value={fmtQte(suiviDetail.qte_theorique)}
-                      sub={suiviDetail.qte_a_compter ? `${ORDINAL[detail.comptage_courant]} comptage : ${fmtQte(suiviDetail.qte_saisie)} saisies / ${fmtQte(suiviDetail.qte_a_compter)} théo.` : suiviDetail.qte_transit ? `dont ${fmtQte(suiviDetail.qte_transit)} en transit` : undefined} />
+                      sub={suiviDetail.qte_transit ? `stock théorique SAGE, dont ${fmtQte(suiviDetail.qte_transit)} en transit` : 'stock théorique SAGE'} />
                     <Kpi label="Valeur théorique" value={fmtEuro(suiviDetail.valeur_theorique)} />
-                    <Kpi label="Saisies" value={suiviDetail.nb_a_compter ? `${fmtNum(suiviDetail.nb_saisies)} / ${fmtNum(suiviDetail.nb_a_compter)}` : '—'} sub={detail.statut === 'comptage' ? `${ORDINAL[detail.comptage_courant]} comptage` : undefined} />
+                    <Kpi label="Saisies" value={suiviDetail.nb_a_compter ? `${fmtNum(suiviDetail.nb_saisies)} / ${fmtNum(suiviDetail.nb_a_compter)}` : '—'}
+                      sub={detail.statut === 'comptage' && suiviDetail.nb_a_compter ? `références · ${ORDINAL[detail.comptage_courant]} comptage · ${Math.round((suiviDetail.nb_saisies / suiviDetail.nb_a_compter) * 100)} %` : undefined} />
                     <Kpi label="Écarts" value={fmtNum(suiviDetail.nb_ecarts)} sub={`${suiviDetail.nb_valides} validé(s) · ${suiviDetail.nb_refuses} refusé(s)`} />
                     <Kpi label="À décider" value={fmtNum(suiviDetail.nb_ecarts_a_decider)} tone={suiviDetail.nb_ecarts_a_decider ? 'warn' : 'ok'} />
                     <Kpi label="Écart net" value={fmtEuro(suiviDetail.valeur_ecart_net)} sub={`+${fmtEuro(suiviDetail.valeur_ecart_plus)} / ${fmtEuro(suiviDetail.valeur_ecart_moins)}`} tone={n0(suiviDetail.valeur_ecart_net) < 0 ? 'alerte' : undefined} />
