@@ -61,14 +61,15 @@
  * DIVERS / TRANSPORT / REGUL* / MARGE* / PLV* / RETOUR / PERDU / REMPLAC* / OBSERVATION* / PASDEMAIL /
  * PIECESAV / BRMOTIF / WORKGROUP.
  *
- * ÉVOLUTION (23/11/2026) : bouton « Export import BLG » (tarif actuel et proposition) — fichier Excel au format
+ * ÉVOLUTION (23/11/2026) : bouton « Export import BLG » (tarif actuel et proposition) — fichier CSV au format
  * d'import des tarifs BLG, colonnes ID BLG / Fournisseur / Date de début d'application / Date de fin d'application
  * / Prix tarif. ID BLG = blg.article_part.id (appariement reference puis internal_reference, comme
  * v_appro_article_blg_cles), Fournisseur = code fournisseur BLG (blg.article_supplier.name, ex. fH0001).
  * Fenêtre de paramétrage : dates (proposition : date d'effet / date de fin ; tarif actuel : aujourd'hui → 31/12
  * de l'année) et prix retenu (tarif actuel : prix tarif SAGE ou prix net ; proposition : prix public du fichier
- * ou prix du 1er palier, ramené à l'unité SAGE). Les articles sans ID BLG ou sans prix partent dans un 2e onglet
- * « Non exportés ». RPC get_tarif_ids_blg — migration 20261123a_tarifs_export_blg.sql.
+ * ou prix du 1er palier, ramené à l'unité SAGE). Les articles sans ID BLG ou sans prix partent dans un 2e fichier
+ * « _non_exportes.csv ». Format CSV (demande d'Arnaud, 23/11/2026, 8h45) : « ; », virgule décimale, JJ/MM/AAAA,
+ * UTF-8 avec BOM. RPC get_tarif_ids_blg — migration 20261123a_tarifs_export_blg.sql.
  */
 
 import React, { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
@@ -588,28 +589,27 @@ async function exporterImportBlg(d: Donnees, cfg: ExportBlg, lignes: LigneBlg[])
   if (!ids.fournisseur_blg) throw new Error(`Fournisseur ${d.fournisseur} introuvable dans BLG (code attendu « f${d.fournisseur} »).`)
   const parRef = new Map(ids.articles.map((a) => [a.reference.toUpperCase(), a.part_id]))
 
-  const wb = new ExcelJS.Workbook()
-  wb.creator = 'Compagnon CEGECLIM'
-  const ws = wb.addWorksheet('Import BLG')
-  ws.columns = [
-    { header: 'ID BLG', key: 'id', width: 10 },
-    { header: 'Fournisseur', key: 'frs', width: 14 },
-    { header: 'Date de début d\'application', key: 'deb', width: 24, style: { numFmt: 'dd/mm/yyyy' } },
-    { header: 'Date de fin d\'application', key: 'fin', width: 22, style: { numFmt: 'dd/mm/yyyy' } },
-    { header: 'Prix tarif', key: 'prix', width: 12, style: { numFmt: '0.00##' } },
-  ]
-  ws.getRow(1).font = { bold: true }
-  const rej = wb.addWorksheet('Non exportés')
-  rej.columns = [
-    { header: 'Article SAGE', key: 'ref', width: 18 }, { header: 'Désignation', key: 'des', width: 42 },
-    { header: 'Réf. fournisseur', key: 'rf', width: 18 }, { header: 'Prix', key: 'prix', width: 12 }, { header: 'Motif', key: 'motif', width: 34 },
-  ]
-  rej.getRow(1).font = { bold: true }
+  // CSV « à la française » : séparateur point-virgule, virgule décimale, dates JJ/MM/AAAA, UTF-8 avec BOM
+  const cell = (v: unknown) => {
+    const t = v === null || v === undefined ? '' : String(v)
+    return /[;"\r\n]/.test(t) ? `"${t.replace(/"/g, '""')}"` : t
+  }
+  const dateFr = (iso: string) => (iso ? `${iso.slice(8, 10)}/${iso.slice(5, 7)}/${iso.slice(0, 4)}` : '')
+  const prixFr = (v: number) => String(v).replace('.', ',')
+  const telechargerCsv = (nom: string, lignesCsv: unknown[][]) => {
+    const contenu = '﻿' + lignesCsv.map((l) => l.map(cell).join(';')).join('\r\n') + '\r\n'
+    const url = URL.createObjectURL(new Blob([contenu], { type: 'text/csv;charset=utf-8' }))
+    const el = document.createElement('a')
+    el.href = url
+    el.download = nom
+    el.click()
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000)
+  }
 
-  // Dates en UTC midi pour éviter un décalage d'un jour à l'ouverture dans Excel
-  const versDate = (iso: string) => (iso ? new Date(`${iso}T12:00:00Z`) : null)
-  const deb = versDate(cfg.debut)
-  const fin = versDate(cfg.fin)
+  const deb = dateFr(cfg.debut)
+  const fin = dateFr(cfg.fin)
+  const sortie: unknown[][] = [['ID BLG', 'Fournisseur', 'Date de début d\'application', 'Date de fin d\'application', 'Prix tarif']]
+  const rejetes: unknown[][] = [['Article SAGE', 'Désignation', 'Réf. fournisseur', 'Prix', 'Motif']]
   const vus = new Set<number>()
   let nb = 0
   let rejets = 0
@@ -619,21 +619,17 @@ async function exporterImportBlg(d: Donnees, cfg: ExportBlg, lignes: LigneBlg[])
     const motif = !id ? 'Article absent de BLG' : prix === null ? 'Pas de prix' : vus.has(id) ? 'ID BLG en double' : null
     if (motif) {
       rejets++
-      rej.addRow({ ref: l.reference, des: l.designation, rf: l.ref_fournisseur, prix: l.prix, motif })
+      rejetes.push([l.reference, l.designation, l.ref_fournisseur, l.prix !== null && Number.isFinite(l.prix) ? prixFr(l.prix) : '', motif])
       continue
     }
     vus.add(id as number)
-    ws.addRow({ id, frs: ids.fournisseur_blg, deb, fin, prix })
+    sortie.push([id, ids.fournisseur_blg, deb, fin, prixFr(prix as number)])
     nb++
   }
 
-  const buffer = await wb.xlsx.writeBuffer()
-  const url = URL.createObjectURL(new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }))
-  const el = document.createElement('a')
-  el.href = url
-  el.download = `import_tarif_BLG_${ids.fournisseur_blg}_${cfg.debut || dateIso(new Date())}.xlsx`
-  el.click()
-  URL.revokeObjectURL(url)
+  const suffixe = `${ids.fournisseur_blg}_${cfg.debut || dateIso(new Date())}`
+  telechargerCsv(`import_tarif_BLG_${suffixe}.csv`, sortie)
+  if (rejets) window.setTimeout(() => telechargerCsv(`import_tarif_BLG_${suffixe}_non_exportes.csv`, rejetes), 400)
   return { nb, rejets, fournisseur: ids.fournisseur_blg }
 }
 
@@ -667,7 +663,7 @@ function FenetreExportBlg({ cfg, setCfg, nbLignes, onAnnuler, onValider, occupe 
           ))}
         </div>
         {cfg.source === 'proposition' && <div className="mt-2 text-[11.5px] text-[#8A8474]">Prix ramenés à l’unité SAGE quand une conversion d’unité est posée sur la ligne.</div>}
-        <div className="mt-2 text-[11.5px] text-[#8A8474]">Les articles sans ID BLG ou sans prix sont listés dans l’onglet « Non exportés ».</div>
+        <div className="mt-2 text-[11.5px] text-[#8A8474]">Fichier CSV (séparateur « ; », virgule décimale, dates JJ/MM/AAAA). Les articles sans ID BLG ou sans prix sont listés dans un second fichier « _non_exportes.csv ».</div>
         {datesKo && <div className="mt-2 text-[12px] text-[#A3401C]">Date de début obligatoire, et antérieure à la date de fin.</div>}
         <div className="mt-5 flex justify-end gap-2">
           <button className={btn} onClick={onAnnuler}>Annuler</button>
@@ -1105,7 +1101,7 @@ function TarifsFournisseurs() {
     setErreur(null)
     try {
       const r = await exporterImportBlg(donnees, exportBlg, lignesBlg)
-      setInfo(`Fichier d’import BLG généré (${r.fournisseur}) : ${fmtNum(r.nb)} article(s) exporté(s)${r.rejets ? `, ${fmtNum(r.rejets)} non exporté(s) (voir l’onglet « Non exportés »)` : ''}.`)
+      setInfo(`Fichier d’import BLG généré (${r.fournisseur}) : ${fmtNum(r.nb)} article(s) exporté(s)${r.rejets ? `, ${fmtNum(r.rejets)} non exporté(s) (voir le fichier « _non_exportes.csv »)` : ''}.`)
       setExportBlg(null)
     } catch (e) {
       setErreur(messageErreur(e))
