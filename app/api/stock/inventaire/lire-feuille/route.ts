@@ -19,6 +19,10 @@
 // réponse (after()) et le résultat déposé dans la ligne ; l'écran interroge
 // GET ?id=… toutes les 3 s. Les pages pivotées (scan portrait d'une feuille
 // paysage) sont redressées par le navigateur ; l'IA est aussi prévenue.
+// 23/11/2026 (2e essai : un « 1 » à cheval sur deux lignes attribué à la ligne du
+// dessus) : l'IA part de chaque écriture manuscrite et relève les ancres imprimées
+// de SA ligne (réf. fournisseur, qté stock) + position incertaine / ligne voisine ;
+// l'écran compare ces ancres à la liste et alerte en cas de décalage.
 //
 // Sécurité : session obligatoire (proxy.ts). Les droits sur le dépôt sont
 // contrôlés au moment de l'enregistrement par les RPC inv_* (inv_peut_saisir).
@@ -59,16 +63,23 @@ EN-TÊTE (haut de page) :
 - "feuille" : le texte « Feuille x / y » imprimé, sinon "".
 
 TABLEAU : colonnes imprimées « Réf. CEGECLIM | Réf. fournisseur | Désignation | Qté stock | Qté comptée | Éq. | PUMP | Commentaire » (la colonne « Éq. » peut ne pas exister sur les anciennes feuilles).
-Relève CHAQUE ligne d'article imprimée de la page, dans l'ordre, y compris celles dont la case « Qté comptée » est vide. Ignore les lignes de titre de section (familles comme « ACC », « En transit … ») et la ligne d'en-tête des colonnes.
-Pour chaque ligne :
-- "ref" : la Réf. CEGECLIM imprimée (1re colonne, en gras), recopiée exactement, sans le texte « (hors liste) » ou « (transit) » ;
-- "qte" et "etat" : uniquement ce qui est écrit À LA MAIN dans la case « Qté comptée ». ATTENTION : ne prends JAMAIS le nombre imprimé de la colonne « Qté stock » ni le PUMP.
-   * case vide → "etat": "vide", "qte": null ;
+MÉTHODE (important, les écritures manuscrites débordent souvent sur la ligne voisine) :
+1. Repère une à une les écritures manuscrites des colonnes « Qté comptée », « Éq. » et « Commentaire » (et toute case barrée ou gribouillée).
+2. Pour CHACUNE, suis la ligne horizontale du tableau sur laquelle se trouve la plus grande partie de l'écriture, et relève sur CETTE ligne les valeurs IMPRIMÉES : Réf. CEGECLIM, Réf. fournisseur et Qté stock. Vérifie que ces trois valeurs sont bien sur la même ligne horizontale que l'écriture.
+3. Si l'écriture est à cheval sur deux lignes ou qu'il est difficile de dire à quelle ligne elle appartient, mets "position_incertaine": true et indique dans "ref_voisine" la Réf. CEGECLIM de l'autre ligne possible.
+Ne relève QUE les lignes portant une écriture manuscrite ou une rature (ne liste pas les lignes non complétées). Ignore les lignes de titre de section (« ACC », « En transit … ») et l'en-tête des colonnes.
+Pour chaque ligne relevée :
+- "ref" : la Réf. CEGECLIM imprimée (1re colonne, en gras) de la ligne, recopiée exactement, sans « (hors liste) » ni « (transit) » ;
+- "ref_fournisseur" : la Réf. fournisseur imprimée sur la même ligne ;
+- "qte_stock" : le nombre IMPRIMÉ de la colonne « Qté stock » de la même ligne (ancre de contrôle, peut être négatif) ;
+- "qte" et "etat" : uniquement ce qui est écrit À LA MAIN dans la case « Qté comptée ». ATTENTION : ne prends JAMAIS le nombre imprimé de la colonne « Qté stock » ni le PUMP comme quantité comptée.
+   * rien d'écrit dans la case (seulement un commentaire ou des initiales sur la ligne) → "etat": "vide", "qte": null ;
    * nombre manuscrit net → "etat": "lisible", "qte": le nombre (0 est une valeur valable ; virgule décimale possible) ;
    * nombre barré puis un autre nombre écrit à côté → "etat": "corrige", "qte": le nombre NON barré ;
    * case barrée, rayée, gribouillée ou nombre barré sans remplaçant → "etat": "barre", "qte": null ;
    * écriture impossible à lire avec certitude → "etat": "illisible", "qte": ta meilleure lecture ou null ;
 - "doute" : true si tu hésites sur un chiffre (1/7, 4/9, 5/6, 0/6, 3/8…), sinon false ;
+- "position_incertaine" et "ref_voisine" : voir la méthode ci-dessus (false et "" sinon) ;
 - "commentaire" : le texte manuscrit de la colonne « Commentaire » de la ligne, recopié tel quel (sinon "") ; un texte barré ne compte pas ;
 - "equipe" : les initiales manuscrites de la colonne « Éq. » de la ligne, ou à défaut des initiales écrites à côté de la quantité ou en marge de cette ligne (sinon "").
 Une flèche ou un trait « idem » / guillemets « " » dans la case quantité ne sont pas une quantité : "etat": "illisible".
@@ -77,7 +88,7 @@ HORS LISTE : en bas de la dernière page, un cadre « Articles trouvés hors lis
 
 Réponds uniquement avec ce JSON :
 {"entete": {"titre": "", "depot": "", "comptage": null, "code_liste": "", "date_inventaire": "", "equipes": [], "feuille": ""},
- "lignes": [{"ref": "", "qte": null, "etat": "vide", "doute": false, "commentaire": "", "equipe": ""}],
+ "lignes": [{"ref": "", "ref_fournisseur": "", "qte_stock": 0, "qte": null, "etat": "lisible", "doute": false, "position_incertaine": false, "ref_voisine": "", "commentaire": "", "equipe": ""}],
  "hors_liste": []}`
 
 async function lireImage(image: string): Promise<any> {
@@ -145,6 +156,10 @@ async function analyser(image: string) {
         qte,
         etat: etat === 'lisible' && qte === null ? 'illisible' : etat,
         doute: Boolean(l?.doute),
+        ref_fournisseur: texte(l?.ref_fournisseur, 60).toUpperCase(),
+        qte_stock: (() => { const x = Number(String(l?.qte_stock ?? '').replace(/\s/g, '').replace(',', '.')); return l?.qte_stock === null || l?.qte_stock === '' || !Number.isFinite(x) ? null : x })(),
+        position_incertaine: Boolean(l?.position_incertaine),
+        ref_voisine: texte(l?.ref_voisine, 60).toUpperCase().replace(/\s+/g, ''),
         commentaire: texte(l?.commentaire, 300),
         equipe: initiales(l?.equipe),
       }

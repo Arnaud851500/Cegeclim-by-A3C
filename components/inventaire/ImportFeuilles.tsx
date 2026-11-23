@@ -21,6 +21,10 @@
  *   - référence déjà saisie (en base ou par une autre page du lot) : la quantité lue est proposée
  *     EN AJOUT, avec une alerte à confirmer avant l'enregistrement (ou remplacer / ignorer) ;
  *   - rien n'est enregistré sans la validation de la personne qui intègre le document.
+ *   - 23/11/2026 : contrôle de décalage de ligne — l'IA relève, pour chaque écriture, la réf.
+ *     fournisseur et la qté stock IMPRIMÉES de sa ligne ; si elles ne correspondent pas à la ligne
+ *     de la liste, ou si l'écriture est à cheval sur deux lignes, la ligne est « à vérifier »
+ *     (proposition de la bonne référence en un clic) et la case de vérification est exigée.
  */
 
 import React, { useEffect, useMemo, useRef, useState } from 'react'
@@ -83,6 +87,12 @@ type LigneRev = {
   qte: string
   com: string
   action: Action
+  refFournLue: string
+  qteStockLue: number | null
+  positionIncertaine: boolean
+  refVoisine: string
+  /** Référence confirmée ou corrigée à la main : plus de contrôle de décalage. */
+  verifiee: boolean
 }
 
 type Calcul = {
@@ -96,6 +106,9 @@ type Calcul = {
   erreur: string | null
   info: string | null
   cleCible: string | null
+  /** Décalage de ligne possible : message et références proposées. */
+  verif: string | null
+  propositions: string[]
 }
 
 type Ecriture = {
@@ -226,12 +239,14 @@ export default function ImportFeuilles({ depots, depotFixe, equipeParDefaut, onF
           nLignes.push({
             cle: `${im.cle}:${k}`, pageCle: im.cle, horsListe: false, refLue: l.ref, ref: l.ref, qteLue: l.qte, etat: l.etat, doute: l.doute,
             comLu: l.commentaire, equipe: l.equipe, qte: l.etat === 'barre' || l.etat === 'vide' ? '' : vQ(l.qte), com: l.commentaire, action: 'auto',
+            refFournLue: l.ref_fournisseur || '', qteStockLue: l.qte_stock ?? null, positionIncertaine: !!l.position_incertaine, refVoisine: l.ref_voisine || '', verifiee: false,
           })
         }
         for (const [k, l] of (lu?.hors_liste || []).entries()) {
           nLignes.push({
             cle: `${im.cle}:HL${k}`, pageCle: im.cle, horsListe: true, refLue: l.ref, ref: l.ref, qteLue: l.qte, etat: l.qte === null ? 'illisible' : 'lisible', doute: false,
             comLu: l.commentaire, equipe: '', qte: vQ(l.qte), com: l.commentaire, action: 'auto',
+            refFournLue: '', qteStockLue: null, positionIncertaine: false, refVoisine: '', verifiee: true,
           })
         }
       })
@@ -251,12 +266,34 @@ export default function ImportFeuilles({ depots, depotFixe, equipeParDefaut, onF
     for (const r of lignes) {
       const p = pageParCle.get(r.pageCle)
       const liste = p?.cibleId ? listes[p.cibleId] || null : null
-      const c: Calcul = { ligne: null, liste, equipe: '', existant: null, existantEquipe: null, resolu: null, apres: null, erreur: null, info: null, cleCible: null }
+      const c: Calcul = { ligne: null, liste, equipe: '', existant: null, existantEquipe: null, resolu: null, apres: null, erreur: null, info: null, cleCible: null, verif: null, propositions: [] }
       out.set(r.cle, c)
       if (!p || !p.lu) { c.erreur = 'page non lue'; continue }
       if (!p.cibleId) { c.erreur = 'liste à choisir pour la page'; continue }
       if (!liste) { c.info = 'chargement de la liste…'; continue }
       c.ligne = trouverLigne(liste.lignes, r.ref)
+      // Contrôle de décalage : ancres imprimées de la ligne de l'écriture vs ligne de la liste.
+      if (!r.verifiee && (r.qteLue !== null || r.etat !== 'vide')) {
+        const props = new Set<string>()
+        const motifs: string[] = []
+        if (r.positionIncertaine) {
+          motifs.push(`écriture à cheval${r.refVoisine ? ` avec la ligne ${r.refVoisine}` : ' sur deux lignes'}`)
+          const v = r.refVoisine ? trouverLigne(liste.lignes, r.refVoisine) : null
+          if (v) props.add(v.reference)
+        }
+        if (c.ligne) {
+          const stockKo = r.qteStockLue !== null && Math.abs(r.qteStockLue - c.ligne.qte_theorique) > 1e-9
+          const fournKo = !!r.refFournLue && !!c.ligne.ref_fournisseur && cleRef(r.refFournLue) !== cleRef(c.ligne.ref_fournisseur)
+          if (stockKo || fournKo) {
+            motifs.push(`la feuille porte ${[fournKo ? `réf. fourn. ${r.refFournLue}` : '', stockKo ? `stock ${fmtQte(r.qteStockLue)}` : ''].filter(Boolean).join(' / ')} sur cette ligne (liste : ${c.ligne.ref_fournisseur || '—'} / ${fmtQte(c.ligne.qte_theorique)})`)
+            const parFourn = r.refFournLue ? liste.lignes.filter((x) => cleRef(x.ref_fournisseur) === cleRef(r.refFournLue)) : []
+            for (const x of parFourn.length ? parFourn : liste.lignes.filter((x) => r.qteStockLue !== null && x.qte_theorique === r.qteStockLue && x.famille_macro === c.ligne?.famille_macro)) {
+              if (x.id !== c.ligne.id) props.add(x.reference)
+            }
+          }
+        }
+        if (motifs.length) { c.verif = `Ligne à vérifier sur le scan : ${motifs.join(' ; ')}`; c.propositions = Array.from(props).slice(0, 3) }
+      }
       const q = lireQuantite(r.qte)
       if (q === null) { c.resolu = 'ignorer'; c.info = r.etat === 'barre' ? 'case barrée : pas de saisie' : r.etat === 'vide' ? 'non comptée sur la feuille' : 'pas de quantité'; continue }
       const ouverte = liste.statut === 'comptage' && liste.comptages.some((k) => k.numero === liste.numero && k.statut === 'en_cours')
@@ -312,6 +349,7 @@ export default function ImportFeuilles({ depots, depotFixe, equipeParDefaut, onF
         ajouts: vals.filter((c) => c.resolu === 'ajouter').length,
         remplacements: vals.filter((c) => c.resolu === 'remplacer').length,
         erreurs: vals.filter((c) => c.erreur).length,
+        verifs: vals.filter((c) => c.verif && !c.erreur && c.resolu !== 'ignorer').length,
         horsListe: ecr.filter((e) => e.horsListe).length,
       },
     }
@@ -356,7 +394,8 @@ export default function ImportFeuilles({ depots, depotFixe, equipeParDefaut, onF
 
   const lignesVisibles = lignes.filter((r) => voirVides || r.etat !== 'vide' || lireQuantite(r.qte) !== null)
   const nbVides = lignes.length - lignesVisibles.length
-  const peutEnregistrer = ecritures.length > 0 && (stats.ajouts + stats.remplacements === 0 || ajoutsVus)
+  const aVerifier = stats.ajouts + stats.remplacements + stats.verifs
+  const peutEnregistrer = ecritures.length > 0 && (aVerifier === 0 || ajoutsVus)
   const ctl = 'h-8 rounded-md border border-[#D9D4C7] bg-white px-2 text-[12.5px] outline-none focus:border-[#B4761A]'
   const btn = 'h-9 rounded-lg border border-[#E5E1D8] bg-white px-3 text-[13px] font-bold text-[#3A362E] hover:bg-[#F4F3F0] disabled:opacity-40'
 
@@ -466,15 +505,20 @@ export default function ImportFeuilles({ depots, depotFixe, equipeParDefaut, onF
               </section>
 
               {/* Alerte ajouts */}
-              {stats.ajouts + stats.remplacements > 0 && (
+              {aVerifier > 0 && (
                 <section className="mb-3 rounded-xl border border-[#F0D4A6] bg-[#FDF3E3] px-3 py-2.5 text-[13px] text-[#6B4A10]">
+                  {stats.verifs > 0 && (
+                    <div className="mb-1"><b>⚠ {stats.verifs} écriture(s) peut-être sur la mauvaise ligne</b> (chiffre à cheval sur deux lignes ou référence imprimée qui ne correspond pas) :
+                      vérifiez sur le scan (clic sur « p. X ») et corrigez la référence si besoin — un clic sur la référence proposée suffit.</div>
+                  )}
+                  {stats.ajouts + stats.remplacements > 0 && (<div>
                   <b>⚠ {stats.ajouts + stats.remplacements} ligne(s) portent sur une référence déjà saisie</b> (en base ou sur une autre page de ce lot).
                   {stats.ajouts > 0 && <> La quantité lue sera <b>AJOUTÉE</b> à la quantité existante pour {stats.ajouts} d’entre elles</>}
                   {stats.remplacements > 0 && <>{stats.ajouts > 0 ? ' ;' : ''} {stats.remplacements} remplaceront la quantité existante</>}.
-                  Vérifiez les lignes surlignées en orange (choix « ajouter / remplacer / ignorer » par ligne).
+                  Vérifiez les lignes surlignées en orange (choix « ajouter / remplacer / ignorer » par ligne).</div>)}
                   <label className="mt-1.5 flex items-center gap-2 font-bold">
                     <input type="checkbox" checked={ajoutsVus} onChange={(e) => setAjoutsVus(e.target.checked)} className="h-4 w-4" />
-                    J’ai vérifié ces lignes : appliquer les ajouts / remplacements
+                    J’ai vérifié ces lignes{stats.ajouts + stats.remplacements > 0 ? ' : appliquer les ajouts / remplacements' : ''}
                   </label>
                 </section>
               )}
@@ -494,7 +538,7 @@ export default function ImportFeuilles({ depots, depotFixe, equipeParDefaut, onF
                         <th className="px-2 py-2">Page</th><th className="px-2 py-2">Référence</th><th className="px-2 py-2">Désignation</th>
                         <th className="px-2 py-2 text-center">Lu</th><th className="px-2 py-2 text-center">Qté</th><th className="px-2 py-2">Équipe</th>
                         <th className="px-2 py-2 text-right">Déjà saisi</th><th className="px-2 py-2">Action</th><th className="px-2 py-2 text-right">Après</th>
-                        <th className="px-2 py-2">Commentaire</th><th className="px-2 py-2">Contrôle</th>
+                        <th className="px-2 py-2">Commentaire</th><th className="px-2 py-2 min-w-[220px]">Contrôle</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -502,7 +546,7 @@ export default function ImportFeuilles({ depots, depotFixe, equipeParDefaut, onF
                         const c = calculs.get(r.cle)
                         const p = pages.find((x) => x.cle === r.pageCle)
                         const eqPage = p ? equipesDe(p.equipes) : []
-                        const alerte = c?.resolu === 'ajouter' || c?.resolu === 'remplacer'
+                        const alerte = c?.resolu === 'ajouter' || c?.resolu === 'remplacer' || (!!c?.verif && c?.resolu !== 'ignorer')
                         const bg = c?.erreur ? 'bg-[#FDF0EF]' : alerte ? 'bg-[#FFF6E6]' : c?.resolu === 'ignorer' ? 'bg-[#FAFAF8] text-[#8A8474]' : ''
                         return (
                           <tr key={r.cle} className={`border-t border-[#EFECE4] ${bg}`}>
@@ -512,7 +556,7 @@ export default function ImportFeuilles({ depots, depotFixe, equipeParDefaut, onF
                             </td>
                             <td className="px-2 py-1">
                               <input value={r.ref} list={p?.cibleId ? `inv-refs-${p.cibleId}` : undefined}
-                                onChange={(e) => majLigne(r.cle, { ref: e.target.value.toUpperCase() })}
+                                onChange={(e) => majLigne(r.cle, { ref: e.target.value.toUpperCase(), verifiee: true })}
                                 className={`${ctl} w-40 font-bold ${c && !c.ligne && c.resolu !== 'ignorer' ? 'border-[#E8B4AE]' : ''}`} title={r.refLue !== r.ref ? `Lu : ${r.refLue}` : undefined} />
                             </td>
                             <td className="max-w-[260px] truncate px-2 py-1" title={c?.ligne?.designation || ''}>{c?.ligne?.designation || <span className="text-[#B42318]">—</span>}</td>
@@ -550,9 +594,28 @@ export default function ImportFeuilles({ depots, depotFixe, equipeParDefaut, onF
                             <td className="px-2 py-1">
                               <input value={r.com} onChange={(e) => majLigne(r.cle, { com: e.target.value })} maxLength={300} className={`${ctl} w-full min-w-[160px]`} />
                             </td>
-                            <td className="max-w-[260px] px-2 py-1 text-[11.5px]">
+                            <td className="max-w-[340px] px-2 py-1 text-[11.5px]">
+                              {c?.verif && c.resolu !== 'ignorer' && (
+                                <div className="mb-0.5 font-semibold text-[#B42318]">
+                                  {c.verif}
+                                  {c.propositions.length > 0 && (
+                                    <div className="mt-0.5 flex flex-wrap gap-1">
+                                      {c.propositions.map((ref) => (
+                                        <button key={ref} type="button" onClick={() => majLigne(r.cle, { ref, verifiee: true })}
+                                          className="rounded border border-[#B42318] bg-white px-1.5 py-0.5 text-[11px] font-bold text-[#B42318] hover:bg-[#FDF0EF]">→ {ref}</button>
+                                      ))}
+                                      <button type="button" onClick={() => majLigne(r.cle, { verifiee: true })}
+                                        className="rounded border border-[#8A8474] bg-white px-1.5 py-0.5 text-[11px] font-bold text-[#5E5A44]">ligne correcte</button>
+                                    </div>
+                                  )}
+                                  {c.propositions.length === 0 && (
+                                    <button type="button" onClick={() => majLigne(r.cle, { verifiee: true })}
+                                      className="mt-0.5 rounded border border-[#8A8474] bg-white px-1.5 py-0.5 text-[11px] font-bold text-[#5E5A44]">ligne correcte</button>
+                                  )}
+                                </div>
+                              )}
                               {c?.erreur ? <span className="font-semibold text-red-700">{c.erreur}</span>
-                                : alerte ? <span className="font-semibold text-[#96600F]">{c?.resolu === 'ajouter' ? `déjà saisie : ${fmtQte(c?.existant)} + ${r.qte}` : `remplace ${fmtQte(c?.existant)}`}</span>
+                                : c?.resolu === 'ajouter' || c?.resolu === 'remplacer' ? <span className="font-semibold text-[#96600F]">{c?.resolu === 'ajouter' ? `déjà saisie : ${fmtQte(c?.existant)} + ${r.qte}` : `remplace ${fmtQte(c?.existant)}`}</span>
                                 : c?.resolu === 'hors_liste' ? <span className="font-semibold text-[#96600F]">sera ajoutée à la liste</span>
                                 : c?.resolu === 'saisir' ? <span className="text-[#2F6F33]">✓ à saisir</span>
                                 : <span>{c?.info}</span>}

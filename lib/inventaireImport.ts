@@ -32,7 +32,12 @@ export type EnteteLue = {
   feuille: string
 }
 
-export type LigneLue = { ref: string; qte: number | null; etat: EtatLu; doute: boolean; commentaire: string; equipe: string }
+export type LigneLue = {
+  ref: string; qte: number | null; etat: EtatLu; doute: boolean; commentaire: string; equipe: string
+  /** Ancres imprimées relevées sur la même ligne que l'écriture (contrôle de décalage de ligne). */
+  ref_fournisseur?: string; qte_stock?: number | null
+  position_incertaine?: boolean; ref_voisine?: string
+}
 export type HorsListeLu = { ref: string; qte: number | null; commentaire: string }
 export type FeuilleLue = { entete: EnteteLue; lignes: LigneLue[]; hors_liste: HorsListeLu[] }
 
