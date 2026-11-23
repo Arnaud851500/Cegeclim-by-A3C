@@ -285,10 +285,14 @@ export function commentairesLigne(l: LignePilotage): string {
     .join(' · ')
 }
 
-/** Section d'affichage d'une ligne : « En transit » en tête, puis famille macro. */
-export function sectionLigne(l: { transit?: boolean; famille_macro: string | null; depot_stock?: string | null; depot_stock_libelle?: string | null }): string {
+/**
+ * Section d'affichage d'une ligne : « En transit » en tête, puis le stock du dépôt.
+ * 23/11/2026 (Arnaud) : plus de regroupement par famille, les listes sont triées sur la seule
+ * référence CEGECLIM ; l'intertitre « Stock du dépôt » n'apparaît qu'après une section transit.
+ */
+export function sectionLigne(l: { transit?: boolean; famille_macro?: string | null; depot_stock?: string | null; depot_stock_libelle?: string | null }): string {
   if (l.transit) return `En transit — ${l.depot_stock_libelle || 'dépôt transit'} (dépôt SAGE n° ${l.depot_stock || '?'})`
-  return l.famille_macro || 'Sans famille macro'
+  return 'Stock du dépôt'
 }
 
 export const AIDE_TRANSIT = 'Expédié par FMS, pas encore réceptionné dans SAGE : compter ce qui est physiquement arrivé à l’agence (0 si rien).'
@@ -377,7 +381,7 @@ export function pdfListeComptage(
   let macro = ''
   for (const l of lignes) {
     const m = sectionLigne(l)
-    if (m !== macro) {
+    if (m !== macro && (l.transit || macro !== '')) {
       macro = m
       body.push([{ content: p(l.transit ? `${m} : ${AIDE_TRANSIT}` : m), colSpan: nbCol,
         styles: { font: 'helvetica', fontSize: 8, halign: 'left', ...(l.transit ? { fillColor: [232, 240, 251], fontStyle: 'bold', textColor: [29, 79, 145] } : { fillColor: [238, 235, 226], fontStyle: 'bold', textColor: [60, 56, 46] }) } }])

@@ -461,7 +461,7 @@ function SaisieInventaire() {
                       const editableLigne = editable && !bloquee
                       return (
                         <React.Fragment key={l.id}>
-                          {macro !== macroPrec && (
+                          {macro !== macroPrec && (l.transit || macroPrec !== null) && (
                             l.transit ? (
                               <tr><td colSpan={8} className="border-t border-[#B9CFEE] bg-[#E8F0FB] px-3 py-1.5 text-[12px] text-[#1D4F91]">
                                 <span className="font-bold uppercase tracking-wide">{macro}</span> · {AIDE_TRANSIT}

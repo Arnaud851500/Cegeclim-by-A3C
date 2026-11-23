@@ -686,7 +686,7 @@ function PilotageInventaire() {
                     ))}
                   </div>
                   <select value={tri} onChange={(e) => setTri(e.target.value as 'famille' | 'valeur')} className={ctl}>
-                    <option value="famille">Tri : famille, référence</option>
+                    <option value="famille">Tri : référence</option>
                     <option value="valeur">Tri : valeur d’écart</option>
                   </select>
                   <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Rechercher" className={`${ctl} w-48`} />
