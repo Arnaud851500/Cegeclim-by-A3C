@@ -60,6 +60,15 @@
  * des absents du fichier et de toute masse. Article technique = sans réf. fournisseur, prix ≤ 0, ou code
  * DIVERS / TRANSPORT / REGUL* / MARGE* / PLV* / RETOUR / PERDU / REMPLAC* / OBSERVATION* / PASDEMAIL /
  * PIECESAV / BRMOTIF / WORKGROUP.
+ *
+ * ÉVOLUTION (23/11/2026) : bouton « Export import BLG » (tarif actuel et proposition) — fichier Excel au format
+ * d'import des tarifs BLG, colonnes ID BLG / Fournisseur / Date de début d'application / Date de fin d'application
+ * / Prix tarif. ID BLG = blg.article_part.id (appariement reference puis internal_reference, comme
+ * v_appro_article_blg_cles), Fournisseur = code fournisseur BLG (blg.article_supplier.name, ex. fH0001).
+ * Fenêtre de paramétrage : dates (proposition : date d'effet / date de fin ; tarif actuel : aujourd'hui → 31/12
+ * de l'année) et prix retenu (tarif actuel : prix tarif SAGE ou prix net ; proposition : prix public du fichier
+ * ou prix du 1er palier, ramené à l'unité SAGE). Les articles sans ID BLG ou sans prix partent dans un 2e onglet
+ * « Non exportés ». RPC get_tarif_ids_blg — migration 20261123a_tarifs_export_blg.sql.
  */
 
 import React, { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
@@ -531,6 +540,145 @@ async function exporterTarifActuel(d: Donnees, articles: Article[]) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
+// Export au format d'import des tarifs BLG (23/11/2026)
+// ─────────────────────────────────────────────────────────────────────────
+
+type PrixBlg = 'tarif' | 'net' | 'public' | 'palier'
+type ExportBlg = { source: 'actuel' | 'proposition'; debut: string; fin: string; prix: PrixBlg }
+type LigneBlg = { reference: string; designation: string | null; ref_fournisseur: string | null; prix: number | null }
+type IdsBlg = { fournisseur_blg: string | null; fournisseur_blg_titre: string | null; articles: { reference: string; part_id: number }[] }
+
+const LIBELLES_PRIX_BLG: Record<PrixBlg, string> = {
+  tarif: 'Prix tarif SAGE (avant remise)',
+  net: 'Prix net SAGE (après remise)',
+  public: 'Prix public du fichier',
+  palier: 'Prix d’achat du 1er palier du fichier',
+}
+
+function dateIso(d: Date): string {
+  const z = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${z(d.getMonth() + 1)}-${z(d.getDate())}`
+}
+
+/** Lignes à exporter : article SAGE + prix retenu (prix de la proposition ramené à l'unité SAGE). */
+function lignesExportBlg(cfg: ExportBlg, articles: Article[], comp: { lignes: LigneComp[] } | null): LigneBlg[] {
+  if (cfg.source === 'actuel') {
+    return articles.map((a) => ({
+      reference: a.reference, designation: a.designation, ref_fournisseur: a.ref_fournisseur,
+      prix: cfg.prix === 'net' ? a.prix_net : a.prix_tarif,
+    }))
+  }
+  const vus = new Set<string>()
+  const out: LigneBlg[] = []
+  for (const x of comp?.lignes || []) {
+    if (!x.art || x.etat === 'ignoree' || x.etat === 'doublon' || vus.has(x.art.reference)) continue
+    vus.add(x.art.reference)
+    const prix = cfg.prix === 'public'
+      ? (x.l.prix_public !== null && x.l.prix_public !== undefined ? x.l.prix_public / x.conv : null)
+      : prixPalier(x.paliersSage, 1)
+    out.push({ reference: x.art.reference, designation: x.art.designation || x.l.designation, ref_fournisseur: x.l.ref_fournisseur, prix })
+  }
+  return out
+}
+
+async function exporterImportBlg(d: Donnees, cfg: ExportBlg, lignes: LigneBlg[]): Promise<{ nb: number; rejets: number; fournisseur: string }> {
+  const { data, error } = await supabase.rpc('get_tarif_ids_blg', { p_fournisseur: d.fournisseur, p_references: lignes.map((l) => l.reference) })
+  if (error) throw error
+  const ids = (data || { fournisseur_blg: null, fournisseur_blg_titre: null, articles: [] }) as IdsBlg
+  if (!ids.fournisseur_blg) throw new Error(`Fournisseur ${d.fournisseur} introuvable dans BLG (code attendu « f${d.fournisseur} »).`)
+  const parRef = new Map(ids.articles.map((a) => [a.reference.toUpperCase(), a.part_id]))
+
+  const wb = new ExcelJS.Workbook()
+  wb.creator = 'Compagnon CEGECLIM'
+  const ws = wb.addWorksheet('Import BLG')
+  ws.columns = [
+    { header: 'ID BLG', key: 'id', width: 10 },
+    { header: 'Fournisseur', key: 'frs', width: 14 },
+    { header: 'Date de début d\'application', key: 'deb', width: 24, style: { numFmt: 'dd/mm/yyyy' } },
+    { header: 'Date de fin d\'application', key: 'fin', width: 22, style: { numFmt: 'dd/mm/yyyy' } },
+    { header: 'Prix tarif', key: 'prix', width: 12, style: { numFmt: '0.00##' } },
+  ]
+  ws.getRow(1).font = { bold: true }
+  const rej = wb.addWorksheet('Non exportés')
+  rej.columns = [
+    { header: 'Article SAGE', key: 'ref', width: 18 }, { header: 'Désignation', key: 'des', width: 42 },
+    { header: 'Réf. fournisseur', key: 'rf', width: 18 }, { header: 'Prix', key: 'prix', width: 12 }, { header: 'Motif', key: 'motif', width: 34 },
+  ]
+  rej.getRow(1).font = { bold: true }
+
+  // Dates en UTC midi pour éviter un décalage d'un jour à l'ouverture dans Excel
+  const versDate = (iso: string) => (iso ? new Date(`${iso}T12:00:00Z`) : null)
+  const deb = versDate(cfg.debut)
+  const fin = versDate(cfg.fin)
+  const vus = new Set<number>()
+  let nb = 0
+  let rejets = 0
+  for (const l of lignes) {
+    const id = parRef.get(l.reference.toUpperCase())
+    const prix = l.prix !== null && Number.isFinite(l.prix) && l.prix > 0 ? Math.round(l.prix * 10000) / 10000 : null
+    const motif = !id ? 'Article absent de BLG' : prix === null ? 'Pas de prix' : vus.has(id) ? 'ID BLG en double' : null
+    if (motif) {
+      rejets++
+      rej.addRow({ ref: l.reference, des: l.designation, rf: l.ref_fournisseur, prix: l.prix, motif })
+      continue
+    }
+    vus.add(id as number)
+    ws.addRow({ id, frs: ids.fournisseur_blg, deb, fin, prix })
+    nb++
+  }
+
+  const buffer = await wb.xlsx.writeBuffer()
+  const url = URL.createObjectURL(new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }))
+  const el = document.createElement('a')
+  el.href = url
+  el.download = `import_tarif_BLG_${ids.fournisseur_blg}_${cfg.debut || dateIso(new Date())}.xlsx`
+  el.click()
+  URL.revokeObjectURL(url)
+  return { nb, rejets, fournisseur: ids.fournisseur_blg }
+}
+
+function FenetreExportBlg({ cfg, setCfg, nbLignes, onAnnuler, onValider, occupe }: {
+  cfg: ExportBlg; setCfg: (c: ExportBlg) => void; nbLignes: number; onAnnuler: () => void; onValider: () => void; occupe: boolean
+}) {
+  const choix: PrixBlg[] = cfg.source === 'actuel' ? ['tarif', 'net'] : ['public', 'palier']
+  const datesKo = !cfg.debut || (!!cfg.fin && cfg.fin < cfg.debut)
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={onAnnuler}>
+      <div className="w-full max-w-[520px] rounded-xl bg-white p-5 shadow-xl" onClick={(e) => e.stopPropagation()}>
+        <div className="text-[15px] font-bold">Export pour l’import des tarifs dans BLG</div>
+        <div className="mt-1 text-[12px] text-[#8A8474]">
+          {cfg.source === 'actuel' ? 'Tarif actuel SAGE — articles affichés dans le tableau' : 'Proposition — lignes appariées à un article SAGE'} : {fmtNum(nbLignes)} article(s).
+          Colonnes : ID BLG / Fournisseur / Date de début d’application / Date de fin d’application / Prix tarif.
+        </div>
+        <div className="mt-4 flex flex-wrap gap-3">
+          <label className="text-[11px] text-[#8A8474]">Date de début d’application<br />
+            <input type="date" value={cfg.debut} onChange={(e) => setCfg({ ...cfg, debut: e.target.value })} className={ctl} />
+          </label>
+          <label className="text-[11px] text-[#8A8474]">Date de fin d’application<br />
+            <input type="date" value={cfg.fin} onChange={(e) => setCfg({ ...cfg, fin: e.target.value })} className={ctl} />
+          </label>
+        </div>
+        <div className="mt-4 text-[11px] text-[#8A8474]">Prix tarif exporté</div>
+        <div className="mt-1 flex flex-col gap-1.5">
+          {choix.map((c) => (
+            <label key={c} className="flex items-center gap-2 text-[12.5px]">
+              <input type="radio" checked={cfg.prix === c} onChange={() => setCfg({ ...cfg, prix: c })} /> {LIBELLES_PRIX_BLG[c]}
+            </label>
+          ))}
+        </div>
+        {cfg.source === 'proposition' && <div className="mt-2 text-[11.5px] text-[#8A8474]">Prix ramenés à l’unité SAGE quand une conversion d’unité est posée sur la ligne.</div>}
+        <div className="mt-2 text-[11.5px] text-[#8A8474]">Les articles sans ID BLG ou sans prix sont listés dans l’onglet « Non exportés ».</div>
+        {datesKo && <div className="mt-2 text-[12px] text-[#A3401C]">Date de début obligatoire, et antérieure à la date de fin.</div>}
+        <div className="mt-5 flex justify-end gap-2">
+          <button className={btn} onClick={onAnnuler}>Annuler</button>
+          <button className={btnFonce} disabled={occupe || datesKo || !nbLignes} onClick={onValider}>{occupe ? 'Export…' : 'Télécharger le fichier'}</button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────────
 // Page
 // ─────────────────────────────────────────────────────────────────────────
 
@@ -565,6 +713,8 @@ function TarifsFournisseurs() {
   const [fiche, setFiche] = useState<LigneComp | null>(null)
   const [imp, setImp] = useState<ImportEnCours | null>(null)
   const [glisse, setGlisse] = useState(false)
+  const [exportBlg, setExportBlg] = useState<ExportBlg | null>(null)
+  const [exportBlgEnCours, setExportBlgEnCours] = useState(false)
 
   const vue: Vue = vueUrl || (propUrl ? 'comparaison' : 'actuel')
 
@@ -937,6 +1087,33 @@ function TarifsFournisseurs() {
     return s
   }, [articlesActuels, base, perim])
 
+  // ── Export import BLG ──────────────────────────────────────────────────
+  function ouvrirExportBlg(source: 'actuel' | 'proposition') {
+    const auj = new Date()
+    if (source === 'actuel') {
+      setExportBlg({ source, debut: dateIso(auj), fin: `${auj.getFullYear()}-12-31`, prix: 'tarif' })
+      return
+    }
+    const p = donnees?.proposition
+    const avecPublic = !!comp?.lignes.some((x) => x.art && x.l.prix_public !== null && x.l.prix_public !== undefined)
+    setExportBlg({ source, debut: p?.date_effet?.slice(0, 10) || dateIso(auj), fin: p?.date_fin?.slice(0, 10) || '', prix: avecPublic ? 'public' : 'palier' })
+  }
+  const lignesBlg = useMemo(() => (exportBlg ? lignesExportBlg(exportBlg, articlesActuels, comp) : []), [exportBlg, articlesActuels, comp])
+  async function validerExportBlg() {
+    if (!donnees || !exportBlg) return
+    setExportBlgEnCours(true)
+    setErreur(null)
+    try {
+      const r = await exporterImportBlg(donnees, exportBlg, lignesBlg)
+      setInfo(`Fichier d’import BLG généré (${r.fournisseur}) : ${fmtNum(r.nb)} article(s) exporté(s)${r.rejets ? `, ${fmtNum(r.rejets)} non exporté(s) (voir l’onglet « Non exportés »)` : ''}.`)
+      setExportBlg(null)
+    } catch (e) {
+      setErreur(messageErreur(e))
+    } finally {
+      setExportBlgEnCours(false)
+    }
+  }
+
   const enTeteTri = (col: string, label: string, cls = '') => (
     <th className={`cursor-pointer select-none px-2 py-1.5 ${cls}`} onClick={() => setTri((t) => ({ col, sens: t.col === col ? (t.sens === 1 ? -1 : 1) : -1 }))}>
       {label}{tri.col === col ? (tri.sens === -1 ? ' ↓' : ' ↑') : ''}
@@ -1116,6 +1293,7 @@ function TarifsFournisseurs() {
                     <label className="flex items-center gap-1.5 text-[12px]"><input type="checkbox" checked={seulementVentes} onChange={(e) => setSeulementVentes(e.target.checked)} /> avec ventes ou achats sur 12 mois</label>
                     <span className="flex-1" />
                     <button className={btn} onClick={() => void exporterTarifActuel(donnees, articlesActuels)}>Export Excel</button>
+                    <button className={btn} onClick={() => ouvrirExportBlg('actuel')} title="Fichier ID BLG / Fournisseur / dates d'application / Prix tarif pour l'import des tarifs dans BLG">Export import BLG</button>
                   </div>
                   <div className="max-h-[70vh] overflow-auto">
                     <table className="w-full border-collapse text-[12px]">
@@ -1260,6 +1438,7 @@ function TarifsFournisseurs() {
                   </label>
                   <div className="flex flex-col gap-1.5 pt-3.5">
                     <button className={btn} onClick={() => void exporterExcel(donnees, comp, base, qref, perim)}>Export Excel</button>
+                    <button className={btn} onClick={() => ouvrirExportBlg('proposition')} title="Fichier ID BLG / Fournisseur / dates d'application / Prix tarif pour l'import des tarifs dans BLG">Export import BLG</button>
                   </div>
                 </section>
 
@@ -1402,6 +1581,7 @@ function TarifsFournisseurs() {
         )}
       </div>
 
+      {exportBlg && <FenetreExportBlg cfg={exportBlg} setCfg={setExportBlg} nbLignes={lignesBlg.length} occupe={exportBlgEnCours} onAnnuler={() => setExportBlg(null)} onValider={() => void validerExportBlg()} />}
       {fiche && <FicheLigne key={fiche.l.id} x={fiche} onFermer={() => setFiche(null)} onApparier={(ref, ign) => void apparier(fiche.l, ref, ign)} onConversion={(c) => void convertir(fiche.l, c)} />}
     </main>
   )
