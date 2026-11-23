@@ -195,6 +195,27 @@ export function cleRef(v: string | null | undefined): string {
   return String(v || '').toUpperCase().replace(/[^A-Z0-9]/g, '')
 }
 
+/** Distance d'édition (Levenshtein) entre deux clés courtes. */
+export function distance(a: string, b: string): number {
+  const m = a.length, n = b.length
+  if (!m) return n
+  if (!n) return m
+  let prev = Array.from({ length: n + 1 }, (_, j) => j)
+  for (let i = 1; i <= m; i++) {
+    const cur = [i]
+    for (let j = 1; j <= n; j++) cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1))
+    prev = cur
+  }
+  return prev[n]
+}
+
+/** Deux références « semblables » malgré une erreur de lecture (1 caractère d'écart, confusions O/0, I/1…). */
+export function refsProches(a: string | null | undefined, b: string | null | undefined): boolean {
+  const x = cleFloue(String(a || '')), y = cleFloue(String(b || ''))
+  if (!x || !y) return true
+  return x === y || distance(x, y) <= Math.max(1, Math.floor(Math.min(x.length, y.length) / 8))
+}
+
 function cleFloue(v: string): string {
   return cleRef(v).replace(/O/g, '0').replace(/[IL]/g, '1').replace(/S/g, '5').replace(/B/g, '8')
 }

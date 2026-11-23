@@ -34,7 +34,7 @@ import {
   type LigneSaisie, type ListeSaisie,
 } from '@/lib/inventaire'
 import {
-  cleRef, enParallele, equipesDe, lireFeuille, pagesEnImages, trouverLigne,
+  cleRef, enParallele, equipesDe, lireFeuille, pagesEnImages, refsProches, trouverLigne,
   type EtatLu, type FeuilleLue,
 } from '@/lib/inventaireImport'
 
@@ -282,13 +282,18 @@ export default function ImportFeuilles({ depots, depotFixe, equipeParDefaut, onF
           if (v) props.add(v.reference)
         }
         if (c.ligne) {
+          // Tolérance de lecture : une lettre d'écart sur la réf. fournisseur n'est pas un décalage.
           const stockKo = r.qteStockLue !== null && Math.abs(r.qteStockLue - c.ligne.qte_theorique) > 1e-9
-          const fournKo = !!r.refFournLue && !!c.ligne.ref_fournisseur && cleRef(r.refFournLue) !== cleRef(c.ligne.ref_fournisseur)
+          const fournKo = !!r.refFournLue && !!c.ligne.ref_fournisseur && !refsProches(r.refFournLue, c.ligne.ref_fournisseur)
           if (stockKo || fournKo) {
             motifs.push(`la feuille porte ${[fournKo ? `réf. fourn. ${r.refFournLue}` : '', stockKo ? `stock ${fmtQte(r.qteStockLue)}` : ''].filter(Boolean).join(' / ')} sur cette ligne (liste : ${c.ligne.ref_fournisseur || '—'} / ${fmtQte(c.ligne.qte_theorique)})`)
-            const parFourn = r.refFournLue ? liste.lignes.filter((x) => cleRef(x.ref_fournisseur) === cleRef(r.refFournLue)) : []
-            for (const x of parFourn.length ? parFourn : liste.lignes.filter((x) => r.qteStockLue !== null && x.qte_theorique === r.qteStockLue && x.famille_macro === c.ligne?.famille_macro)) {
-              if (x.id !== c.ligne.id) props.add(x.reference)
+            // Propositions : uniquement les lignes voisines (2 au-dessus / 2 au-dessous) qui collent aux valeurs lues.
+            const i = liste.lignes.findIndex((x) => x.id === c.ligne?.id)
+            const voisines = liste.lignes.slice(Math.max(0, i - 2), i + 3).filter((x) => x.id !== c.ligne?.id)
+            for (const x of voisines) {
+              const okStock = r.qteStockLue === null || Math.abs(x.qte_theorique - r.qteStockLue) < 1e-9
+              const okFourn = !r.refFournLue || refsProches(r.refFournLue, x.ref_fournisseur)
+              if (okStock && okFourn) props.add(x.reference)
             }
           }
         }

@@ -23,6 +23,9 @@
 // dessus) : l'IA part de chaque écriture manuscrite et relève les ancres imprimées
 // de SA ligne (réf. fournisseur, qté stock) + position incertaine / ligne voisine ;
 // l'écran compare ces ancres à la liste et alerte en cas de décalage.
+// 23/11/2026 (3e essai) : ne relever que les lignes manuscrites faisait perdre le fil
+// des lignes (quantités décalées d'une ligne) : retour à la transcription COMPLÈTE,
+// ligne par ligne de haut en bas, ancres conservées.
 //
 // Sécurité : session obligatoire (proxy.ts). Les droits sur le dépôt sont
 // contrôlés au moment de l'enregistrement par les RPC inv_* (inv_peut_saisir).
@@ -63,17 +66,17 @@ EN-TÊTE (haut de page) :
 - "feuille" : le texte « Feuille x / y » imprimé, sinon "".
 
 TABLEAU : colonnes imprimées « Réf. CEGECLIM | Réf. fournisseur | Désignation | Qté stock | Qté comptée | Éq. | PUMP | Commentaire » (la colonne « Éq. » peut ne pas exister sur les anciennes feuilles).
-MÉTHODE (important, les écritures manuscrites débordent souvent sur la ligne voisine) :
-1. Repère une à une les écritures manuscrites des colonnes « Qté comptée », « Éq. » et « Commentaire » (et toute case barrée ou gribouillée).
-2. Pour CHACUNE, suis la ligne horizontale du tableau sur laquelle se trouve la plus grande partie de l'écriture, et relève sur CETTE ligne les valeurs IMPRIMÉES : Réf. CEGECLIM, Réf. fournisseur et Qté stock. Vérifie que ces trois valeurs sont bien sur la même ligne horizontale que l'écriture.
-3. Si l'écriture est à cheval sur deux lignes ou qu'il est difficile de dire à quelle ligne elle appartient, mets "position_incertaine": true et indique dans "ref_voisine" la Réf. CEGECLIM de l'autre ligne possible.
-Ne relève QUE les lignes portant une écriture manuscrite ou une rature (ne liste pas les lignes non complétées). Ignore les lignes de titre de section (« ACC », « En transit … ») et l'en-tête des colonnes.
-Pour chaque ligne relevée :
+MÉTHODE (important : ne jamais décaler d'une ligne) :
+Parcours le tableau LIGNE PAR LIGNE, de haut en bas, sans en sauter aucune, et relève CHAQUE ligne d'article imprimée, y compris celles dont la case « Qté comptée » est vide.
+Pour chaque ligne, lis de gauche à droite en suivant la ligne horizontale du tableau : Réf. CEGECLIM, Réf. fournisseur, Qté stock imprimées, puis ce qui est écrit à la main dans les cases « Qté comptée », « Éq. » et « Commentaire » de CETTE ligne.
+Une écriture appartient à la ligne dont la case contient la plus grande partie de l'écriture. Si elle est vraiment à cheval sur deux lignes, mets "position_incertaine": true et indique dans "ref_voisine" la Réf. CEGECLIM de l'autre ligne possible.
+Ignore les lignes de titre de section (« ACC », « En transit … ») et l'en-tête des colonnes.
+Pour chaque ligne :
 - "ref" : la Réf. CEGECLIM imprimée (1re colonne, en gras) de la ligne, recopiée exactement, sans « (hors liste) » ni « (transit) » ;
 - "ref_fournisseur" : la Réf. fournisseur imprimée sur la même ligne ;
 - "qte_stock" : le nombre IMPRIMÉ de la colonne « Qté stock » de la même ligne (ancre de contrôle, peut être négatif) ;
 - "qte" et "etat" : uniquement ce qui est écrit À LA MAIN dans la case « Qté comptée ». ATTENTION : ne prends JAMAIS le nombre imprimé de la colonne « Qté stock » ni le PUMP comme quantité comptée.
-   * rien d'écrit dans la case (seulement un commentaire ou des initiales sur la ligne) → "etat": "vide", "qte": null ;
+   * rien d'écrit dans la case → "etat": "vide", "qte": null ;
    * nombre manuscrit net → "etat": "lisible", "qte": le nombre (0 est une valeur valable ; virgule décimale possible) ;
    * nombre barré puis un autre nombre écrit à côté → "etat": "corrige", "qte": le nombre NON barré ;
    * case barrée, rayée, gribouillée ou nombre barré sans remplaçant → "etat": "barre", "qte": null ;
