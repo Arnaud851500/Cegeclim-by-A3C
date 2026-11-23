@@ -381,12 +381,15 @@ export default function MobileClients({
   cibleNom,
   onCibleConsommee,
   onOpenStock,
+  onQuandLivrer,
 }: {
   cibleNumero?: string | null
   cibleNom?: string | null
   onCibleConsommee?: () => void
   /** Ouvre le détail stock d'une référence -- passé par MobileShell. */
   onOpenStock?: (reference: string, designation: string) => void
+  /** Ouvre « Quand puis-je livrer ? » sur un devis (2026-11-23) -- passé par MobileShell. */
+  onQuandLivrer?: (numeroDevis: string) => void
 }) {
   const [allClients, setAllClients] = useState<ClientRow[] | null>(null)
   const [clientsError, setClientsError] = useState<string | null>(null)
@@ -1085,6 +1088,7 @@ export default function MobileClients({
         currentEmail={currentEmail}
         currentName={currentName}
         onOpenStock={onOpenStock}
+        onQuandLivrer={onQuandLivrer}
         onBack={() => {
           setSelected(null)
           setDetail(null)
@@ -1741,7 +1745,7 @@ function EvolLine({ value, n1, isPoints }: { value: number | null; n1: number | 
 }
 
 function ClientDetailScreen({
-  client, detail, loading, currentEmail, currentName, onBack, onActionSaved, onTaskCreated, onOpenStock,
+  client, detail, loading, currentEmail, currentName, onBack, onActionSaved, onTaskCreated, onOpenStock, onQuandLivrer,
 }: {
   client: ClientRow
   detail: ClientDetail | null
@@ -1752,6 +1756,7 @@ function ClientDetailScreen({
   onActionSaved: (updated: TaskRow) => void
   onTaskCreated: (created: ActionRow) => void
   onOpenStock?: (reference: string, designation: string) => void
+  onQuandLivrer?: (numeroDevis: string) => void
 }) {
   const [openDetail, setOpenDetail] = useState<{ title: string; subtitle?: string; fields: DetailField[]; footer?: React.ReactNode } | null>(null)
   const [openTask, setOpenTask] = useState<TaskRow | null>(null)
@@ -2084,6 +2089,24 @@ function ClientDetailScreen({
       )
     }
 
+    // ÉVOLUTION (2026-11-23, Arnaud) : sur un devis, bouton « À quelle date puis-je
+    // livrer ? » -> écran « Quand puis-je livrer ? » empilé avec ce devis déjà chargé
+    // (rien à ressaisir) ; la fenêtre du devis reste ouverte en dessous, « ← Retour »
+    // y ramène.
+    const boutonQuandLivrer = type === 'Devis' && onQuandLivrer ? (
+      <button
+        type="button"
+        onClick={() => onQuandLivrer(d.numeroPiece)}
+        style={{
+          display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
+          padding: '13px', borderRadius: 12, border: '1px solid rgba(193,104,60,0.55)',
+          background: 'rgba(193,104,60,0.2)', color: '#F0A27A', fontSize: 14, fontWeight: 700,
+        }}
+      >
+        🚚 À quelle date puis-je livrer ?
+      </button>
+    ) : null
+
     let footer: React.ReactNode | undefined
     if (estDevisAvecTraitement || estCommandeAvecTraitement) {
       footer = (
@@ -2126,6 +2149,15 @@ function ClientDetailScreen({
         >
           📅 Modifier livraison / référence chantier
         </button>
+      )
+    }
+
+    if (boutonQuandLivrer) {
+      footer = (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          {boutonQuandLivrer}
+          {footer}
+        </div>
       )
     }
 

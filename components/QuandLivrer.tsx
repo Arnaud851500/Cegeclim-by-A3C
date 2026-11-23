@@ -600,9 +600,10 @@ export default function QuandLivrer({ compact = false, initialDevis, initialList
 
   const ouvrirArticle = useCallback((ref: string) => {
     if (!onOuvrirArticle) return
-    try { window.sessionStorage.setItem(CLE_RETOUR, '1') } catch { /* sans retour mémorisé */ }
+    // Sur mobile (compact), l'écran reste monté dans la pile : rien à restaurer au retour.
+    if (!compact) { try { window.sessionStorage.setItem(CLE_RETOUR, '1') } catch { /* sans retour mémorisé */ } }
     onOuvrirArticle(ref)
-  }, [onOuvrirArticle])
+  }, [onOuvrirArticle, compact])
 
   // ── Photo / image d'une commande ───────────────────────────────────────
   // ── Captures / photos en attente, lues ensemble sur validation ─────────

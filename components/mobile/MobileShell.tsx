@@ -35,6 +35,8 @@ import QuandLivrer from '@/components/QuandLivrer'
 
 
 // ÉVOLUTION (2026-11-20) : écran 'livrer' = « Quand puis-je livrer ? » (components/QuandLivrer).
+// ÉVOLUTION (2026-11-23) : ouvert aussi depuis un devis de la fiche client (cibleDevis,
+// devis chargé sans ressaisie) ; une référence du contrôle ouvre sa fiche stock empilée.
 export type MobileScreen = 'home' | 'activite' | 'clients' | 'rdv' | 'alertes' | 'prospects' | 'stock' | 'Admin' | 'actualites' | 'hotline' | 'livrer'
 
 /**
@@ -58,6 +60,8 @@ type PileEntree = {
   cibleActu?: string | null
   /** Écran 'actualites' (liste) : onglet affiché à l'ouverture. */
   cibleOnglet?: ActualiteType
+  /** Écran 'livrer' : devis à contrôler dès l'ouverture (depuis la fiche client). */
+  cibleDevis?: string | null
 }
 
 /**
@@ -283,6 +287,12 @@ export default function MobileShell() {
     empiler({ screen: 'stock', cibleStock: { reference, designation } })
   }
 
+  /** Fiche client → devis → « Quand puis-je livrer ? » sur ce devis (2026-11-23).
+   * L'écran est empilé : « ← Retour » revient sur la fiche, devis toujours ouvert. */
+  function ouvrirQuandLivrerDevis(numeroDevis: string) {
+    empiler({ screen: 'livrer', cibleDevis: numeroDevis })
+  }
+
   /** Fil d'actu : ouvre la liste (onglet demandé) et, si un id est fourni,
    * la publication par-dessus -- « ← Retour » revient alors à la liste.
    * Si la liste est déjà l'écran courant, seule la lecture est empilée. */
@@ -384,6 +394,7 @@ export default function MobileShell() {
                 cibleNom={entree.cibleClient?.nom}
                 onCibleConsommee={() => consommerCible(entree.key, 'cibleClient')}
                 onOpenStock={ouvrirStockDepuisAilleurs}
+                onQuandLivrer={ouvrirQuandLivrerDevis}
               />
             )}
             {entree.screen === 'rdv' && <MobileRdv onOpenClient={ouvrirClientDepuisRdv} />}
@@ -415,7 +426,13 @@ export default function MobileShell() {
             )}
             {entree.screen === 'Admin' && <MobileAdminPanel />}
             {entree.screen === 'hotline' && <MobileHotline />}
-            {entree.screen === 'livrer' && <QuandLivrer compact />}
+            {entree.screen === 'livrer' && (
+              <QuandLivrer
+                compact
+                initialDevis={entree.cibleDevis || undefined}
+                onOuvrirArticle={(ref) => ouvrirStockDepuisAilleurs(ref, '')}
+              />
+            )}
             {entree.screen === 'actualites' &&
               (entree.cibleActu ? (
                 <MobileActualiteLecture id={entree.cibleActu} />
