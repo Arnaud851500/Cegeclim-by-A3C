@@ -7,6 +7,9 @@
 // aussi rendu par l'écran mobile 'livrer'). Ouvert depuis le raccourci de
 // l'accueil et le bloc Stocks & logistique (droit can_stocks).
 // URL : ?devis=DE314531 ouvre un devis ; ?liste=REF;QTE,REF;QTE contrôle une liste.
+// ÉVOLUTION (23/11/2026) : clic sur une référence → écran de projection du stock
+// (/stock?ref=…&retour=…) ; le bouton de retour de cet écran revient ici et le
+// contrôle est restauré sans être refait (état gardé par components/QuandLivrer).
 // ============================================================================
 
 import { Suspense, useCallback } from 'react'
@@ -27,12 +30,21 @@ function Contenu() {
     [router]
   )
 
+  const onOuvrirArticle = useCallback(
+    (ref: string) => {
+      const retour = `${window.location.pathname}${window.location.search}`
+      router.push(`/stock?ref=${encodeURIComponent(ref)}&retour=${encodeURIComponent(retour)}`)
+    },
+    [router]
+  )
+
   return (
     <QuandLivrer
       initialDevis={devis}
       initialListe={liste}
       initialMode={params.has('liste') ? 'liste' : 'devis'}
       onDevisChange={onDevisChange}
+      onOuvrirArticle={onOuvrirArticle}
     />
   )
 }

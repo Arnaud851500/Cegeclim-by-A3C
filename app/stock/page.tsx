@@ -79,11 +79,16 @@
 //   HT (sans remise, même source que le mobile : RPC
 //   get_articles_prix_catalogue) affiché à côté de chaque référence de la
 //   liste ; « — » quand l'article n'a pas de prix.
+// ÉVOLUTION (2026-11-23, demandé par Arnaud) : ouverture depuis « Quand puis-je
+//   livrer ? » (/stock?ref=…&retour=/quand-livrer…) : bouton « ← Retour au contrôle »
+//   dans le bandeau et dans la fiche ; fermer la fiche (✕ / Échap) y revient aussi.
+//   Le contrôle est restauré sans être refait (état gardé par components/QuandLivrer).
 // Sur mobile (< 768 px) on rend MobileStockArticles tel quel.
 // ============================================================================
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type React from 'react'
+import { useRouter } from 'next/navigation'
 import { supabase } from '@/lib/supabaseClient'
 import { useViewport } from '@/lib/useViewport'
 import { tc, themed } from '@/lib/theme'
@@ -551,6 +556,10 @@ export default function StockPage() {
 }
 
 function StockDesktop() {
+  const router = useRouter()
+  // Retour vers le contrôle « Quand puis-je livrer ? » (?retour=/quand-livrer…)
+  const [retour, setRetour] = useState<string | null>(null)
+  const revenirAuControle = useCallback(() => { if (retour) router.push(retour) }, [retour, router])
   // ── Recherche & filtres ────────────────────────────────────────────────
   const [query, setQuery] = useState('')
   const [results, setResults] = useState<StockRow[] | null>(null)
@@ -594,6 +603,8 @@ function StockDesktop() {
     const ref = String(params.get('ref') || '').trim().toUpperCase()
     const groupe = String(params.get('groupe') || '').trim()
     const refsUrl = parseReferences(String(params.get('refs') || ''))
+    const retourUrl = String(params.get('retour') || '')
+    if (retourUrl.startsWith('/quand-livrer')) setRetour(retourUrl)
     if (groupe || refsUrl.length) {
       if (refsUrl.length) setQuery(refsUrl.join('\n'))
       if (groupe) setGroupeActif(groupe)
@@ -848,11 +859,12 @@ function StockDesktop() {
   }, [])
 
   const fermer = useCallback(() => {
+    if (retour) { revenirAuControle(); return }
     setSelected(null)
     const url = new URL(window.location.href)
     url.searchParams.delete('ref')
     window.history.replaceState(null, '', url.toString())
-  }, [])
+  }, [retour, revenirAuControle])
 
   const positionSelection = selected ? lignesAffichees.findIndex((r) => r.reference_article === selected.reference) : -1
   const precedente = positionSelection > 0 ? lignesAffichees[positionSelection - 1] : null
@@ -871,6 +883,11 @@ function StockDesktop() {
         .stkRefBtn:hover .stkRefCode { text-decoration: underline; text-underline-offset: 3px; }
       `)}</style>
 
+      {retour && (
+        <button type="button" onClick={revenirAuControle} style={styles.retourBtn} title="Revenir au contrôle sans le refaire">
+          ← Retour au contrôle « Quand puis-je livrer ? »
+        </button>
+      )}
       <div style={styles.header}>
         <div>
           <div style={styles.kicker}>Stocks &amp; logistique</div>
@@ -1107,6 +1124,7 @@ function StockDesktop() {
       {selected && (
         <FenetreArticle
           onClose={fermer}
+          onRetour={retour ? revenirAuControle : null}
           onPrev={precedente ? () => selectionner(precedente.reference_article, precedente.designation || '') : null}
           onNext={suivante ? () => selectionner(suivante.reference_article, suivante.designation || '') : null}
           position={positionSelection >= 0 ? `${positionSelection + 1} / ${lignesAffichees.length}` : null}
@@ -1216,10 +1234,11 @@ function DispoNouvelleCdc({ proj, quantite }: { proj: RefProjection | undefined;
 
 // ── Fenêtre flottante ─────────────────────────────────────────────────────
 function FenetreArticle({
-  children, onClose, onPrev, onNext, position,
+  children, onClose, onRetour, onPrev, onNext, position,
 }: {
   children: React.ReactNode
   onClose: () => void
+  onRetour?: (() => void) | null
   onPrev: (() => void) | null
   onNext: (() => void) | null
   position: string | null
@@ -1250,6 +1269,7 @@ function FenetreArticle({
         <div style={styles.modalBar}>
           <span style={styles.modalKicker}>Fiche article{position ? ` · ${position}` : ''}</span>
           <div style={{ display: 'flex', gap: 6 }}>
+            {onRetour && <button type="button" onClick={onRetour} style={{ ...styles.retourBtn, marginBottom: 0 }} title="Revenir au contrôle sans le refaire (Échap)">← Retour au contrôle</button>}
             <button type="button" className="stkBtn" onClick={() => onPrev?.()} disabled={!onPrev} style={{ ...styles.ghostBtn, opacity: onPrev ? 1 : 0.35 }} title="Référence précédente (←)">‹ Précédente</button>
             <button type="button" className="stkBtn" onClick={() => onNext?.()} disabled={!onNext} style={{ ...styles.ghostBtn, opacity: onNext ? 1 : 0.35 }} title="Référence suivante (→)">Suivante ›</button>
             <button type="button" className="stkBtn" onClick={onClose} style={styles.ghostBtn} title="Fermer (Échap)">✕ Fermer</button>
@@ -1893,6 +1913,7 @@ const styles: Record<string, React.CSSProperties> = themed({
   fieldLabel: { fontSize: 11, color: 'rgba(255,255,255,0.5)', textTransform: 'uppercase', letterSpacing: '0.06em', fontWeight: 700 },
   select: { height: 36, borderRadius: 9, border: '1px solid rgba(255,255,255,0.15)', background: 'var(--cg-panel)', color: '#fff', padding: '0 8px', fontSize: 13, fontFamily: 'inherit', width: '100%', boxSizing: 'border-box' },
   input: { height: 40, width: 120, borderRadius: 10, border: '1px solid rgba(255,255,255,0.15)', background: 'rgba(255,255,255,0.05)', color: '#fff', padding: '0 10px', fontSize: 18, fontWeight: 700, fontFamily: 'var(--font-mono)', boxSizing: 'border-box' },
+  retourBtn: { display: 'inline-flex', alignItems: 'center', gap: 6, alignSelf: 'flex-start', marginBottom: 10, padding: '8px 14px', borderRadius: 10, border: '1px solid #C1683C', background: '#C1683C', color: '#fff', fontFamily: 'inherit', fontSize: 13, fontWeight: 700, cursor: 'pointer', whiteSpace: 'nowrap' },
   ghostBtn: { display: 'inline-flex', alignItems: 'center', padding: '8px 12px', borderRadius: 10, border: '1px solid rgba(255,255,255,0.18)', background: 'transparent', color: 'rgba(255,255,255,0.78)', fontFamily: 'inherit', fontSize: 12.5, fontWeight: 600, cursor: 'pointer', whiteSpace: 'nowrap', textDecoration: 'none' },
   linkBtn: { marginTop: 4, alignSelf: 'flex-start', background: 'none', border: 'none', padding: '4px 0', fontSize: 12, color: 'rgba(255,255,255,0.45)', textDecoration: 'underline', textUnderlineOffset: 3, cursor: 'pointer', fontFamily: 'inherit' },
 

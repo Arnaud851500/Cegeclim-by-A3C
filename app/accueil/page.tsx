@@ -34,6 +34,8 @@ import { themed } from '@/lib/theme'
 // ÉVOLUTION (2026-11-20) : raccourci « Quand puis-je livrer ? » (mini bloc pleine
 // largeur sous le titre, droit can_stocks) : n° de devis → /quand-livrer?devis=…,
 // ou « Coller une liste » → /quand-livrer en mode liste.
+// ÉVOLUTION (2026-11-23) : libellés précisés — devis créés au plus tard la veille,
+// liste collée / photo / capture d'écran, date de livraison client = dispo dépôt + 7 j.
 // ÉVOLUTION (2026-09-15 soir) : bloc « Mes alertes » — pas une page mais la
 // fenêtre flottante « Centre d'alertes » (ClientRootShell), qui reprend en
 // grand les pastilles du bandeau. Il apparaît après « Mes tâches » dès que le
@@ -707,13 +709,16 @@ function RaccourciQuandLivrer({ onOpen }: { onOpen: (url: string) => void }) {
       <span style={{ fontSize: 30, lineHeight: 1 }} aria-hidden="true">🚚</span>
       <span style={{ display: 'flex', flexDirection: 'column', flex: '1 1 220px', minWidth: 0 }}>
         <span style={{ fontSize: 20, fontWeight: 700 }}>Quand puis-je livrer ?</span>
-        <span style={{ fontSize: 13, opacity: 0.85 }}>Avant de créer la commande : date au plus tôt d’un devis ou d’une liste d’articles.</span>
+        <span style={{ fontSize: 13, opacity: 0.85 }}>
+          Avant de créer la commande : date de livraison client au plus tôt (dispo au dépôt + 7 j de logistique) d’un devis créé au plus tard la veille,
+          ou d’une liste d’articles — collée, photographiée ou en capture d’écran.
+        </span>
       </span>
       <input
         value={numero}
         onChange={(e) => setNumero(e.target.value)}
-        placeholder="N° de devis…"
-        aria-label="N° de devis"
+        placeholder="N° de devis (créé hier ou avant)…"
+        aria-label="N° de devis, créé au plus tard la veille"
         style={{ flex: '0 1 220px', minWidth: 160, font: 'inherit', fontSize: 16, padding: '11px 14px', borderRadius: 12, border: '1px solid rgba(255,255,255,0.45)', background: 'rgba(255,255,255,0.14)', color: '#fff', outline: 'none' }}
       />
       <button type="submit" style={{ font: 'inherit', fontSize: 15, fontWeight: 700, padding: '11px 18px', borderRadius: 12, border: 0, background: '#fff', color: '#8E4524', cursor: 'pointer' }}>
@@ -724,7 +729,7 @@ function RaccourciQuandLivrer({ onOpen }: { onOpen: (url: string) => void }) {
         onClick={() => onOpen('/quand-livrer?liste=')}
         style={{ font: 'inherit', fontSize: 14, fontWeight: 600, padding: '11px 14px', borderRadius: 12, border: '1px solid rgba(255,255,255,0.5)', background: 'transparent', color: '#fff', cursor: 'pointer' }}
       >
-        📋 Coller une liste
+        📋 Liste, photo ou capture
       </button>
     </form>
   )

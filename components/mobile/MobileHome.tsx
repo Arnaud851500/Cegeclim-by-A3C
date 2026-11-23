@@ -471,7 +471,7 @@ export default function MobileHome({
           <span style={{ fontSize: 26 }} aria-hidden="true">🚚</span>
           <span style={{ display: 'flex', flexDirection: 'column', flex: 1, minWidth: 0 }}>
             <span style={{ fontSize: 17, fontWeight: 700 }}>Quand puis-je livrer ?</span>
-            <span style={{ fontSize: 12.5, opacity: 0.85 }}>Date au plus tôt d’un devis ou d’une liste</span>
+            <span style={{ fontSize: 12.5, opacity: 0.85 }}>Livraison client au plus tôt : devis d’hier ou avant, liste, photo ou capture</span>
           </span>
           <span style={{ fontSize: 22, opacity: 0.7 }} aria-hidden="true">›</span>
         </button>

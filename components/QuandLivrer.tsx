@@ -23,6 +23,19 @@
 //   rouge  = stock insuffisant : commande d'appro à passer (date = délai d'appro)
 //            ou référence bloquée en appro (non promettable).
 // La référence limitante (celle qui fixe la date au plus tôt) est mise en avant.
+//
+// ÉVOLUTION (23/11/2026, Arnaud) :
+//  - deux dates distinctes et explicites : MISE À DISPOSITION AU DÉPÔT (calcul de
+//    stock projeté) et LIVRAISON CLIENT AU PLUS TÔT = dispo dépôt + 7 jours
+//    calendaires de logistique (préparation + transport) ; le verdict donne la date
+//    de livraison client ;
+//  - devis : seuls les devis créés au plus tard la veille sont disponibles ; une
+//    commande du jour se contrôle par une liste collée, une photo ou une capture ;
+//  - clic sur une référence → écran de projection du stock (/stock?ref=, courbe),
+//    avec retour sur ce contrôle sans le refaire (état gardé en sessionStorage) ;
+//  - blocage appro lu dans BLG (tag « Bloqué achat ») + arrêt appro manuel ;
+//    délai d'un nouvel appro = délai article de « Calcul d'appro » s'il est saisi
+//    (migration 20261123_quand_livrer_blocage_blg.sql).
 // Contrôles complémentaires : article en sommeil / inconnu, écart entre le
 // tarif de base du devis et le tarif actuel, écart entre le PR du devis et le
 // PUMP actuel (ex. cuivre), ancienneté du devis.
@@ -113,6 +126,18 @@ type InfoArticle = {
   pr_actuel_source: string | null
 }
 
+type EtatSauve = {
+  v: 1
+  ts: number
+  mode: Mode
+  texte: string
+  recherche: string
+  devis: DevisCharge | null
+  lignes: Ligne[]
+  decochees: string[]
+  dispo: [string, Dispo][]
+}
+
 export type QuandLivrerProps = {
   /** Affichage resserré (mobile). */
   compact?: boolean
@@ -124,6 +149,8 @@ export type QuandLivrerProps = {
   initialMode?: 'devis' | 'liste'
   /** Appelé quand le devis affiché change (synchronisation d'URL côté PC). */
   onDevisChange?: (numero: string | null) => void
+  /** Ouvre l'écran de projection du stock d'une référence (PC). Sans cette prop, la référence n'est pas cliquable. */
+  onOuvrirArticle?: (ref: string) => void
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -141,6 +168,13 @@ const SEUIL_ECART_EUR = 10
 // Une référence dont la valeur dans le document est sous ce seuil est un
 // « accessoire » : la date hors accessoires est donnée à part dans le verdict.
 const SEUIL_ACCESSOIRE_EUR = 100
+// Délai logistique entre la mise à disposition au dépôt et la livraison chez le
+// client (préparation + transport), en jours calendaires (Arnaud, 23/11/2026).
+export const DELAI_LOGISTIQUE_JOURS = 7
+// État du contrôle gardé pour revenir de l'écran de projection sans le refaire.
+const CLE_ETAT = 'cegeclim:quand-livrer:etat'
+const CLE_RETOUR = 'cegeclim:quand-livrer:retour'
+const ETAT_DUREE_MS = 4 * 3600 * 1000
 
 type AlertePrix = { type: 'TARIF' | 'PR'; pct: number; valeur: number }
 
@@ -185,6 +219,17 @@ function aujourdhuiIso() {
   const m = String(d.getMonth() + 1).padStart(2, '0')
   const j = String(d.getDate()).padStart(2, '0')
   return `${y}-${m}-${j}`
+}
+
+function ajouterJours(iso: string, n: number) {
+  const [y, m, d] = iso.slice(0, 10).split('-').map(Number)
+  const date = new Date(y, m - 1, d + n)
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
+}
+
+/** Date de livraison client = mise à disposition au dépôt + délai logistique. */
+function dateClient(isoDepot: string) {
+  return ajouterJours(isoDepot, DELAI_LOGISTIQUE_JOURS)
 }
 
 function fmtDate(iso: string | null | undefined, avecJour = true) {
@@ -269,6 +314,7 @@ async function imageVersDataUrl(fichier: File, max = 1600): Promise<string> {
 
 type Lecture = {
   couleur: Couleur
+  /** Date de mise à disposition au dépôt (null = non promettable). */
   date: string | null
   titre: string
   detail: string | null
@@ -288,22 +334,35 @@ function lireDispo(d: Dispo | undefined, aujourdhui: string): Lecture {
         : null
   switch (d.statut) {
     case 'DISPO':
-      return { couleur: 'vert', date: aujourdhui, titre: 'Dispo tout de suite', detail: null }
+      return { couleur: 'vert', date: aujourdhui, titre: 'Dispo au dépôt aujourd’hui', detail: null }
     case 'DATE_FUTURE':
-      return { couleur: 'orange', date: d.date_dispo_complete, titre: `Dispo le ${fmtDate(d.date_dispo_complete)}`, detail: partiel }
+      return { couleur: 'orange', date: d.date_dispo_complete, titre: `Dispo au dépôt le ${fmtDate(d.date_dispo_complete)}`, detail: partiel }
     case 'SUR_DELAI_APPRO':
       return {
         couleur: 'rouge',
         date: d.date_dispo_complete,
-        titre: `Appro à passer — ${fmtDate(d.date_dispo_complete)}`,
-        detail: [`délai ${d.delai_source === 'CONSTATE' ? 'constaté' : d.delai_source === 'REFERENCE' ? 'de la réf.' : 'paramétré'} ${d.delai_appro_jours ?? '?'} j`, partiel].filter(Boolean).join(' · '),
+        titre: `Appro à passer — dépôt le ${fmtDate(d.date_dispo_complete)}`,
+        detail: [
+          d.delai_source === 'REFERENCE'
+            ? `délai article (Calcul d’appro) ${d.delai_appro_jours ?? '?'} j`
+            : d.delai_source === 'CONSTATE'
+              ? `délai constaté ${d.delai_appro_jours ?? '?'} j`
+              : `délai fournisseur / défaut ${d.delai_appro_jours ?? '?'} j`,
+          partiel,
+        ].filter(Boolean).join(' · '),
       }
     case 'BLOQUE_APPRO':
       return {
         couleur: 'rouge',
         date: null,
         titre: 'Non promettable — bloqué appro',
-        detail: [d.blocage_source === 'SAGE' ? 'blocage appro SAGE' : d.blocage_source === 'MANUEL' ? 'arrêt appro manuel' : null, partiel].filter(Boolean).join(' · ') || null,
+        detail: [
+          d.blocage_source === 'BLG' ? 'bloqué achat dans BLG'
+            : d.blocage_source === 'MANUEL' ? 'arrêt appro (Calcul d’appro)'
+              : d.blocage_source === 'BLG+MANUEL' ? 'bloqué achat BLG + arrêt appro'
+                : d.blocage_source === 'SAGE' ? 'blocage appro SAGE' : null,
+          partiel,
+        ].filter(Boolean).join(' · ') || null,
       }
     default:
       return { couleur: 'neutre', date: null, titre: '—', detail: null }
@@ -325,7 +384,7 @@ const RANG: Record<Couleur, number> = { neutre: 0, vert: 1, orange: 2, rouge: 3 
 // Composant
 // ─────────────────────────────────────────────────────────────────────────
 
-export default function QuandLivrer({ compact = false, initialDevis, initialListe, initialMode, onDevisChange }: QuandLivrerProps) {
+export default function QuandLivrer({ compact = false, initialDevis, initialListe, initialMode, onDevisChange, onOuvrirArticle }: QuandLivrerProps) {
   const aujourdhui = useMemo(() => aujourdhuiIso(), [])
 
   const [mode, setMode] = useState<Mode>(initialMode ?? (initialListe ? 'liste' : 'devis'))
@@ -463,14 +522,51 @@ export default function QuandLivrer({ compact = false, initialDevis, initialList
     }
   }, [texte, onDevisChange])
 
-  // Ouverture initiale (URL)
+  // Ouverture initiale : retour de l'écran de projection (état gardé), sinon URL
   const initFait = useRef(false)
+  const restaure = useRef(false)
   useEffect(() => {
     if (initFait.current) return
     initFait.current = true
+    try {
+      const retour = window.sessionStorage.getItem(CLE_RETOUR) === '1'
+      window.sessionStorage.removeItem(CLE_RETOUR)
+      const brut = retour ? window.sessionStorage.getItem(CLE_ETAT) : null
+      const e = brut ? (JSON.parse(brut) as EtatSauve) : null
+      const memeDevis = !initialDevis || (e?.devis?.entete.numero || '') === initialDevis.trim().toUpperCase()
+      if (e && e.v === 1 && Date.now() - e.ts < ETAT_DUREE_MS && e.lignes.length && memeDevis) {
+        restaure.current = true
+        setMode(e.mode)
+        setTexte(e.texte)
+        setRecherche(e.recherche)
+        setDevis(e.devis)
+        setLignes(e.lignes)
+        setDecochees(new Set(e.decochees))
+        setDispo(new Map(e.dispo))
+        return
+      }
+    } catch { /* stockage indisponible : contrôle normal */ }
     if (initialDevis) void chargerDevis(initialDevis)
     else if (initialListe) void controlerListe()
   }, [initialDevis, initialListe, chargerDevis, controlerListe])
+
+  // État gardé pour le retour depuis l'écran de projection du stock
+  useEffect(() => {
+    if (!lignes.length) return
+    try {
+      const e: EtatSauve = {
+        v: 1, ts: Date.now(), mode, texte, recherche, devis, lignes,
+        decochees: Array.from(decochees), dispo: Array.from(dispo.entries()),
+      }
+      window.sessionStorage.setItem(CLE_ETAT, JSON.stringify(e))
+    } catch { /* stockage plein ou indisponible */ }
+  }, [mode, texte, recherche, devis, lignes, decochees, dispo])
+
+  const ouvrirArticle = useCallback((ref: string) => {
+    if (!onOuvrirArticle) return
+    try { window.sessionStorage.setItem(CLE_RETOUR, '1') } catch { /* sans retour mémorisé */ }
+    onOuvrirArticle(ref)
+  }, [onOuvrirArticle])
 
   // ── Photo / image d'une commande ───────────────────────────────────────
   const lirePhoto = useCallback(async (fichiers: FileList | File[] | null) => {
@@ -648,7 +744,10 @@ export default function QuandLivrer({ compact = false, initialDevis, initialList
   const copierResume = async () => {
     const lignesTxt: string[] = []
     if (devis) lignesTxt.push(`Devis ${devis.entete.numero} — ${devis.entete.client ?? ''}`.trim())
-    if (synthese.dateMax) lignesTxt.push(`Livraison possible au plus tôt : ${fmtDate(synthese.dateMax)}`)
+    if (synthese.dateMax) {
+      lignesTxt.push(`Livraison client au plus tôt : ${fmtDate(dateClient(synthese.dateMax))}`)
+      lignesTxt.push(`(mise à disposition au dépôt le ${fmtDate(synthese.dateMax)} + ${DELAI_LOGISTIQUE_JOURS} jours calendaires de logistique)`)
+    }
     if (synthese.limitantes.size) lignesTxt.push(`Référence(s) limitante(s) : ${Array.from(synthese.limitantes).join(', ')}`)
     if (synthese.bloquees.length) lignesTxt.push(`Non promettable (blocage appro) : ${synthese.bloquees.join(', ')}`)
     if (synthese.aCommander.length) lignesTxt.push(`Commande d’appro à passer : ${synthese.aCommander.join(', ')}`)
@@ -674,8 +773,10 @@ export default function QuandLivrer({ compact = false, initialDevis, initialList
           <div className="qlKicker">AIDE À LA COMMANDE</div>
           <h1 className="qlTitre">Quand puis-je livrer ?</h1>
           <p className="qlLead">
-            Avant de créer la commande dans SAGE ou BLG : la date de livraison au plus tôt, ligne à ligne, à partir du stock projeté
-            (stock − commandes clients déjà prises + commandes fournisseurs), et les points à revoir sur un devis ancien.
+            Avant de créer la commande dans SAGE ou BLG : la <b>date de livraison client au plus tôt</b> = date de mise à disposition au dépôt
+            (stock projeté : stock − commandes clients déjà prises + commandes fournisseurs) <b>+ {DELAI_LOGISTIQUE_JOURS} jours calendaires de logistique</b>,
+            ligne à ligne, et les points à revoir sur un devis ancien. Contrôlez un devis créé au plus tard la veille, ou une liste d’articles
+            collée, photographiée ou en capture d’écran.
           </p>
         </header>
       )}
@@ -727,6 +828,10 @@ export default function QuandLivrer({ compact = false, initialDevis, initialList
               </div>
             )}
           </form>
+          <div className="qlAide">
+            Devis enregistrés jusqu’à la veille : les devis créés aujourd’hui ne sont pas encore disponibles.
+            Pour une commande du jour, utilisez « Une liste d’articles » : coller une liste, une photo ou une capture d’écran.
+          </div>
         </div>
       ) : (
         <div className="qlSaisie">
@@ -746,7 +851,7 @@ export default function QuandLivrer({ compact = false, initialDevis, initialList
               {chargement ? '…' : 'Contrôler la liste'}
             </button>
             <button type="button" className="qlBtn" onClick={() => fichierRef.current?.click()} disabled={photoEnCours}>
-              {photoEnCours ? 'Lecture de l’image…' : '📷 Photo / image de la commande'}
+              {photoEnCours ? 'Lecture de l’image…' : '📷 Photo / capture d’écran de la commande'}
             </button>
             {texte && (
               <button type="button" className="qlBtn qlBtnGhost" onClick={() => { setTexte(''); setLignes([]); setDispo(new Map()) }}>
@@ -763,7 +868,9 @@ export default function QuandLivrer({ compact = false, initialDevis, initialList
               onChange={(e) => void lirePhoto(e.target.files)}
             />
           </div>
-          {!compact && <div className="qlAide">Astuce : une capture d’écran collée ici (Ctrl+V) est lue comme une photo.</div>}
+          <div className="qlAide">
+            Collez une liste (Excel, mail…), prenez une photo de la commande, ou collez une capture d’écran ici (Ctrl+V) : elle est lue comme une photo.
+          </div>
         </div>
       )}
 
@@ -786,15 +893,24 @@ export default function QuandLivrer({ compact = false, initialDevis, initialList
                     ? 'Calcul en cours…'
                     : synthese.dateMax === null
                       ? 'Non promettable'
-                      : synthese.dateMax <= aujourdhui
-                        ? 'Tout est dispo : livrable dès aujourd’hui'
-                        : `Livrable au plus tôt le ${fmtDate(synthese.dateMax)}`}
+                      : `Livraison client au plus tôt le ${fmtDate(dateClient(synthese.dateMax))}`}
               </div>
+              {synthese.pret && synthese.dateMax && (
+                <div className="qlVerdictDepot">
+                  {synthese.dateMax <= aujourdhui
+                    ? <>Tout est <b>dispo au dépôt aujourd’hui</b></>
+                    : <>Mise à disposition au dépôt le <b>{fmtDate(synthese.dateMax)}</b></>}
+                  {' '}+ <b>{DELAI_LOGISTIQUE_JOURS} jours calendaires</b> de logistique (préparation + transport)
+                  {' '}· livraison client dans {joursEntre(aujourdhui, dateClient(synthese.dateMax))} jours
+                </div>
+              )}
               {synthese.pret && synthese.dateMax && synthese.dateMax > aujourdhui && (
                 <div className="qlVerdictSous">
-                  dans {joursEntre(aujourdhui, synthese.dateMax)} jours · fixé par{' '}
+                  Date fixée par{' '}
                   {Array.from(synthese.limitantes).filter((r) => !synthese.bloquees.includes(r)).map((r) => (
-                    <span key={r} className="qlLimitante">⚑ {r}</span>
+                    onOuvrirArticle
+                      ? <button key={r} type="button" className="qlLimitante qlLienRef" title="Voir la projection du stock (courbe)" onClick={() => ouvrirArticle(r)}>⚑ {r} ↗</button>
+                      : <span key={r} className="qlLimitante">⚑ {r}</span>
                   ))}
                 </div>
               )}
@@ -806,7 +922,7 @@ export default function QuandLivrer({ compact = false, initialDevis, initialList
               {synthese.horsAccessoires && (
                 <div className="qlVerdictSous qlHorsAcc">
                   Sans les accessoires (moins de {SEUIL_ACCESSOIRE_EUR} € dans le document) :{' '}
-                  <b>{synthese.horsAccessoires.date <= aujourdhui ? 'livrable dès aujourd’hui' : `livrable le ${fmtDate(synthese.horsAccessoires.date)}`}</b>
+                  <b>livraison client le {fmtDate(dateClient(synthese.horsAccessoires.date))}</b> (dépôt {synthese.horsAccessoires.date <= aujourdhui ? 'aujourd’hui' : `le ${fmtDate(synthese.horsAccessoires.date, false)}`})
                   {' '}— à traiter à part : {synthese.horsAccessoires.refs.join(', ')}
                 </div>
               )}
@@ -844,10 +960,12 @@ export default function QuandLivrer({ compact = false, initialDevis, initialList
           </section>
 
           <div className="qlLegende">
-            <span><i style={{ background: COULEURS.vert.trait }} /> dispo tout de suite</span>
-            <span><i style={{ background: COULEURS.orange.trait }} /> dispo à une date future</span>
+            <span><i style={{ background: COULEURS.vert.trait }} /> dispo au dépôt tout de suite</span>
+            <span><i style={{ background: COULEURS.orange.trait }} /> dispo au dépôt à une date future</span>
             <span><i style={{ background: COULEURS.rouge.trait }} /> commande d’appro à passer / non promettable</span>
             <span>⚑ référence limitante</span>
+            <span>Dates des lignes = mise à disposition au dépôt ; livraison client = + {DELAI_LOGISTIQUE_JOURS} j</span>
+            {onOuvrirArticle && <span className="qlAide">Cliquez une référence pour voir la projection de son stock (courbe).</span>}
             {devis?.source === 'LIGNES' && <span className="qlAide">Devis antérieur au tri des lignes : un seul bloc, cochez ligne à ligne.</span>}
             {plusieursBlocs && <span className="qlAide">Décochez un bloc pour voir la date sans lui.</span>}
           </div>
@@ -882,7 +1000,7 @@ export default function QuandLivrer({ compact = false, initialDevis, initialList
                       <span className="qlBlocNom">{b.libelle || `Bloc ${b.bloc}`}</span>
                       {nbCoches > 0 && couleurBloc !== 'neutre' && (
                         <span className="qlBlocDate" style={{ color: COULEURS[couleurBloc].encre, borderColor: COULEURS[couleurBloc].trait }}>
-                          {dateBloc && dateBloc <= aujourdhui ? 'dispo' : dateBloc ? `au plus tôt ${fmtDate(dateBloc, false)}` : 'non promettable'}
+                          {dateBloc ? `livraison client ≥ ${fmtDate(dateClient(dateBloc), false)}` : 'non promettable'}
                         </span>
                       )}
                       {nbCoches === 0 && <span className="qlBlocDate">retiré</span>}
@@ -904,6 +1022,7 @@ export default function QuandLivrer({ compact = false, initialDevis, initialList
                         qteTotaleRef={l.ref ? qteParRef.get(l.ref) ?? null : null}
                         limitante={Boolean(l.ref && synthese.limitantes.has(l.ref))}
                         avecPrixDevis={Boolean(devis)}
+                        onOuvrirArticle={onOuvrirArticle ? ouvrirArticle : undefined}
                       />
                     )
                   })}
@@ -913,8 +1032,11 @@ export default function QuandLivrer({ compact = false, initialDevis, initialList
           </div>
 
           <p className="qlNote">
-            Date de mise à disposition au dépôt (hors délai de transport). Le calcul tient compte de toutes les commandes clients déjà en portefeuille
-            à leur date de livraison : une commande mal datée peut retarder la date affichée.
+            Chaque ligne donne la date de <b>mise à disposition au dépôt</b> ; la <b>livraison client</b> ajoute {DELAI_LOGISTIQUE_JOURS} jours calendaires
+            de logistique (préparation + transport). Le calcul tient compte de toutes les commandes clients déjà en portefeuille à leur date de livraison :
+            une commande mal datée peut retarder la date affichée. Sans stock ni commande fournisseur suffisants, la date est celle d’un nouvel appro :
+            aujourd’hui + délai article saisi dans « Calcul d’appro » (sinon délai constaté, sinon délai fournisseur). Références bloquées achat dans BLG :
+            non promettables.
           </p>
         </>
       )}
@@ -927,7 +1049,7 @@ export default function QuandLivrer({ compact = false, initialDevis, initialList
 // ─────────────────────────────────────────────────────────────────────────
 
 function LigneVue({
-  l, coche, onBascule, lecture, dispo, qteTotaleRef, limitante,
+  l, coche, onBascule, lecture, dispo, qteTotaleRef, limitante, onOuvrirArticle,
 }: {
   l: Ligne
   coche: boolean
@@ -937,6 +1059,7 @@ function LigneVue({
   qteTotaleRef: number | null
   limitante: boolean
   avecPrixDevis: boolean
+  onOuvrirArticle?: (ref: string) => void
 }) {
   const estArticle = l.type === 'ARTICLE'
 
@@ -959,6 +1082,7 @@ function LigneVue({
 
   const details = [
     estArticle && coche ? lecture?.detail : null,
+    estArticle && coche && lecture?.date ? `livraison client ≥ ${fmtDate(dateClient(lecture.date), false)}` : null,
     estArticle && coche && dispo ? `stock dispo ${fmtQte(dispo.stock_dispo)}` : null,
   ].filter(Boolean).join(' · ')
 
@@ -971,7 +1095,13 @@ function LigneVue({
 
       <div className="qlRefCol">
         {lim && <span className="qlLimBadge" style={{ background: c.trait }}>⚑ LIMITANTE</span>}
-        <span className="qlMono qlRefCode">{l.ref}</span>
+        {onOuvrirArticle && l.ref && l.type !== 'INCONNU' ? (
+          <button type="button" className="qlMono qlRefCode qlLienRef" title="Voir la projection du stock (courbe)" onClick={() => onOuvrirArticle(l.ref!)}>
+            {l.ref} <span aria-hidden="true">↗</span>
+          </button>
+        ) : (
+          <span className="qlMono qlRefCode">{l.ref}</span>
+        )}
         {l.sommeil && <span className="qlBadge qlBadgeErr">sommeil</span>}
         {l.type === 'INCONNU' && <span className="qlBadge qlBadgeErr">inconnue</span>}
       </div>
@@ -1055,6 +1185,12 @@ const CSS = `
 .qlVerdictMain { flex: 1 1 420px; min-width: 0; }
 .qlVerdictLabel { font-size: 13px; color: rgba(var(--cg-ink-rgb),0.7); display: flex; align-items: center; gap: 8px; }
 .qlVerdictDate { font-size: 24px; font-weight: 700; margin: 2px 0 4px; letter-spacing: -0.01em; }
+.qlVerdictDepot { font-size: 13px; color: rgba(var(--cg-ink-rgb),0.8); margin: 0 0 4px; }
+.qlLienRef { border: 0; background: transparent; color: inherit; padding: 0; cursor: pointer; text-decoration: underline; text-decoration-style: dotted; text-underline-offset: 3px; font: inherit; }
+button.qlLimitante.qlLienRef { padding: 2px 8px; background: rgba(var(--cg-ink-rgb),0.12); text-decoration: none; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-weight: 700; }
+.qlLienRef:hover { color: var(--cg-accent); }
+.qlRefCode.qlLienRef { font-family: 'IBM Plex Mono', ui-monospace, monospace; font-weight: 600; font-size: 14px; white-space: nowrap; }
+.qlLigne.limitante .qlRefCode.qlLienRef { font-size: 15.5px; }
 .qlVerdictSous { font-size: 13px; margin-top: 2px; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
 .qlLimitante { font-family: 'IBM Plex Mono', ui-monospace, monospace; font-weight: 700; padding: 2px 8px; border-radius: 999px; background: rgba(var(--cg-ink-rgb),0.12); }
 .qlVerdictCote { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; flex: 0 1 340px; }
