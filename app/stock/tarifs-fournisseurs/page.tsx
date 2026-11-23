@@ -604,7 +604,7 @@ async function exporterImportBlg(d: Donnees, cfg: ExportBlg, lignes: LigneBlg[])
     window.setTimeout(() => URL.revokeObjectURL(url), 1000)
   }
 
-  const sortie: unknown[][] = [['ID BLG', 'Fournisseur', 'Référence interne', 'Référence fournisseur', 'Prix tarif']]
+  const sortie: unknown[][] = [['ID BLG', 'Fournisseur', 'Référence interne', 'Référence fournisseur', 'Prix d\'achat']]
   const rejetes: unknown[][] = [['Article SAGE', 'Désignation', 'Réf. fournisseur', 'Prix', 'Motif']]
   const vus = new Set<number>()
   let nb = 0
@@ -639,9 +639,9 @@ function FenetreExportBlg({ cfg, setCfg, nbLignes, onAnnuler, onValider, occupe 
         <div className="text-[15px] font-bold">Export pour l’import des tarifs dans BLG</div>
         <div className="mt-1 text-[12px] text-[#8A8474]">
           {cfg.source === 'actuel' ? 'Tarif actuel SAGE — articles affichés dans le tableau' : 'Proposition — lignes appariées à un article SAGE'} : {fmtNum(nbLignes)} article(s).
-          Colonnes : ID BLG / Fournisseur / Référence interne / Référence fournisseur / Prix tarif.
+          Colonnes : ID BLG / Fournisseur / Référence interne / Référence fournisseur / Prix d’achat.
         </div>
-        <div className="mt-4 text-[11px] text-[#8A8474]">Prix tarif exporté</div>
+        <div className="mt-4 text-[11px] text-[#8A8474]">Prix exporté (colonne « Prix d’achat »)</div>
         <div className="mt-1 flex flex-col gap-1.5">
           {choix.map((c) => (
             <label key={c} className="flex items-center gap-2 text-[12.5px]">
