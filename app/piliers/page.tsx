@@ -2089,17 +2089,49 @@ function passagesDe(api: Api, r: Reunion): ReunionSujet[] {
   return rs
 }
 
-function compteRenduTexte(api: Api, r: Reunion) {
+// (23/11/2026) Compte rendu : une entrée par sujet — qui l'a abordé, priorité,
+// titre, décision ; en retrait, le commentaire puis les actions à mener (qui,
+// date de l'update attendu, quoi). Les actions tirées d'un sujet sont rangées
+// sous leur sujet. Tri : P1 d'abord.
+type ActionCR = { membre: Membre | null; date: string | null; titre: string; faite: boolean; sujetId: string }
+type EntreeCR = { sujet: Sujet; passage: ReunionSujet; aborde: Membre | null; commentaire: string; actions: ActionCR[] }
+
+function entreesCR(api: Api, r: Reunion, odj: boolean): EntreeCR[] {
   const rs = passagesDe(api, r)
+  const ids = new Set(rs.map((x) => x.sujet_id))
+  const piloteDe = (id: string) => api.porteursOf(id).find((p) => p.role === 'pilote')?.membre || null
+  return rs
+    .map((x) => ({ x, s: api.sujetById.get(x.sujet_id) }))
+    .filter((e): e is { x: ReunionSujet; s: Sujet } => !!e.s)
+    .filter(({ s }) => !(s.parent_id && ids.has(s.parent_id)))
+    .filter(({ s }) => (s.reunion_origine === r.id) === odj)
+    .map(({ x, s }) => {
+      const decision = api.suivis.find((v) => v.sujet_id === s.id && v.reunion_id === r.id && v.type === 'decision')
+      const actions: ActionCR[] = []
+      if (OPEN_STATUTS.includes(s.statut)) actions.push({ membre: piloteDe(s.id), date: s.prochain_point, titre: 'Suite du sujet', faite: false, sujetId: s.id })
+      api.sujets
+        .filter((c) => c.parent_id === s.id)
+        .sort((a, b) => a.numero - b.numero)
+        .forEach((c) => actions.push({ membre: piloteDe(c.id), date: c.prochain_point, titre: c.titre, faite: !isOpen(c), sujetId: c.id }))
+      return {
+        sujet: s,
+        passage: x,
+        aborde: (s.propose_par && api.membreById.get(s.propose_par)) || piloteDe(s.id),
+        commentaire: x.commentaire || decision?.texte || s.contexte || '',
+        actions,
+      }
+    })
+    .sort((a, b) => (a.sujet.priorite || 9) - (b.sujet.priorite || 9) || a.sujet.numero - b.sujet.numero)
+}
+
+function compteRenduTexte(api: Api, r: Reunion) {
   const mt = api.meteo.filter((m) => m.reunion_id === r.id)
   const lines: string[] = []
   lines.push(`Réunion Piliers — ${fmtDateLong(r.date_reunion)}`)
   const red = r.redacteur_id ? api.membreById.get(r.redacteur_id) : null
   if (red) lines.push(`Rédacteur : ${red.prenom}`)
   lines.push('')
-  if (r.synthese) {
-    lines.push('SYNTHÈSE', r.synthese, '')
-  }
+  if (r.synthese) lines.push('SYNTHÈSE', r.synthese, '')
   if (mt.length) {
     lines.push('MÉTÉO')
     mt.forEach((m) => {
@@ -2110,14 +2142,14 @@ function compteRenduTexte(api: Api, r: Reunion) {
     lines.push('')
   }
   const section = (title: string, odj: boolean) => {
-    const list = rs.filter((x) => (api.sujetById.get(x.sujet_id)?.reunion_origine === r.id) === odj)
+    const list = entreesCR(api, r, odj)
     if (!list.length) return
     lines.push(title)
-    list.forEach((x) => {
-      const s = api.sujetById.get(x.sujet_id)
-      if (!s) return
-      const pil = api.porteursOf(s.id).find((p) => p.role === 'pilote')?.membre.prenom
-      lines.push(`  #${s.numero}${s.confidentiel ? ' [CONFIDENTIEL]' : ''} ${s.titre} — ${ISSUES[x.issue].label}${pil ? ` (${pil})` : ''}${x.commentaire ? ` : ${x.commentaire}` : ''}${isOpen(s) && s.prochain_point ? ` · prochain point ${fmtDate(s.prochain_point)}` : ''}`)
+    list.forEach((e) => {
+      const s = e.sujet
+      lines.push(`${e.aborde?.prenom || '?'} — ${s.priorite ? `[P${s.priorite}] ` : ''}${s.confidentiel ? '[CONFIDENTIEL] ' : ''}${s.titre} (${ISSUES[e.passage.issue].label})`)
+      if (e.commentaire) lines.push(`      ${e.commentaire.replace(/\n/g, '\n      ')}`)
+      e.actions.forEach((a) => lines.push(`      → ${a.membre?.prenom || 'à désigner'} · update le ${a.date ? fmtDate(a.date) : '?'} · ${a.titre}${a.faite ? ' (fait)' : ''}`))
     })
     lines.push('')
   }
@@ -2126,32 +2158,95 @@ function compteRenduTexte(api: Api, r: Reunion) {
   return lines.join('\n')
 }
 
+function PrioBadge({ p }: { p: number | null }) {
+  if (!p) return <span style={{ fontSize: 11, color: C.faint, width: 30, display: 'inline-block', textAlign: 'center' }}>—</span>
+  const pr = PRIORITES.find((x) => x.key === p)!
+  const fort = p === 1
+  return (
+    <span
+      title={pr.help}
+      style={{
+        fontSize: 11,
+        fontWeight: 800,
+        width: 30,
+        textAlign: 'center',
+        display: 'inline-block',
+        padding: '2px 0',
+        borderRadius: 6,
+        background: fort ? pr.color : 'transparent',
+        color: fort ? '#fff' : C.ink,
+        border: `1px solid ${pr.color}`,
+      }}
+    >
+      P{p}
+    </span>
+  )
+}
+
 function CompteRendu({ reunion }: { reunion: Reunion }) {
   const api = useApi()
-  const rs = passagesDe(api, reunion)
   const mt = api.meteo.filter((m) => m.reunion_id === reunion.id)
   const txt = compteRenduTexte(api, reunion)
   const mails = api.membresActifs.map((m) => m.email).filter(Boolean).join(';')
+  const today = todayIso()
 
   const bloc = (title: string, odj: boolean) => {
-    const list = rs.filter((x) => (api.sujetById.get(x.sujet_id)?.reunion_origine === reunion.id) === odj)
+    const list = entreesCR(api, reunion, odj)
     if (!list.length) return null
+    const nbP1 = list.filter((e) => e.sujet.priorite === 1).length
     return (
-      <div style={{ marginTop: 18 }}>
-        <h3 style={{ fontSize: 14, textTransform: 'uppercase', letterSpacing: 1, color: C.muted, margin: '0 0 8px' }}>{title}</h3>
-        {list.map((x) => {
-          const s = api.sujetById.get(x.sujet_id)
-          if (!s) return null
-          const is = ISSUES[x.issue]
+      <div style={{ marginTop: 20 }}>
+        <h3 style={{ fontSize: 13, textTransform: 'uppercase', letterSpacing: 1, color: C.muted, margin: '0 0 6px' }}>
+          {title}
+          {nbP1 > 0 && <span style={{ marginLeft: 10, color: C.alert, textTransform: 'none', letterSpacing: 0 }}>· {nbP1} prioritaire{nbP1 > 1 ? 's' : ''} (P1)</span>}
+        </h3>
+        {list.map((e) => {
+          const s = e.sujet
+          const is = ISSUES[e.passage.issue]
           return (
-            <div key={x.sujet_id} style={{ display: 'flex', gap: 10, padding: '8px 0', borderBottom: `1px solid ${C.line}`, alignItems: 'center' }}>
-              <span>{is.icon}</span>
-              <div style={{ flex: 1 }}>
-                <SujetTitle sujet={s} small />
-                {x.commentaire && <div style={{ fontSize: 13, color: C.muted, marginTop: 2 }}>{x.commentaire}</div>}
+            <div key={s.id} style={{ padding: '8px 0 8px 10px', borderBottom: `1px solid ${C.line}`, boxShadow: s.priorite === 1 ? `inset 3px 0 0 ${C.alert}` : 'none' }}>
+              <div style={{ display: 'grid', gridTemplateColumns: '150px 34px minmax(0, 1fr) auto', gap: 10, alignItems: 'center' }}>
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8, fontWeight: 700, fontSize: 13, minWidth: 0 }}>
+                  {e.aborde ? <Avatar membre={e.aborde} size={24} /> : <span style={{ color: C.faint }}>?</span>}
+                  <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{e.aborde?.prenom || '—'}</span>
+                </span>
+                <PrioBadge p={s.priorite} />
+                <button
+                  onClick={() => api.openSujet(s.id)}
+                  style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', color: C.ink, textAlign: 'left', fontSize: 14, fontWeight: s.priorite === 1 ? 800 : 600, fontFamily: FONT_BODY }}
+                >
+                  {s.confidentiel && <span title="Confidentiel">🔒 </span>}
+                  {s.impacte_ca && <span title="Impacte le CA">⚡ </span>}
+                  {s.titre}
+                  <span style={{ color: C.faint, fontWeight: 400, fontSize: 12 }}> #{s.numero}</span>
+                </button>
+                <span style={{ fontSize: 12, color: is.color, fontWeight: 700, whiteSpace: 'nowrap' }}>
+                  {is.icon} {is.label}
+                </span>
               </div>
-              <PorteursInline sujetId={s.id} small />
-              <span style={{ fontSize: 12, color: is.color, fontWeight: 700, minWidth: 100, textAlign: 'right' }}>{is.label}</span>
+              {(e.commentaire || e.actions.length > 0) && (
+                <div style={{ marginLeft: 194, marginTop: 4, display: 'flex', flexDirection: 'column', gap: 3 }}>
+                  {e.commentaire && <div style={{ fontSize: 13, color: C.muted, whiteSpace: 'pre-wrap', lineHeight: 1.45 }}>{e.commentaire}</div>}
+                  {e.actions.map((a, i) => {
+                    const retard = !a.faite && !!a.date && a.date < today
+                    return (
+                      <button
+                        key={`${a.sujetId}-${i}`}
+                        onClick={() => api.openSujet(a.sujetId)}
+                        style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, background: 'none', border: 'none', padding: 0, cursor: 'pointer', color: C.ink, textAlign: 'left', fontFamily: FONT_BODY, opacity: a.faite ? 0.55 : 1 }}
+                      >
+                        <span style={{ color: C.accent }}>→</span>
+                        {a.membre ? <Avatar membre={a.membre} size={18} /> : null}
+                        <b style={{ minWidth: 70 }}>{a.membre?.prenom || 'à désigner'}</b>
+                        <span style={{ color: retard ? C.alert : C.muted, fontWeight: retard ? 700 : 400, minWidth: 120 }}>
+                          {a.faite ? '✅ fait' : a.date ? `update le ${fmtDate(a.date)}` : 'date à fixer'}
+                        </span>
+                        <span style={{ textDecoration: a.faite ? 'line-through' : 'none' }}>{a.titre}</span>
+                      </button>
+                    )
+                  })}
+                </div>
+              )}
             </div>
           )
         })}
@@ -2190,7 +2285,7 @@ function CompteRendu({ reunion }: { reunion: Reunion }) {
         </Btn>
         <Btn
           onClick={() => {
-            const body = txt.length > 1800 ? `${txt.slice(0, 1800)}\n…\n(compte rendu complet dans le compagnon : Réunion Piliers › Réunions passées)` : txt
+            const body = txt.length > 1800 ? `${txt.slice(0, 1800)}\n…\n(compte rendu complet dans le compagnon : Réunion Piliers › Dernières réunions)` : txt
             window.location.href = `mailto:${mails}?subject=${encodeURIComponent(`Compte rendu réunion Piliers — ${fmtDate(reunion.date_reunion, { day: 'numeric', month: 'long', year: 'numeric' })}`)}&body=${encodeURIComponent(body)}`
           }}
         >
