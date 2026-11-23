@@ -2,6 +2,7 @@
 
 import { useDeferredValue, useEffect, useMemo, useRef, useState } from 'react'
 import Papa from 'papaparse'
+import { saveProspectSuivi } from '@/lib/prospectSuivi'
 import * as XLSX from 'xlsx-js-style'
 import jsPDF from 'jspdf'
 import autoTable, { Row } from 'jspdf-autotable'
@@ -1530,15 +1531,18 @@ async function saveSelectedClientField(field: 'prospect_comment' | 'prospect_sta
   setClients((prev) => prev.map((row) => (row.id === currentId ? ({ ...row, [field]: normalizedValue } as ClientRow) : row)))
   setMapClients((prev) => prev.map((row) => (row.id === currentId ? ({ ...row, [field]: normalizedValue } as ClientRow) : row)))
 
-  const { error } = await supabase
-    .from('clients')
-    .update({ [field]: normalizedValue })
-    .eq('id', currentId)
-
-  if (error) {
+  try {
+    await saveProspectSuivi(String(currentId), { [field]: normalizedValue })
+  } catch (error: any) {
     console.error(error)
-    alert("Erreur lors de l'enregistrement de la fiche client.")
-    await loadAll()
+    alert("Erreur lors de l'enregistrement de la fiche client :\n" + (error?.message || String(error)))
+    const previousValue = (beforeRow as Record<string, unknown>)[field] ?? null
+    // Le commentaire reste affiché dans la fiche ouverte pour ne pas perdre le texte saisi.
+    if (field !== 'prospect_comment') {
+      setSelectedClient((prev) => (prev && prev.id === currentId ? ({ ...prev, [field]: previousValue } as ClientRow) : prev))
+    }
+    setClients((prev) => prev.map((row) => (row.id === currentId ? ({ ...row, [field]: previousValue } as ClientRow) : row)))
+    setMapClients((prev) => prev.map((row) => (row.id === currentId ? ({ ...row, [field]: previousValue } as ClientRow) : row)))
     return
   }
 

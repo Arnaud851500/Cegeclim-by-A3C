@@ -5,6 +5,7 @@ import { createPortal } from 'react-dom'
 import dynamic from 'next/dynamic'
 import 'leaflet/dist/leaflet.css'
 import { supabase } from '@/lib/supabaseClient'
+import { saveProspectSuivi } from '@/lib/prospectSuivi'
 import { NavigationChoiceSheet, PhoneChoiceSheet } from './MobileActionSheets'
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -662,11 +663,12 @@ export default function MobileProspects() {
     if (!selected) return
     setSaving(true)
     try {
-      const { error } = await supabase
-        .from('clients')
-        .update({ prospect_status: statutBrouillon || null, prospect_comment: commentaireBrouillon })
-        .eq('id', selected.id)
-      if (error) throw error
+      // FIX (2026-11-23) : RPC save_client_prospect_suivi -- l'update direct était
+      // silencieusement refusé (0 ligne) pour les commerciaux.
+      await saveProspectSuivi(String(selected.id), {
+        prospect_status: statutBrouillon || null,
+        prospect_comment: commentaireBrouillon,
+      })
 
       setProspects((prev) =>
         prev.map((p) => (p.id === selected.id ? { ...p, prospect_status: statutBrouillon, prospect_comment: commentaireBrouillon } : p)),
