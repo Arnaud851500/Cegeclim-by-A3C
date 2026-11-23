@@ -55,7 +55,7 @@ EN-TÊTE (haut de page) :
 - "comptage" : 1, 2 ou 3 d'après la ligne « 1er comptage / 2e comptage / 3e comptage » imprimée sous le titre, sinon null ;
 - "code_liste" : le code imprimé « Liste INV-XXXXXXXX-Cn » (police machine à écrire), recopié exactement (ex. « INV-1A2B3C4D-C1 »), sinon "" ;
 - "date_inventaire" : la date « inventaire du JJ/MM/AAAA » au format AAAA-MM-JJ, sinon "" ;
-- "equipes" : les initiales manuscrites écrites dans le cadre « Équipe(s) (initiales) » en haut à droite. Une équipe peut regrouper 2 personnes écrites « PJC/AV ». S'il y a deux équipes distinctes (deux groupes d'initiales séparés par « et », une virgule, un tiret ou sur deux lignes), renvoie-les comme deux éléments. Lettres seules, en majuscules. Liste vide si rien n'est écrit ;
+- "equipes" : les initiales manuscrites écrites dans le cadre « Équipe(s) (initiales) » en haut à droite. Une équipe regroupe souvent 2 personnes reliées par « / », « + » ou « & » (ex. « PL + YV ») : c'est UNE équipe, renvoie-la sous la forme « PL/YV ». Seulement s'il y a deux équipes distinctes (deux groupes d'initiales séparés par une virgule, « et », ou écrits sur deux lignes), renvoie-les comme deux éléments. Lettres seules, en majuscules. Liste vide si rien n'est écrit ;
 - "feuille" : le texte « Feuille x / y » imprimé, sinon "".
 
 TABLEAU : colonnes imprimées « Réf. CEGECLIM | Réf. fournisseur | Désignation | Qté stock | Qté comptée | Éq. | PUMP | Commentaire » (la colonne « Éq. » peut ne pas exister sur les anciennes feuilles).
