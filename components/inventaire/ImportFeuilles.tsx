@@ -25,6 +25,9 @@
  *     fournisseur et la qté stock IMPRIMÉES de sa ligne ; si elles ne correspondent pas à la ligne
  *     de la liste, ou si l'écriture est à cheval sur deux lignes, la ligne est « à vérifier »
  *     (proposition de la bonne référence en un clic) et la case de vérification est exigée.
+ *   - 23/11/2026 (idée d'Arnaud) : n° de ligne imprimé (colonne « N° » = inventaire_lignes.id) :
+ *     rapprochement d'abord par ce numéro ; s'il concorde avec la référence lue (à une erreur de
+ *     lecture près), pas de contrôle de décalage. Anciennes feuilles : rapprochement par référence.
  */
 
 import React, { useEffect, useMemo, useRef, useState } from 'react'
@@ -87,6 +90,8 @@ type LigneRev = {
   qte: string
   com: string
   action: Action
+  /** N° de ligne imprimé lu sur la feuille (inventaire_lignes.id), null sur les anciennes feuilles. */
+  no: number | null
   refFournLue: string
   qteStockLue: number | null
   positionIncertaine: boolean
@@ -239,14 +244,14 @@ export default function ImportFeuilles({ depots, depotFixe, equipeParDefaut, onF
           nLignes.push({
             cle: `${im.cle}:${k}`, pageCle: im.cle, horsListe: false, refLue: l.ref, ref: l.ref, qteLue: l.qte, etat: l.etat, doute: l.doute,
             comLu: l.commentaire, equipe: l.equipe, qte: l.etat === 'barre' || l.etat === 'vide' ? '' : vQ(l.qte), com: l.commentaire, action: 'auto',
-            refFournLue: l.ref_fournisseur || '', qteStockLue: l.qte_stock ?? null, positionIncertaine: !!l.position_incertaine, refVoisine: l.ref_voisine || '', verifiee: false,
+            no: l.no ?? null, refFournLue: l.ref_fournisseur || '', qteStockLue: l.qte_stock ?? null, positionIncertaine: !!l.position_incertaine, refVoisine: l.ref_voisine || '', verifiee: false,
           })
         }
         for (const [k, l] of (lu?.hors_liste || []).entries()) {
           nLignes.push({
             cle: `${im.cle}:HL${k}`, pageCle: im.cle, horsListe: true, refLue: l.ref, ref: l.ref, qteLue: l.qte, etat: l.qte === null ? 'illisible' : 'lisible', doute: false,
             comLu: l.commentaire, equipe: '', qte: vQ(l.qte), com: l.commentaire, action: 'auto',
-            refFournLue: '', qteStockLue: null, positionIncertaine: false, refVoisine: '', verifiee: true,
+            no: null, refFournLue: '', qteStockLue: null, positionIncertaine: false, refVoisine: '', verifiee: true,
           })
         }
       })
@@ -271,9 +276,19 @@ export default function ImportFeuilles({ depots, depotFixe, equipeParDefaut, onF
       if (!p || !p.lu) { c.erreur = 'page non lue'; continue }
       if (!p.cibleId) { c.erreur = 'liste à choisir pour la page'; continue }
       if (!liste) { c.info = 'chargement de la liste…'; continue }
-      c.ligne = trouverLigne(liste.lignes, r.ref)
+      // Rapprochement : n° de ligne imprimé d'abord (clé stable), puis référence lue.
+      const parNo = !r.verifiee && r.no !== null ? liste.lignes.find((x) => x.id === r.no) || null : null
+      const parRef = trouverLigne(liste.lignes, r.ref)
+      let cleSure = false
+      if (parNo && (!parRef || parRef.id === parNo.id || refsProches(r.ref, parNo.reference))) { c.ligne = parNo; cleSure = true }
+      else if (parNo && parRef) {
+        // N° et référence désignent deux lignes différentes : on garde la référence, à vérifier.
+        c.ligne = parRef
+        c.verif = `Ligne à vérifier sur le scan : n° ${r.no} lu (= ${parNo.reference}) mais référence ${r.ref}`
+        c.propositions = [parNo.reference]
+      } else c.ligne = parRef
       // Contrôle de décalage : ancres imprimées de la ligne de l'écriture vs ligne de la liste.
-      if (!r.verifiee && (r.qteLue !== null || r.etat !== 'vide')) {
+      if (!cleSure && !c.verif && !r.verifiee && (r.qteLue !== null || r.etat !== 'vide')) {
         const props = new Set<string>()
         const motifs: string[] = []
         if (r.positionIncertaine) {
@@ -298,6 +313,12 @@ export default function ImportFeuilles({ depots, depotFixe, equipeParDefaut, onF
           }
         }
         if (motifs.length) { c.verif = `Ligne à vérifier sur le scan : ${motifs.join(' ; ')}`; c.propositions = Array.from(props).slice(0, 3) }
+      }
+      // Même avec un n° de ligne sûr, une écriture à cheval sur deux lignes reste à vérifier.
+      if (cleSure && !r.verifiee && r.positionIncertaine && r.qteLue !== null) {
+        const v = r.refVoisine ? trouverLigne(liste.lignes, r.refVoisine) : null
+        c.verif = `Ligne à vérifier sur le scan : écriture à cheval${v ? ` avec la ligne ${v.reference}` : ' sur deux lignes'}`
+        c.propositions = v ? [v.reference] : []
       }
       const q = lireQuantite(r.qte)
       if (q === null) { c.resolu = 'ignorer'; c.info = r.etat === 'barre' ? 'case barrée : pas de saisie' : r.etat === 'vide' ? 'non comptée sur la feuille' : 'pas de quantité'; continue }
@@ -560,7 +581,7 @@ export default function ImportFeuilles({ depots, depotFixe, equipeParDefaut, onF
                               {r.horsListe && <span className="ml-1 rounded bg-[#FDF3E3] px-1 text-[10px] font-bold text-[#96600F]">hors liste</span>}
                             </td>
                             <td className="px-2 py-1">
-                              <input value={r.ref} list={p?.cibleId ? `inv-refs-${p.cibleId}` : undefined}
+                              <input value={!r.verifiee && c?.ligne ? c.ligne.reference : r.ref} list={p?.cibleId ? `inv-refs-${p.cibleId}` : undefined}
                                 onChange={(e) => majLigne(r.cle, { ref: e.target.value.toUpperCase(), verifiee: true })}
                                 className={`${ctl} w-40 font-bold ${c && !c.ligne && c.resolu !== 'ignorer' ? 'border-[#E8B4AE]' : ''}`} title={r.refLue !== r.ref ? `Lu : ${r.refLue}` : undefined} />
                             </td>

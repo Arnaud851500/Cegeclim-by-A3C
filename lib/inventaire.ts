@@ -12,6 +12,7 @@
  *     de CHAQUE page (feuilles réparties entre plusieurs équipes), pagination en pied ;
  *     23/11/2026 : code de liste « INV-xxxxxxxx-Cn » en tête de page et colonne « Éq. »
  *     (une feuille peut servir à 2 équipes) pour l'intégration des feuilles scannées ;
+ *     colonne « N° » = identifiant stable de la ligne, clé de rapprochement des scans ;
  *   - pdfEcarts : écarts d'un ou plusieurs dépôts avec les comptages, la valeur
  *     au PUMP et la décision des achats ;
  *   - excelEcarts : écarts validés prêts à saisir dans SAGE (+ détail + synthèse).
@@ -371,7 +372,7 @@ export function pdfListeComptage(
   }
 
   const lignes = opts.lignes ? [...opts.lignes] : [...liste.lignes]
-  const nbCol = 8
+  const nbCol = 9
   const body: Array<Array<string | { content: string; colSpan?: number; styles?: Record<string, unknown> }>> = []
   let macro = ''
   for (const l of lignes) {
@@ -379,9 +380,10 @@ export function pdfListeComptage(
     if (m !== macro) {
       macro = m
       body.push([{ content: p(l.transit ? `${m} : ${AIDE_TRANSIT}` : m), colSpan: nbCol,
-        styles: l.transit ? { fillColor: [232, 240, 251], fontStyle: 'bold', textColor: [29, 79, 145] } : { fillColor: [238, 235, 226], fontStyle: 'bold', textColor: [60, 56, 46] } }])
+        styles: { font: 'helvetica', fontSize: 8, halign: 'left', ...(l.transit ? { fillColor: [232, 240, 251], fontStyle: 'bold', textColor: [29, 79, 145] } : { fillColor: [238, 235, 226], fontStyle: 'bold', textColor: [60, 56, 46] }) } }])
     }
     const row = [
+      String(l.id),
       p(l.reference) + (l.hors_liste ? ' (hors liste)' : '') + (l.transit ? ' (transit)' : ''),
       p(l.ref_fournisseur || ''),
       p(l.designation || ''),
@@ -390,16 +392,18 @@ export function pdfListeComptage(
       pEuro(l.pump),
       avec ? p(l.commentaire || '') : '',
     ]
-    row.splice(5, 0, avec && l.qte !== null ? p(l.initiales || '') : '')
+    row.splice(6, 0, avec && l.qte !== null ? p(l.initiales || '') : '')
     body.push(row)
   }
 
+  // Colonne « N° » : identifiant stable de la ligne (inventaire_lignes.id), clé de lecture des feuilles scannées.
   // Colonne « Éq. » : une feuille peut servir à deux équipes, chacune note ses initiales sur ses lignes.
-  const head = [['Réf. CEGECLIM', 'Réf. fournisseur', 'Désignation', 'Qté stock', 'Qté comptée', 'Éq.', 'PUMP', 'Commentaire']]
+  const head = [['N°', 'Réf. CEGECLIM', 'Réf. fournisseur', 'Désignation', 'Qté stock', 'Qté comptée', 'Éq.', 'PUMP', 'Commentaire']]
   const columnStyles: Record<number, Record<string, unknown>> = {
-    0: { cellWidth: 36, fontStyle: 'bold' }, 1: { cellWidth: 32 }, 2: { cellWidth: 'auto' },
-    3: { cellWidth: 17, halign: 'right' }, 4: { cellWidth: 24, halign: 'center', minCellHeight: 7.5 },
-    5: { cellWidth: 17, halign: 'center' }, 6: { cellWidth: 22, halign: 'right' }, 7: { cellWidth: 54 },
+    0: { cellWidth: 16, font: 'courier', fontStyle: 'bold', fontSize: 10, halign: 'center' },
+    1: { cellWidth: 34, fontStyle: 'bold' }, 2: { cellWidth: 30 }, 3: { cellWidth: 'auto' },
+    4: { cellWidth: 16, halign: 'right' }, 5: { cellWidth: 24, halign: 'center', minCellHeight: 7.5 },
+    6: { cellWidth: 16, halign: 'center' }, 7: { cellWidth: 21, halign: 'right' }, 8: { cellWidth: 46 },
   }
 
   autoTable(doc, {

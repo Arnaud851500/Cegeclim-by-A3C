@@ -26,6 +26,9 @@
 // 23/11/2026 (3e essai) : ne relever que les lignes manuscrites faisait perdre le fil
 // des lignes (quantités décalées d'une ligne) : retour à la transcription COMPLÈTE,
 // ligne par ligne de haut en bas, ancres conservées.
+// 23/11/2026 (idée d'Arnaud) : colonne « N° » imprimée = identifiant stable de la
+// ligne ; l'IA le relève et l'écran rapproche d'abord par ce numéro (bien plus sûr
+// que la lecture d'une référence comme « C90138GR »).
 //
 // Sécurité : session obligatoire (proxy.ts). Les droits sur le dépôt sont
 // contrôlés au moment de l'enregistrement par les RPC inv_* (inv_peut_saisir).
@@ -65,13 +68,15 @@ EN-TÊTE (haut de page) :
 - "equipes" : les initiales manuscrites écrites dans le cadre « Équipe(s) (initiales) » en haut à droite. Une équipe regroupe souvent 2 personnes reliées par « / », « + » ou « & » (ex. « PL + YV ») : c'est UNE équipe, renvoie-la sous la forme « PL/YV ». Seulement s'il y a deux équipes distinctes (deux groupes d'initiales séparés par une virgule, « et », ou écrits sur deux lignes), renvoie-les comme deux éléments. Lettres seules, en majuscules. Liste vide si rien n'est écrit ;
 - "feuille" : le texte « Feuille x / y » imprimé, sinon "".
 
-TABLEAU : colonnes imprimées « Réf. CEGECLIM | Réf. fournisseur | Désignation | Qté stock | Qté comptée | Éq. | PUMP | Commentaire » (la colonne « Éq. » peut ne pas exister sur les anciennes feuilles).
+TABLEAU : colonnes imprimées « N° | Réf. CEGECLIM | Réf. fournisseur | Désignation | Qté stock | Qté comptée | Éq. | PUMP | Commentaire » (les colonnes « N° » et « Éq. » n'existent pas sur les anciennes feuilles).
+La colonne « N° » (1re colonne, chiffres en police machine à écrire) est la CLÉ de la ligne : lis-la avec le plus grand soin, chiffre par chiffre.
 MÉTHODE (important : ne jamais décaler d'une ligne) :
 Parcours le tableau LIGNE PAR LIGNE, de haut en bas, sans en sauter aucune, et relève CHAQUE ligne d'article imprimée, y compris celles dont la case « Qté comptée » est vide.
-Pour chaque ligne, lis de gauche à droite en suivant la ligne horizontale du tableau : Réf. CEGECLIM, Réf. fournisseur, Qté stock imprimées, puis ce qui est écrit à la main dans les cases « Qté comptée », « Éq. » et « Commentaire » de CETTE ligne.
+Pour chaque ligne, lis de gauche à droite en suivant la ligne horizontale du tableau : N°, Réf. CEGECLIM, Réf. fournisseur, Qté stock imprimés, puis ce qui est écrit à la main dans les cases « Qté comptée », « Éq. » et « Commentaire » de CETTE ligne.
 Une écriture appartient à la ligne dont la case contient la plus grande partie de l'écriture. Si elle est vraiment à cheval sur deux lignes, mets "position_incertaine": true et indique dans "ref_voisine" la Réf. CEGECLIM de l'autre ligne possible.
 Ignore les lignes de titre de section (« ACC », « En transit … ») et l'en-tête des colonnes.
 Pour chaque ligne :
+- "no" : le nombre imprimé de la colonne « N° » de la ligne (entier), null si la colonne n'existe pas ;
 - "ref" : la Réf. CEGECLIM imprimée (1re colonne, en gras) de la ligne, recopiée exactement, sans « (hors liste) » ni « (transit) » ;
 - "ref_fournisseur" : la Réf. fournisseur imprimée sur la même ligne ;
 - "qte_stock" : le nombre IMPRIMÉ de la colonne « Qté stock » de la même ligne (ancre de contrôle, peut être négatif) ;
@@ -91,7 +96,7 @@ HORS LISTE : en bas de la dernière page, un cadre « Articles trouvés hors lis
 
 Réponds uniquement avec ce JSON :
 {"entete": {"titre": "", "depot": "", "comptage": null, "code_liste": "", "date_inventaire": "", "equipes": [], "feuille": ""},
- "lignes": [{"ref": "", "ref_fournisseur": "", "qte_stock": 0, "qte": null, "etat": "lisible", "doute": false, "position_incertaine": false, "ref_voisine": "", "commentaire": "", "equipe": ""}],
+ "lignes": [{"no": null, "ref": "", "ref_fournisseur": "", "qte_stock": 0, "qte": null, "etat": "lisible", "doute": false, "position_incertaine": false, "ref_voisine": "", "commentaire": "", "equipe": ""}],
  "hors_liste": []}`
 
 async function lireImage(image: string): Promise<any> {
@@ -155,6 +160,7 @@ async function analyser(image: string) {
       const etat = ETATS.has(String(l?.etat)) ? String(l.etat) : 'illisible'
       const qte = etat === 'vide' || etat === 'barre' ? null : nombre(l?.qte)
       return {
+        no: (() => { const x = Number(String(l?.no ?? '').replace(/\D/g, '')); return l?.no === null || l?.no === undefined || l?.no === '' || !Number.isSafeInteger(x) || x <= 0 ? null : x })(),
         ref: texte(l?.ref, 60).toUpperCase().replace(/\s*\((HORS LISTE|TRANSIT)\)\s*/g, '').replace(/\s+/g, ''),
         qte,
         etat: etat === 'lisible' && qte === null ? 'illisible' : etat,

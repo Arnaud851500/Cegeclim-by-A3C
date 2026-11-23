@@ -34,6 +34,8 @@ export type EnteteLue = {
 
 export type LigneLue = {
   ref: string; qte: number | null; etat: EtatLu; doute: boolean; commentaire: string; equipe: string
+  /** N° imprimé de la ligne (= inventaire_lignes.id), feuilles imprimées depuis le 23/11/2026. */
+  no?: number | null
   /** Ancres imprimées relevées sur la même ligne que l'écriture (contrôle de décalage de ligne). */
   ref_fournisseur?: string; qte_stock?: number | null
   position_incertaine?: boolean; ref_voisine?: string
