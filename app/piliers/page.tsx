@@ -586,12 +586,18 @@ function TabReunion() {
   const pct = total ? Math.round((fait / total) * 100) : 0
 
   // Revue groupée par pilote (ordre des membres), puis « sans pilote »
+  // (23/11/2026) Les actions tirées d'un sujet sont affichées sous leur sujet
+  // (en retrait), et non dans le groupe de leur porteur.
+  const revueIds = new Set(revue.map((s) => s.id))
+  const sousSujet = (s: Sujet) => !!s.parent_id && revueIds.has(s.parent_id)
+  const enfantsRevue = (id: string) => revue.filter((c) => c.parent_id === id).sort((a, b) => a.numero - b.numero)
+  const racines = revue.filter((s) => !sousSujet(s))
   const groupes: { membre: Membre | null; items: Sujet[] }[] = []
   membresActifs.forEach((m) => {
-    const items = revue.filter((s) => api.porteursOf(s.id).find((p) => p.role === 'pilote')?.membre.id === m.id)
+    const items = racines.filter((s) => api.porteursOf(s.id).find((p) => p.role === 'pilote')?.membre.id === m.id)
     if (items.length) groupes.push({ membre: m, items: items.sort((a, b) => scoreSujet(b) - scoreSujet(a) || a.numero - b.numero) })
   })
-  const sansPilote = revue.filter((s) => !api.porteursOf(s.id).some((p) => p.role === 'pilote' && p.membre.actif))
+  const sansPilote = racines.filter((s) => !api.porteursOf(s.id).some((p) => p.role === 'pilote' && p.membre.actif))
   if (sansPilote.length) groupes.push({ membre: null, items: sansPilote })
 
   return (
@@ -702,7 +708,7 @@ function TabReunion() {
                   {g.items.filter((s) => s.proposition_porteur || s.proposition_commentaire).length} préparé{g.items.length > 1 ? 's' : ''} · {g.items.filter((s) => issueOf(s.id)).length} / {g.items.length} revu{g.items.length > 1 ? 's' : ''}
                 </div>
               </div>
-              <RevueListe sujets={g.items} reunion={R} issueOf={issueOf} />
+              <RevueListe sujets={g.items} reunion={R} issueOf={issueOf} enfantsDe={enfantsRevue} />
             </div>
           ))}
         </Step>
@@ -903,7 +909,17 @@ function MeteoGrid({ reunion }: { reunion: Reunion }) {
 // remise à vide.
 const REVUE_COLS = '26px minmax(180px, 3fr) 96px minmax(160px, 2fr) 30px 124px 104px 236px 72px'
 
-function RevueListe({ sujets, reunion, issueOf }: { sujets: Sujet[]; reunion: Reunion | null; issueOf?: (id: string) => ReunionSujet | null }) {
+function RevueListe({
+  sujets,
+  reunion,
+  issueOf,
+  enfantsDe,
+}: {
+  sujets: Sujet[]
+  reunion: Reunion | null
+  issueOf?: (id: string) => ReunionSujet | null
+  enfantsDe?: (id: string) => Sujet[]
+}) {
   if (!sujets.length) return null
   const th: React.CSSProperties = { fontSize: 11, color: C.faint, textTransform: 'uppercase', letterSpacing: 0.6, whiteSpace: 'nowrap' }
   return (
@@ -920,15 +936,23 @@ function RevueListe({ sujets, reunion, issueOf }: { sujets: Sujet[]; reunion: Re
           <span style={th}>{reunion ? 'Décision' : ''}</span>
           <span />
         </div>
-        {sujets.map((s, i) => (
-          <RevueLigne key={s.id} sujet={s} reunion={reunion} revu={issueOf ? issueOf(s.id) : null} last={i === sujets.length - 1} />
-        ))}
+        {sujets.map((s, i) => {
+          const enfants = enfantsDe ? enfantsDe(s.id) : []
+          return (
+            <React.Fragment key={s.id}>
+              <RevueLigne sujet={s} reunion={reunion} revu={issueOf ? issueOf(s.id) : null} last={i === sujets.length - 1 && !enfants.length} />
+              {enfants.map((c, j) => (
+                <RevueLigne key={c.id} sujet={c} reunion={reunion} revu={issueOf ? issueOf(c.id) : null} last={i === sujets.length - 1 && j === enfants.length - 1} indent />
+              ))}
+            </React.Fragment>
+          )
+        })}
       </div>
     </div>
   )
 }
 
-function RevueLigne({ sujet, reunion, revu, last }: { sujet: Sujet; reunion: Reunion | null; revu: ReunionSujet | null; last?: boolean }) {
+function RevueLigne({ sujet, reunion, revu, last, indent }: { sujet: Sujet; reunion: Reunion | null; revu: ReunionSujet | null; last?: boolean; indent?: boolean }) {
   const api = useApi()
   const [commentaire, setCommentaire] = useState(sujet.proposition_commentaire)
   const [prochain, setProchain] = useState(sujet.prochain_point || (reunion ? addDaysIso(reunion.date_reunion, 28) : ''))
@@ -939,6 +963,7 @@ function RevueLigne({ sujet, reunion, revu, last }: { sujet: Sujet; reunion: Reu
   const na = refOf(NATURES, sujet.nature)
   const recents = api.suivisOf(sujet.id).filter((s) => s.type !== 'statut' && (!api.depuis || s.created_at > api.depuis))
   const derniere = recents[0]
+  const parent = sujet.parent_id ? api.sujetById.get(sujet.parent_id) || null : null
 
   const proposer = async (p: PropositionPorteur | null, texte: string) => {
     await api.updateSujet(sujet, { proposition_porteur: p, proposition_commentaire: texte, proposition_le: new Date().toISOString() })
@@ -978,11 +1003,11 @@ function RevueLigne({ sujet, reunion, revu, last }: { sujet: Sujet; reunion: Reu
         padding: '6px 10px',
         borderBottom: last ? 'none' : `1px solid ${C.line}`,
         boxShadow: alerte ? `inset 3px 0 0 ${C.alert}` : 'none',
-        background: revu ? C.soft : 'transparent',
+        background: revu ? C.soft : indent ? 'rgba(var(--cg-ink-rgb), 0.025)' : 'transparent',
         opacity: busy ? 0.6 : 1,
       }}
     >
-      <span>{pilote ? <Avatar membre={pilote} size={24} /> : <span style={{ color: C.faint }}>?</span>}</span>
+      <span>{pilote ? <Avatar membre={pilote} size={indent ? 20 : 24} /> : <span style={{ color: C.faint }}>?</span>}</span>
 
       <button
         onClick={() => api.openSujet(sujet.id)}
@@ -1003,11 +1028,18 @@ function RevueLigne({ sujet, reunion, revu, last }: { sujet: Sujet; reunion: Reu
           whiteSpace: 'nowrap',
         }}
       >
+        {indent && <span style={{ color: C.accent, fontWeight: 700, marginLeft: 6 }}>↳ </span>}
+        {!indent && parent && (
+          <span style={{ color: C.accent, fontWeight: 600, fontSize: 12 }} title={`Action tirée de #${parent.numero} ${parent.titre}`}>
+            ↳ #{parent.numero} {parent.titre.length > 28 ? `${parent.titre.slice(0, 28)}…` : parent.titre} ›{' '}
+          </span>
+        )}
         <span style={{ color: C.faint, fontWeight: 500 }}>#{sujet.numero} </span>
         <span title={na?.label}>{na?.icon} </span>
         {sujet.confidentiel && <span title="Confidentiel">🔒 </span>}
         {sujet.impacte_ca && <span title="Impacte le CA">⚡ </span>}
-        {sujet.titre}
+        {indent && pilote && <b style={{ fontWeight: 700 }}>{pilote.prenom} : </b>}
+        <span style={{ fontWeight: indent ? 500 : 600 }}>{sujet.titre}</span>
       </button>
 
       {/* Proposition du porteur */}
