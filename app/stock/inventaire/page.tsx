@@ -26,6 +26,10 @@
  * 20/11/2026 : quantités d'unités à compter (stock théorique SAGE des listes) dans les indicateurs, le suivi
  * par dépôt, le détail et la préparation (migration 20261120_inventaire_quantites_unites.sql).
  *
+ * 23/11/2026 : « Intégrer des feuilles PDF » — point d'entrée central des feuilles de comptage scannées :
+ * la liste de chaque page est retrouvée par l'en-tête (code « Liste INV-… », sinon dépôt du titre),
+ * puis même revue et même validation que depuis l'écran de saisie (components/inventaire/ImportFeuilles.tsx).
+ *
  * Accès : droit can_appro (ou can_autorisation), contrôlé aussi par chaque RPC.
  * Sources : RPC inv_* (supabase/migrations/20261101_inventaire_annuel.sql).
  */
@@ -38,6 +42,7 @@ import {
   libelleDecision, libelleStatut, messageErreur, n0, pdfEcarts, pdfListeComptage,
   type Campagne, type InvDepot, type LignePilotage, type ListeSaisie, type SuiviDepot,
 } from '@/lib/inventaire'
+import ImportFeuilles from '@/components/inventaire/ImportFeuilles'
 
 type Ctx = {
   email: string
@@ -117,6 +122,7 @@ function PilotageInventaire() {
   const [search, setSearch] = useState('')
   const [selection, setSelection] = useState<Set<number>>(new Set())
   const [commentaireDecision, setCommentaireDecision] = useState('')
+  const [importOuvert, setImportOuvert] = useState(false)
   const [confirmation, setConfirmation] = useState<null | { titre: string; texte: string; action: () => Promise<void>; bouton: string }>(null)
 
   const campagne = ctx?.campagnes.find((c) => c.id === campagneId) || null
@@ -390,6 +396,8 @@ function PilotageInventaire() {
             {campagne && (
               <button type="button" className={`${btn} h-10`} onClick={() => setFormCampagne({ id: campagne.id, libelle: campagne.libelle, date: campagne.date_inventaire, statut: campagne.statut, commentaire: campagne.commentaire || '' })}>✎</button>
             )}
+            <button type="button" className={`${btnNoir} h-10`} disabled={!campagne || !suivi.some((d) => d.statut === 'comptage')} onClick={() => setImportOuvert(true)}
+              title="Feuilles de comptage scannées de tous les dépôts : la liste est retrouvée par l'en-tête, saisie proposée à valider">📄 Intégrer des feuilles PDF</button>
             <button type="button" className={`${btn} h-10`} disabled={!campagne || occupe !== null || totaux.ecarts === 0} onClick={() => void imprimerEcarts(null)}>🖨 Écarts (PDF)</button>
             <button type="button" className={`${btnNoir} h-10`} disabled={!campagne || occupe !== null || totaux.ecarts === 0} onClick={() => void exporterExcel()}>{occupe === 'excel' ? 'Export…' : '⬇ Excel écarts SAGE'}</button>
             <button type="button" className={`${btn} h-10`} onClick={() => void rafraichirTout()} title="Actualiser">↻</button>
@@ -810,6 +818,14 @@ function PilotageInventaire() {
       )}
 
       {/* Confirmation */}
+      {importOuvert && campagne && (
+        <ImportFeuilles
+          depots={suivi.map((d) => ({ id: d.id, depot_libelle: d.depot_libelle, depot_num: d.depot_num, statut: d.statut, comptage_courant: d.comptage_courant, campagne: d.campagne }))}
+          onFermer={() => setImportOuvert(false)}
+          onEnregistre={() => void rafraichirTout()}
+        />
+      )}
+
       {confirmation && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={() => setConfirmation(null)}>
           <div className="w-full max-w-md rounded-xl bg-white p-5 shadow-xl" onClick={(e) => e.stopPropagation()}>

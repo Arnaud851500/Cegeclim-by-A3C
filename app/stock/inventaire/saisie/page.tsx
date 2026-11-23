@@ -25,6 +25,9 @@
  *    « Équipe »). Règle « initiales différentes » appliquée ligne par ligne : une ligne ne se
  *    recompte pas par un inventoriste qui l'a déjà comptée. Les saisies des autres tablettes
  *    remontent toutes les 30 s. Impression de la sélection affichée (répartition des feuilles).
+ *  - 23/11/2026 : « Intégrer des feuilles (PDF) » — feuilles de comptage scannées lues par l'IA,
+ *    initiales / quantités / commentaires proposés, référence déjà saisie proposée en ajout avec
+ *    alerte, enregistrement après validation (components/inventaire/ImportFeuilles.tsx).
  *
  * Accès : droit can_stocks ; dépôt limité à l'agence de l'utilisateur (périmètre agences
  * de l'onglet Utilisateurs d'Autorisations, MEES = DAX) ; achats = tous les dépôts.
@@ -40,6 +43,7 @@ import {
   lireQuantite, membresCommuns, messageErreur, normaliserEquipe, pdfListeComptage,
   type InvDepot, type LigneSaisie, type ListeSaisie,
 } from '@/lib/inventaire'
+import ImportFeuilles from '@/components/inventaire/ImportFeuilles'
 
 type InvAgence = InvDepot & { nb_a_compter: number; nb_saisies: number }
 type Brouillon = { qte: string; com: string; etat: 'idle' | 'saving' | 'ok' | 'err'; msg?: string }
@@ -74,6 +78,7 @@ function SaisieInventaire() {
   const [finEnCours, setFinEnCours] = useState(false)
   const [ajoutRef, setAjoutRef] = useState('')
   const [ajoutEnCours, setAjoutEnCours] = useState(false)
+  const [importOuvert, setImportOuvert] = useState(false)
   const tableRef = useRef<HTMLTableSectionElement | null>(null)
 
   const appliquerInventaires = useCallback((data: unknown, error: unknown) => {
@@ -313,6 +318,9 @@ function SaisieInventaire() {
                 )}
               </>
             )}
+            {liste && ouvert && (
+              <button type="button" onClick={() => setImportOuvert(true)} className="h-10 rounded-lg bg-[#111820] px-3 text-[13px] font-bold text-white" title="Feuilles de comptage scannées : lecture automatique des initiales, quantités et commentaires, à valider avant enregistrement">📄 Intégrer des feuilles (PDF)</button>
+            )}
             <button type="button" onClick={() => { void chargerInventaires(); if (selId) void chargerListe(selId) }} className="h-10 rounded-lg border border-[#E5E1D8] bg-white px-3 text-[14px] font-bold" title="Actualiser">↻</button>
           </div>
         </section>
@@ -519,6 +527,16 @@ function SaisieInventaire() {
           </>
         )}
       </div>
+
+      {importOuvert && liste && (
+        <ImportFeuilles
+          depots={[{ id: liste.id, depot_libelle: liste.depot_libelle, depot_num: liste.depot_num, statut: liste.statut, comptage_courant: liste.comptage_courant, campagne: liste.campagne }]}
+          depotFixe={liste.id}
+          equipeParDefaut={equipe}
+          onFermer={() => setImportOuvert(false)}
+          onEnregistre={() => { void chargerListe(liste.id); void chargerInventaires() }}
+        />
+      )}
 
       {confirmFin && liste && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={() => !finEnCours && setConfirmFin(false)}>

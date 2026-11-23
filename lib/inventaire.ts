@@ -10,6 +10,8 @@
  *     réf. CEGECLIM, réf. fournisseur, désignation, qté en stock, case de saisie,
  *     PUMP, case commentaire ; cadre « équipe (initiales) / date / feuille x/y » en tête
  *     de CHAQUE page (feuilles réparties entre plusieurs équipes), pagination en pied ;
+ *     23/11/2026 : code de liste « INV-xxxxxxxx-Cn » en tête de page et colonne « Éq. »
+ *     (une feuille peut servir à 2 équipes) pour l'intégration des feuilles scannées ;
  *   - pdfEcarts : écarts d'un ou plusieurs dépôts avec les comptages, la valeur
  *     au PUMP et la décision des achats ;
  *   - excelEcarts : écarts validés prêts à saisir dans SAGE (+ détail + synthèse).
@@ -253,6 +255,23 @@ export function comComptage(l: LignePilotage, n: number): string | null {
   return n === 1 ? l.com1 : n === 2 ? l.com2 : l.com3
 }
 
+/**
+ * Code de la liste imprimé en tête de chaque feuille (« INV-1A2B3C4D-C1 ») : début de l'identifiant
+ * de l'inventaire du dépôt + n° de comptage. Sert à l'intégration des feuilles scannées (PDF) pour
+ * retrouver la liste et le comptage sans ambiguïté.
+ */
+export function codeListe(invDepotId: string, numero: number): string {
+  return `INV-${invDepotId.replace(/-/g, '').slice(0, 8).toUpperCase()}-C${numero}`
+}
+
+/** Lit un code de liste (tolère espaces, O/0) : { prefixe, numero } ou null. */
+export function lireCodeListe(v: string | null | undefined): { prefixe: string; numero: number } | null {
+  const t = String(v || '').toUpperCase().replace(/\s+/g, '')
+  const m = t.match(/INV-?([0-9A-FO]{8})-?C([123])/)
+  if (!m) return null
+  return { prefixe: m[1].replace(/O/g, '0'), numero: Number(m[2]) }
+}
+
 export function iniComptage(l: LignePilotage, n: number): string | null {
   return (n === 1 ? l.ini1 : n === 2 ? l.ini2 : l.ini3) ?? null
 }
@@ -331,6 +350,7 @@ export function pdfListeComptage(
   const doc = new jsPDF({ orientation: 'landscape', unit: 'mm', format: 'a4' })
   const w = doc.internal.pageSize.getWidth()
   const titre = `${liste.campagne?.libelle || 'Inventaire'} - ${liste.depot_libelle}`
+  const code = codeListe(liste.id, numero)
   const sousTitre = `${ORDINAL[numero]} comptage - inventaire du ${fmtDate(liste.campagne?.date_inventaire)} - stock SAGE du ${fmtDateHeure(liste.stock_sage_le)}`
     + (opts.selection ? ` - sélection : ${opts.selection}` : '')
   const avec = !!opts.avecSaisies
@@ -338,17 +358,20 @@ export function pdfListeComptage(
   // Cadre équipe sur chaque page : chaque feuille peut être confiée à une équipe différente.
   const entete = () => {
     enteteCegeclim(doc, titre, sousTitre)
+    // Code de liste lisible par l'intégration des feuilles scannées
+    doc.setFont('courier', 'bold'); doc.setFontSize(10.5); doc.setTextColor(0)
+    doc.text(`Liste ${code}`, w - 118, 8, { align: 'right' })
     doc.setDrawColor(60); doc.setLineWidth(0.3)
     doc.rect(w - 112, 4, 104, 16)
     doc.setFont('helvetica', 'normal'); doc.setFontSize(8)
-    doc.text(p('Équipe (initiales, ex. PJC/AV) :'), w - 110, 9)
-    doc.line(w - 62, 9.6, w - 34, 9.6)
+    doc.text(p('Équipe(s) (initiales, ex. PJC/AV) :'), w - 110, 9)
+    doc.line(w - 60, 9.6, w - 34, 9.6)
     doc.text('Date / heure :', w - 110, 16)
     doc.line(w - 88, 16.6, w - 34, 16.6)
   }
 
   const lignes = opts.lignes ? [...opts.lignes] : [...liste.lignes]
-  const nbCol = avec ? 8 : 7
+  const nbCol = 8
   const body: Array<Array<string | { content: string; colSpan?: number; styles?: Record<string, unknown> }>> = []
   let macro = ''
   for (const l of lignes) {
@@ -367,24 +390,17 @@ export function pdfListeComptage(
       pEuro(l.pump),
       avec ? p(l.commentaire || '') : '',
     ]
-    if (avec) row.splice(5, 0, p(l.qte !== null ? l.initiales || '' : ''))
+    row.splice(5, 0, avec && l.qte !== null ? p(l.initiales || '') : '')
     body.push(row)
   }
 
-  const head = avec
-    ? [['Réf. CEGECLIM', 'Réf. fournisseur', 'Désignation', 'Qté stock', 'Qté comptée', 'Équipe', 'PUMP', 'Commentaire']]
-    : [['Réf. CEGECLIM', 'Réf. fournisseur', 'Désignation', 'Qté stock', 'Qté comptée', 'PUMP', 'Commentaire']]
-  const columnStyles: Record<number, Record<string, unknown>> = avec
-    ? {
-        0: { cellWidth: 36, fontStyle: 'bold' }, 1: { cellWidth: 32 }, 2: { cellWidth: 'auto' },
-        3: { cellWidth: 17, halign: 'right' }, 4: { cellWidth: 22, halign: 'center', minCellHeight: 7.5 },
-        5: { cellWidth: 20, halign: 'center' }, 6: { cellWidth: 22, halign: 'right' }, 7: { cellWidth: 52 },
-      }
-    : {
-        0: { cellWidth: 38, fontStyle: 'bold' }, 1: { cellWidth: 34 }, 2: { cellWidth: 'auto' },
-        3: { cellWidth: 18, halign: 'right' }, 4: { cellWidth: 24, halign: 'center', minCellHeight: 7.5 },
-        5: { cellWidth: 24, halign: 'right' }, 6: { cellWidth: 62 },
-      }
+  // Colonne « Éq. » : une feuille peut servir à deux équipes, chacune note ses initiales sur ses lignes.
+  const head = [['Réf. CEGECLIM', 'Réf. fournisseur', 'Désignation', 'Qté stock', 'Qté comptée', 'Éq.', 'PUMP', 'Commentaire']]
+  const columnStyles: Record<number, Record<string, unknown>> = {
+    0: { cellWidth: 36, fontStyle: 'bold' }, 1: { cellWidth: 32 }, 2: { cellWidth: 'auto' },
+    3: { cellWidth: 17, halign: 'right' }, 4: { cellWidth: 24, halign: 'center', minCellHeight: 7.5 },
+    5: { cellWidth: 17, halign: 'center' }, 6: { cellWidth: 22, halign: 'right' }, 7: { cellWidth: 54 },
+  }
 
   autoTable(doc, {
     startY: 25,
@@ -407,7 +423,7 @@ export function pdfListeComptage(
   doc.setFont('helvetica', 'normal'); doc.setFontSize(9)
   const nbArt = lignes.length
   doc.text(p(`${nbArt} ligne(s) à compter${opts.selection ? ' (sélection)' : ''}. Toutes les lignes doivent être comptées, y compris à 0.`), 8, y)
-  doc.text(p('Articles trouvés hors liste : les noter ci-dessous puis les ajouter à l\'écran (1er comptage).'), 8, y + 5)
+  doc.text(p('Articles trouvés hors liste : les noter ci-dessous (réf., quantité). Feuille partagée par 2 équipes : initiales dans la colonne Éq.'), 8, y + 5)
   doc.setDrawColor(120)
   doc.rect(8, y + 8, 160, 16)
   doc.text(p('Signature de l\'équipe :'), 180, y + 12)
