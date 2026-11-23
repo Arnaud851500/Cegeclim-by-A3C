@@ -62,13 +62,12 @@
  * PIECESAV / BRMOTIF / WORKGROUP.
  *
  * ÉVOLUTION (23/11/2026) : bouton « Export import BLG » (tarif actuel et proposition) — fichier CSV au format
- * d'import des tarifs BLG, colonnes ID BLG / Fournisseur / Date de début d'application / Date de fin d'application
- * / Prix tarif. ID BLG = blg.article_part.id (appariement reference puis internal_reference, comme
+ * d'import des tarifs BLG, colonnes ID BLG / Fournisseur / Référence interne (article SAGE) / Référence fournisseur
+ * / Prix tarif (dates d'application retirées à la demande d'Arnaud le 23/11/2026, 9h). ID BLG = blg.article_part.id (appariement reference puis internal_reference, comme
  * v_appro_article_blg_cles), Fournisseur = code fournisseur BLG (blg.article_supplier.name, ex. fH0001).
- * Fenêtre de paramétrage : dates (proposition : date d'effet / date de fin ; tarif actuel : aujourd'hui → 31/12
- * de l'année) et prix retenu (tarif actuel : prix tarif SAGE ou prix net ; proposition : prix public du fichier
+ * Fenêtre de paramétrage : prix retenu (tarif actuel : prix tarif SAGE ou prix net ; proposition : prix public du fichier
  * ou prix du 1er palier, ramené à l'unité SAGE). Les articles sans ID BLG ou sans prix partent dans un 2e fichier
- * « _non_exportes.csv ». Format CSV (demande d'Arnaud, 23/11/2026, 8h45) : « ; », virgule décimale, JJ/MM/AAAA,
+ * « _non_exportes.csv ». Format CSV (demande d'Arnaud, 23/11/2026, 8h45) : « ; », virgule décimale,
  * UTF-8 avec BOM. RPC get_tarif_ids_blg — migration 20261123a_tarifs_export_blg.sql.
  */
 
@@ -545,7 +544,7 @@ async function exporterTarifActuel(d: Donnees, articles: Article[]) {
 // ─────────────────────────────────────────────────────────────────────────
 
 type PrixBlg = 'tarif' | 'net' | 'public' | 'palier'
-type ExportBlg = { source: 'actuel' | 'proposition'; debut: string; fin: string; prix: PrixBlg }
+type ExportBlg = { source: 'actuel' | 'proposition'; prix: PrixBlg }
 type LigneBlg = { reference: string; designation: string | null; ref_fournisseur: string | null; prix: number | null }
 type IdsBlg = { fournisseur_blg: string | null; fournisseur_blg_titre: string | null; articles: { reference: string; part_id: number }[] }
 
@@ -594,7 +593,6 @@ async function exporterImportBlg(d: Donnees, cfg: ExportBlg, lignes: LigneBlg[])
     const t = v === null || v === undefined ? '' : String(v)
     return /[;"\r\n]/.test(t) ? `"${t.replace(/"/g, '""')}"` : t
   }
-  const dateFr = (iso: string) => (iso ? `${iso.slice(8, 10)}/${iso.slice(5, 7)}/${iso.slice(0, 4)}` : '')
   const prixFr = (v: number) => String(v).replace('.', ',')
   const telechargerCsv = (nom: string, lignesCsv: unknown[][]) => {
     const contenu = '﻿' + lignesCsv.map((l) => l.map(cell).join(';')).join('\r\n') + '\r\n'
@@ -606,9 +604,7 @@ async function exporterImportBlg(d: Donnees, cfg: ExportBlg, lignes: LigneBlg[])
     window.setTimeout(() => URL.revokeObjectURL(url), 1000)
   }
 
-  const deb = dateFr(cfg.debut)
-  const fin = dateFr(cfg.fin)
-  const sortie: unknown[][] = [['ID BLG', 'Fournisseur', 'Date de début d\'application', 'Date de fin d\'application', 'Prix tarif']]
+  const sortie: unknown[][] = [['ID BLG', 'Fournisseur', 'Référence interne', 'Référence fournisseur', 'Prix tarif']]
   const rejetes: unknown[][] = [['Article SAGE', 'Désignation', 'Réf. fournisseur', 'Prix', 'Motif']]
   const vus = new Set<number>()
   let nb = 0
@@ -623,11 +619,11 @@ async function exporterImportBlg(d: Donnees, cfg: ExportBlg, lignes: LigneBlg[])
       continue
     }
     vus.add(id as number)
-    sortie.push([id, ids.fournisseur_blg, deb, fin, prixFr(prix as number)])
+    sortie.push([id, ids.fournisseur_blg, l.reference, l.ref_fournisseur || '', prixFr(prix as number)])
     nb++
   }
 
-  const suffixe = `${ids.fournisseur_blg}_${cfg.debut || dateIso(new Date())}`
+  const suffixe = `${ids.fournisseur_blg}_${dateIso(new Date())}`
   telechargerCsv(`import_tarif_BLG_${suffixe}.csv`, sortie)
   if (rejets) window.setTimeout(() => telechargerCsv(`import_tarif_BLG_${suffixe}_non_exportes.csv`, rejetes), 400)
   return { nb, rejets, fournisseur: ids.fournisseur_blg }
@@ -637,22 +633,13 @@ function FenetreExportBlg({ cfg, setCfg, nbLignes, onAnnuler, onValider, occupe 
   cfg: ExportBlg; setCfg: (c: ExportBlg) => void; nbLignes: number; onAnnuler: () => void; onValider: () => void; occupe: boolean
 }) {
   const choix: PrixBlg[] = cfg.source === 'actuel' ? ['tarif', 'net'] : ['public', 'palier']
-  const datesKo = !cfg.debut || (!!cfg.fin && cfg.fin < cfg.debut)
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={onAnnuler}>
       <div className="w-full max-w-[520px] rounded-xl bg-white p-5 shadow-xl" onClick={(e) => e.stopPropagation()}>
         <div className="text-[15px] font-bold">Export pour l’import des tarifs dans BLG</div>
         <div className="mt-1 text-[12px] text-[#8A8474]">
           {cfg.source === 'actuel' ? 'Tarif actuel SAGE — articles affichés dans le tableau' : 'Proposition — lignes appariées à un article SAGE'} : {fmtNum(nbLignes)} article(s).
-          Colonnes : ID BLG / Fournisseur / Date de début d’application / Date de fin d’application / Prix tarif.
-        </div>
-        <div className="mt-4 flex flex-wrap gap-3">
-          <label className="text-[11px] text-[#8A8474]">Date de début d’application<br />
-            <input type="date" value={cfg.debut} onChange={(e) => setCfg({ ...cfg, debut: e.target.value })} className={ctl} />
-          </label>
-          <label className="text-[11px] text-[#8A8474]">Date de fin d’application<br />
-            <input type="date" value={cfg.fin} onChange={(e) => setCfg({ ...cfg, fin: e.target.value })} className={ctl} />
-          </label>
+          Colonnes : ID BLG / Fournisseur / Référence interne / Référence fournisseur / Prix tarif.
         </div>
         <div className="mt-4 text-[11px] text-[#8A8474]">Prix tarif exporté</div>
         <div className="mt-1 flex flex-col gap-1.5">
@@ -663,11 +650,10 @@ function FenetreExportBlg({ cfg, setCfg, nbLignes, onAnnuler, onValider, occupe 
           ))}
         </div>
         {cfg.source === 'proposition' && <div className="mt-2 text-[11.5px] text-[#8A8474]">Prix ramenés à l’unité SAGE quand une conversion d’unité est posée sur la ligne.</div>}
-        <div className="mt-2 text-[11.5px] text-[#8A8474]">Fichier CSV (séparateur « ; », virgule décimale, dates JJ/MM/AAAA). Les articles sans ID BLG ou sans prix sont listés dans un second fichier « _non_exportes.csv ».</div>
-        {datesKo && <div className="mt-2 text-[12px] text-[#A3401C]">Date de début obligatoire, et antérieure à la date de fin.</div>}
+        <div className="mt-2 text-[11.5px] text-[#8A8474]">Fichier CSV (séparateur « ; », virgule décimale). Référence interne = article SAGE / CEGECLIM. Les articles sans ID BLG ou sans prix sont listés dans un second fichier « _non_exportes.csv ».</div>
         <div className="mt-5 flex justify-end gap-2">
           <button className={btn} onClick={onAnnuler}>Annuler</button>
-          <button className={btnFonce} disabled={occupe || datesKo || !nbLignes} onClick={onValider}>{occupe ? 'Export…' : 'Télécharger le fichier'}</button>
+          <button className={btnFonce} disabled={occupe || !nbLignes} onClick={onValider}>{occupe ? 'Export…' : 'Télécharger le fichier'}</button>
         </div>
       </div>
     </div>
@@ -1085,14 +1071,12 @@ function TarifsFournisseurs() {
 
   // ── Export import BLG ──────────────────────────────────────────────────
   function ouvrirExportBlg(source: 'actuel' | 'proposition') {
-    const auj = new Date()
     if (source === 'actuel') {
-      setExportBlg({ source, debut: dateIso(auj), fin: `${auj.getFullYear()}-12-31`, prix: 'tarif' })
+      setExportBlg({ source, prix: 'tarif' })
       return
     }
-    const p = donnees?.proposition
     const avecPublic = !!comp?.lignes.some((x) => x.art && x.l.prix_public !== null && x.l.prix_public !== undefined)
-    setExportBlg({ source, debut: p?.date_effet?.slice(0, 10) || dateIso(auj), fin: p?.date_fin?.slice(0, 10) || '', prix: avecPublic ? 'public' : 'palier' })
+    setExportBlg({ source, prix: avecPublic ? 'public' : 'palier' })
   }
   const lignesBlg = useMemo(() => (exportBlg ? lignesExportBlg(exportBlg, articlesActuels, comp) : []), [exportBlg, articlesActuels, comp])
   async function validerExportBlg() {
