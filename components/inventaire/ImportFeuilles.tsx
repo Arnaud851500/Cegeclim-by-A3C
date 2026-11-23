@@ -400,7 +400,7 @@ export default function ImportFeuilles({ depots, depotFixe, equipeParDefaut, onF
           <div className="flex flex-1 flex-col items-center justify-center gap-3 p-8">
             <div className="h-8 w-8 animate-spin rounded-full border-4 border-[#E5E1D8] border-t-[#B4761A]" />
             <p className="text-[14px] font-semibold text-[#3A362E]">{progres || 'Traitement…'}</p>
-            {etape === 'lecture' && <p className="text-[12px] text-[#8A8474]">Environ 20 à 40 secondes par page, 3 pages lues en parallèle.</p>}
+            {etape === 'lecture' && <p className="text-[12px] text-[#8A8474]">Une à deux minutes par page manuscrite, 3 pages lues en parallèle : vous pouvez laisser la fenêtre ouverte.</p>}
           </div>
         )}
 

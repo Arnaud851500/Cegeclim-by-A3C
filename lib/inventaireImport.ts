@@ -5,7 +5,10 @@
  * écran de pilotage) :
  *   - pagesEnImages : chaque page d'un PDF (pdf.js) ou chaque photo devient une image
  *     JPEG (même préparation que la lecture photo de « Quand puis-je livrer ? ») ;
- *   - lireFeuille : appel de /api/stock/inventaire/lire-feuille (une page par appel) ;
+ *   - lireFeuille : appel de /api/stock/inventaire/lire-feuille (une page par appel) ; la lecture
+ *     tourne en arrière-plan côté serveur, l'écran interroge le résultat toutes les 3 s
+ *     (une page manuscrite peut demander plus d'une minute : appel unique coupé, « Failed to fetch ») ;
+ *   - pages portrait redressées en paysage (feuille paysage scannée en A4 portrait) ;
  *   - rapprochement d'une référence lue avec les lignes de la liste.
  */
 
@@ -56,8 +59,21 @@ async function chargerPdfJs(): Promise<any> {
   return w.pdfjsLib
 }
 
+/**
+ * Les feuilles de comptage sont en paysage : une page portrait (scan A4 vertical) est tournée
+ * d'un quart de tour dans le sens horaire (sens habituel du chargeur) ; l'IA corrige le reste.
+ */
 function canvasVersJpeg(canvas: HTMLCanvasElement): string {
-  return canvas.toDataURL('image/jpeg', 0.92)
+  if (canvas.height <= canvas.width) return canvas.toDataURL('image/jpeg', 0.88)
+  const r = document.createElement('canvas')
+  r.width = canvas.height
+  r.height = canvas.width
+  const ctx = r.getContext('2d')
+  if (!ctx) return canvas.toDataURL('image/jpeg', 0.88)
+  ctx.translate(r.width, 0)
+  ctx.rotate(Math.PI / 2)
+  ctx.drawImage(canvas, 0, 0)
+  return r.toDataURL('image/jpeg', 0.88)
 }
 
 async function imageVersDataUrl(fichier: File): Promise<string> {
@@ -115,15 +131,45 @@ export async function pagesEnImages(fichiers: File[], onProgres?: (texte: string
 }
 /* eslint-enable @typescript-eslint/no-explicit-any */
 
+const pause = (ms: number) => new Promise((r) => setTimeout(r, ms))
+
+function erreurReseau(e: unknown): Error {
+  const m = e instanceof Error ? e.message : String(e)
+  return new Error(/failed to fetch|load failed|network/i.test(m) ? 'Connexion au serveur interrompue : vérifier le réseau puis relancer.' : m)
+}
+
+/** Lecture IA d'une page : démarrage côté serveur puis interrogation du résultat (6 min au plus). */
 export async function lireFeuille(image: string): Promise<FeuilleLue> {
-  const res = await fetch('/api/stock/inventaire/lire-feuille', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ image }),
-  })
-  const json = await res.json().catch(() => null)
-  if (!res.ok) throw new Error(json?.error || `Lecture impossible (${res.status})`)
-  return json as FeuilleLue
+  let id = ''
+  try {
+    const res = await fetch('/api/stock/inventaire/lire-feuille', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ image }),
+    })
+    const json = await res.json().catch(() => null)
+    if (!res.ok || !json?.id) throw new Error(json?.error || `Lecture impossible (${res.status})`)
+    id = String(json.id)
+  } catch (e) {
+    throw erreurReseau(e)
+  }
+  const fin = Date.now() + 6.5 * 60000
+  let echecs = 0
+  while (Date.now() < fin) {
+    await pause(3000)
+    try {
+      const res = await fetch(`/api/stock/inventaire/lire-feuille?id=${encodeURIComponent(id)}`, { cache: 'no-store' })
+      const json = await res.json().catch(() => null)
+      if (!res.ok) throw new Error(json?.error || `Suivi de lecture impossible (${res.status})`)
+      echecs = 0
+      if (json.statut === 'ok' && json.resultat) return json.resultat as FeuilleLue
+      if (json.statut === 'erreur') throw new Error(json.erreur || 'Lecture de la page impossible.')
+    } catch (e) {
+      // Coupure passagère : on retente quelques fois avant d'abandonner.
+      if (++echecs >= 5 || !(e instanceof TypeError)) throw erreurReseau(e)
+    }
+  }
+  throw new Error('La lecture de la page n’a pas abouti dans les 6 minutes. Relancer la page.')
 }
 
 /** Exécute des tâches avec au plus n appels simultanés, dans l'ordre des résultats. */
