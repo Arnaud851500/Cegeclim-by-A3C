@@ -36,6 +36,19 @@
 //  - blocage appro lu dans BLG (tag « Bloqué achat ») + arrêt appro manuel ;
 //    délai d'un nouvel appro = délai article de « Calcul d'appro » s'il est saisi
 //    (migration 20261123_quand_livrer_blocage_blg.sql).
+//  - DATE DE LIVRAISON PRÉVUE : reprise du devis (date de livraison SAGE, si elle est
+//    postérieure à la date du devis — RPC get_quand_livrer_devis_date_livraison),
+//    lue sur la photo / capture de la commande, ou saisie. Le verdict dit si elle est
+//    tenable (livraison client au plus tôt ≤ date prévue), avec la marge ou le retard,
+//    et chaque ligne indique si elle tient cette date (dispo dépôt ≤ date prévue − 7 j).
+//  - lecture des lignes collées depuis une grille SAGE / BLG / Excel : la quantité
+//    n'est plus le dernier nombre de la ligne (souvent le montant HT) — voir
+//    lib/quandLivrerListe.ts ; alerte si une quantité lue n'est pas entière.
+//  - captures / photos : plusieurs captures se collent en file d'attente (Ctrl+V ou
+//    bouton), « Lire » les traite ensemble (un appel par capture, lignes en double
+//    entre captures qui se chevauchent retirées) ; chaque référence lue est rapprochée
+//    du catalogue (RPC ql_resoudre_references : séparateurs, désignation, référence
+//    tronquée par la grille, faute de lecture) et les corrections sont annoncées.
 // Contrôles complémentaires : article en sommeil / inconnu, écart entre le
 // tarif de base du devis et le tarif actuel, écart entre le PR du devis et le
 // PUMP actuel (ex. cuivre), ancienneté du devis.
@@ -43,6 +56,7 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { supabase } from '@/lib/supabaseClient'
+import { analyserLigneCollee } from '@/lib/quandLivrerListe'
 
 // ─────────────────────────────────────────────────────────────────────────
 // Types
@@ -136,6 +150,15 @@ type EtatSauve = {
   lignes: Ligne[]
   decochees: string[]
   dispo: [string, Dispo][]
+  dateCible?: string
+  dateCibleSource?: SourceDate | null
+}
+
+type SourceDate = 'DEVIS' | 'PHOTO' | 'SAISIE'
+const LIB_SOURCE_DATE: Record<SourceDate, string> = {
+  DEVIS: 'date de livraison du devis',
+  PHOTO: 'lue sur l’image',
+  SAISIE: 'saisie',
 }
 
 export type QuandLivrerProps = {
@@ -263,30 +286,25 @@ function joursEntre(a: string, b: string) {
   return Math.round((db.getTime() - da.getTime()) / 86400000)
 }
 
-/** Une ligne de texte collée → { ref, qte } (tabulation, ;, |, espaces). */
-function analyserLigneCollee(brut: string): { ref: string; qte: number } | null {
-  const ligne = brut.replace(/ /g, ' ').trim()
-  if (!ligne) return null
-  let tokens = ligne.split(/\t|;|\|/).map((t) => t.trim()).filter(Boolean)
-  if (tokens.length <= 1) tokens = ligne.split(/\s+/).filter(Boolean)
-  const estQte = (t: string) => /^x?\d+([.,]\d+)?x?$/i.test(t)
-  const versQte = (t: string) => Number(t.replace(/x/gi, '').replace(',', '.'))
-  // « 3 x RAK-… » ou « 3 RAK-… » : quantité en tête.
-  if (tokens.length >= 2 && estQte(tokens[0]) && !estQte(tokens[1])) {
-    const reste = tokens.slice(1).filter((t) => t.toLowerCase() !== 'x')
-    if (!reste.length) return null
-    return { ref: reste[0].toUpperCase(), qte: versQte(tokens[0]) || 1 }
+/** Ligne lue sur une capture par l'IA. */
+type LigneImage = { ref: string; qte: number; designation?: string; tronquee?: boolean }
+
+const MAX_CAPTURES = 8
+
+/** Nombre de lignes en tête de « suite » qui répètent la fin de « avant » (captures qui se chevauchent). */
+function chevauchement(avant: LigneImage[], suite: LigneImage[]): number {
+  const cle = (l: LigneImage) => `${l.ref.replace(/(\.\.\.|…|\.\.)$/, '')}|${l.qte}|${(l.designation || '').toUpperCase().replace(/[^A-Z0-9]/g, '')}`
+  for (let m = Math.min(avant.length, suite.length); m >= 1; m--) {
+    let ok = true
+    for (let k = 0; k < m && ok; k++) ok = cle(avant[avant.length - m + k]) === cle(suite[k])
+    // Une seule ligne commune ne compte que si elle porte une désignation (sinon simple répétition possible).
+    if (ok && (m > 1 || (suite[0].designation || '').length > 5)) return m
   }
-  const refTok = tokens.find((t) => !estQte(t))
-  if (!refTok) return null
-  if (/^(r[ée]f([ée]rence)?|article|code|d[ée]signation|quantit[ée]|qt[ée])\b/i.test(refTok) && !tokens.some(estQte)) return null
-  const qtes = tokens.filter((t) => t !== refTok && estQte(t))
-  const qte = qtes.length ? versQte(qtes[qtes.length - 1]) : 1
-  return { ref: refTok.toUpperCase(), qte: qte > 0 ? qte : 1 }
+  return 0
 }
 
-/** Réduit une image (photo de téléphone) avant envoi à l'IA. */
-async function imageVersDataUrl(fichier: File, max = 1600): Promise<string> {
+/** Réduit une image avant envoi à l'IA (assez grande pour lire une capture d'écran de grille). */
+async function imageVersDataUrl(fichier: File, max = 2400): Promise<string> {
   const url = URL.createObjectURL(fichier)
   try {
     const img = await new Promise<HTMLImageElement>((resolve, reject) => {
@@ -302,7 +320,7 @@ async function imageVersDataUrl(fichier: File, max = 1600): Promise<string> {
     const ctx = canvas.getContext('2d')
     if (!ctx) throw new Error('Image illisible.')
     ctx.drawImage(img, 0, 0, canvas.width, canvas.height)
-    return canvas.toDataURL('image/jpeg', 0.85)
+    return canvas.toDataURL('image/jpeg', 0.92)
   } finally {
     URL.revokeObjectURL(url)
   }
@@ -399,6 +417,7 @@ export default function QuandLivrer({ compact = false, initialDevis, initialList
   // Liste collée
   const [texte, setTexte] = useState(initialListe ? initialListe.split(',').map((x) => x.replace(';', '\t')).join('\n') : '')
   const [photoEnCours, setPhotoEnCours] = useState(false)
+  const [captures, setCaptures] = useState<{ id: string; url: string }[]>([])
   const fichierRef = useRef<HTMLInputElement | null>(null)
 
   // Commun
@@ -409,6 +428,9 @@ export default function QuandLivrer({ compact = false, initialDevis, initialList
   const [calcul, setCalcul] = useState(false)
   const [erreur, setErreur] = useState<string | null>(null)
   const [message, setMessage] = useState<string | null>(null)
+  // Date de livraison prévue au client (ISO), à tenir
+  const [dateCible, setDateCible] = useState('')
+  const [dateCibleSource, setDateCibleSource] = useState<SourceDate | null>(null)
   const requete = useRef(0)
 
   // ── Liste des derniers devis (périmètre de l'utilisateur) ──────────────
@@ -469,7 +491,12 @@ export default function QuandLivrer({ compact = false, initialDevis, initialList
       setDecochees(new Set())
       setDispo(new Map())
       setRecherche(n)
+      setDateCible('')
+      setDateCibleSource(null)
       onDevisChange?.(n)
+      void supabase.rpc('get_quand_livrer_devis_date_livraison', { p_numero: n }).then(({ data }) => {
+        if (typeof data === 'string' && data) { setDateCible(data.slice(0, 10)); setDateCibleSource('DEVIS') }
+      })
     } catch (e: any) {
       setErreur(e?.message || 'Erreur au chargement du devis.')
     } finally {
@@ -509,7 +536,14 @@ export default function QuandLivrer({ compact = false, initialDevis, initialList
           sommeil: Boolean(inf?.sommeil),
         }
       })
+      // Quantités non entières : souvent un montant ou un prix pris pour une quantité.
+      const decimales = items.filter((x) => !Number.isInteger(x.qte))
+      if (decimales.length) {
+        setMessage(`${decimales.length} quantité${decimales.length > 1 ? 's' : ''} non entière${decimales.length > 1 ? 's' : ''} lue${decimales.length > 1 ? 's' : ''} (${decimales.slice(0, 3).map((x) => `${x.ref} : ${fmtQte(x.qte)}`).join(', ')}${decimales.length > 3 ? '…' : ''}) — vérifiez la colonne quantité de la liste collée.`)
+      }
       setMode('liste')
+      // La date venait du devis affiché jusque-là : elle ne vaut pas pour cette liste.
+      if (devis) { setDateCible(''); setDateCibleSource(null) }
       setDevis(null)
       setLignes(ls)
       setDecochees(new Set())
@@ -520,7 +554,7 @@ export default function QuandLivrer({ compact = false, initialDevis, initialList
     } finally {
       setChargement(false)
     }
-  }, [texte, onDevisChange])
+  }, [texte, onDevisChange, devis])
 
   // Ouverture initiale : retour de l'écran de projection (état gardé), sinon URL
   const initFait = useRef(false)
@@ -543,6 +577,8 @@ export default function QuandLivrer({ compact = false, initialDevis, initialList
         setLignes(e.lignes)
         setDecochees(new Set(e.decochees))
         setDispo(new Map(e.dispo))
+        setDateCible(e.dateCible || '')
+        setDateCibleSource(e.dateCibleSource ?? null)
         return
       }
     } catch { /* stockage indisponible : contrôle normal */ }
@@ -556,11 +592,11 @@ export default function QuandLivrer({ compact = false, initialDevis, initialList
     try {
       const e: EtatSauve = {
         v: 1, ts: Date.now(), mode, texte, recherche, devis, lignes,
-        decochees: Array.from(decochees), dispo: Array.from(dispo.entries()),
+        decochees: Array.from(decochees), dispo: Array.from(dispo.entries()), dateCible, dateCibleSource,
       }
       window.sessionStorage.setItem(CLE_ETAT, JSON.stringify(e))
     } catch { /* stockage plein ou indisponible */ }
-  }, [mode, texte, recherche, devis, lignes, decochees, dispo])
+  }, [mode, texte, recherche, devis, lignes, decochees, dispo, dateCible, dateCibleSource])
 
   const ouvrirArticle = useCallback((ref: string) => {
     if (!onOuvrirArticle) return
@@ -569,35 +605,95 @@ export default function QuandLivrer({ compact = false, initialDevis, initialList
   }, [onOuvrirArticle])
 
   // ── Photo / image d'une commande ───────────────────────────────────────
-  const lirePhoto = useCallback(async (fichiers: FileList | File[] | null) => {
-    const liste = fichiers ? Array.from(fichiers).filter((f) => f.type.startsWith('image/')).slice(0, 4) : []
+  // ── Captures / photos en attente, lues ensemble sur validation ─────────
+  const ajouterCaptures = useCallback(async (fichiers: FileList | File[] | null) => {
+    const liste = fichiers ? Array.from(fichiers).filter((f) => f.type.startsWith('image/')) : []
     if (!liste.length) return
+    setErreur(null)
+    try {
+      const lues = await Promise.all(liste.map(async (f) => ({ id: `${Date.now()}-${Math.random().toString(36).slice(2)}`, url: await imageVersDataUrl(f) })))
+      setCaptures((prev) => [...prev, ...lues].slice(0, MAX_CAPTURES))
+      if (captures.length + lues.length > MAX_CAPTURES) setMessage(`${MAX_CAPTURES} captures au plus par lecture.`)
+    } catch (e: unknown) {
+      setErreur(e instanceof Error ? e.message : 'Image illisible.')
+    } finally {
+      if (fichierRef.current) fichierRef.current.value = ''
+    }
+  }, [captures.length])
+
+  // Capture collée n'importe où sur l'écran (onglet liste), pas seulement dans la zone de texte.
+  useEffect(() => {
+    if (mode !== 'liste') return
+    function onPaste(e: ClipboardEvent) {
+      const t = e.target as HTMLElement | null
+      if (t && t.tagName === 'TEXTAREA') return // géré par la zone de texte
+      const imgs = Array.from(e.clipboardData?.files || []).filter((f) => f.type.startsWith('image/'))
+      if (imgs.length) { e.preventDefault(); void ajouterCaptures(imgs) }
+    }
+    window.addEventListener('paste', onPaste)
+    return () => window.removeEventListener('paste', onPaste)
+  }, [mode, ajouterCaptures])
+
+  const lireCaptures = useCallback(async () => {
+    if (!captures.length) return
     setPhotoEnCours(true)
     setErreur(null)
     setMessage(null)
     try {
-      const images = await Promise.all(liste.map((f) => imageVersDataUrl(f)))
-      const res = await fetch('/api/quand-livrer/photo', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ images }),
+      // Une capture par appel, en parallèle : pas de réponse tronquée sur une grosse commande.
+      const reponses = await Promise.all(captures.map(async (c, k) => {
+        const res = await fetch('/api/quand-livrer/photo', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ images: [c.url] }),
+        })
+        const json = await res.json().catch(() => null)
+        if (!res.ok) throw new Error(`Capture ${k + 1} : ${json?.error || `lecture impossible (${res.status})`}`)
+        return json as { lignes?: LigneImage[]; date_livraison?: string | null }
+      }))
+      // Assemblage dans l'ordre des captures, en retirant le chevauchement entre deux captures successives.
+      let lus: LigneImage[] = []
+      let doublons = 0
+      for (const r of reponses) {
+        const ls = Array.isArray(r?.lignes) ? r.lignes : []
+        const recouvrement = chevauchement(lus, ls)
+        doublons += recouvrement
+        lus = [...lus, ...ls.slice(recouvrement)]
+      }
+      if (!lus.length) { setErreur('Aucune référence lue sur les captures.'); return }
+      const dateLue = reponses.map((r) => r?.date_livraison).find((d): d is string => typeof d === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(d)) ?? null
+
+      // Rapprochement du catalogue : fautes de lecture, références tronquées, désignation.
+      let corrections: string[] = []
+      const { data: resolu } = await supabase.rpc('ql_resoudre_references', {
+        p_lignes: lus.map((x) => ({ ref: x.ref, designation: x.designation || null, tronquee: Boolean(x.tronquee) })),
       })
-      const json = await res.json().catch(() => null)
-      if (!res.ok) throw new Error(json?.error || `Lecture impossible (${res.status}).`)
-      const lus: { ref: string; qte: number }[] = Array.isArray(json?.lignes) ? json.lignes : []
-      if (!lus.length) { setErreur('Aucune référence lue sur l’image.'); return }
+      if (Array.isArray(resolu)) {
+        const r = resolu as { i: number; lu: string; ref: string; methode: string }[]
+        lus = lus.map((x, k) => (r[k]?.ref ? { ...x, ref: r[k].ref } : x))
+        corrections = r
+          .filter((x) => x.methode !== 'EXACTE' && x.methode !== 'NON_TROUVEE' && x.lu.replace(/(\.\.\.|…|\.\.)$/, '') !== x.ref)
+          .map((x) => `${x.lu} → ${x.ref}`)
+      }
+
       const ajout = lus.map((x) => `${x.ref}\t${x.qte}`).join('\n')
       const nouveau = texte.trim() ? `${texte.trim()}\n${ajout}` : ajout
       setTexte(nouveau)
-      setMessage(`${lus.length} ligne${lus.length > 1 ? 's' : ''} lue${lus.length > 1 ? 's' : ''} sur l’image — vérifiez les références avant de vous y fier.`)
+      setCaptures([])
       await controlerListe(nouveau)
-    } catch (e: any) {
-      setErreur(e?.message || 'Lecture de l’image impossible.')
+      if (dateLue) { setDateCible(dateLue); setDateCibleSource('PHOTO') }
+      setMessage([
+        `${lus.length} ligne${lus.length > 1 ? 's' : ''} lue${lus.length > 1 ? 's' : ''} sur ${reponses.length} capture${reponses.length > 1 ? 's' : ''}`,
+        dateLue ? `date de livraison prévue ${fmtDate(dateLue, false)}` : null,
+        doublons ? `${doublons} ligne${doublons > 1 ? 's' : ''} en double entre captures retirée${doublons > 1 ? 's' : ''}` : null,
+        corrections.length ? `${corrections.length} référence${corrections.length > 1 ? 's' : ''} rapprochée${corrections.length > 1 ? 's' : ''} du catalogue : ${corrections.join(', ')}` : null,
+      ].filter(Boolean).join(' · ') + ' — vérifiez la liste avant de vous y fier.')
+    } catch (e: unknown) {
+      setErreur(e instanceof Error ? e.message : 'Lecture des captures impossible.')
     } finally {
       setPhotoEnCours(false)
-      if (fichierRef.current) fichierRef.current.value = ''
     }
-  }, [texte, controlerListe])
+  }, [captures, texte, controlerListe])
 
   // ── Sélection → quantités par référence → dispo ────────────────────────
   const selection = useMemo(() => lignes.filter((l) => !decochees.has(l.id)), [lignes, decochees])
@@ -685,8 +781,18 @@ export default function QuandLivrer({ compact = false, initialDevis, initialList
     const horsAccessoires = pret && equipements.length > 0 && !equipBloque && dateEquip && accessoiresRetardants.length > 0
       ? { date: dateEquip, refs: accessoiresRetardants }
       : null
-    return { refs, lectures, pret, dateMax, couleur, bloquees, aCommander, limitantes: new Set([...limitantes, ...bloquees]), horsAccessoires }
-  }, [qteParRef, valeurParRef, dispo, aujourdhui])
+    // Date de livraison prévue : tenable si la livraison client au plus tôt est ≤ date prévue,
+    // c.-à-d. si chaque référence est au dépôt au plus tard à la date prévue − délai logistique.
+    let cible: null | { date: string; depotMax: string; tenable: boolean; ecartJours: number | null; refsEnRetard: string[]; tropProche: boolean } = null
+    if (dateCible && pret && refs.length) {
+      const depotMax = ajouterJours(dateCible, -DELAI_LOGISTIQUE_JOURS)
+      const refsEnRetard = refs.filter((r) => dispo.get(r)?.statut === 'BLOQUE_APPRO' || (lectures.get(r)?.date ?? '') > depotMax)
+      const tenable = refsEnRetard.length === 0
+      const ecartJours = dateMax && bloquees.length === 0 ? joursEntre(dateClient(dateMax), dateCible) : null
+      cible = { date: dateCible, depotMax, tenable, ecartJours, refsEnRetard, tropProche: depotMax < aujourdhui }
+    }
+    return { refs, lectures, pret, dateMax, couleur, bloquees, aCommander, limitantes: new Set([...limitantes, ...bloquees]), horsAccessoires, cible }
+  }, [qteParRef, valeurParRef, dispo, aujourdhui, dateCible])
 
   const controles = useMemo(() => {
     const articles = selection.filter((l) => l.ref && l.type !== 'COMMENTAIRE')
@@ -747,6 +853,11 @@ export default function QuandLivrer({ compact = false, initialDevis, initialList
     if (synthese.dateMax) {
       lignesTxt.push(`Livraison client au plus tôt : ${fmtDate(dateClient(synthese.dateMax))}`)
       lignesTxt.push(`(mise à disposition au dépôt le ${fmtDate(synthese.dateMax)} + ${DELAI_LOGISTIQUE_JOURS} jours calendaires de logistique)`)
+    }
+    if (synthese.cible) {
+      lignesTxt.push(synthese.cible.tenable
+        ? `Date de livraison prévue ${fmtDate(synthese.cible.date)} : tenable${synthese.cible.ecartJours !== null ? ` (marge ${synthese.cible.ecartJours} j)` : ''}`
+        : `Date de livraison prévue ${fmtDate(synthese.cible.date)} : NON tenable${synthese.cible.ecartJours !== null ? ` (${-synthese.cible.ecartJours} j de retard)` : ''} — ${synthese.cible.refsEnRetard.join(', ')}`)
     }
     if (synthese.limitantes.size) lignesTxt.push(`Référence(s) limitante(s) : ${Array.from(synthese.limitantes).join(', ')}`)
     if (synthese.bloquees.length) lignesTxt.push(`Non promettable (blocage appro) : ${synthese.bloquees.join(', ')}`)
@@ -841,7 +952,7 @@ export default function QuandLivrer({ compact = false, initialDevis, initialList
             onChange={(e) => setTexte(e.target.value)}
             onPaste={(e) => {
               const imgs = Array.from(e.clipboardData.files || []).filter((f) => f.type.startsWith('image/'))
-              if (imgs.length) { e.preventDefault(); void lirePhoto(imgs) }
+              if (imgs.length) { e.preventDefault(); void ajouterCaptures(imgs) }
             }}
             placeholder={'Une ligne par article : référence puis quantité\n(copier-coller depuis Excel, un mail, un bon de commande…)\n\nRAK-DJ35RHAE\t3\nSPX-URFG1\t3'}
             rows={compact ? 6 : 7}
@@ -851,10 +962,10 @@ export default function QuandLivrer({ compact = false, initialDevis, initialList
               {chargement ? '…' : 'Contrôler la liste'}
             </button>
             <button type="button" className="qlBtn" onClick={() => fichierRef.current?.click()} disabled={photoEnCours}>
-              {photoEnCours ? 'Lecture de l’image…' : '📷 Photo / capture d’écran de la commande'}
+              📷 {captures.length ? 'Ajouter une photo / capture' : 'Photo / capture d’écran de la commande'}
             </button>
             {texte && (
-              <button type="button" className="qlBtn qlBtnGhost" onClick={() => { setTexte(''); setLignes([]); setDispo(new Map()) }}>
+              <button type="button" className="qlBtn qlBtnGhost" onClick={() => { setTexte(''); setLignes([]); setDispo(new Map()); setDateCible(''); setDateCibleSource(null) }}>
                 Effacer
               </button>
             )}
@@ -865,12 +976,63 @@ export default function QuandLivrer({ compact = false, initialDevis, initialList
               capture="environment"
               multiple
               hidden
-              onChange={(e) => void lirePhoto(e.target.files)}
+              onChange={(e) => void ajouterCaptures(e.target.files)}
             />
           </div>
+          {captures.length > 0 && (
+            <div className="qlCaptures">
+              <div className="qlCapturesListe">
+                {captures.map((c, k) => (
+                  <figure key={c.id} className="qlCapture">
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img src={c.url} alt={`Capture ${k + 1}`} />
+                    <figcaption>{k + 1}</figcaption>
+                    <button type="button" title="Retirer cette capture" onClick={() => setCaptures((prev) => prev.filter((x) => x.id !== c.id))} disabled={photoEnCours}>✕</button>
+                  </figure>
+                ))}
+              </div>
+              <div className="qlCapturesActions">
+                <span>
+                  {captures.length} capture{captures.length > 1 ? 's' : ''} prête{captures.length > 1 ? 's' : ''}, dans l’ordre de la commande.
+                  {' '}Collez la suite (Ctrl+V) si la commande tient sur plusieurs écrans, puis lancez la lecture.
+                </span>
+                <button type="button" className="qlBtn qlBtnPrim" onClick={() => void lireCaptures()} disabled={photoEnCours}>
+                  {photoEnCours ? 'Lecture en cours…' : `✔ Lire ${captures.length > 1 ? `les ${captures.length} captures` : 'la capture'}`}
+                </button>
+                <button type="button" className="qlBtn qlBtnGhost" onClick={() => setCaptures([])} disabled={photoEnCours}>Vider</button>
+              </div>
+            </div>
+          )}
           <div className="qlAide">
-            Collez une liste (Excel, mail…), prenez une photo de la commande, ou collez une capture d’écran ici (Ctrl+V) : elle est lue comme une photo.
+            Collez une liste (Excel, mail…), une ou plusieurs captures d’écran (Ctrl+V, une par écran pour une grosse commande), ou prenez des photos :
+            les captures s’ajoutent en attente, puis « Lire » les traite ensemble. Les références lues sont rapprochées du catalogue (fautes de lecture,
+            références tronquées).
           </div>
+        </div>
+      )}
+
+      {(mode === 'liste' || devis) && (
+        <div className="qlCible">
+          <label>
+            <span className="qlCibleLib">Date de livraison prévue au client</span>
+            <input
+              type="date"
+              className="qlCibleInput"
+              value={dateCible}
+              min={aujourdhui}
+              onChange={(e) => { setDateCible(e.target.value); setDateCibleSource(e.target.value ? 'SAISIE' : null) }}
+            />
+          </label>
+          {dateCible ? (
+            <>
+              <span className="qlAide">{dateCibleSource ? LIB_SOURCE_DATE[dateCibleSource] : ''}</span>
+              <button type="button" className="qlBtn qlBtnGhost qlBtnSmall" onClick={() => { setDateCible(''); setDateCibleSource(null) }}>Retirer</button>
+            </>
+          ) : (
+            <span className="qlAide">
+              {devis ? 'Pas de date de livraison annoncée sur ce devis : saisissez-la pour savoir si elle est tenable.' : 'Facultatif : la date annoncée au client (commande, devis), pour savoir si elle est tenable.'}
+            </span>
+          )}
         </div>
       )}
 
@@ -902,6 +1064,29 @@ export default function QuandLivrer({ compact = false, initialDevis, initialList
                     : <>Mise à disposition au dépôt le <b>{fmtDate(synthese.dateMax)}</b></>}
                   {' '}+ <b>{DELAI_LOGISTIQUE_JOURS} jours calendaires</b> de logistique (préparation + transport)
                   {' '}· livraison client dans {joursEntre(aujourdhui, dateClient(synthese.dateMax))} jours
+                </div>
+              )}
+              {synthese.cible && (
+                <div className={`qlCibleVerdict ${synthese.cible.tenable ? 'ok' : 'ko'}`}>
+                  {synthese.cible.tenable ? (
+                    <>
+                      ✔ <b>Date prévue du {fmtDate(synthese.cible.date)} tenable</b>
+                      {synthese.cible.ecartJours !== null && <> · marge de {synthese.cible.ecartJours} jour{synthese.cible.ecartJours > 1 ? 's' : ''}</>}
+                      {' '}(toutes les références au dépôt au plus tard le {fmtDate(synthese.cible.depotMax, false)})
+                    </>
+                  ) : (
+                    <>
+                      ✖ <b>Date prévue du {fmtDate(synthese.cible.date)} non tenable</b>
+                      {synthese.cible.ecartJours !== null && synthese.cible.ecartJours < 0 && <> · {-synthese.cible.ecartJours} jour{-synthese.cible.ecartJours > 1 ? 's' : ''} de retard</>}
+                      {synthese.cible.tropProche && <> · moins de {DELAI_LOGISTIQUE_JOURS} jours de logistique avant cette date</>}
+                      {' '}— à revoir :{' '}
+                      {synthese.cible.refsEnRetard.map((r) => (
+                        onOuvrirArticle
+                          ? <button key={r} type="button" className="qlLimitante qlLienRef" title="Voir la projection du stock (courbe)" onClick={() => ouvrirArticle(r)}>{r} ↗</button>
+                          : <span key={r} className="qlLimitante">{r}</span>
+                      ))}
+                    </>
+                  )}
                 </div>
               )}
               {synthese.pret && synthese.dateMax && synthese.dateMax > aujourdhui && (
@@ -1003,6 +1188,11 @@ export default function QuandLivrer({ compact = false, initialDevis, initialList
                           {dateBloc ? `livraison client ≥ ${fmtDate(dateClient(dateBloc), false)}` : 'non promettable'}
                         </span>
                       )}
+                      {nbCoches > 0 && synthese.cible && couleurBloc !== 'neutre' && (
+                        dateBloc && dateBloc <= synthese.cible.depotMax
+                          ? <span className="qlTient ok">✔ tient le {fmtDate(synthese.cible.date, false)}</span>
+                          : <span className="qlTient ko">✖ ne tient pas le {fmtDate(synthese.cible.date, false)}</span>
+                      )}
                       {nbCoches === 0 && <span className="qlBlocDate">retiré</span>}
                     </label>
                   )}
@@ -1023,6 +1213,7 @@ export default function QuandLivrer({ compact = false, initialDevis, initialList
                         limitante={Boolean(l.ref && synthese.limitantes.has(l.ref))}
                         avecPrixDevis={Boolean(devis)}
                         onOuvrirArticle={onOuvrirArticle ? ouvrirArticle : undefined}
+                        depotMaxCible={synthese.cible?.depotMax ?? null}
                       />
                     )
                   })}
@@ -1049,7 +1240,7 @@ export default function QuandLivrer({ compact = false, initialDevis, initialList
 // ─────────────────────────────────────────────────────────────────────────
 
 function LigneVue({
-  l, coche, onBascule, lecture, dispo, qteTotaleRef, limitante, onOuvrirArticle,
+  l, coche, onBascule, lecture, dispo, qteTotaleRef, limitante, onOuvrirArticle, depotMaxCible,
 }: {
   l: Ligne
   coche: boolean
@@ -1060,6 +1251,8 @@ function LigneVue({
   limitante: boolean
   avecPrixDevis: boolean
   onOuvrirArticle?: (ref: string) => void
+  /** Date limite de mise à disposition au dépôt pour tenir la date prévue (null = pas de date prévue). */
+  depotMaxCible: string | null
 }) {
   const estArticle = l.type === 'ARTICLE'
 
@@ -1119,6 +1312,13 @@ function LigneVue({
         {estArticle && coche ? (
           <>
             <span className="qlPill" style={{ background: c.trait }}>{lecture?.titre ?? '…'}</span>
+            {depotMaxCible && lecture && lecture.couleur !== 'neutre' && (
+              lecture.date && lecture.date <= depotMaxCible
+                ? <span className="qlTient ok" title="Au dépôt à temps pour la date de livraison prévue">✔ tient la date</span>
+                : <span className="qlTient ko" title="Pas au dépôt à temps pour la date de livraison prévue">
+                    ✖ {lecture.date ? `+${joursEntre(depotMaxCible, lecture.date)} j` : 'bloquée'}
+                  </span>
+            )}
             {details && <span className="qlDispoDetail">{details}</span>}
           </>
         ) : l.type === 'INCONNU' ? (
@@ -1185,6 +1385,25 @@ const CSS = `
 .qlVerdictMain { flex: 1 1 420px; min-width: 0; }
 .qlVerdictLabel { font-size: 13px; color: rgba(var(--cg-ink-rgb),0.7); display: flex; align-items: center; gap: 8px; }
 .qlVerdictDate { font-size: 24px; font-weight: 700; margin: 2px 0 4px; letter-spacing: -0.01em; }
+.qlCaptures { margin-top: 8px; max-width: 1100px; border: 1px dashed rgba(var(--cg-ink-rgb),0.3); border-radius: 12px; padding: 8px 10px; background: rgba(var(--cg-ink-rgb),0.03); }
+.qlCapturesListe { display: flex; flex-wrap: wrap; gap: 8px; }
+.qlCapture { position: relative; margin: 0; width: 150px; height: 96px; border-radius: 8px; overflow: hidden; border: 1px solid rgba(var(--cg-ink-rgb),0.2); background: #000; }
+.qlCapture img { width: 100%; height: 100%; object-fit: cover; object-position: top left; display: block; }
+.qlCapture figcaption { position: absolute; left: 4px; bottom: 4px; background: rgba(0,0,0,0.7); color: #fff; font-size: 11px; font-weight: 700; padding: 1px 6px; border-radius: 6px; }
+.qlCapture button { position: absolute; top: 3px; right: 3px; border: 0; border-radius: 6px; background: rgba(0,0,0,0.7); color: #fff; font-size: 12px; cursor: pointer; padding: 1px 6px; }
+.qlCapturesActions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; margin-top: 8px; font-size: 12.5px; color: rgba(var(--cg-ink-rgb),0.75); }
+.qlCapturesActions span { flex: 1 1 320px; }
+.qlCible { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin: 2px 0 10px; }
+.qlCible label { display: flex; align-items: center; gap: 10px; }
+.qlCibleLib { font-size: 13.5px; font-weight: 700; }
+.qlCibleInput { font: inherit; font-size: 15px; color: var(--cg-ink); background: rgba(var(--cg-ink-rgb),0.05); border: 1px solid rgba(var(--cg-ink-rgb),0.22); border-radius: 10px; padding: 6px 10px; color-scheme: light dark; }
+.qlCible .qlAide { margin: 0; }
+.qlCibleVerdict { font-size: 14px; margin: 4px 0 6px; padding: 6px 12px; border-radius: 10px; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.qlCibleVerdict.ok { background: rgba(46,139,87,0.16); color: var(--cg-ok-text); border: 1px solid rgba(46,139,87,0.5); }
+.qlCibleVerdict.ko { background: rgba(200,55,45,0.16); color: var(--cg-danger-text); border: 1px solid rgba(200,55,45,0.55); }
+.qlTient { font-size: 12px; font-weight: 700; padding: 2px 8px; border-radius: 999px; white-space: nowrap; }
+.qlTient.ok { background: rgba(46,139,87,0.16); color: var(--cg-ok-text); }
+.qlTient.ko { background: rgba(200,55,45,0.18); color: var(--cg-danger-text); }
 .qlVerdictDepot { font-size: 13px; color: rgba(var(--cg-ink-rgb),0.8); margin: 0 0 4px; }
 .qlLienRef { border: 0; background: transparent; color: inherit; padding: 0; cursor: pointer; text-decoration: underline; text-decoration-style: dotted; text-underline-offset: 3px; font: inherit; }
 button.qlLimitante.qlLienRef { padding: 2px 8px; background: rgba(var(--cg-ink-rgb),0.12); text-decoration: none; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-weight: 700; }

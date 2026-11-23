@@ -186,7 +186,7 @@ export function tryParseJsonObject(text: string): any {
   return null
 }
 
-export type OpenAIContentPart = { type: 'input_text'; text: string } | { type: 'input_image'; image_url: string }
+export type OpenAIContentPart = { type: 'input_text'; text: string } | { type: 'input_image'; image_url: string; detail?: 'low' | 'high' | 'auto' }
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY
 const OPENAI_MODEL = process.env.OPENAI_CEE_MODEL || process.env.OPENAI_MODEL || 'gpt-4.1-mini'
