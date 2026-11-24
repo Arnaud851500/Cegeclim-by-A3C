@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import * as XLSX from 'xlsx'
 import { supabase } from '@/lib/supabaseClient'
@@ -24,6 +24,7 @@ import {
 // dédié avec action / commentaire par CDC. URL ?promesse=interdite ou
 // événement cegeclim:open-promesses-interdites. Voir lib/cdcPromesses.ts.
 import CdcPromessesInterdites from '@/components/CdcPromessesInterdites'
+import type { PromesseLigne } from '@/lib/cdcPromesses'
 import { PROMESSES_FENETRE_JOURS, PROMESSES_OPEN_EVENT, commandesDansPerimetre, fetchPromessesAlerte, fetchPromessesInterdites, promessesExportCommandes, promessesExportLignes } from '@/lib/cdcPromesses'
 
 type LignePortefeuille = {
@@ -301,7 +302,21 @@ type InterditeHisto = {
   premiere_detection: string | null
 }
 
+// Détail par référence d'une CDC à date interdite (contrôle du jour ou historique).
+type InterditeRef = {
+  reference_article: string
+  verdict: string
+  date_promise: string | null
+  date_proposee: string | null
+  date_exacte: string | null
+  nb_victimes: number | null
+  q_victimes: number | null
+  arret_appro: boolean
+  corrigee: boolean
+}
+
 type InterditeDoc = {
+  refs: Map<string, InterditeRef>
   premiere_detection: string | null
   date_livraison_saisie: string | null
   date_proposee: string | null
@@ -466,6 +481,31 @@ function InfoTip({ text, align = 'left' }: { text: ReactNode; align?: 'left' | '
       </span>
     </span>
   )
+}
+
+function verdictLabel(verdict: string) {
+  if (verdict === 'INTENABLE') return 'Intenable'
+  if (verdict === 'CREE_RETARD') return 'Crée un retard'
+  if (verdict === 'OK') return 'Corrigée'
+  return 'Repérée'
+}
+
+function joursEcart(a: string | null | undefined, b: string | null | undefined) {
+  if (!a || !b) return null
+  const d = Math.round((new Date(b).getTime() - new Date(a).getTime()) / 86400000)
+  return Number.isFinite(d) ? d : null
+}
+
+/** Commentaire lisible d'une ligne à date interdite. */
+function interditeRefComment(r: InterditeRef) {
+  const ecart = joursEcart(r.date_promise, r.date_proposee)
+  const proposee = r.arret_appro && !r.date_proposee
+    ? 'aucune date possible (arrêt appro)'
+    : r.date_proposee
+      ? `aurait dû être proposée au plus tôt le ${new Date(r.date_proposee).toLocaleDateString('fr-FR')}${ecart !== null && ecart > 0 ? ` (+${ecart} j)` : ''}`
+      : 'aucune date possible connue'
+  const victimes = r.nb_victimes ? ` · prend le stock de ${r.nb_victimes} CDC plus ancienne(s)${r.q_victimes ? ` (${r.q_victimes} p.)` : ''}` : ''
+  return `${verdictLabel(r.verdict)} : promise le ${r.date_promise ? new Date(r.date_promise).toLocaleDateString('fr-FR') : '?'}, ${proposee}${victimes}${r.corrigee ? ' · corrigée depuis' : ''}`
 }
 
 function interditeTitle(info: InterditeDoc) {
@@ -830,6 +870,7 @@ export default function PortefeuilleLivraisonPage() {
   const [showLignes, setShowLignes] = useState(false)
   const [modalDocKey, setModalDocKey] = useState<string | null>(null)
   const [interditeRows, setInterditeRows] = useState<InterditeHisto[]>([])
+  const [interditeLive, setInterditeLive] = useState<PromesseLigne[]>([])
   const [interditeOnly, setInterditeOnly] = useState(false)
   const [dateHisto, setDateHisto] = useState<DateLivHisto[] | null>(null)
   const [dateHistoLoading, setDateHistoLoading] = useState(false)
@@ -1057,16 +1098,36 @@ export default function PortefeuilleLivraisonPage() {
         console.warn('Portefeuille livraison V2 - historique dates interdites non chargé', error)
       }
     }
+    // Contrôle du jour (fenêtre 7 j + CDC avec action) : toujours disponible,
+    // même si l'historique n'est pas encore en place.
+    async function loadInterditesLive() {
+      try {
+        const rows = await fetchPromessesInterdites()
+        if (!cancelled) setInterditeLive(rows.filter((r) => r.verdict !== 'OK'))
+      } catch (error) {
+        console.warn('Portefeuille livraison V2 - contrôle des dates interdites non chargé', error)
+      }
+    }
     void loadInterdites()
+    void loadInterditesLive()
     return () => { cancelled = true }
   }, [])
 
   const interditeByDoc = useMemo(() => {
     const map = new Map<string, InterditeDoc>()
+    const getDoc = (key: string) => {
+      let current = map.get(key)
+      if (!current) {
+        current = { refs: new Map(), premiere_detection: null, date_livraison_saisie: null, date_proposee: null, verdicts: [], corrigee: true, references: [] }
+        map.set(key, current)
+      }
+      return current
+    }
+    // 1. Historique (mémoire permanente).
     for (const row of interditeRows) {
       const key = safeText(row.numero_document, '')
       if (!key) continue
-      const current = map.get(key) || { premiere_detection: null, date_livraison_saisie: null, date_proposee: null, verdicts: [], corrigee: true, references: [] }
+      const current = getDoc(key)
       if (row.premiere_detection && (!current.premiere_detection || row.premiere_detection < current.premiere_detection)) {
         current.premiere_detection = row.premiere_detection
         current.date_livraison_saisie = row.date_livraison_saisie
@@ -1074,11 +1135,52 @@ export default function PortefeuilleLivraisonPage() {
       if (row.date_proposee && (!current.date_proposee || row.date_proposee > current.date_proposee)) current.date_proposee = row.date_proposee
       if (row.verdict_initial && !current.verdicts.includes(row.verdict_initial)) current.verdicts.push(row.verdict_initial)
       if (row.verdict_dernier !== 'OK') current.corrigee = false
-      if (row.reference_article && row.reference_article !== '*' && !current.references.includes(row.reference_article)) current.references.push(row.reference_article)
-      map.set(key, current)
+      if (row.reference_article && row.reference_article !== '*') {
+        if (!current.references.includes(row.reference_article)) current.references.push(row.reference_article)
+        current.refs.set(normalizeReferenceKey(row.reference_article), {
+          reference_article: row.reference_article,
+          verdict: row.verdict_initial || 'REPEREE',
+          date_promise: row.date_livraison_saisie,
+          date_proposee: row.date_proposee,
+          date_exacte: null,
+          nb_victimes: null,
+          q_victimes: null,
+          arret_appro: false,
+          corrigee: row.verdict_dernier === 'OK',
+        })
+      }
+    }
+    // 2. Contrôle du jour : prioritaire (détail complet, toujours en défaut).
+    for (const row of interditeLive) {
+      const key = safeText(row.numero_document, '')
+      if (!key) continue
+      const current = getDoc(key)
+      const detection = row.premiere_detection || row.calcule_le || null
+      if (detection && (!current.premiere_detection || detection < current.premiere_detection)) {
+        current.premiere_detection = detection
+        current.date_livraison_saisie = row.date_livraison
+      }
+      if (!current.date_livraison_saisie) current.date_livraison_saisie = row.date_livraison
+      if (row.date_proposee && (!current.date_proposee || row.date_proposee > current.date_proposee)) current.date_proposee = row.date_proposee
+      if (!current.verdicts.includes(row.verdict)) current.verdicts.push(row.verdict)
+      current.corrigee = false
+      if (!current.references.includes(row.reference_article)) current.references.push(row.reference_article)
+      const refKey = normalizeReferenceKey(row.reference_article)
+      const histo = current.refs.get(refKey)
+      current.refs.set(refKey, {
+        reference_article: row.reference_article,
+        verdict: row.verdict,
+        date_promise: histo?.date_promise || row.date_livraison,
+        date_proposee: row.date_proposee,
+        date_exacte: row.date_exacte,
+        nb_victimes: row.nb_victimes ?? null,
+        q_victimes: row.q_victimes ?? null,
+        arret_appro: Boolean(row.arret_appro),
+        corrigee: false,
+      })
     }
     return map
-  }, [interditeRows])
+  }, [interditeRows, interditeLive])
 
   // Si l'utilisateur décoche CDC alors que le filtre "CDC liv < M-2" est
   // actif, on le désactive plutôt que d'afficher un tableau vide.
@@ -1882,11 +1984,11 @@ export default function PortefeuilleLivraisonPage() {
   const modalLignes = useMemo<LigneDetail[]>(() => {
     if (!modalDocKey) return []
     const interdite = modalDoc ? interditeByDoc.get(modalDoc.numero_document) : undefined
-    const refsInterdites = new Set((interdite?.references || []).map(normalizeReferenceKey))
+    const refsInterdites = new Set(Array.from(interdite?.refs.values() || []).filter((r) => !r.corrigee).map((r) => normalizeReferenceKey(r.reference_article)))
     const rows = lignes.filter((ligne) => docKey(ligne) === modalDocKey).map(toLigneDetail)
     const score = (ligne: LigneDetail) => {
       const couv = couvertureSeverity(ligne.couv_statut) * 10
-      const interditeBonus = refsInterdites.has(normalizeReferenceKey(ligne.reference_article)) && !interdite?.corrigee ? 5 : 0
+      const interditeBonus = refsInterdites.has(normalizeReferenceKey(ligne.reference_article)) ? 25 : 0
       return couv + interditeBonus + (ligne.couv_arret_appro ? 1 : 0)
     }
     return rows.sort((a, b) => score(b) - score(a) || sortValues(a.reference_article, b.reference_article))
@@ -2491,6 +2593,10 @@ export default function PortefeuilleLivraisonPage() {
                                 <ArretApproBadge count={doc.couv_nb_arret_appro} />
                               </span>
                             )}
+                            {interdite && <InterditeBadge info={interdite} />}
+                            {interdite && !interdite.corrigee && interdite.date_proposee && (
+                              <span className="whitespace-nowrap text-[10px] font-semibold text-red-700" title={Array.from(interdite.refs.values()).map(interditeRefComment).join('\n')}>→ {formatDate(interdite.date_proposee)}</span>
+                            )}
                           </div>
                         ) : '—'}
                       </td>
@@ -2738,10 +2844,13 @@ export default function PortefeuilleLivraisonPage() {
                       const couvNonServable = isCouvertureNonServable(ligne.couv_statut)
                       const isCouvertureLine = Boolean(ligne.couv_statut) && ligne.couv_statut !== COUVERTURE_HORS_CONTROLE
                       const info = interditeByDoc.get(modalDoc.numero_document)
-                      const refInterdite = Boolean(info && !info.corrigee && info.references.map(normalizeReferenceKey).includes(normalizeReferenceKey(ligne.reference_article)))
+                      const refInfo = info?.refs.get(normalizeReferenceKey(ligne.reference_article))
+                      const refInterdite = Boolean(refInfo && !refInfo.corrigee)
                       const souci = couvNonServable || refInterdite || ligne.couv_arret_appro
+                      const nbCols = modalDoc.type_document === 'CDC' ? 11 : 6
                       return (
-                        <tr key={`${ligne.id || index}`} className={[couvNonServable ? 'bg-rose-50' : refInterdite ? 'bg-red-50' : '', 'hover:bg-slate-50'].join(' ')}>
+                        <Fragment key={`${ligne.id || index}`}>
+                        <tr className={[couvNonServable ? 'bg-rose-50' : refInterdite ? 'bg-red-50' : '', 'hover:bg-slate-50'].join(' ')}>
                           <td className="border-b border-slate-100 px-1 py-0.5 text-center">{souci ? (refInterdite ? '⛔' : '⚠') : ''}</td>
                           <td className="truncate border-b border-slate-100 px-1.5 py-0.5 font-medium" title={safeText(ligne.reference_article, '')}>
                             {ligne.reference_article ? <a href={`/stock?ref=${encodeURIComponent(ligne.reference_article)}`} target="_blank" rel="noreferrer" className={['hover:underline', couvNonServable ? 'text-rose-700' : 'text-blue-700'].join(' ')}>{ligne.reference_article}</a> : '—'}
@@ -2755,6 +2864,9 @@ export default function PortefeuilleLivraisonPage() {
                               <div className="flex items-center gap-1 overflow-hidden">
                                 {ligne.couv_statut ? <span className={['inline-flex whitespace-nowrap rounded-full border px-1.5 py-0 text-[10px] font-semibold', couvertureClassName(ligne.couv_statut)].join(' ')}>{couvertureLabel(ligne.couv_statut)}</span> : '—'}
                                 {ligne.couv_arret_appro && <span title={ARRET_APPRO_TITLE}>⛔</span>}
+                                {refInfo && (
+                                  <span title={interditeRefComment(refInfo)} className={['inline-flex whitespace-nowrap rounded border px-1 py-0 text-[10px] font-semibold', refInfo.corrigee ? 'border-slate-300 bg-slate-100 text-slate-500' : 'border-red-300 bg-red-100 text-red-800'].join(' ')}>⛔ Interdite</span>
+                                )}
                               </div>
                             </td>
                             <td className="border-b border-slate-100 px-1.5 py-0.5 text-right">{isCouvertureLine ? formatQty(ligne.couv_stock_disponible) : '—'}</td>
@@ -2777,6 +2889,15 @@ export default function PortefeuilleLivraisonPage() {
                             </td>
                           </>)}
                         </tr>
+                        {refInfo && (
+                          <tr className={refInfo.corrigee ? 'bg-slate-50' : 'bg-red-50'}>
+                            <td className="border-b border-slate-100 px-1 py-0.5"></td>
+                            <td colSpan={nbCols - 1} className={['border-b border-slate-100 px-1.5 pb-1 pt-0 text-[11px]', refInfo.corrigee ? 'text-slate-500' : 'font-semibold text-red-800'].join(' ')}>
+                              ⛔ Date de livraison interdite — {interditeRefComment(refInfo)}
+                            </td>
+                          </tr>
+                        )}
+                        </Fragment>
                       )
                     })}
                     {modalLignes.length === 0 && <tr><td colSpan={11} className="px-4 py-6 text-center text-slate-500">Aucune ligne.</td></tr>}
