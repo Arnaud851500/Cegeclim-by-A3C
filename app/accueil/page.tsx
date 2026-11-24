@@ -14,7 +14,7 @@
 // default_landing_page = /accueil sur les profils (écran Autorisations).
 // ============================================================================
 
-import { Fragment, useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type React from 'react'
 import { useRouter } from 'next/navigation'
 import { useAccess } from '@/components/AccessContext'
@@ -36,6 +36,14 @@ import { themed } from '@/lib/theme'
 // ou « Coller une liste » → /quand-livrer en mode liste.
 // ÉVOLUTION (2026-11-23) : libellés précisés — devis créés au plus tard la veille,
 // liste collée / photo / capture d'écran, date de livraison client = dispo dépôt + 7 j.
+// ÉVOLUTION (2026-11-24) : tout tient sur une page, quel que soit le nombre de blocs
+// autorisés. La grille occupe la hauteur restante de la fenêtre (mesurée sous le
+// bandeau) ; le nombre de colonnes dépend du nombre de blocs et de la largeur
+// (1 à 5), la hauteur des lignes se partage l'espace. Le contenu d'un bloc
+// s'adapte à sa taille : « grand » (icônes, titre, sous-titre, liste des écrans),
+// « moyen » (icônes réduites) ou « compact » (icône à gauche, texte à droite) —
+// textes jamais sous 12 px. En-tête et raccourci « Quand puis-je livrer ? » sur une
+// ligne. Écran très bas (< 380 px utiles) : la page défile plutôt que d'écraser.
 // ÉVOLUTION (2026-09-15 soir) : bloc « Mes alertes » — pas une page mais la
 // fenêtre flottante « Centre d'alertes » (ClientRootShell), qui reprend en
 // grand les pastilles du bandeau. Il apparaît après « Mes tâches » dès que le
@@ -78,8 +86,30 @@ export default function AccueilPage() {
 
   const [openBloc, setOpenBloc] = useState<NavBloc | null>(null)
 
+
   const blocs = useMemo(() => getVisibleBlocs(rights), [rights])
   const nbEcrans = blocs.reduce((sum, bloc) => sum + bloc.pages.length, 0)
+
+  // Espace disponible pour la grille (sous le bandeau, l'en-tête et le raccourci)
+  const gridRef = useRef<HTMLDivElement | null>(null)
+  const [zone, setZone] = useState<{ w: number; h: number }>({ w: 1200, h: 640 })
+  useLayoutEffect(() => {
+    const el = gridRef.current
+    if (!el) return
+    const mesurer = () => {
+      const r = el.getBoundingClientRect()
+      const h = Math.max(380, Math.floor(window.innerHeight - r.top - 18))
+      setZone((z) => (Math.abs(z.w - r.width) < 2 && Math.abs(z.h - h) < 2 ? z : { w: r.width, h }))
+    }
+    mesurer()
+    const ro = new ResizeObserver(mesurer)
+    ro.observe(el)
+    window.addEventListener('resize', mesurer)
+    return () => {
+      ro.disconnect()
+      window.removeEventListener('resize', mesurer)
+    }
+  }, [blocs.length, isMobile])
 
   // Position du bloc « Mes alertes » dans la grille : juste après « Mes tâches »
   // (comme sur le mobile « Mes tâches - alertes »), sinon en tête.
@@ -88,6 +118,26 @@ export default function AccueilPage() {
     return idx >= 0 ? idx + 1 : 0
   }, [blocs])
   const showAlertBloc = alerts.items.length > 0
+
+  // Tuiles affichées : blocs + « Mes alertes » à sa place
+  const tuiles = useMemo(() => {
+    const t: ({ kind: 'bloc'; bloc: NavBloc } | { kind: 'alertes' })[] = blocs.map((bloc) => ({ kind: 'bloc' as const, bloc }))
+    if (showAlertBloc) t.splice(Math.min(alertBlocIndex, t.length), 0, { kind: 'alertes' })
+    return t
+  }, [blocs, showAlertBloc, alertBlocIndex])
+
+  const GAP = 14
+  const disposition = useMemo(() => {
+    const n = Math.max(1, tuiles.length)
+    const maxCols = zone.w < 760 ? 2 : zone.w < 1050 ? 3 : zone.w < 1400 ? 4 : 5
+    const prefer: Record<number, number> = { 1: 1, 2: 2, 3: 3, 4: 2, 5: 3, 6: 3, 7: 4, 8: 4, 9: 3, 10: 5, 11: 4, 12: 4 }
+    const cols = Math.min(maxCols, prefer[n] ?? 5, n)
+    const rows = Math.ceil(n / cols)
+    const rowH = (zone.h - GAP * (rows - 1)) / rows
+    const colW = (zone.w - GAP * (cols - 1)) / cols
+    const taille: Taille = rowH >= 215 && colW >= 260 ? 'grand' : rowH >= 150 ? 'moyen' : 'compact'
+    return { cols, rows, rowH, taille }
+  }, [tuiles.length, zone])
 
   const displayName =
     String(rights.display_name || '').trim() ||
@@ -132,22 +182,20 @@ export default function AccueilPage() {
         .cgcBloc { transition: transform 0.16s ease, box-shadow 0.16s ease, filter 0.16s ease; }
         .cgcBloc:hover { transform: translateY(-2px); filter: brightness(1.08); box-shadow: 0 16px 36px rgba(0,0,0,calc(0.42 * var(--cg-shadow-k))); }
         [data-theme="light"] .cgcBloc:hover { filter: brightness(0.98); }
+        .cgcBloc { overflow: hidden; min-height: 0; min-width: 0; }
         .cgcBloc:focus-visible, .cgcAlertCounter:focus-visible, .cgcAlertHead:focus-visible { outline: 2px solid var(--cg-ink-soft); outline-offset: 3px; }
         .cgcAlertCounter:hover { filter: brightness(1.08); transform: translateY(-1px); }
         [data-theme="light"] .cgcAlertCounter:hover { filter: brightness(0.97); }
         .cgcBlocPage:hover { background: rgba(var(--cg-ink-rgb),0.09); border-color: rgba(var(--cg-ink-rgb),0.22); }
         .cgcBlocPage:focus-visible { outline: 2px solid var(--cg-ink-soft); outline-offset: 2px; }
         .cgcPanelClose:hover { background: rgba(255,255,255,0.10); color: #fff; }
-        @media (max-width: 1240px) { .cgcBlocGrid { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; } }
         @media (prefers-reduced-motion: reduce) { .cgcBloc { transition: none; } .cgcBloc:hover { transform: none; } }
       `}</style>
 
       <div style={styles.hero}>
-        <div style={styles.kicker}>CEGECLIM</div>
         <h1 style={styles.title}>Bonjour{displayName ? `, ${displayName}` : ''}.</h1>
         <div style={styles.lead}>
-          {nbEcrans} écran{nbEcrans > 1 ? 's' : ''} accessible{nbEcrans > 1 ? 's' : ''} dans {blocs.length} bloc{blocs.length > 1 ? 's' : ''}.
-          Choisissez un bloc pour ouvrir un écran ; le bouton MENU du bandeau vous ramène ici.
+          {nbEcrans} écran{nbEcrans > 1 ? 's' : ''} dans {blocs.length} bloc{blocs.length > 1 ? 's' : ''} — choisissez un bloc ; le bouton MENU du bandeau vous ramène ici.
         </div>
       </div>
 
@@ -158,45 +206,37 @@ export default function AccueilPage() {
           Aucun écran n’est ouvert sur votre profil. Rapprochez-vous d’un administrateur pour obtenir des accès.
         </div>
       ) : (
-        <div className="cgcBlocGrid" style={styles.grid}>
-          {blocs.map((bloc, index) => (
-            <Fragment key={bloc.id}>
-            {showAlertBloc && index === alertBlocIndex && (
-              <AlertsBloc items={alerts.items} activeCount={alerts.activeCount} onOpenCenter={alerts.openAlertCenter} light={light} colors={blocColors(alerts.activeCount > 0 ? ALERT_GRADIENT_ACTIVE : ALERT_GRADIENT_OK)} />
-            )}
-            <button
-              type="button"
-              className="cgcBloc"
-              onClick={() => onBlocClick(bloc)}
-              style={(() => {
-                const c = blocColors(bloc.gradient)
-                return {
-                  ...styles.bloc,
-                  background: c.background,
-                  ...(c.border ? { border: c.border } : {}),
-                  ...(c.boxShadow ? { boxShadow: c.boxShadow } : {}),
-                  ...(c.color ? { color: c.color } : {}),
-                }
-              })()}
-            >
-              <span style={{ ...styles.blocChevron, ...(light ? { color: blocColors(bloc.gradient).chevron } : {}) }} aria-hidden="true">›</span>
-              <span style={styles.blocIcons}>
-                {(bloc.icons && bloc.icons.length > 0 ? bloc.icons : [bloc.icon]).map((icon, iconIndex) => (
-                  <span key={`${bloc.id}-icon-${iconIndex}`} style={{ ...styles.blocIcon, background: light ? blocColors(bloc.gradient).iconBg : bloc.iconBg }}>{icon}</span>
-                ))}
-              </span>
-              <span style={styles.blocLabel}>{bloc.label}</span>
-              <span style={{ ...styles.blocSubtitle, ...(light ? { color: blocColors(bloc.gradient).subtitle } : {}) }}>{bloc.subtitle}</span>
-              <span style={{ ...styles.blocCount, ...(light ? { color: blocColors(bloc.gradient).count } : {}) }}>
-                {bloc.pages.length === 1
-                  ? bloc.pages[0].label
-                  : `${bloc.pages.length} écrans`}
-              </span>
-            </button>
-            </Fragment>
-          ))}
-          {showAlertBloc && alertBlocIndex >= blocs.length && (
-            <AlertsBloc items={alerts.items} activeCount={alerts.activeCount} onOpenCenter={alerts.openAlertCenter} light={light} colors={blocColors(alerts.activeCount > 0 ? ALERT_GRADIENT_ACTIVE : ALERT_GRADIENT_OK)} />
+        <div
+          ref={gridRef}
+          style={{
+            ...styles.grid,
+            gridTemplateColumns: `repeat(${disposition.cols}, minmax(0, 1fr))`,
+            gridTemplateRows: `repeat(${disposition.rows}, minmax(0, 1fr))`,
+            gap: GAP,
+            height: zone.h,
+          }}
+        >
+          {tuiles.map((tuile) =>
+            tuile.kind === 'alertes' ? (
+              <AlertsBloc
+                key="alertes"
+                items={alerts.items}
+                activeCount={alerts.activeCount}
+                onOpenCenter={alerts.openAlertCenter}
+                light={light}
+                taille={disposition.taille}
+                colors={blocColors(alerts.activeCount > 0 ? ALERT_GRADIENT_ACTIVE : ALERT_GRADIENT_OK)}
+              />
+            ) : (
+              <BlocTuile
+                key={tuile.bloc.id}
+                bloc={tuile.bloc}
+                taille={disposition.taille}
+                light={light}
+                colors={blocColors(tuile.bloc.gradient)}
+                onClick={() => onBlocClick(tuile.bloc)}
+              />
+            )
           )}
         </div>
       )}
@@ -265,15 +305,19 @@ export default function AccueilPage() {
 
 const styles: Record<string, React.CSSProperties> = themed({
   page: {
-    maxWidth: 1360,
+    maxWidth: 1560,
     margin: '0 auto',
-    padding: '18px 8px 40px',
+    padding: '12px 8px 0',
     color: '#F5F3EC',
     fontFamily: 'var(--font-body)',
   },
 
   hero: {
-    marginBottom: 22,
+    display: 'flex',
+    alignItems: 'baseline',
+    flexWrap: 'wrap',
+    gap: '4px 18px',
+    marginBottom: 10,
   },
 
   kicker: {
@@ -287,19 +331,17 @@ const styles: Record<string, React.CSSProperties> = themed({
   title: {
     margin: 0,
     fontFamily: 'var(--font-display)',
-    fontSize: 38,
+    fontSize: 28,
     fontWeight: 800,
-    lineHeight: 1.05,
+    lineHeight: 1.1,
     letterSpacing: '-0.02em',
     color: '#ffffff',
   },
 
   lead: {
-    marginTop: 10,
-    fontSize: 15,
-    lineHeight: 1.5,
+    fontSize: 14,
+    lineHeight: 1.4,
     color: 'rgba(245,243,236,0.62)',
-    maxWidth: 720,
   },
 
   empty: {
@@ -312,8 +354,6 @@ const styles: Record<string, React.CSSProperties> = themed({
 
   grid: {
     display: 'grid',
-    gridTemplateColumns: 'repeat(3, minmax(0, 1fr))',
-    gap: 16,
   },
 
   bloc: {
@@ -322,10 +362,9 @@ const styles: Record<string, React.CSSProperties> = themed({
     flexDirection: 'column',
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 8,
-    minHeight: 228,
-    padding: '26px 22px 22px',
-    borderRadius: 26,
+    gap: 6,
+    padding: '16px 18px',
+    borderRadius: 22,
     border: '1px solid rgba(255,255,255,0.12)',
     boxShadow: '0 10px 28px rgba(0,0,0,0.32)',
     color: '#ffffff',
@@ -383,6 +422,14 @@ const styles: Record<string, React.CSSProperties> = themed({
     letterSpacing: '0.12em',
     textTransform: 'uppercase',
     color: 'rgba(255,255,255,0.55)',
+  },
+
+  blocPages: {
+    marginTop: 4,
+    fontSize: 12.5,
+    lineHeight: 1.4,
+    color: 'rgba(255,255,255,0.72)',
+    maxWidth: 520,
   },
 
   panelBackdrop: {
@@ -532,8 +579,8 @@ const styles: Record<string, React.CSSProperties> = themed({
     flexWrap: 'wrap',
     justifyContent: 'center',
     gap: 6,
-    marginTop: 8,
-    maxWidth: 380,
+    marginTop: 4,
+    maxWidth: '100%',
   },
 
   alertChip: {
@@ -563,7 +610,7 @@ const styles: Record<string, React.CSSProperties> = themed({
     fontWeight: 800,
     fontVariantNumeric: 'tabular-nums',
   },
-}, ['bloc', 'blocChevron', 'blocIcon', 'blocLabel', 'blocSubtitle', 'blocCount', 'panelHeader', 'panelIcon', 'panelTitle', 'panelSubtitle', 'panelClose', 'panelCloseLight', 'alertChip', 'alertChipValue'])
+}, ['bloc', 'blocChevron', 'blocIcon', 'blocLabel', 'blocSubtitle', 'blocCount', 'blocPages', 'panelHeader', 'panelIcon', 'panelTitle', 'panelSubtitle', 'panelClose', 'panelCloseLight', 'alertChip', 'alertChipValue'])
 
 // ── Bloc « Mes alertes » (13/10/2026, v2) ───────────────────────────────────
 // Même gabarit que les autres blocs (dégradé, icône, titre, sous-titre), avec
@@ -583,6 +630,81 @@ const ALERT_SHORT_LABELS: Record<string, string> = {
   coherence: 'Cohérence',
 }
 
+type Taille = 'grand' | 'moyen' | 'compact'
+
+// Dimensions du contenu d'un bloc selon la place disponible (textes ≥ 12 px)
+const TAILLES: Record<Taille, { icon: number; iconFont: number; label: number; subtitle: number; count: number }> = {
+  grand: { icon: 60, iconFont: 30, label: 25, subtitle: 14.5, count: 11.5 },
+  moyen: { icon: 46, iconFont: 23, label: 21, subtitle: 13.5, count: 11 },
+  compact: { icon: 44, iconFont: 22, label: 18, subtitle: 12.5, count: 11 },
+}
+
+const clamp = (lines: number): React.CSSProperties => ({
+  display: '-webkit-box',
+  WebkitLineClamp: lines,
+  WebkitBoxOrient: 'vertical',
+  overflow: 'hidden',
+})
+
+function BlocTuile({
+  bloc,
+  taille,
+  light,
+  colors,
+  onClick,
+}: {
+  bloc: NavBloc
+  taille: Taille
+  light: boolean
+  colors: BlocColors
+  onClick: () => void
+}) {
+  const t = TAILLES[taille]
+  const compact = taille === 'compact'
+  const icons = bloc.icons && bloc.icons.length > 0 ? bloc.icons : [bloc.icon]
+  const ecrans =
+    bloc.pages.length === 1 ? bloc.pages[0].label : `${bloc.pages.length} écrans`
+  return (
+    <button
+      type="button"
+      className="cgcBloc"
+      onClick={onClick}
+      title={bloc.pages.map((p) => p.label).join(' · ')}
+      style={{
+        ...styles.bloc,
+        ...(compact ? { flexDirection: 'row', justifyContent: 'flex-start', textAlign: 'left', gap: 14, padding: '12px 34px 12px 16px' } : {}),
+        background: colors.background,
+        ...(colors.border ? { border: colors.border } : {}),
+        ...(colors.boxShadow ? { boxShadow: colors.boxShadow } : {}),
+        ...(colors.color ? { color: colors.color } : {}),
+      }}
+    >
+      <span style={{ ...styles.blocChevron, top: compact ? '50%' : 12, right: 14, transform: compact ? 'translateY(-50%)' : undefined, ...(light ? { color: colors.chevron } : {}) }} aria-hidden="true">›</span>
+      <span style={{ ...styles.blocIcons, gap: 8, flexShrink: 0, ...(compact && icons.length > 1 ? { flexDirection: 'column', gap: 4 } : {}) }}>
+        {(compact ? icons.slice(0, 1) : icons).map((icon, i) => (
+          <span
+            key={`${bloc.id}-icon-${i}`}
+            style={{ ...styles.blocIcon, width: t.icon, height: t.icon, fontSize: t.iconFont, borderRadius: Math.round(t.icon * 0.27), marginBottom: 0, background: light ? colors.iconBg : bloc.iconBg }}
+          >
+            {icon}
+          </span>
+        ))}
+      </span>
+      <span style={{ display: 'flex', flexDirection: 'column', alignItems: compact ? 'flex-start' : 'center', gap: compact ? 2 : 4, minWidth: 0, maxWidth: '100%' }}>
+        <span style={{ ...styles.blocLabel, fontSize: t.label, ...clamp(2) }}>{bloc.label}</span>
+        <span style={{ ...styles.blocSubtitle, fontSize: t.subtitle, ...clamp(compact ? 1 : 2), ...(light ? { color: colors.subtitle } : {}) }}>{bloc.subtitle}</span>
+        {taille === 'grand' && bloc.pages.length > 1 ? (
+          <span style={{ ...styles.blocPages, ...clamp(2), ...(light ? { color: colors.count } : {}) }}>
+            {bloc.pages.map((p) => p.label).join(' · ')}
+          </span>
+        ) : (
+          <span style={{ ...styles.blocCount, fontSize: t.count, marginTop: compact ? 1 : 2, ...(light ? { color: colors.count } : {}) }}>{ecrans}</span>
+        )}
+      </span>
+    </button>
+  )
+}
+
 type BlocColors = {
   background: string
   border?: string
@@ -600,13 +722,18 @@ function AlertsBloc({
   onOpenCenter,
   light,
   colors,
+  taille,
 }: {
   items: AlertItem[]
   activeCount: number
   onOpenCenter: () => void
   light: boolean
   colors: BlocColors
+  taille: Taille
 }) {
+  const t = TAILLES[taille]
+  // Peu de hauteur ou beaucoup de compteurs : on retire l'icône et le sous-titre pour garder les pastilles lisibles
+  const petit = taille === 'compact' || (taille === 'moyen' && items.length > 4)
   return (
     <div
       className="cgcBloc"
@@ -615,14 +742,19 @@ function AlertsBloc({
       onClick={onOpenCenter}
       style={{
         ...styles.bloc,
+        cursor: 'pointer',
+        gap: petit ? 4 : 6,
+        padding: petit ? '10px 14px' : styles.bloc.padding,
         background: colors.background,
         ...(colors.border ? { border: colors.border } : {}),
         ...(colors.boxShadow ? { boxShadow: colors.boxShadow } : {}),
         ...(colors.color ? { color: colors.color } : {}),
       }}
     >
-      <span style={{ ...styles.blocChevron, ...(light ? { color: colors.chevron } : {}) }} aria-hidden="true">›</span>
-      <span style={{ ...styles.blocIcon, background: light ? colors.iconBg : 'rgba(255,255,255,0.18)' }} aria-hidden="true">🔔</span>
+      <span style={{ ...styles.blocChevron, top: 12, right: 14, ...(light ? { color: colors.chevron } : {}) }} aria-hidden="true">›</span>
+      {!petit && (
+        <span style={{ ...styles.blocIcon, width: t.icon, height: t.icon, fontSize: t.iconFont, borderRadius: Math.round(t.icon * 0.27), marginBottom: 0, background: light ? colors.iconBg : 'rgba(255,255,255,0.18)' }} aria-hidden="true">🔔</span>
+      )}
       <button
         type="button"
         className="cgcAlertHead"
@@ -630,16 +762,18 @@ function AlertsBloc({
           event.stopPropagation()
           onOpenCenter()
         }}
-        style={{ ...styles.blocLabel, border: 'none', background: 'transparent', color: 'inherit', cursor: 'pointer', padding: 0 }}
+        style={{ ...styles.blocLabel, fontSize: t.label, border: 'none', background: 'transparent', color: 'inherit', cursor: 'pointer', padding: 0 }}
         title="Ouvrir le Centre d’alertes (objectifs et actions attendues)"
       >
-        Mes alertes{activeCount > 0 ? ` (${activeCount})` : ''}
+        {petit ? '🔔 ' : ''}Mes alertes{activeCount > 0 ? ` (${activeCount})` : ''}
       </button>
-      <span style={{ ...styles.blocSubtitle, ...(light ? { color: colors.subtitle } : {}) }}>
-        {activeCount > 0 ? 'À traiter en priorité · objectif 0' : 'Rien à traiter pour le moment'}
-      </span>
+      {!petit && (
+        <span style={{ ...styles.blocSubtitle, fontSize: t.subtitle, ...(light ? { color: colors.subtitle } : {}) }}>
+          {activeCount > 0 ? 'À traiter en priorité · objectif 0' : 'Rien à traiter pour le moment'}
+        </span>
+      )}
 
-      <span style={styles.alertChips}>
+      <span style={{ ...styles.alertChips, ...(petit ? { gap: 4, marginTop: 0 } : {}) }}>
         {items.map((item) => {
           const toTreat = item.count > 0
           const label = ALERT_SHORT_LABELS[item.key] || item.label
@@ -656,6 +790,7 @@ function AlertsBloc({
               title={toTreat ? `${item.count.toLocaleString('fr-FR')} ${item.unit} — ${item.description}` : `${item.label} : rien à traiter`}
               style={{
                 ...styles.alertChip,
+                ...(petit ? { padding: '3px 8px 3px 6px', gap: 5 } : {}),
                 ...(light
                   ? { background: '#FFFFFF', border: `1px solid ${toTreat ? '#F3C5C1' : '#B9DFC6'}`, color: '#2A3142' }
                   : { background: 'rgba(11,18,32,0.28)', border: '1px solid rgba(255,255,255,0.22)', color: 'rgba(255,255,255,0.92)' }),
@@ -697,21 +832,23 @@ function RaccourciQuandLivrer({ onOpen }: { onOpen: (url: string) => void }) {
         display: 'flex',
         flexWrap: 'wrap',
         alignItems: 'center',
-        gap: 14,
-        margin: '0 0 18px',
-        padding: '16px 20px',
-        borderRadius: 22,
+        gap: '8px 12px',
+        margin: '0 0 12px',
+        padding: '10px 16px',
+        borderRadius: 18,
         background: 'linear-gradient(120deg, #C1683C 0%, #8E4524 100%)',
         color: '#fff',
         boxShadow: '0 10px 28px rgba(0,0,0,calc(0.28 * var(--cg-shadow-k)))',
       }}
     >
-      <span style={{ fontSize: 30, lineHeight: 1 }} aria-hidden="true">🚚</span>
-      <span style={{ display: 'flex', flexDirection: 'column', flex: '1 1 220px', minWidth: 0 }}>
-        <span style={{ fontSize: 20, fontWeight: 700 }}>Quand puis-je livrer ?</span>
-        <span style={{ fontSize: 13, opacity: 0.85 }}>
-          Avant de créer la commande : date de livraison client au plus tôt (dispo au dépôt + 7 j de logistique) d’un devis créé au plus tard la veille,
-          ou d’une liste d’articles — collée, photographiée ou en capture d’écran.
+      <span style={{ fontSize: 24, lineHeight: 1 }} aria-hidden="true">🚚</span>
+      <span
+        style={{ display: 'flex', flexDirection: 'column', flex: '1 1 260px', minWidth: 0 }}
+        title="Avant de créer la commande : date de livraison client au plus tôt (dispo au dépôt + 7 j de logistique) d’un devis créé au plus tard la veille, ou d’une liste d’articles — collée, photographiée ou en capture d’écran."
+      >
+        <span style={{ fontSize: 17, fontWeight: 700, lineHeight: 1.2 }}>Quand puis-je livrer ?</span>
+        <span style={{ fontSize: 12.5, opacity: 0.88, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+          Date de livraison client au plus tôt (dispo dépôt + 7 j) d’un devis créé au plus tard la veille, ou d’une liste d’articles
         </span>
       </span>
       <input
@@ -719,15 +856,15 @@ function RaccourciQuandLivrer({ onOpen }: { onOpen: (url: string) => void }) {
         onChange={(e) => setNumero(e.target.value)}
         placeholder="N° de devis (créé hier ou avant)…"
         aria-label="N° de devis, créé au plus tard la veille"
-        style={{ flex: '0 1 220px', minWidth: 160, font: 'inherit', fontSize: 16, padding: '11px 14px', borderRadius: 12, border: '1px solid rgba(255,255,255,0.45)', background: 'rgba(255,255,255,0.14)', color: '#fff', outline: 'none' }}
+        style={{ flex: '0 1 240px', minWidth: 160, font: 'inherit', fontSize: 15, padding: '8px 12px', borderRadius: 12, border: '1px solid rgba(255,255,255,0.45)', background: 'rgba(255,255,255,0.14)', color: '#fff', outline: 'none' }}
       />
-      <button type="submit" style={{ font: 'inherit', fontSize: 15, fontWeight: 700, padding: '11px 18px', borderRadius: 12, border: 0, background: '#fff', color: '#8E4524', cursor: 'pointer' }}>
+      <button type="submit" style={{ font: 'inherit', fontSize: 14.5, fontWeight: 700, padding: '8px 16px', borderRadius: 12, border: 0, background: '#fff', color: '#8E4524', cursor: 'pointer' }}>
         Contrôler
       </button>
       <button
         type="button"
         onClick={() => onOpen('/quand-livrer?liste=')}
-        style={{ font: 'inherit', fontSize: 14, fontWeight: 600, padding: '11px 14px', borderRadius: 12, border: '1px solid rgba(255,255,255,0.5)', background: 'transparent', color: '#fff', cursor: 'pointer' }}
+        style={{ font: 'inherit', fontSize: 14, fontWeight: 600, padding: '8px 12px', borderRadius: 12, border: '1px solid rgba(255,255,255,0.5)', background: 'transparent', color: '#fff', cursor: 'pointer' }}
       >
         📋 Liste, photo ou capture
       </button>
