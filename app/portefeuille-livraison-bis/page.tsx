@@ -1,6 +1,6 @@
 'use client'
 
-import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import * as XLSX from 'xlsx'
 import { supabase } from '@/lib/supabaseClient'
@@ -23,9 +23,9 @@ import {
 // règle que l'écran Reconstruction du stock projeté) -- carte KPI + panneau
 // dédié avec action / commentaire par CDC. URL ?promesse=interdite ou
 // événement cegeclim:open-promesses-interdites. Voir lib/cdcPromesses.ts.
-import CdcPromessesInterdites from '@/components/CdcPromessesInterdites'
-import type { PromesseLigne } from '@/lib/cdcPromesses'
-import { PROMESSES_FENETRE_JOURS, PROMESSES_OPEN_EVENT, commandesDansPerimetre, fetchPromessesAlerte, fetchPromessesInterdites, promessesExportCommandes, promessesExportLignes } from '@/lib/cdcPromesses'
+import { CelluleAction, EditionAction } from '@/components/CdcPromessesInterdites'
+import type { PromesseCommande, PromesseLigne } from '@/lib/cdcPromesses'
+import { PROMESSES_FENETRE_JOURS, PROMESSES_OPEN_EVENT, VERDICT_INFO, commandesDansPerimetre, fetchPromessesInterdites, formatDateCourte, grouperParCommande, promessesExportCommandes, promessesExportLignes } from '@/lib/cdcPromesses'
 
 type LignePortefeuille = {
   id: number | string | null
@@ -875,10 +875,16 @@ export default function PortefeuilleLivraisonPage() {
   const [dateHisto, setDateHisto] = useState<DateLivHisto[] | null>(null)
   const [dateHistoLoading, setDateHistoLoading] = useState(false)
   const [selectedCouverture, setSelectedCouverture] = useState<CouvertureFilterMode>('TOUS')
-  // Panneau « Date de livraison interdite » (2026-10-20).
-  const [promessesOpen, setPromessesOpen] = useState(false)
-  const [promessesCount, setPromessesCount] = useState<number | null>(null)
-  const promessesPanelRef = useRef<HTMLDivElement | null>(null)
+  // Dates de livraison interdites à traiter (2026-11-24, Arnaud) : une seule
+  // pastille « Date interdite à traiter » qui filtre la liste des commandes
+  // (horizon 3 mois, lignes masquées) ; le détail et le traitement (décaler /
+  // déprioriser) se font dans la fenêtre de la commande. Le panneau séparé et la
+  // pastille « Saisies en date interdite » sont retirés. Une CDC passée en
+  // préparation (PL) reste suivie via son n° de PL.
+  const [promessesLignes, setPromessesLignes] = useState<PromesseLigne[]>([])
+  const [plVersCdc, setPlVersCdc] = useState<Map<string, string>>(new Map())
+  const [editionPromesse, setEditionPromesse] = useState<PromesseCommande | null>(null)
+  const listeCommandesRef = useRef<HTMLElement | null>(null)
 
   const isBlSelected = selectedTypes.includes('BL')
   const isCdcSelected = selectedTypes.includes('CDC')
@@ -1001,9 +1007,19 @@ export default function PortefeuilleLivraisonPage() {
     function handleOpenCouverture() { applyCouvertureFilter('NON_SERVABLE') }
 
     function applyPromessesFilter() {
-      setSelectedTypes(['CDC'])
-      setPromessesOpen(true)
-      window.setTimeout(() => promessesPanelRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 300)
+      setSelectedTypes(['CDC', 'PL'])
+      setHorizonMois('3')
+      setDateLivraisonFin(getHorizonIsoDate(3))
+      setDateLivraisonFinModifiee(true)
+      setDateFinParDefaut(false)
+      setCdcRetardOnly(false)
+      setSelectedCouverture('TOUS')
+      setSelectedControle('TOUS')
+      setSelectedGroupKey(null)
+      setInterditeOnly(true)
+      setShowLignes(false)
+      setSelection(null)
+      setSelectedDocumentKeyForLines(null)
     }
     function handleOpenPromesses() { applyPromessesFilter() }
     function applyPromessesFromUrl() {
@@ -1032,14 +1048,6 @@ export default function PortefeuilleLivraisonPage() {
     }
   }, [])
 
-  // Compteur de la carte « Date de livraison interdite » (périmètre RLS de
-  // l'utilisateur) ; remplacé par celui du panneau une fois ouvert (qui tient
-  // compte des filtres agence / représentant de la page).
-  useEffect(() => {
-    let alive = true
-    fetchPromessesAlerte().then((a) => { if (alive && !a.indisponible) setPromessesCount((n) => (n === null ? a.aTraiter : n)) })
-    return () => { alive = false }
-  }, [])
 
   // Références en « Blocage appro » SAGE : chargées une seule fois, paginées
   // par sécurité (limite PostgREST). En cas d'erreur, la page reste utilisable
@@ -1098,20 +1106,52 @@ export default function PortefeuilleLivraisonPage() {
         console.warn('Portefeuille livraison V2 - historique dates interdites non chargé', error)
       }
     }
-    // Contrôle du jour (fenêtre 7 j + CDC avec action) : toujours disponible,
-    // même si l'historique n'est pas encore en place.
-    async function loadInterditesLive() {
-      try {
-        const rows = await fetchPromessesInterdites()
-        if (!cancelled) setInterditeLive(rows.filter((r) => r.verdict !== 'OK'))
-      } catch (error) {
-        console.warn('Portefeuille livraison V2 - contrôle des dates interdites non chargé', error)
-      }
-    }
     void loadInterdites()
-    void loadInterditesLive()
     return () => { cancelled = true }
   }, [])
+
+  // Contrôle du jour (fenêtre 7 j + CDC avec action) : toujours disponible,
+  // même si l'historique n'est pas encore en place ; rechargé après un traitement.
+  const chargerPromesses = useCallback(async () => {
+    try {
+      const rows = await fetchPromessesInterdites()
+      setPromessesLignes(rows)
+      setInterditeLive(rows.filter((r) => r.verdict !== 'OK'))
+      // CDC déjà passées en préparation : n° de PL → n° de CDC.
+      const cdcs = Array.from(new Set(rows.map((r) => safeText(r.numero_document, '')).filter(Boolean)))
+      const map = new Map<string, string>()
+      for (let k = 0; k < cdcs.length; k += 200) {
+        const { data, error } = await supabase
+          .from('activite_lignes')
+          .select('numero_piece,numero_piece_bc')
+          .eq('type_document', 'Préparation de livraison')
+          .in('numero_piece_bc', cdcs.slice(k, k + 200))
+        if (error) throw error
+        for (const r of (data || []) as { numero_piece: string | null; numero_piece_bc: string | null }[]) {
+          if (r.numero_piece && r.numero_piece_bc) map.set(r.numero_piece.trim(), r.numero_piece_bc.trim())
+        }
+      }
+      setPlVersCdc(map)
+    } catch (error) {
+      console.warn('Portefeuille livraison V2 - contrôle des dates interdites non chargé', error)
+    }
+  }, [])
+  useEffect(() => { void chargerPromesses() }, [chargerPromesses])
+
+  /** Commandes du contrôle des dates interdites, par n° de CDC. */
+  const promessesParCdc = useMemo(() => {
+    const m = new Map<string, PromesseCommande>()
+    for (const c of grouperParCommande(promessesLignes)) m.set(c.numero_document, c)
+    return m
+  }, [promessesLignes])
+  const cdcDuDoc = useCallback((doc: { type_document: string; numero_document: string }) => (
+    doc.type_document === 'PL' ? plVersCdc.get(doc.numero_document) || doc.numero_document : doc.numero_document
+  ), [plVersCdc])
+  const promesseDuDoc = useCallback((doc: { type_document: string; numero_document: string }) => promessesParCdc.get(cdcDuDoc(doc)) || null, [promessesParCdc, cdcDuDoc])
+  const estDateInterditeATraiter = useCallback((doc: { type_document: string; numero_document: string }) => {
+    const c = promesseDuDoc(doc)
+    return Boolean(c && (c.statut_traitement === 'a_traiter' || c.statut_traitement === 'non_confirmee'))
+  }, [promesseDuDoc])
 
   const interditeByDoc = useMemo(() => {
     const map = new Map<string, InterditeDoc>()
@@ -1624,7 +1664,7 @@ export default function PortefeuilleLivraisonPage() {
         const haystack = [doc.numero_document, doc.nom_tiers, doc.numero_tiers, doc.references, doc.references_articles, doc.reference_entete, doc.lieu_livraison, doc.representant, doc.agence, docSearchIndex.get(doc.key) || ''].join(' ').toLowerCase()
         if (!searchTerms.every((term) => haystack.includes(term))) return false
       }
-      if (interditeOnly && !interditeByDoc.has(doc.numero_document)) return false
+      if (interditeOnly && !estDateInterditeATraiter(doc)) return false
       if (cdcRetardOnly && !isCdcEnRetard(doc)) return false
       // Filtre couverture stock : ne concerne que les CDC ; les autres types
       // restent affichés uniquement quand le filtre est sur "Tous".
@@ -1644,7 +1684,7 @@ export default function PortefeuilleLivraisonPage() {
       if (lieuSearch && !doc.lieu_livraison.toLowerCase().includes(lieuSearch)) return false
       return true
     })
-  }, [documents, searchTerms, docSearchIndex, interditeOnly, interditeByDoc, cdcRetardOnly, selectedCouverture, selectedGroupKey, selectedControle, selectedExpedition, selectedDepotEntete, referenceEnteteSearch, lieuLivraisonSearch])
+  }, [documents, searchTerms, docSearchIndex, interditeOnly, estDateInterditeATraiter, cdcRetardOnly, selectedCouverture, selectedGroupKey, selectedControle, selectedExpedition, selectedDepotEntete, referenceEnteteSearch, lieuLivraisonSearch])
 
   const moisLivraison = useMemo(() => {
     const set = new Set<string>()
@@ -1983,7 +2023,7 @@ export default function PortefeuilleLivraisonPage() {
 
   const modalLignes = useMemo<LigneDetail[]>(() => {
     if (!modalDocKey) return []
-    const interdite = modalDoc ? interditeByDoc.get(modalDoc.numero_document) : undefined
+    const interdite = modalDoc ? interditeByDoc.get(cdcDuDoc(modalDoc)) : undefined
     const refsInterdites = new Set(Array.from(interdite?.refs.values() || []).filter((r) => !r.corrigee).map((r) => normalizeReferenceKey(r.reference_article)))
     const rows = lignes.filter((ligne) => docKey(ligne) === modalDocKey).map(toLigneDetail)
     const score = (ligne: LigneDetail) => {
@@ -1993,7 +2033,7 @@ export default function PortefeuilleLivraisonPage() {
     }
     return rows.sort((a, b) => score(b) - score(a) || sortValues(a.reference_article, b.reference_article))
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [modalDocKey, modalDoc, lignes, couvertureById, blocageApproRefs, interditeByDoc])
+  }, [modalDocKey, modalDoc, lignes, couvertureById, blocageApproRefs, interditeByDoc, cdcDuDoc])
 
   useEffect(() => {
     if (!modalDoc) { setDateHisto(null); return }
@@ -2020,14 +2060,23 @@ export default function PortefeuilleLivraisonPage() {
     return () => window.removeEventListener('keydown', onKey)
   }, [modalDocKey])
 
-  const interditeKpi = useMemo(() => documents.reduce((acc, doc) => {
-    const info = interditeByDoc.get(doc.numero_document)
-    if (!info || doc.type_document !== 'CDC') return acc
-    acc.nb += 1
-    if (!info.corrigee) acc.nonCorrigees += 1
-    if (doc.couv_statut_doc === 'COUVERT' || doc.couv_statut_doc === 'COUVERT_PAR_RECEPTION') acc.couvertes += 1
-    return acc
-  }, { nb: 0, nonCorrigees: 0, couvertes: 0 }), [documents, interditeByDoc])
+  /** Commandes de la liste (filtres de l'écran) dont la date interdite est à traiter. */
+  const interditeATraiterKpi = useMemo(() => {
+    const docs = documents.filter((doc) => (doc.type_document === 'CDC' || doc.type_document === 'PL') && estDateInterditeATraiter(doc))
+    return { nb: docs.length, nonConfirmees: docs.filter((doc) => promesseDuDoc(doc)?.statut_traitement === 'non_confirmee').length }
+  }, [documents, estDateInterditeATraiter, promesseDuDoc])
+
+  function ouvrirDatesInterdites() {
+    setSelectedTypes((prev) => Array.from(new Set([...prev.filter((t) => t !== 'BL' && t !== 'BR'), 'CDC', 'PL'])))
+    applyHorizon('3')
+    setSelectedCouverture('TOUS')
+    setSelectedControle('TOUS')
+    setSelectedGroupKey(null)
+    setInterditeOnly(true)
+    setShowLignes(false)
+    applyDetailSelection(null)
+    window.setTimeout(() => listeCommandesRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 250)
+  }
 
   const selectionLabel = useMemo(() => {
     if (!selection) return ''
@@ -2264,26 +2313,12 @@ export default function PortefeuilleLivraisonPage() {
           {showPromessesCard && (
             <button
               type="button"
-              onClick={() => {
-                setPromessesOpen((v) => !v)
-                if (!promessesOpen) window.setTimeout(() => promessesPanelRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 200)
-              }}
-              className={[chipBase, (promessesCount || 0) > 0 ? 'border-rose-300 bg-rose-50' : 'border-emerald-200 bg-white', promessesOpen ? 'ring-2 ring-rose-400' : ''].join(' ')}
+              onClick={() => { if (interditeOnly) { setInterditeOnly(false); applyDetailSelection(null) } else ouvrirDatesInterdites() }}
+              className={[chipBase, interditeATraiterKpi.nb > 0 ? 'border-rose-300 bg-rose-50' : 'border-emerald-200 bg-white', interditeOnly ? 'ring-2 ring-rose-400' : ''].join(' ')}
             >
-              <span className={labelCls}>Date interdite à traiter</span>
-              <span className={['text-sm font-semibold', (promessesCount || 0) > 0 ? 'text-rose-700' : 'text-emerald-700'].join(' ')}>{promessesCount === null ? '—' : promessesCount.toLocaleString('fr-FR')}</span>
-              <InfoTip text={`CDC créées depuis ${PROMESSES_FENETRE_JOURS} jours dont la date promise ne tient pas compte du stock, sans action ou action non confirmée. Clic : ouvrir la liste de traitement.`} />
-            </button>
-          )}
-          {isCdcSelected && (
-            <button
-              type="button"
-              onClick={() => { setInterditeOnly((v) => !v); applyDetailSelection(null) }}
-              className={[chipBase, interditeKpi.nonCorrigees > 0 ? 'border-red-300 bg-red-50' : 'border-slate-200 bg-white', interditeOnly ? 'ring-2 ring-red-400' : ''].join(' ')}
-            >
-              <span className={labelCls}>⛔ Saisies en date interdite</span>
-              <span className={['text-sm font-semibold', interditeKpi.nonCorrigees > 0 ? 'text-red-700' : 'text-slate-700'].join(' ')}>{interditeKpi.nb.toLocaleString('fr-FR')}</span>
-              <InfoTip text={<>CDC du portefeuille affiché qui ont été repérées un jour avec une date de livraison interdite, quelle que soit leur ancienneté : {interditeKpi.nonCorrigees.toLocaleString('fr-FR')} toujours en défaut au dernier contrôle, {interditeKpi.couvertes.toLocaleString('fr-FR')} aujourd'hui « couvertes » par le stock ou une réception alors que la date n'aurait pas dû être promise. Clic : ne garder que ces CDC.</>} />
+              <span className={labelCls}>⛔ Date interdite à traiter</span>
+              <span className={['text-sm font-semibold', interditeATraiterKpi.nb > 0 ? 'text-rose-700' : 'text-emerald-700'].join(' ')}>{interditeATraiterKpi.nb.toLocaleString('fr-FR')}</span>
+              <InfoTip text={<>Commandes de la liste créées depuis {PROMESSES_FENETRE_JOURS} jours dont la date de livraison promise ne tient pas compte du stock (intenable, ou prise sur le stock d’une commande plus ancienne), pas encore traitées{interditeATraiterKpi.nonConfirmees > 0 ? <> (dont {interditeATraiterKpi.nonConfirmees.toLocaleString('fr-FR')} dont l’action n’est pas confirmée à la synchro)</> : null}. Une CDC passée en préparation reste suivie sous son n° de PL. Clic : horizon 3 mois et liste limitée à ces commandes ; ouvrez une commande pour voir le détail et la traiter (décaler la date ou déprioriser une autre commande){interditeOnly ? ' — filtre actif, clic pour le retirer' : ''}.</>} />
             </button>
           )}
           {isBlSelected && (
@@ -2308,15 +2343,6 @@ export default function PortefeuilleLivraisonPage() {
           )}
         </section>
 
-        {showPromessesCard && promessesOpen && (
-          <div ref={promessesPanelRef} className="scroll-mt-24">
-            <CdcPromessesInterdites
-              agenceFiltre={access.allowedAgences.length > 0 ? '' : selectedAgence}
-              representantFiltre={access.allowedCollaborateurs.length > 0 ? '' : selectedRepresentant}
-              onCountChange={setPromessesCount}
-            />
-          </div>
-        )}
         {isBlSelected && (
           <section className="rounded-2xl border border-slate-200 bg-white shadow-sm">
             <div className="flex flex-col gap-2 border-b border-slate-200 px-4 py-3 lg:flex-row lg:items-center lg:justify-between">
@@ -2532,7 +2558,7 @@ export default function PortefeuilleLivraisonPage() {
         </section>
 
         {/* ── Liste des commandes ──────────────────────────────────────── */}
-        <section className="rounded-xl border border-slate-200 bg-white shadow-sm">
+        <section ref={listeCommandesRef} className="scroll-mt-24 rounded-xl border border-slate-200 bg-white shadow-sm">
           <div className="flex flex-wrap items-center gap-2 border-b border-slate-200 px-3 py-1.5">
             <h2 className="text-sm font-semibold">Commandes</h2>
             <span className="text-xs text-slate-500">{sortedDocuments.length.toLocaleString('fr-FR')} document(s)</span>
@@ -2554,7 +2580,7 @@ export default function PortefeuilleLivraisonPage() {
             )}
             {interditeOnly && (
               <span className="inline-flex items-center gap-1 rounded-full border border-red-200 bg-red-50 px-2 py-0.5 text-[11px] font-semibold text-red-800">
-                Saisies en date interdite
+                Date interdite à traiter
                 <button type="button" onClick={() => setInterditeOnly(false)} className="ml-1 text-red-600 hover:text-red-900">✕</button>
               </span>
             )}
@@ -2579,7 +2605,7 @@ export default function PortefeuilleLivraisonPage() {
                   const cdcRetard = isCdcEnRetard(doc)
                   const isCdcDoc = doc.type_document === 'CDC'
                   const couvNonServable = isCdcDoc && isCouvertureNonServable(doc.couv_statut_doc)
-                  const interdite = isCdcDoc ? interditeByDoc.get(doc.numero_document) : undefined
+                  const interdite = isCdcDoc || doc.type_document === 'PL' ? interditeByDoc.get(cdcDuDoc(doc)) : undefined
                   const couvertureCells = isCdcSelected ? (
                     <>
                       <td className={td}>
@@ -2755,6 +2781,13 @@ export default function PortefeuilleLivraisonPage() {
         )}
 
         {/* ── Fenêtre flottante d'une commande ─────────────────────────── */}
+        {editionPromesse && (
+          <EditionAction
+            commande={editionPromesse}
+            onClose={() => setEditionPromesse(null)}
+            onSaved={() => { setEditionPromesse(null); void chargerPromesses() }}
+          />
+        )}
         {modalDoc && (
           <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-900/40 p-3" onClick={() => setModalDocKey(null)}>
             <div className="flex max-h-[94vh] w-[min(1500px,97vw)] flex-col rounded-xl bg-white shadow-2xl" onClick={(e) => e.stopPropagation()}>
@@ -2766,7 +2799,7 @@ export default function PortefeuilleLivraisonPage() {
                       <span className={['inline-flex whitespace-nowrap rounded-full border px-2 py-0.5 text-[11px] font-semibold', couvertureClassName(modalDoc.couv_statut_doc)].join(' ')}>{couvertureLabel(modalDoc.couv_statut_doc)}</span>
                     )}
                     {isCdcEnRetard(modalDoc) && <span className="rounded-full border border-red-300 bg-red-100 px-2 py-0.5 text-[11px] font-semibold text-red-800">{CDC_RETARD_LABEL}</span>}
-                    {interditeByDoc.get(modalDoc.numero_document) && <InterditeBadge info={interditeByDoc.get(modalDoc.numero_document)!} />}
+                    {interditeByDoc.get(cdcDuDoc(modalDoc)) && <InterditeBadge info={interditeByDoc.get(cdcDuDoc(modalDoc))!} />}
                   </div>
                   <div className="text-xs text-slate-600">
                     <b>{modalDoc.nom_tiers}</b> ({modalDoc.numero_tiers}) · {modalDoc.representant} · {modalDoc.agence}
@@ -2777,7 +2810,7 @@ export default function PortefeuilleLivraisonPage() {
                     {modalDoc.couv_nb_non_servables > 0 && <> · <span className="font-semibold text-rose-700">{modalDoc.couv_nb_non_servables} ligne(s) non dispo. à date liv.{modalDoc.couv_date_couverture_doc ? ` — complète le ${formatDate(modalDoc.couv_date_couverture_doc)}` : ''}</span></>}
                   </div>
                   {(() => {
-                    const info = interditeByDoc.get(modalDoc.numero_document)
+                    const info = interditeByDoc.get(cdcDuDoc(modalDoc))
                     if (!info) return null
                     return (
                       <div className={['text-xs', info.corrigee ? 'text-slate-500' : 'font-semibold text-red-700'].join(' ')}>
@@ -2786,6 +2819,34 @@ export default function PortefeuilleLivraisonPage() {
                         {info.date_proposee ? ` · date au plus tôt sans léser personne ${formatDate(info.date_proposee)}` : ''}
                         {info.references.length ? ` · réf. ${info.references.join(', ')}` : ''}
                         {info.corrigee ? ' · corrigée depuis' : ''}
+                      </div>
+                    )
+                  })()}
+                  {(() => {
+                    const c = promesseDuDoc(modalDoc)
+                    if (!c) return null
+                    return (
+                      <div className="mt-1 rounded-lg border border-rose-200 bg-rose-50/70 px-2.5 py-1.5 text-xs">
+                        <div className="mb-1 flex flex-wrap items-center gap-2">
+                          <span className="font-semibold text-rose-800">⛔ Date de livraison interdite{modalDoc.type_document === 'PL' ? ` (commande ${c.numero_document})` : ''}</span>
+                          <span className="text-slate-600">
+                            {c.lignes.length ? VERDICT_INFO[c.verdict].label : 'désormais tenable'}
+                            {c.date_proposee ? <> · livrable au plus tôt le <b>{formatDateCourte(c.date_proposee)}</b>{c.via_appro ? ' (appro à lancer)' : ''}</> : null}
+                          </span>
+                        </div>
+                        <CelluleAction c={c} onEdit={() => setEditionPromesse(c)} />
+                        {c.lignes.length > 0 && (
+                          <div className="mt-1 text-[11px] text-slate-700">
+                            {c.lignes.map((l) => (
+                              <div key={l.reference_article}>
+                                <b>{l.reference_article}</b> · {VERDICT_INFO[l.verdict].court} · qté {l.quantite} · manque {l.q_manque}
+                                {l.date_exacte ? <> · dispo exacte {formatDateCourte(l.date_exacte)}</> : null}
+                                {l.date_proposee ? <> · date proposée {formatDateCourte(l.date_proposee)}</> : null}
+                                {l.nb_victimes ? <> · retarde {l.nb_victimes} commande(s)</> : null}
+                              </div>
+                            ))}
+                          </div>
+                        )}
                       </div>
                     )
                   })()}
@@ -2843,7 +2904,7 @@ export default function PortefeuilleLivraisonPage() {
                     {modalLignes.map((ligne, index) => {
                       const couvNonServable = isCouvertureNonServable(ligne.couv_statut)
                       const isCouvertureLine = Boolean(ligne.couv_statut) && ligne.couv_statut !== COUVERTURE_HORS_CONTROLE
-                      const info = interditeByDoc.get(modalDoc.numero_document)
+                      const info = interditeByDoc.get(cdcDuDoc(modalDoc))
                       const refInfo = info?.refs.get(normalizeReferenceKey(ligne.reference_article))
                       const refInterdite = Boolean(refInfo && !refInfo.corrigee)
                       const souci = couvNonServable || refInterdite || ligne.couv_arret_appro

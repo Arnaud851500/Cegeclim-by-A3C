@@ -7,6 +7,8 @@
 // ?promesse=interdite). Une ligne par CDC × référence, mêmes colonnes que le
 // détail de l'écran « Reconstruction du stock projeté » ; une action +
 // commentaire par CDC (cellule fusionnée). Voir lib/cdcPromesses.ts.
+// (2026-11-24) CelluleAction et EditionAction exportées : le Portefeuille V2
+// traite une date interdite depuis la fenêtre de la commande.
 // ============================================================================
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
@@ -308,7 +310,7 @@ function CelluleCommande({ c, onEdit }: { c: PromesseCommande; onEdit: () => voi
   )
 }
 
-function CelluleAction({ c, onEdit }: { c: PromesseCommande; onEdit: () => void }) {
+export function CelluleAction({ c, onEdit }: { c: PromesseCommande; onEdit: () => void }) {
   return (
     <div className="space-y-1">
       <div className="flex flex-wrap items-center gap-1.5">
@@ -331,7 +333,7 @@ function CelluleAction({ c, onEdit }: { c: PromesseCommande; onEdit: () => void 
   )
 }
 
-function EditionAction({ commande, onClose, onSaved }: { commande: PromesseCommande; onClose: () => void; onSaved: () => void }) {
+export function EditionAction({ commande, onClose, onSaved }: { commande: PromesseCommande; onClose: () => void; onSaved: () => void }) {
   const [action, setAction] = useState<PromesseAction>(commande.action || 'decaler')
   const [nouvelleDate, setNouvelleDate] = useState(commande.nouvelle_date || commande.date_proposee || '')
   const [cdcDepriorisee, setCdcDepriorisee] = useState(commande.cdc_depriorisee || '')
