@@ -1,6 +1,7 @@
 'use client'
 
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import type { ReactNode } from 'react'
 import * as XLSX from 'xlsx'
 import { supabase } from '@/lib/supabaseClient'
 import {
@@ -22,8 +23,9 @@ import {
 // règle que l'écran Reconstruction du stock projeté) -- carte KPI + panneau
 // dédié avec action / commentaire par CDC. URL ?promesse=interdite ou
 // événement cegeclim:open-promesses-interdites. Voir lib/cdcPromesses.ts.
-import CdcPromessesInterdites from '@/components/CdcPromessesInterdites'
-import { PROMESSES_ALERT_LABEL, PROMESSES_FENETRE_JOURS, PROMESSES_OPEN_EVENT, commandesDansPerimetre, fetchPromessesAlerte, fetchPromessesInterdites, promessesExportCommandes, promessesExportLignes } from '@/lib/cdcPromesses'
+import { CelluleAction, EditionAction } from '@/components/CdcPromessesInterdites'
+import type { PromesseCommande, PromesseLigne } from '@/lib/cdcPromesses'
+import { PROMESSES_FENETRE_JOURS, PROMESSES_OPEN_EVENT, VERDICT_INFO, commandesDansPerimetre, fetchPromessesInterdites, formatDateCourte, grouperParCommande, promessesExportCommandes, promessesExportLignes } from '@/lib/cdcPromesses'
 
 type LignePortefeuille = {
   id: number | string | null
@@ -287,6 +289,50 @@ type SyntheseRow = {
 
 type SyntheseGroupBy = 'agence' | 'famille'
 
+// V2 (2026-11-24) : mémoire permanente des CDC repérées « date de livraison
+// interdite » (table cdc_promesses_historique, alimentée par le contrôle).
+type InterditeHisto = {
+  numero_document: string
+  reference_article: string
+  verdict_initial: string | null
+  verdict_dernier: string | null
+  date_livraison_saisie: string | null
+  date_livraison_derniere: string | null
+  date_proposee: string | null
+  premiere_detection: string | null
+}
+
+// Détail par référence d'une CDC à date interdite (contrôle du jour ou historique).
+type InterditeRef = {
+  reference_article: string
+  verdict: string
+  date_promise: string | null
+  date_proposee: string | null
+  date_exacte: string | null
+  nb_victimes: number | null
+  q_victimes: number | null
+  arret_appro: boolean
+  corrigee: boolean
+}
+
+type InterditeDoc = {
+  refs: Map<string, InterditeRef>
+  premiere_detection: string | null
+  date_livraison_saisie: string | null
+  date_proposee: string | null
+  verdicts: string[]
+  corrigee: boolean
+  references: string[]
+}
+
+type DateLivHisto = {
+  numero_document: string
+  date_livraison_min: string | null
+  date_livraison_max: string | null
+  nb_lignes: number | null
+  observe_le: string
+}
+
 type DetailSelection = {
   representant?: string
   agence?: string
@@ -423,17 +469,70 @@ const HORIZON_OPTIONS: Array<[string, string]> = [
   ['6', '6 mois'],
 ]
 
+const INTERDITE_PAGE_SIZE = 1000
+
+/** Petite info-bulle « i » : le texte s'affiche au survol. */
+function InfoTip({ text, align = 'left' }: { text: ReactNode; align?: 'left' | 'right' }) {
+  return (
+    <span className="group/info relative inline-flex align-middle" onClick={(e) => e.stopPropagation()}>
+      <span className="inline-flex h-3.5 w-3.5 cursor-help items-center justify-center rounded-full border border-slate-300 bg-white text-[9px] font-bold leading-none text-slate-500">i</span>
+      <span className={['pointer-events-none absolute top-full z-50 mt-1 hidden w-80 rounded-lg border border-slate-200 bg-white p-2 text-left text-[11px] font-normal normal-case leading-snug tracking-normal text-slate-700 shadow-lg group-hover/info:block', align === 'right' ? 'right-0' : 'left-0'].join(' ')}>
+        {text}
+      </span>
+    </span>
+  )
+}
+
+function verdictLabel(verdict: string) {
+  if (verdict === 'INTENABLE') return 'Intenable'
+  if (verdict === 'CREE_RETARD') return 'Crée un retard'
+  if (verdict === 'OK') return 'Corrigée'
+  return 'Repérée'
+}
+
+function joursEcart(a: string | null | undefined, b: string | null | undefined) {
+  if (!a || !b) return null
+  const d = Math.round((new Date(b).getTime() - new Date(a).getTime()) / 86400000)
+  return Number.isFinite(d) ? d : null
+}
+
+/** Commentaire lisible d'une ligne à date interdite. */
+function interditeRefComment(r: InterditeRef) {
+  const ecart = joursEcart(r.date_promise, r.date_proposee)
+  const proposee = r.arret_appro && !r.date_proposee
+    ? 'aucune date possible (arrêt appro)'
+    : r.date_proposee
+      ? `aurait dû être proposée au plus tôt le ${new Date(r.date_proposee).toLocaleDateString('fr-FR')}${ecart !== null && ecart > 0 ? ` (+${ecart} j)` : ''}`
+      : 'aucune date possible connue'
+  const victimes = r.nb_victimes ? ` · prend le stock de ${r.nb_victimes} CDC plus ancienne(s)${r.q_victimes ? ` (${r.q_victimes} p.)` : ''}` : ''
+  return `${verdictLabel(r.verdict)} : promise le ${r.date_promise ? new Date(r.date_promise).toLocaleDateString('fr-FR') : '?'}, ${proposee}${victimes}${r.corrigee ? ' · corrigée depuis' : ''}`
+}
+
+function interditeTitle(info: InterditeDoc) {
+  const parts = [
+    `Date de livraison interdite repérée le ${info.premiere_detection ? new Date(info.premiere_detection).toLocaleDateString('fr-FR') : '?'}`,
+    info.date_livraison_saisie ? `date promise alors : ${new Date(info.date_livraison_saisie).toLocaleDateString('fr-FR')}` : '',
+    info.date_proposee ? `date au plus tôt sans léser personne : ${new Date(info.date_proposee).toLocaleDateString('fr-FR')}` : '',
+    info.verdicts.length ? `verdict : ${info.verdicts.join(', ')}` : '',
+    info.references.length ? `réf. : ${info.references.join(', ')}` : '',
+    info.corrigee ? 'dernier contrôle : date corrigée (OK)' : '',
+  ].filter(Boolean)
+  return parts.join(' · ')
+}
+
+function InterditeBadge({ info }: { info: InterditeDoc }) {
+  return (
+    <span title={interditeTitle(info)} className={['inline-flex whitespace-nowrap rounded border px-1 py-0 text-[10px] font-semibold', info.corrigee ? 'border-slate-300 bg-slate-100 text-slate-500' : 'border-red-300 bg-red-100 text-red-800'].join(' ')}>
+      ⛔ Date interdite{info.corrigee ? ' (corrigée)' : ''}
+    </span>
+  )
+}
+
 function toIsoDate(date: Date) {
   const year = date.getFullYear()
   const month = String(date.getMonth() + 1).padStart(2, '0')
   const day = String(date.getDate()).padStart(2, '0')
   return `${year}-${month}-${day}`
-}
-
-function getYesterdayIsoDate() {
-  const date = new Date()
-  date.setDate(date.getDate() - 1)
-  return toIsoDate(date)
 }
 
 function getHorizonIsoDate(months: number) {
@@ -713,18 +812,6 @@ async function runControlQueryWithRetry<T>(label: string, operation: () => Promi
   throw lastError
 }
 
-// Nombre de colonnes de la grille KPI selon les cartes visibles (Tailwind a
-// besoin des noms de classes complets, d'où la table de correspondance).
-const KPI_GRID_COLS: Record<number, string> = {
-  2: 'xl:grid-cols-2',
-  3: 'xl:grid-cols-3',
-  4: 'xl:grid-cols-4',
-  5: 'xl:grid-cols-5',
-  6: 'xl:grid-cols-6',
-  7: 'xl:grid-cols-7',
-  8: 'xl:grid-cols-8',
-}
-
 export default function PortefeuilleLivraisonPage() {
   const currentMonthKey = useMemo(() => getCurrentMonthKey(), [])
   const access = usePageFilterAccess()
@@ -748,8 +835,10 @@ export default function PortefeuilleLivraisonPage() {
   const [dateCreationDebut, setDateCreationDebut] = useState('')
   const [dateCreationFin, setDateCreationFin] = useState('')
   const [dateLivraisonDebut, setDateLivraisonDebut] = useState('')
-  const [dateLivraisonFin, setDateLivraisonFin] = useState(() => getYesterdayIsoDate())
-  const [dateLivraisonFinModifiee, setDateLivraisonFinModifiee] = useState(false)
+  // V2 : par défaut la sélection couvre les 2 prochains mois (retards inclus).
+  const [dateLivraisonFin, setDateLivraisonFin] = useState(() => getHorizonIsoDate(2))
+  const [dateLivraisonFinModifiee, setDateLivraisonFinModifiee] = useState(true)
+  const [dateFinParDefaut, setDateFinParDefaut] = useState(true)
 
   const [selectedRepresentant, setSelectedRepresentant] = useState('')
   const [selectedAgence, setSelectedAgence] = useState('')
@@ -772,12 +861,30 @@ export default function PortefeuilleLivraisonPage() {
   // positionne la borne "Livraison fin" à aujourd'hui + N mois) et filtre
   // "Couverture stock" sur les documents CDC (URL ?couverture=non-servable,
   // événement cegeclim:open-couverture-stock).
-  const [horizonMois, setHorizonMois] = useState('')
+  const [horizonMois, setHorizonMois] = useState('2')
+
+  // V2 : ergonomie (recherche libre, synthèse repliée, fenêtre commande,
+  // détail à la ligne masqué par défaut, dates interdites historiques).
+  const [searchText, setSearchText] = useState('')
+  const [syntheseOpen, setSyntheseOpen] = useState(false)
+  const [showLignes, setShowLignes] = useState(false)
+  const [modalDocKey, setModalDocKey] = useState<string | null>(null)
+  const [interditeRows, setInterditeRows] = useState<InterditeHisto[]>([])
+  const [interditeLive, setInterditeLive] = useState<PromesseLigne[]>([])
+  const [interditeOnly, setInterditeOnly] = useState(false)
+  const [dateHisto, setDateHisto] = useState<DateLivHisto[] | null>(null)
+  const [dateHistoLoading, setDateHistoLoading] = useState(false)
   const [selectedCouverture, setSelectedCouverture] = useState<CouvertureFilterMode>('TOUS')
-  // Panneau « Date de livraison interdite » (2026-10-20).
-  const [promessesOpen, setPromessesOpen] = useState(false)
-  const [promessesCount, setPromessesCount] = useState<number | null>(null)
-  const promessesPanelRef = useRef<HTMLDivElement | null>(null)
+  // Dates de livraison interdites à traiter (2026-11-24, Arnaud) : une seule
+  // pastille « Date interdite à traiter » qui filtre la liste des commandes
+  // (horizon 3 mois, lignes masquées) ; le détail et le traitement (décaler /
+  // déprioriser) se font dans la fenêtre de la commande. Le panneau séparé et la
+  // pastille « Saisies en date interdite » sont retirés. Une CDC passée en
+  // préparation (PL) reste suivie via son n° de PL.
+  const [promessesLignes, setPromessesLignes] = useState<PromesseLigne[]>([])
+  const [plVersCdc, setPlVersCdc] = useState<Map<string, string>>(new Map())
+  const [editionPromesse, setEditionPromesse] = useState<PromesseCommande | null>(null)
+  const listeCommandesRef = useRef<HTMLElement | null>(null)
 
   const isBlSelected = selectedTypes.includes('BL')
   const isCdcSelected = selectedTypes.includes('CDC')
@@ -799,6 +906,7 @@ export default function PortefeuilleLivraisonPage() {
     setSelectedTypes(['BL'])
     setDateLivraisonFin('')
     setDateLivraisonFinModifiee(false)
+    setDateFinParDefaut(false)
     setSelectedControle(mode)
     setSelectedGroupKey(null)
     setCdcRetardOnly(false)
@@ -834,6 +942,7 @@ export default function PortefeuilleLivraisonPage() {
 
   function applyHorizon(value: string) {
     setHorizonMois(value)
+    setDateFinParDefaut(false)
     if (!value) return
     setDateLivraisonFin(getHorizonIsoDate(Number(value)))
     setDateLivraisonFinModifiee(true)
@@ -845,6 +954,7 @@ export default function PortefeuilleLivraisonPage() {
       setSelectedTypes(['BL'])
       setDateLivraisonFin('')
       setDateLivraisonFinModifiee(false)
+      setDateFinParDefaut(false)
       setSelectedControle(mode)
       setSelectedGroupKey(null)
       setCdcRetardOnly(false)
@@ -897,9 +1007,19 @@ export default function PortefeuilleLivraisonPage() {
     function handleOpenCouverture() { applyCouvertureFilter('NON_SERVABLE') }
 
     function applyPromessesFilter() {
-      setSelectedTypes(['CDC'])
-      setPromessesOpen(true)
-      window.setTimeout(() => promessesPanelRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 300)
+      setSelectedTypes(['CDC', 'PL'])
+      setHorizonMois('3')
+      setDateLivraisonFin(getHorizonIsoDate(3))
+      setDateLivraisonFinModifiee(true)
+      setDateFinParDefaut(false)
+      setCdcRetardOnly(false)
+      setSelectedCouverture('TOUS')
+      setSelectedControle('TOUS')
+      setSelectedGroupKey(null)
+      setInterditeOnly(true)
+      setShowLignes(false)
+      setSelection(null)
+      setSelectedDocumentKeyForLines(null)
     }
     function handleOpenPromesses() { applyPromessesFilter() }
     function applyPromessesFromUrl() {
@@ -928,14 +1048,6 @@ export default function PortefeuilleLivraisonPage() {
     }
   }, [])
 
-  // Compteur de la carte « Date de livraison interdite » (périmètre RLS de
-  // l'utilisateur) ; remplacé par celui du panneau une fois ouvert (qui tient
-  // compte des filtres agence / représentant de la page).
-  useEffect(() => {
-    let alive = true
-    fetchPromessesAlerte().then((a) => { if (alive && !a.indisponible) setPromessesCount((n) => (n === null ? a.aTraiter : n)) })
-    return () => { alive = false }
-  }, [])
 
   // Références en « Blocage appro » SAGE : chargées une seule fois, paginées
   // par sécurité (limite PostgREST). En cas d'erreur, la page reste utilisable
@@ -968,6 +1080,147 @@ export default function PortefeuilleLivraisonPage() {
     void loadBlocageAppro()
     return () => { cancelled = true }
   }, [])
+
+  // V2 : CDC repérées un jour « date de livraison interdite » (toutes dates,
+  // pas seulement la fenêtre de 7 jours du contrôle). Table absente = pas de
+  // pastille, la page reste utilisable.
+  useEffect(() => {
+    let cancelled = false
+    async function loadInterdites() {
+      try {
+        const rows: InterditeHisto[] = []
+        for (let from = 0; ; from += INTERDITE_PAGE_SIZE) {
+          const { data, error } = await supabase
+            .from('cdc_promesses_historique')
+            .select('numero_document,reference_article,verdict_initial,verdict_dernier,date_livraison_saisie,date_livraison_derniere,date_proposee,premiere_detection')
+            .order('numero_document', { ascending: true })
+            .order('reference_article', { ascending: true })
+            .range(from, from + INTERDITE_PAGE_SIZE - 1)
+          if (error) throw error
+          const page = (data || []) as InterditeHisto[]
+          rows.push(...page)
+          if (page.length < INTERDITE_PAGE_SIZE) break
+        }
+        if (!cancelled) setInterditeRows(rows)
+      } catch (error) {
+        console.warn('Portefeuille livraison V2 - historique dates interdites non chargé', error)
+      }
+    }
+    void loadInterdites()
+    return () => { cancelled = true }
+  }, [])
+
+  // Contrôle du jour (fenêtre 7 j + CDC avec action) : toujours disponible,
+  // même si l'historique n'est pas encore en place ; rechargé après un traitement.
+  const chargerPromesses = useCallback(async () => {
+    try {
+      const rows = await fetchPromessesInterdites()
+      setPromessesLignes(rows)
+      setInterditeLive(rows.filter((r) => r.verdict !== 'OK'))
+      // CDC déjà passées en préparation : n° de PL → n° de CDC.
+      const cdcs = Array.from(new Set(rows.map((r) => safeText(r.numero_document, '')).filter(Boolean)))
+      const map = new Map<string, string>()
+      for (let k = 0; k < cdcs.length; k += 200) {
+        const { data, error } = await supabase
+          .from('activite_lignes')
+          .select('numero_piece,numero_piece_bc')
+          .eq('type_document', 'Préparation de livraison')
+          .in('numero_piece_bc', cdcs.slice(k, k + 200))
+        if (error) throw error
+        for (const r of (data || []) as { numero_piece: string | null; numero_piece_bc: string | null }[]) {
+          if (r.numero_piece && r.numero_piece_bc) map.set(r.numero_piece.trim(), r.numero_piece_bc.trim())
+        }
+      }
+      setPlVersCdc(map)
+    } catch (error) {
+      console.warn('Portefeuille livraison V2 - contrôle des dates interdites non chargé', error)
+    }
+  }, [])
+  useEffect(() => { void chargerPromesses() }, [chargerPromesses])
+
+  /** Commandes du contrôle des dates interdites, par n° de CDC. */
+  const promessesParCdc = useMemo(() => {
+    const m = new Map<string, PromesseCommande>()
+    for (const c of grouperParCommande(promessesLignes)) m.set(c.numero_document, c)
+    return m
+  }, [promessesLignes])
+  const cdcDuDoc = useCallback((doc: { type_document: string; numero_document: string }) => (
+    doc.type_document === 'PL' ? plVersCdc.get(doc.numero_document) || doc.numero_document : doc.numero_document
+  ), [plVersCdc])
+  const promesseDuDoc = useCallback((doc: { type_document: string; numero_document: string }) => promessesParCdc.get(cdcDuDoc(doc)) || null, [promessesParCdc, cdcDuDoc])
+  const estDateInterditeATraiter = useCallback((doc: { type_document: string; numero_document: string }) => {
+    const c = promesseDuDoc(doc)
+    return Boolean(c && (c.statut_traitement === 'a_traiter' || c.statut_traitement === 'non_confirmee'))
+  }, [promesseDuDoc])
+
+  const interditeByDoc = useMemo(() => {
+    const map = new Map<string, InterditeDoc>()
+    const getDoc = (key: string) => {
+      let current = map.get(key)
+      if (!current) {
+        current = { refs: new Map(), premiere_detection: null, date_livraison_saisie: null, date_proposee: null, verdicts: [], corrigee: true, references: [] }
+        map.set(key, current)
+      }
+      return current
+    }
+    // 1. Historique (mémoire permanente).
+    for (const row of interditeRows) {
+      const key = safeText(row.numero_document, '')
+      if (!key) continue
+      const current = getDoc(key)
+      if (row.premiere_detection && (!current.premiere_detection || row.premiere_detection < current.premiere_detection)) {
+        current.premiere_detection = row.premiere_detection
+        current.date_livraison_saisie = row.date_livraison_saisie
+      }
+      if (row.date_proposee && (!current.date_proposee || row.date_proposee > current.date_proposee)) current.date_proposee = row.date_proposee
+      if (row.verdict_initial && !current.verdicts.includes(row.verdict_initial)) current.verdicts.push(row.verdict_initial)
+      if (row.verdict_dernier !== 'OK') current.corrigee = false
+      if (row.reference_article && row.reference_article !== '*') {
+        if (!current.references.includes(row.reference_article)) current.references.push(row.reference_article)
+        current.refs.set(normalizeReferenceKey(row.reference_article), {
+          reference_article: row.reference_article,
+          verdict: row.verdict_initial || 'REPEREE',
+          date_promise: row.date_livraison_saisie,
+          date_proposee: row.date_proposee,
+          date_exacte: null,
+          nb_victimes: null,
+          q_victimes: null,
+          arret_appro: false,
+          corrigee: row.verdict_dernier === 'OK',
+        })
+      }
+    }
+    // 2. Contrôle du jour : prioritaire (détail complet, toujours en défaut).
+    for (const row of interditeLive) {
+      const key = safeText(row.numero_document, '')
+      if (!key) continue
+      const current = getDoc(key)
+      const detection = row.premiere_detection || row.calcule_le || null
+      if (detection && (!current.premiere_detection || detection < current.premiere_detection)) {
+        current.premiere_detection = detection
+        current.date_livraison_saisie = row.date_livraison
+      }
+      if (!current.date_livraison_saisie) current.date_livraison_saisie = row.date_livraison
+      if (row.date_proposee && (!current.date_proposee || row.date_proposee > current.date_proposee)) current.date_proposee = row.date_proposee
+      if (!current.verdicts.includes(row.verdict)) current.verdicts.push(row.verdict)
+      current.corrigee = false
+      if (!current.references.includes(row.reference_article)) current.references.push(row.reference_article)
+      const refKey = normalizeReferenceKey(row.reference_article)
+      const histo = current.refs.get(refKey)
+      current.refs.set(refKey, {
+        reference_article: row.reference_article,
+        verdict: row.verdict,
+        date_promise: histo?.date_promise || row.date_livraison,
+        date_proposee: row.date_proposee,
+        date_exacte: row.date_exacte,
+        nb_victimes: row.nb_victimes ?? null,
+        q_victimes: row.q_victimes ?? null,
+        arret_appro: Boolean(row.arret_appro),
+        corrigee: false,
+      })
+    }
+    return map
+  }, [interditeRows, interditeLive])
 
   // Si l'utilisateur décoche CDC alors que le filtre "CDC liv < M-2" est
   // actif, on le désactive plutôt que d'afficher un tableau vide.
@@ -1364,6 +1617,20 @@ export default function PortefeuilleLivraisonPage() {
     return Array.from(map.values()).map(({ famillesSet, referencesArticlesSet, referencesSet, couvRefsSet, arretRefsSet, ...doc }) => doc)
   }, [lignes, controlesFraisPort, couvertureById, blocageApproRefs])
 
+  // V2 : texte cherchable par document (désignations et références des lignes).
+  const docSearchIndex = useMemo(() => {
+    const map = new Map<string, string>()
+    for (const ligne of lignes) {
+      const key = docKey(ligne)
+      const parts = [ligne.designation_article, ligne.reference_article, ligne.reference].map((v) => String(v || '')).join(' ')
+      map.set(key, `${map.get(key) || ''} ${parts}`)
+    }
+    for (const [key, value] of map) map.set(key, value.toLowerCase())
+    return map
+  }, [lignes])
+
+  const searchTerms = useMemo(() => searchText.trim().toLowerCase().split(/\s+/).filter(Boolean), [searchText])
+
   const expeditions = useMemo<string[]>(() =>
     Array.from(new Set<string>([...documents.map((doc) => doc.expedition), ...groupesFraisPort.map((group) => group.expedition)].filter((v): v is string => Boolean(v)))).sort((a, b) => a.localeCompare(b, 'fr')),
   [documents, groupesFraisPort])
@@ -1393,6 +1660,11 @@ export default function PortefeuilleLivraisonPage() {
     const referenceSearch = referenceEnteteSearch.trim().toLowerCase()
     const lieuSearch = lieuLivraisonSearch.trim().toLowerCase()
     return documents.filter((doc) => {
+      if (searchTerms.length) {
+        const haystack = [doc.numero_document, doc.nom_tiers, doc.numero_tiers, doc.references, doc.references_articles, doc.reference_entete, doc.lieu_livraison, doc.representant, doc.agence, docSearchIndex.get(doc.key) || ''].join(' ').toLowerCase()
+        if (!searchTerms.every((term) => haystack.includes(term))) return false
+      }
+      if (interditeOnly && !estDateInterditeATraiter(doc)) return false
       if (cdcRetardOnly && !isCdcEnRetard(doc)) return false
       // Filtre couverture stock : ne concerne que les CDC ; les autres types
       // restent affichés uniquement quand le filtre est sur "Tous".
@@ -1412,7 +1684,7 @@ export default function PortefeuilleLivraisonPage() {
       if (lieuSearch && !doc.lieu_livraison.toLowerCase().includes(lieuSearch)) return false
       return true
     })
-  }, [documents, cdcRetardOnly, selectedCouverture, selectedGroupKey, selectedControle, selectedExpedition, selectedDepotEntete, referenceEnteteSearch, lieuLivraisonSearch])
+  }, [documents, searchTerms, docSearchIndex, interditeOnly, estDateInterditeATraiter, cdcRetardOnly, selectedCouverture, selectedGroupKey, selectedControle, selectedExpedition, selectedDepotEntete, referenceEnteteSearch, lieuLivraisonSearch])
 
   const moisLivraison = useMemo(() => {
     const set = new Set<string>()
@@ -1499,8 +1771,6 @@ export default function PortefeuilleLivraisonPage() {
     ? access.allowedAgences.length === 1 ? access.allowedAgences[0] : ACCESS_LOCKED_AGENCE_VALUE
     : selectedAgence
 
-  const selectBaseClassName = 'w-full rounded-xl border border-slate-300 px-3 py-2 text-sm'
-
   useEffect(() => {
     const effectiveAgences = access.allowedAgences.length > 0 ? access.allowedAgences : selectedAgence ? [selectedAgence] : []
     const effectiveCollaborateurs = access.allowedCollaborateurs.length > 0 ? access.allowedCollaborateurs : selectedRepresentant ? [selectedRepresentant] : []
@@ -1575,11 +1845,12 @@ export default function PortefeuilleLivraisonPage() {
 
   const documentColumns = useMemo<Array<[keyof DocumentPortefeuille, string]>>(() => {
     const couvertureColumns: Array<[keyof DocumentPortefeuille, string]> = isCdcSelected
-      ? [['couv_statut_doc', 'Couverture stock'], ['couv_nb_non_servables', 'Lignes non dispo. à date liv.'], ['couv_date_couverture_doc', 'Couvert le']]
+      ? [['couv_statut_doc', 'Couverture stock'], ['couv_nb_non_servables', 'Non dispo.'], ['couv_date_couverture_doc', 'Couvert le']]
       : []
     const generalColumns: Array<[keyof DocumentPortefeuille, string]> = [
       ['agence', 'Agence'], ['representant', 'Représentant'], ['numero_tiers', 'N° tiers'], ['nom_tiers', 'Client'],
-      ['numero_document', 'N° document'], ['references', 'Réf. lignes'], ['date_livraison', 'Date livraison'],
+      ['numero_document', 'N° document'], ['references', 'Chantier / réf.'], ['date_creation_document', 'Création'], ['date_livraison', 'Livraison'],
+      ['montant_ht', 'Montant HT'], ['nb_lignes', 'Lignes'],
       ...couvertureColumns,
       ['familles_macro', 'Familles macro'], ['client_en_sommeil', 'Sommeil'],
     ]
@@ -1592,7 +1863,8 @@ export default function PortefeuilleLivraisonPage() {
       ['nb_bl_avec_port', 'BL avec port'], ['frais_port_constate_ht', 'Port constaté BL'],
       ['frais_port_constate_groupe_ht', 'Port constaté groupe'], ['frais_port_attendu_groupe_ht', 'Port attendu groupe'],
       ['action_recommandee', 'Action recommandée'], ['montant_action_ht', 'Montant action'],
-      ['statut_controle', 'Statut groupe'], ['date_livraison', 'Date livraison'],
+      ['statut_controle', 'Statut groupe'], ['date_livraison', 'Livraison'],
+      ['montant_ht', 'Montant HT'], ['nb_lignes', 'Lignes'],
       ...couvertureColumns,
       ['familles_macro', 'Familles macro'], ['client_en_sommeil', 'Sommeil'],
     ]
@@ -1662,20 +1934,19 @@ export default function PortefeuilleLivraisonPage() {
   const showCdcRetardCard = isCdcSelected
   const showCouvertureCard = isCdcSelected
   const showPromessesCard = isCdcSelected
-  const kpiGridColsClass = KPI_GRID_COLS[2 + (showCdcRetardCard ? 1 : 0) + (showCouvertureCard ? 1 : 0) + (showPromessesCard ? 1 : 0) + (isBlSelected ? 4 : 0)] || 'xl:grid-cols-2'
   const isCouvertureFilterActive = selectedCouverture !== 'TOUS'
 
   function toggleType(type: string) {
     setSelectedTypes((current) => {
       if (current.includes(type)) { const next = current.filter((item) => item !== type); return next.length ? next : current }
-      if (type === 'BL' && !dateLivraisonFinModifiee) { setDateLivraisonFin(''); setDateLivraisonFinModifiee(false) }
+      if (type === 'BL' && (!dateLivraisonFinModifiee || dateFinParDefaut)) { setDateLivraisonFin(''); setDateLivraisonFinModifiee(false); setDateFinParDefaut(false); setHorizonMois('') }
       return [...current, type]
     })
   }
 
   useEffect(() => {
     if (isBlSelected) return
-    if (!dateLivraisonFinModifiee && !dateLivraisonFin) setDateLivraisonFin(getYesterdayIsoDate())
+    if (!dateLivraisonFinModifiee && !dateLivraisonFin) { setDateLivraisonFin(getHorizonIsoDate(2)); setDateLivraisonFinModifiee(true); setDateFinParDefaut(true); setHorizonMois('2') }
     setSelectedControle('TOUS'); setSelectedGroupKey(null); setSelectedExpedition(''); setSelectedDepotEntete('')
     setReferenceEnteteSearch(''); setLieuLivraisonSearch(''); setSelection(null); setSelectedDocumentKeyForLines(null)
   }, [isBlSelected, dateLivraisonFin, dateLivraisonFinModifiee])
@@ -1747,113 +2018,177 @@ export default function PortefeuilleLivraisonPage() {
     XLSX.writeFile(workbook, `portefeuille_livraison_${new Date().toISOString().slice(0, 10)}.xlsx`)
   }
 
+  // ── V2 : fenêtre flottante d'une commande ─────────────────────────────────
+  const modalDoc = useMemo(() => (modalDocKey ? documents.find((doc) => doc.key === modalDocKey) || null : null), [modalDocKey, documents])
+
+  const modalLignes = useMemo<LigneDetail[]>(() => {
+    if (!modalDocKey) return []
+    const interdite = modalDoc ? interditeByDoc.get(cdcDuDoc(modalDoc)) : undefined
+    const refsInterdites = new Set(Array.from(interdite?.refs.values() || []).filter((r) => !r.corrigee).map((r) => normalizeReferenceKey(r.reference_article)))
+    const rows = lignes.filter((ligne) => docKey(ligne) === modalDocKey).map(toLigneDetail)
+    const score = (ligne: LigneDetail) => {
+      const couv = couvertureSeverity(ligne.couv_statut) * 10
+      const interditeBonus = refsInterdites.has(normalizeReferenceKey(ligne.reference_article)) ? 25 : 0
+      return couv + interditeBonus + (ligne.couv_arret_appro ? 1 : 0)
+    }
+    return rows.sort((a, b) => score(b) - score(a) || sortValues(a.reference_article, b.reference_article))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [modalDocKey, modalDoc, lignes, couvertureById, blocageApproRefs, interditeByDoc, cdcDuDoc])
+
+  useEffect(() => {
+    if (!modalDoc) { setDateHisto(null); return }
+    let cancelled = false
+    setDateHistoLoading(true)
+    setDateHisto(null)
+    supabase
+      .from('cdc_date_livraison_historique')
+      .select('numero_document,date_livraison_min,date_livraison_max,nb_lignes,observe_le')
+      .eq('numero_document', modalDoc.numero_document)
+      .order('observe_le', { ascending: true })
+      .then(({ data, error }) => {
+        if (cancelled) return
+        setDateHisto(error ? [] : ((data || []) as DateLivHisto[]))
+        setDateHistoLoading(false)
+      })
+    return () => { cancelled = true }
+  }, [modalDoc])
+
+  useEffect(() => {
+    if (!modalDocKey) return
+    function onKey(e: KeyboardEvent) { if (e.key === 'Escape') setModalDocKey(null) }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [modalDocKey])
+
+  /** Commandes de la liste (filtres de l'écran) dont la date interdite est à traiter. */
+  const interditeATraiterKpi = useMemo(() => {
+    const docs = documents.filter((doc) => (doc.type_document === 'CDC' || doc.type_document === 'PL') && estDateInterditeATraiter(doc))
+    return { nb: docs.length, nonConfirmees: docs.filter((doc) => promesseDuDoc(doc)?.statut_traitement === 'non_confirmee').length }
+  }, [documents, estDateInterditeATraiter, promesseDuDoc])
+
+  function ouvrirDatesInterdites() {
+    setSelectedTypes((prev) => Array.from(new Set([...prev.filter((t) => t !== 'BL' && t !== 'BR'), 'CDC', 'PL'])))
+    applyHorizon('3')
+    setSelectedCouverture('TOUS')
+    setSelectedControle('TOUS')
+    setSelectedGroupKey(null)
+    setInterditeOnly(true)
+    setShowLignes(false)
+    applyDetailSelection(null)
+    window.setTimeout(() => listeCommandesRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 250)
+  }
+
+  const selectionLabel = useMemo(() => {
+    if (!selection) return ''
+    if (selection.totalType === 'general') return 'Total général'
+    if (selection.totalType === 'colonne') return `Mois ${monthLabel(selection.mois_livraison || '')}`
+    const parts = [selection.agence, syntheseGroupBy === 'agence' ? selection.representant : '', selection.type_document, selection.totalType === 'ligne' ? 'tous mois' : monthLabel(selection.mois_livraison || '')]
+    return parts.filter(Boolean).join(' · ')
+  }, [selection, syntheseGroupBy])
+
+  const labelCls = 'text-[10px] font-semibold uppercase tracking-wide text-slate-500'
+  const inputCls = 'w-full rounded-lg border border-slate-300 px-2 py-1 text-xs'
+  const chipBase = 'inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-left text-xs shadow-sm'
+  const td = 'border-b border-r border-slate-200 px-1.5 py-1'
+
   return (
     <main className="min-h-screen w-full max-w-none bg-slate-50 px-2 pb-4 pt-2 text-slate-900">
-      <div className="w-full max-w-none space-y-3">
-        <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-          <div className="flex flex-col gap-3 xl:flex-row xl:items-end xl:justify-between">
-            <div>
-              <h1 className="text-2xl font-semibold text-slate-900">Portefeuille CDC / PL / BL / BR par livraison</h1>
-              <p className="mt-1 text-sm text-slate-500">
-                Contrôle groupé des BL : un seul forfait par Date BL / N° tiers / Mode d'expédition / Lieu de livraison. Les BL à corriger sont identifiés avec une action Ajouter, Supprimer ou Vérifier.
-                {' '}Les CDC en retard de livraison ({getCdcRetardDescription()}) sont surlignés en rouge.
-                {' '}Couverture stock des CDC : stock global tous dépôts + réceptions fournisseurs attendues (commandes SAGE non réceptionnées), besoins servis par date de livraison puis date de création ; les commandes fournisseurs en retard ou sans date sont supposées reçues demain. Une ligne livrable après la période figée (aujourd'hui + délai d'appro de la référence) n'est pas en alerte : elle est « à couvrir par appro ». Dates de prochaine dispo par référence : écran Références en pénurie.
-              </p>
-              <div className="mt-2 inline-flex rounded-full border border-blue-200 bg-blue-50 px-2.5 py-1 text-xs font-semibold text-blue-800">
-                Version 2026-10-20 v3.9 — contrôle frais de port groupé · {CDC_RETARD_LABEL} · commandes non complètes à la date de livraison client · dates de livraison interdites · pastille arrêt appro · période figée d'appro
-              </div>
+      <div className="w-full max-w-none space-y-2">
+        {/* ── En-tête compact + filtres ─────────────────────────────────── */}
+        <section className="rounded-xl border border-slate-200 bg-white p-2.5 shadow-sm">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <h1 className="text-base font-semibold text-slate-900">Portefeuille CDC / PL / BL / BR</h1>
+              <InfoTip text="Règles de calcul et légende en bas de page." />
             </div>
-            <div className="flex flex-wrap gap-2">
-              <button type="button" onClick={loadData} disabled={loading} className="rounded-xl bg-slate-900 px-4 py-2 text-sm font-medium text-white shadow-sm disabled:opacity-50">
-                {loading ? 'Chargement...' : 'Actualiser'}
+            <div className="flex flex-wrap items-center gap-1.5">
+              <button type="button" onClick={loadData} disabled={loading} className="rounded-lg bg-slate-900 px-3 py-1.5 text-xs font-medium text-white shadow-sm disabled:opacity-50">
+                {loading ? 'Chargement…' : 'Actualiser'}
               </button>
-              <button type="button" onClick={() => void exportExcel()} disabled={loading || lignes.length === 0} className="rounded-xl bg-emerald-600 px-4 py-2 text-sm font-medium text-white shadow-sm disabled:opacity-50">
+              <button type="button" onClick={() => void exportExcel()} disabled={loading || lignes.length === 0} className="rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white shadow-sm disabled:opacity-50">
                 Export Excel
               </button>
             </div>
           </div>
 
-          <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-6">
-            <div className="rounded-xl border border-slate-200 p-3 xl:col-span-2">
-              <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">Types documents</div>
-              <div className="flex flex-wrap gap-4">
+          <div className="mt-2 grid grid-cols-2 gap-2 md:grid-cols-4 xl:grid-cols-10">
+            <div className="col-span-2 rounded-lg border border-slate-200 px-2 py-1">
+              <div className={labelCls}>Types documents</div>
+              <div className="mt-0.5 flex flex-wrap gap-3">
                 {ALL_TYPES.map((type) => (
-                  <label key={type} className="flex cursor-pointer items-center gap-2 text-sm font-medium text-slate-700">
-                    <input type="checkbox" checked={selectedTypes.includes(type)} onChange={() => toggleType(type)} className="h-4 w-4 rounded border-slate-300 accent-slate-900" />
+                  <label key={type} className="flex cursor-pointer items-center gap-1 text-xs font-medium text-slate-700">
+                    <input type="checkbox" checked={selectedTypes.includes(type)} onChange={() => toggleType(type)} className="h-3.5 w-3.5 rounded border-slate-300 accent-slate-900" />
                     <span>{type}</span>
                   </label>
                 ))}
               </div>
             </div>
-            <label className="space-y-1">
-              <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">Création début</span>
-              <input type="date" value={dateCreationDebut} onChange={(e) => setDateCreationDebut(e.target.value)} className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm" />
+            <label className="space-y-0.5">
+              <span className={labelCls}>Création début</span>
+              <input type="date" value={dateCreationDebut} onChange={(e) => setDateCreationDebut(e.target.value)} className={inputCls} />
             </label>
-            <label className="space-y-1">
-              <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">Création fin</span>
-              <input type="date" value={dateCreationFin} onChange={(e) => setDateCreationFin(e.target.value)} className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm" />
+            <label className="space-y-0.5">
+              <span className={labelCls}>Création fin</span>
+              <input type="date" value={dateCreationFin} onChange={(e) => setDateCreationFin(e.target.value)} className={inputCls} />
             </label>
-            <label className="space-y-1">
-              <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">Livraison début</span>
-              <input type="date" value={dateLivraisonDebut} onChange={(e) => setDateLivraisonDebut(e.target.value)} className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm" />
+            <label className="space-y-0.5">
+              <span className={labelCls}>Livraison début</span>
+              <input type="date" value={dateLivraisonDebut} onChange={(e) => setDateLivraisonDebut(e.target.value)} className={inputCls} />
             </label>
-            <label className="space-y-1">
-              <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">Livraison fin</span>
-              <input type="date" value={dateLivraisonFin} onChange={(e) => { setDateLivraisonFin(e.target.value); setDateLivraisonFinModifiee(true); setHorizonMois('') }} className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm" />
+            <label className="space-y-0.5">
+              <span className={labelCls}>Livraison fin</span>
+              <input type="date" value={dateLivraisonFin} onChange={(e) => { setDateLivraisonFin(e.target.value); setDateLivraisonFinModifiee(true); setDateFinParDefaut(false); setHorizonMois('') }} className={inputCls} />
             </label>
-          </div>
-
-          <div className="mt-3 grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-6">
-            <label className="space-y-1">
-              <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">Représentant</span>
-              <select value={representantSelectValue} disabled={isRepresentantLocked} onChange={(e) => { if (!isRepresentantLocked) setSelectedRepresentant(e.target.value) }} className={accessLockedSelectClassName(selectBaseClassName, isRepresentantLocked)}>
+            <label className="space-y-0.5">
+              <span className={labelCls}>Horizon</span>
+              <select value={horizonMois} onChange={(e) => applyHorizon(e.target.value)} className={inputCls} title="Positionne la borne « Livraison fin » à aujourd'hui + N mois">
+                {HORIZON_OPTIONS.map(([value, label]) => <option key={value || 'none'} value={value}>{label}</option>)}
+              </select>
+            </label>
+            <label className="space-y-0.5">
+              <span className={labelCls}>Représentant</span>
+              <select value={representantSelectValue} disabled={isRepresentantLocked} onChange={(e) => { if (!isRepresentantLocked) setSelectedRepresentant(e.target.value) }} className={accessLockedSelectClassName(inputCls, isRepresentantLocked)}>
                 {isRepresentantLocked && access.allowedCollaborateurs.length > 1 ? <option value={ACCESS_LOCKED_REPRESENTANT_VALUE}>{lockedFilterLabel(access.allowedCollaborateurs, 'Tous')}</option> : <option value="">Tous</option>}
                 {representants.map((v) => <option key={v} value={v}>{isRepresentantLocked && access.allowedCollaborateurs.length === 1 ? `${v} 🔒` : v}</option>)}
               </select>
             </label>
-            <label className="space-y-1">
-              <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">Agence</span>
-              <select value={agenceSelectValue} disabled={isAgenceLocked} onChange={(e) => { if (!isAgenceLocked) setSelectedAgence(e.target.value) }} className={accessLockedSelectClassName(selectBaseClassName, isAgenceLocked)}>
+            <label className="space-y-0.5">
+              <span className={labelCls}>Agence</span>
+              <select value={agenceSelectValue} disabled={isAgenceLocked} onChange={(e) => { if (!isAgenceLocked) setSelectedAgence(e.target.value) }} className={accessLockedSelectClassName(inputCls, isAgenceLocked)}>
                 {isAgenceLocked && access.allowedAgences.length > 1 ? <option value={ACCESS_LOCKED_AGENCE_VALUE}>{lockedFilterLabel(access.allowedAgences, 'Toutes')}</option> : <option value="">Toutes</option>}
                 {agences.map((v) => <option key={v} value={v}>{isAgenceLocked && access.allowedAgences.length === 1 ? `${v} 🔒` : v}</option>)}
               </select>
             </label>
-            <label className="space-y-1">
-              <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">Famille macro</span>
-              <select value={selectedFamilleMacro} onChange={(e) => setSelectedFamilleMacro(e.target.value)} className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm">
+            <label className="space-y-0.5">
+              <span className={labelCls}>Famille macro</span>
+              <select value={selectedFamilleMacro} onChange={(e) => setSelectedFamilleMacro(e.target.value)} className={inputCls}>
                 <option value="">Toutes</option>
                 {famillesMacro.map((v) => <option key={v} value={v}>{v}</option>)}
               </select>
             </label>
-            <label className="space-y-1">
-              <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">Client en sommeil</span>
-              <select value={selectedSommeil} onChange={(e) => setSelectedSommeil(e.target.value as 'TOUS' | 'OUI' | 'NON')} className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm">
+            <label className="space-y-0.5">
+              <span className={labelCls}>Client en sommeil</span>
+              <select value={selectedSommeil} onChange={(e) => setSelectedSommeil(e.target.value as 'TOUS' | 'OUI' | 'NON')} className={inputCls}>
                 <option value="TOUS">Tous</option><option value="OUI">Oui</option><option value="NON">Non</option>
               </select>
             </label>
-            <label className="space-y-1">
-              <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">Horizon livraison</span>
-              <select value={horizonMois} onChange={(e) => applyHorizon(e.target.value)} className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm" title="Positionne la borne « Livraison fin » à aujourd'hui + N mois">
-                {HORIZON_OPTIONS.map(([value, label]) => <option key={value || 'none'} value={value}>{label}</option>)}
-              </select>
-            </label>
-            <label className="space-y-1">
-              <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">Couverture stock (CDC)</span>
-              <select value={selectedCouverture} disabled={!isCdcSelected} onChange={(e) => { setSelectedCouverture(e.target.value as CouvertureFilterMode); applyDetailSelection(null) }} className={['w-full rounded-xl border border-slate-300 px-3 py-2 text-sm', !isCdcSelected ? 'bg-slate-100 text-slate-400' : ''].join(' ')}>
+            <label className="col-span-2 space-y-0.5">
+              <span className={labelCls}>Couverture stock (CDC)</span>
+              <select value={selectedCouverture} disabled={!isCdcSelected} onChange={(e) => { setSelectedCouverture(e.target.value as CouvertureFilterMode); applyDetailSelection(null) }} className={[inputCls, !isCdcSelected ? 'bg-slate-100 text-slate-400' : ''].join(' ')}>
                 <option value="TOUS">Tous les statuts</option>
-                <option value="NON_SERVABLE">Non complètes à la date de livraison client (rupture + réception tardive)</option>
+                <option value="NON_SERVABLE">Non complètes à la date de livraison client</option>
                 <option value="RUPTURE">Rupture</option>
                 <option value="ARRET_APPRO">Rupture sur référence en arrêt appro (SAGE)</option>
                 <option value="RECEPTION_TARDIVE">Réception tardive</option>
                 <option value="COUVERT_PAR_RECEPTION">Couvert par réception</option>
-                <option value="A_COUVRIR_PAR_APPRO">À couvrir par appro (livraison après la période figée, hors alerte)</option>
+                <option value="A_COUVRIR_PAR_APPRO">À couvrir par appro (hors alerte)</option>
                 <option value="COUVERT">Couvert par le stock</option>
               </select>
             </label>
           </div>
 
           {isBlSelected && (
-            <div className="mt-4 rounded-xl border border-blue-200 bg-blue-50/50 p-3">
+            <div className="mt-2 rounded-xl border border-blue-200 bg-blue-50/50 p-3">
               <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
                 <div>
                   <div className="text-sm font-semibold text-blue-950">Filtres et contrôle frais de port</div>
@@ -1919,125 +2254,93 @@ export default function PortefeuilleLivraisonPage() {
               </div>
             </div>
           )}
-
           {!access.loading && (access.accessBadge || access.error) && (
-            <div className={['mt-4 rounded-xl border px-3 py-2 text-sm', access.error ? 'border-amber-200 bg-amber-50 text-amber-800' : 'border-blue-200 bg-blue-50 text-blue-800'].join(' ')}>
+            <div className={['mt-2 rounded-xl border px-3 py-2 text-sm', access.error ? 'border-amber-200 bg-amber-50 text-amber-800' : 'border-blue-200 bg-blue-50 text-blue-800'].join(' ')}>
               {access.error ? `Droits utilisateur non chargés : ${access.error}` : `Périmètre utilisateur appliqué : ${access.accessBadge}`}
             </div>
           )}
-          {errorMessage && <div className="mt-4 rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-700">{errorMessage}</div>}
+          {errorMessage && <div className="mt-2 rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-700">{errorMessage}</div>}
           {isBlSelected && controlErrorMessage && (
-            <div className="mt-4 rounded-xl border border-orange-300 bg-orange-50 p-3 text-sm text-orange-800">
+            <div className="mt-2 rounded-xl border border-orange-300 bg-orange-50 p-3 text-sm text-orange-800">
               <div className="font-semibold">Contrôle frais de port non chargé</div>
               <div className="mt-1">{controlErrorMessage}</div>
             </div>
           )}
           {isCdcSelected && couvertureErrorMessage && (
-            <div className="mt-4 rounded-xl border border-orange-300 bg-orange-50 p-3 text-sm text-orange-800">
+            <div className="mt-2 rounded-xl border border-orange-300 bg-orange-50 p-3 text-sm text-orange-800">
               <div className="font-semibold">Couverture stock non chargée</div>
               <div className="mt-1">{couvertureErrorMessage}</div>
             </div>
           )}
         </section>
 
-        <section className={['grid grid-cols-1 gap-4 md:grid-cols-2', kpiGridColsClass].join(' ')}>
-          <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-            <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Documents affichés</div>
-            <div className="mt-1 text-2xl font-semibold">{totalGeneral.nb_documents.toLocaleString('fr-FR')}</div>
-          </div>
-          <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-            <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Montant HT</div>
-            <div className="mt-1 text-2xl font-semibold">{formatMoney(totalGeneral.montant_ht)}</div>
+        {/* ── KPI compacts ─────────────────────────────────────────────── */}
+        <section className="flex flex-wrap items-stretch gap-1.5">
+          <div className={[chipBase, 'border-slate-200 bg-white'].join(' ')}>
+            <span className={labelCls}>Documents</span>
+            <span className="text-sm font-semibold">{totalGeneral.nb_documents.toLocaleString('fr-FR')}</span>
+            <span className="text-slate-400">·</span>
+            <span className="text-sm font-semibold">{formatMoneyCompact(totalGeneral.montant_ht)}</span>
           </div>
           {showCdcRetardCard && (
             <button
               type="button"
               onClick={() => { if (cdcRetardOnly) { setCdcRetardOnly(false); applyDetailSelection(null) } else openCdcRetard() }}
-              title={cdcRetardOnly ? 'Désactiver le filtre et réafficher tous les documents' : `Ne garder que les CDC en retard (${getCdcRetardDescription()})`}
-              className={[
-                'rounded-2xl border p-4 text-left shadow-sm',
-                cdcRetardKpi.nb_documents > 0 ? 'border-red-300 bg-red-50' : 'border-emerald-200 bg-white',
-                cdcRetardOnly ? 'ring-2 ring-red-400' : '',
-              ].join(' ')}
+              className={[chipBase, cdcRetardKpi.nb_documents > 0 ? 'border-red-300 bg-red-50' : 'border-emerald-200 bg-white', cdcRetardOnly ? 'ring-2 ring-red-400' : ''].join(' ')}
             >
-              <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">{CDC_RETARD_LABEL}</div>
-              <div className={['mt-1 text-2xl font-semibold', cdcRetardKpi.nb_documents > 0 ? 'text-red-700' : 'text-emerald-700'].join(' ')}>{cdcRetardKpi.nb_documents.toLocaleString('fr-FR')}</div>
-              <div className="mt-1 text-[11px] text-slate-500">
-                {formatMoneyCompact(cdcRetardKpi.montant_ht)} · {getCdcRetardDescription()}{cdcRetardOnly ? ' · filtre actif' : ''}
-              </div>
+              <span className={labelCls}>{CDC_RETARD_LABEL}</span>
+              <span className={['text-sm font-semibold', cdcRetardKpi.nb_documents > 0 ? 'text-red-700' : 'text-emerald-700'].join(' ')}>{cdcRetardKpi.nb_documents.toLocaleString('fr-FR')}</span>
+              <InfoTip text={<>{formatMoneyCompact(cdcRetardKpi.montant_ht)} · {getCdcRetardDescription()}. Clic : ne garder que ces CDC{cdcRetardOnly ? ' (filtre actif, clic pour retirer)' : ''}.</>} />
             </button>
           )}
           {showCouvertureCard && (
             <button
               type="button"
               onClick={() => { if (isCouvertureFilterActive) { setSelectedCouverture('TOUS'); applyDetailSelection(null) } else openCouverture('NON_SERVABLE') }}
-              title={isCouvertureFilterActive ? 'Désactiver le filtre et réafficher tous les documents' : 'Ne garder que les CDC dont au moins une ligne ne peut pas être servie à sa date de livraison (stock global + réceptions fournisseurs attendues)'}
-              className={[
-                'rounded-2xl border p-4 text-left shadow-sm',
-                couvertureKpi.nb_documents > 0 ? 'border-rose-300 bg-rose-50' : 'border-emerald-200 bg-white',
-                isCouvertureFilterActive ? 'ring-2 ring-rose-400' : '',
-              ].join(' ')}
+              className={[chipBase, couvertureKpi.nb_documents > 0 ? 'border-rose-300 bg-rose-50' : 'border-emerald-200 bg-white', isCouvertureFilterActive ? 'ring-2 ring-rose-400' : ''].join(' ')}
             >
-              <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">{COUVERTURE_LABEL}</div>
-              <div className={['mt-1 text-2xl font-semibold', couvertureKpi.nb_documents > 0 ? 'text-rose-700' : 'text-emerald-700'].join(' ')}>{couvertureKpi.nb_documents.toLocaleString('fr-FR')}</div>
-              <div className="mt-1 text-[11px] text-slate-500">
-                {formatMoneyCompact(couvertureKpi.montant_ht)} · {couvertureKpi.nb_rupture.toLocaleString('fr-FR')} en rupture · {couvertureKpi.nb_tardive.toLocaleString('fr-FR')} avec réception tardive
-                {couvertureKpi.nb_arret_appro > 0 && <> · <span className="font-semibold text-violet-800" title={ARRET_APPRO_TITLE}>{couvertureKpi.nb_arret_appro.toLocaleString('fr-FR')} avec réf. en arrêt appro</span></>}
-                {couvertureKpi.nb_a_couvrir_appro > 0 && <> · <span className="font-semibold text-amber-800" title="Lignes livrables après la période figée (aujourd'hui + délai d'appro) : un appro lancé aujourd'hui arrive à temps, pas d'alerte sur la commande">{couvertureKpi.nb_a_couvrir_appro.toLocaleString('fr-FR')} CDC à couvrir par appro (hors alerte)</span></>}
-                {' '}· {couvertureKpi.nb_controles.toLocaleString('fr-FR')} CDC contrôlés{isCouvertureFilterActive ? ' · filtre actif' : ''}
-              </div>
+              <span className={labelCls}>Non complètes à date liv.</span>
+              <span className={['text-sm font-semibold', couvertureKpi.nb_documents > 0 ? 'text-rose-700' : 'text-emerald-700'].join(' ')}>{couvertureKpi.nb_documents.toLocaleString('fr-FR')}</span>
+              <InfoTip text={<>
+                {COUVERTURE_LABEL} : {formatMoneyCompact(couvertureKpi.montant_ht)} · {couvertureKpi.nb_rupture.toLocaleString('fr-FR')} en rupture · {couvertureKpi.nb_tardive.toLocaleString('fr-FR')} avec réception tardive
+                {couvertureKpi.nb_arret_appro > 0 && <> · {couvertureKpi.nb_arret_appro.toLocaleString('fr-FR')} avec réf. en arrêt appro</>}
+                {couvertureKpi.nb_a_couvrir_appro > 0 && <> · {couvertureKpi.nb_a_couvrir_appro.toLocaleString('fr-FR')} CDC à couvrir par appro (hors alerte)</>}
+                {' '}· {couvertureKpi.nb_controles.toLocaleString('fr-FR')} CDC contrôlées. Clic : filtrer.
+              </>} />
             </button>
           )}
           {showPromessesCard && (
             <button
               type="button"
-              onClick={() => {
-                setPromessesOpen((v) => !v)
-                if (!promessesOpen) window.setTimeout(() => promessesPanelRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 200)
-              }}
-              title={promessesOpen ? 'Masquer la liste des commandes à date de livraison interdite' : `Afficher les CDC créées depuis ${PROMESSES_FENETRE_JOURS} jours dont la date de livraison promise ne tient pas compte du stock disponible`}
-              className={[
-                'rounded-2xl border p-4 text-left shadow-sm',
-                (promessesCount || 0) > 0 ? 'border-rose-300 bg-rose-50' : 'border-emerald-200 bg-white',
-                promessesOpen ? 'ring-2 ring-rose-400' : '',
-              ].join(' ')}
+              onClick={() => { if (interditeOnly) { setInterditeOnly(false); applyDetailSelection(null) } else ouvrirDatesInterdites() }}
+              className={[chipBase, interditeATraiterKpi.nb > 0 ? 'border-rose-300 bg-rose-50' : 'border-emerald-200 bg-white', interditeOnly ? 'ring-2 ring-rose-400' : ''].join(' ')}
             >
-              <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">{PROMESSES_ALERT_LABEL}</div>
-              <div className={['mt-1 text-2xl font-semibold', (promessesCount || 0) > 0 ? 'text-rose-700' : 'text-emerald-700'].join(' ')}>{promessesCount === null ? '—' : promessesCount.toLocaleString('fr-FR')}</div>
-              <div className="mt-1 text-[11px] text-slate-500">CDC à traiter (sans action ou action non confirmée) · créées depuis {PROMESSES_FENETRE_JOURS} j · date promise sans tenir compte du stock{promessesOpen ? ' · liste affichée' : ''}</div>
+              <span className={labelCls}>⛔ Date interdite à traiter</span>
+              <span className={['text-sm font-semibold', interditeATraiterKpi.nb > 0 ? 'text-rose-700' : 'text-emerald-700'].join(' ')}>{interditeATraiterKpi.nb.toLocaleString('fr-FR')}</span>
+              <InfoTip text={<>Commandes de la liste créées depuis {PROMESSES_FENETRE_JOURS} jours dont la date de livraison promise ne tient pas compte du stock (intenable, ou prise sur le stock d’une commande plus ancienne), pas encore traitées{interditeATraiterKpi.nonConfirmees > 0 ? <> (dont {interditeATraiterKpi.nonConfirmees.toLocaleString('fr-FR')} dont l’action n’est pas confirmée à la synchro)</> : null}. Une CDC passée en préparation reste suivie sous son n° de PL. Clic : horizon 3 mois et liste limitée à ces commandes ; ouvrez une commande pour voir le détail et la traiter (décaler la date ou déprioriser une autre commande){interditeOnly ? ' — filtre actif, clic pour le retirer' : ''}.</>} />
             </button>
           )}
           {isBlSelected && (
             <>
-              <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-                <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Groupes BL contrôlés</div>
-                <div className="mt-1 text-2xl font-semibold">{groupesFraisPort.length.toLocaleString('fr-FR')}</div>
+              <div className={[chipBase, 'border-slate-200 bg-white'].join(' ')}>
+                <span className={labelCls}>Groupes BL contrôlés</span>
+                <span className="text-sm font-semibold">{groupesFraisPort.length.toLocaleString('fr-FR')}</span>
               </div>
-              <button type="button" onClick={() => openBlControl('FRAIS_PORT_MANQUANT')} className={['rounded-2xl border p-4 text-left shadow-sm', controleKpis.portManquant > 0 ? 'border-red-300 bg-red-50' : 'border-emerald-200 bg-white'].join(' ')}>
-                <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Groupes sans port</div>
-                <div className={['mt-1 text-2xl font-semibold', controleKpis.portManquant > 0 ? 'text-red-700' : 'text-emerald-700'].join(' ')}>{controleKpis.portManquant.toLocaleString('fr-FR')}</div>
+              <button type="button" onClick={() => openBlControl('FRAIS_PORT_MANQUANT')} className={[chipBase, controleKpis.portManquant > 0 ? 'border-red-300 bg-red-50' : 'border-emerald-200 bg-white'].join(' ')}>
+                <span className={labelCls}>Groupes sans port</span>
+                <span className={['text-sm font-semibold', controleKpis.portManquant > 0 ? 'text-red-700' : 'text-emerald-700'].join(' ')}>{controleKpis.portManquant.toLocaleString('fr-FR')}</span>
               </button>
-              <button type="button" onClick={() => openBlControl('FRAIS_PORT_A_SUPPRIMER')} className={['rounded-2xl border p-4 text-left shadow-sm', controleKpis.blASupprimer > 0 ? 'border-rose-300 bg-rose-50' : 'border-emerald-200 bg-white'].join(' ')}>
-                <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">BL avec port à supprimer</div>
-                <div className={['mt-1 text-2xl font-semibold', controleKpis.blASupprimer > 0 ? 'text-rose-700' : 'text-emerald-700'].join(' ')}>{controleKpis.blASupprimer.toLocaleString('fr-FR')}</div>
+              <button type="button" onClick={() => openBlControl('FRAIS_PORT_A_SUPPRIMER')} className={[chipBase, controleKpis.blASupprimer > 0 ? 'border-rose-300 bg-rose-50' : 'border-emerald-200 bg-white'].join(' ')}>
+                <span className={labelCls}>BL avec port à supprimer</span>
+                <span className={['text-sm font-semibold', controleKpis.blASupprimer > 0 ? 'text-rose-700' : 'text-emerald-700'].join(' ')}>{controleKpis.blASupprimer.toLocaleString('fr-FR')}</span>
               </button>
-              <button type="button" onClick={() => openBlControl('AUTRES_ANOMALIES')} className={['rounded-2xl border p-4 text-left shadow-sm', controleKpis.autresAnomalies > 0 ? 'border-amber-300 bg-amber-50' : 'border-emerald-200 bg-white'].join(' ')}>
-                <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Autres groupes à vérifier</div>
-                <div className={['mt-1 text-2xl font-semibold', controleKpis.autresAnomalies > 0 ? 'text-amber-700' : 'text-emerald-700'].join(' ')}>{controleKpis.autresAnomalies.toLocaleString('fr-FR')}</div>
+              <button type="button" onClick={() => openBlControl('AUTRES_ANOMALIES')} className={[chipBase, controleKpis.autresAnomalies > 0 ? 'border-amber-300 bg-amber-50' : 'border-emerald-200 bg-white'].join(' ')}>
+                <span className={labelCls}>Autres groupes à vérifier</span>
+                <span className={['text-sm font-semibold', controleKpis.autresAnomalies > 0 ? 'text-amber-700' : 'text-emerald-700'].join(' ')}>{controleKpis.autresAnomalies.toLocaleString('fr-FR')}</span>
               </button>
             </>
           )}
         </section>
-
-        {showPromessesCard && promessesOpen && (
-          <div ref={promessesPanelRef} className="scroll-mt-24">
-            <CdcPromessesInterdites
-              agenceFiltre={access.allowedAgences.length > 0 ? '' : selectedAgence}
-              representantFiltre={access.allowedCollaborateurs.length > 0 ? '' : selectedRepresentant}
-              onCountChange={setPromessesCount}
-            />
-          </div>
-        )}
 
         {isBlSelected && (
           <section className="rounded-2xl border border-slate-200 bg-white shadow-sm">
@@ -2094,17 +2397,20 @@ export default function PortefeuilleLivraisonPage() {
             </div>
           </section>
         )}
-
-        <section className="rounded-2xl border border-slate-200 bg-white shadow-sm">
-          <div className="flex items-center justify-between border-b border-slate-200 px-4 py-3">
-            <div>
-              <h2 className="text-lg font-semibold">Tableau de synthèse</h2>
-              <p className="text-sm text-slate-500">
-                Clique sur une cellule, une ligne, une colonne ou le total général pour afficher le détail en dessous.
-                {' '}<span className="text-red-700">Rouge</span> : {getCdcRetardDescription()} ({CDC_RETARD_LABEL}) · <span className="text-orange-700">orange</span> : mois écoulés avant le mois courant.
-                {isCdcSelected && <> · <span className="text-rose-700">non complètes à date liv.</span> : commandes dont au moins une ligne n'est pas disponible à la date de livraison client (rupture ou réception fournisseur tardive).</>}
-              </p>
-            </div>
+        {/* ── Synthèse repliée par défaut ──────────────────────────────── */}
+        <section className="rounded-xl border border-slate-200 bg-white shadow-sm">
+          <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-1.5">
+            <button type="button" onClick={() => setSyntheseOpen((v) => !v)} className="flex items-center gap-2 text-left">
+              <span className="text-xs text-slate-500">{syntheseOpen ? '▾' : '▸'}</span>
+              <span className="text-sm font-semibold">Tableau de synthèse</span>
+              <span className="text-xs text-slate-500">
+                {syntheseTotal.total_nb_documents.toLocaleString('fr-FR')} docs · {formatMoneyCompact(syntheseTotal.total_montant_ht)}
+                {isCdcSelected && syntheseTotal.total_nb_non_servables > 0 && <> · <span className="font-semibold text-rose-700">{syntheseTotal.total_nb_non_servables} non complète(s) à date liv.</span></>}
+                {isBlSelected && syntheseTotal.total_nb_anomalies > 0 && <> · <span className="font-semibold text-orange-700">{syntheseTotal.total_nb_anomalies} anomalie(s) port</span></>}
+              </span>
+              <InfoTip text={<>Clique sur une cellule, une ligne, une colonne ou le total pour filtrer la liste des commandes. <b className="text-red-700">Rouge</b> : {getCdcRetardDescription()} · <b className="text-orange-700">orange</b> : mois écoulés avant le mois courant.</>} />
+            </button>
+            {syntheseOpen && (
             <div className="flex items-center gap-2">
               <div className="flex rounded-xl border border-slate-300 bg-slate-50 p-1 text-sm">
                 <button
@@ -2124,7 +2430,10 @@ export default function PortefeuilleLivraisonPage() {
               </div>
               <button type="button" onClick={() => applyDetailSelection(null)} className="rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-700">Réinitialiser détail</button>
             </div>
+            )}
           </div>
+          {syntheseOpen && (
+            <div className="border-t border-slate-200">
           <div className="max-h-[580px] overflow-auto">
             <table className="min-w-full border-collapse text-sm">
               <thead className="sticky top-0 z-10 bg-slate-100">
@@ -2243,22 +2552,50 @@ export default function PortefeuilleLivraisonPage() {
               )}
             </table>
           </div>
+            </div>
+          )}
         </section>
 
-        <section className="rounded-2xl border border-slate-200 bg-white shadow-sm">
-          <div className="border-b border-slate-200 px-4 py-3">
-            <h2 className="text-lg font-semibold">Liste des documents</h2>
-            <p className="text-sm text-slate-500">
-              {sortedDocuments.length.toLocaleString('fr-FR')} document(s) affiché(s). Clique sur un numéro de document pour filtrer le détail à la ligne. Les CDC en retard ({CDC_RETARD_LABEL}) sont surlignés en rouge
-              {isCdcSelected ? ', les commandes non complètes à la date de livraison client en rose.' : '.'}
-            </p>
+        {/* ── Liste des commandes ──────────────────────────────────────── */}
+        <section ref={listeCommandesRef} className="scroll-mt-24 rounded-xl border border-slate-200 bg-white shadow-sm">
+          <div className="flex flex-wrap items-center gap-2 border-b border-slate-200 px-3 py-1.5">
+            <h2 className="text-sm font-semibold">Commandes</h2>
+            <span className="text-xs text-slate-500">{sortedDocuments.length.toLocaleString('fr-FR')} document(s)</span>
+            <div className="relative min-w-[280px] flex-1">
+              <input
+                value={searchText}
+                onChange={(e) => setSearchText(e.target.value)}
+                placeholder="Rechercher : n° de commande, client, n° tiers, chantier, référence, désignation… (plusieurs mots possibles)"
+                className="w-full rounded-lg border border-slate-300 py-1 pl-7 pr-7 text-xs"
+              />
+              <span className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-xs text-slate-400">🔎</span>
+              {searchText && <button type="button" onClick={() => setSearchText('')} className="absolute right-2 top-1/2 -translate-y-1/2 text-xs text-slate-400 hover:text-slate-700">✕</button>}
+            </div>
+            {selection && (
+              <span className="inline-flex items-center gap-1 rounded-full border border-blue-200 bg-blue-50 px-2 py-0.5 text-[11px] font-semibold text-blue-800">
+                Synthèse : {selectionLabel}
+                <button type="button" onClick={() => applyDetailSelection(null)} className="ml-1 text-blue-600 hover:text-blue-900">✕</button>
+              </span>
+            )}
+            {interditeOnly && (
+              <span className="inline-flex items-center gap-1 rounded-full border border-red-200 bg-red-50 px-2 py-0.5 text-[11px] font-semibold text-red-800">
+                Date interdite à traiter
+                <button type="button" onClick={() => setInterditeOnly(false)} className="ml-1 text-red-600 hover:text-red-900">✕</button>
+              </span>
+            )}
+            <button type="button" onClick={() => setShowLignes((v) => !v)} className={['rounded-lg border px-2.5 py-1 text-xs font-medium', showLignes ? 'border-slate-900 bg-slate-900 text-white' : 'border-slate-300 bg-white text-slate-700 hover:bg-slate-50'].join(' ')}>
+              {showLignes ? 'Masquer les lignes de commande' : 'Afficher les lignes de commande'}
+            </button>
+            <InfoTip align="right" text={<>Clique sur une commande pour ouvrir sa fenêtre (lignes en souci en premier). En rouge : {CDC_RETARD_LABEL} ; en rose : commandes non complètes à la date de livraison client ; ⛔ : commande saisie un jour avec une date de livraison interdite.</>} />
           </div>
-          <div className="max-h-[480px] overflow-auto">
-            <table className="min-w-full border-collapse text-sm">
-              <thead className="sticky top-0 bg-slate-100">
+          <div className="max-h-[calc(100vh-230px)] min-h-[320px] overflow-auto">
+            <table className="min-w-full border-collapse text-xs">
+              <thead className="sticky top-0 z-10 bg-slate-100">
                 <tr>
                   {documentColumns.map(([key, label]) => (
-                    <th key={key} onClick={() => toggleDocumentSort(key)} className="whitespace-nowrap cursor-pointer border-b border-r border-slate-200 px-2 py-2 text-left hover:bg-slate-200">{label}</th>
+                    <th key={key} onClick={() => toggleDocumentSort(key)} className="whitespace-nowrap cursor-pointer border-b border-r border-slate-200 px-1.5 py-1 text-left text-[11px] font-semibold hover:bg-slate-200">
+                      {label}{documentSort?.key === key ? (documentSort.direction === 'asc' ? ' ▲' : ' ▼') : ''}
+                    </th>
                   ))}
                 </tr>
               </thead>
@@ -2267,12 +2604,13 @@ export default function PortefeuilleLivraisonPage() {
                   const cdcRetard = isCdcEnRetard(doc)
                   const isCdcDoc = doc.type_document === 'CDC'
                   const couvNonServable = isCdcDoc && isCouvertureNonServable(doc.couv_statut_doc)
+                  const interdite = isCdcDoc || doc.type_document === 'PL' ? interditeByDoc.get(cdcDuDoc(doc)) : undefined
                   const couvertureCells = isCdcSelected ? (
                     <>
-                      <td className="border-b border-r border-slate-200 px-2 py-2">
+                      <td className={td}>
                         {isCdcDoc ? (
                           <div className="flex flex-wrap items-center gap-1">
-                            <span className={['inline-flex whitespace-nowrap rounded-full border px-2 py-1 text-xs font-semibold', couvertureClassName(doc.couv_statut_doc)].join(' ')} title={doc.couv_references_non_servables ? `Réf. non disponibles à la date de livraison : ${doc.couv_references_non_servables}` : undefined}>
+                            <span className={['inline-flex whitespace-nowrap rounded-full border px-1.5 py-0 text-[10px] font-semibold', couvertureClassName(doc.couv_statut_doc)].join(' ')} title={doc.couv_references_non_servables ? `Réf. non disponibles à la date de livraison : ${doc.couv_references_non_servables}` : undefined}>
                               {couvertureLabel(doc.couv_statut_doc)}
                             </span>
                             {doc.couv_nb_arret_appro > 0 && (
@@ -2280,63 +2618,78 @@ export default function PortefeuilleLivraisonPage() {
                                 <ArretApproBadge count={doc.couv_nb_arret_appro} />
                               </span>
                             )}
+                            {interdite && <InterditeBadge info={interdite} />}
+                            {interdite && !interdite.corrigee && interdite.date_proposee && (
+                              <span className="whitespace-nowrap text-[10px] font-semibold text-red-700" title={Array.from(interdite.refs.values()).map(interditeRefComment).join('\n')}>→ {formatDate(interdite.date_proposee)}</span>
+                            )}
                           </div>
                         ) : '—'}
                       </td>
-                      <td className={['border-b border-r border-slate-200 px-2 py-2 text-right font-semibold', couvNonServable ? 'text-rose-700' : 'text-slate-400'].join(' ')}>
+                      <td className={[td, 'text-right font-semibold', couvNonServable ? 'text-rose-700' : 'text-slate-400'].join(' ')}>
                         {isCdcDoc && doc.couv_nb_lignes_controlees > 0 ? `${doc.couv_nb_non_servables} / ${doc.couv_nb_lignes_controlees}` : '—'}
                       </td>
-                      <td className="whitespace-nowrap border-b border-r border-slate-200 px-2 py-2">
+                      <td className={[td, 'whitespace-nowrap'].join(' ')}>
                         {couvNonServable ? (
                           doc.couv_date_couverture_doc
                             ? <span className="text-orange-800">{formatDate(doc.couv_date_couverture_doc)}{doc.couv_retard_max_jours !== null ? ` (+${doc.couv_retard_max_jours} j)` : ''}</span>
-                            : <span className="font-semibold text-rose-700">Aucune réception connue</span>
+                            : <span className="font-semibold text-rose-700">Aucune réception</span>
                         ) : '—'}
                       </td>
                     </>
                   ) : null
                   return (
-                    <tr key={doc.key} className={['hover:bg-slate-50', cdcRetard ? 'bg-red-50' : '', couvNonServable ? 'bg-rose-50' : '', doc.action_recommandee === 'AJOUTER' ? 'bg-red-50' : '', doc.action_recommandee === 'SUPPRIMER' ? 'bg-rose-50' : '', doc.action_recommandee === 'VERIFIER' ? 'bg-amber-50' : '', selectedDocumentKeyForLines === doc.key ? 'ring-1 ring-inset ring-blue-300' : ''].join(' ')}>
-                      <td className="border-b border-r border-slate-200 px-2 py-2">{doc.agence}</td>
-                      <td className="border-b border-r border-slate-200 px-2 py-2">{doc.representant}</td>
-                      {isBlSelected && <td className="whitespace-nowrap border-b border-r border-slate-200 px-2 py-2 font-semibold">{formatDate(doc.date_controle)}</td>}
-                      <td className="border-b border-r border-slate-200 px-2 py-2">{doc.numero_tiers}</td>
-                      <td className="border-b border-r border-slate-200 px-2 py-2">{doc.nom_tiers}</td>
-                      <td className="border-b border-r border-slate-200 px-2 py-2 font-medium">
-                        <button type="button" onClick={() => setSelectedDocumentKeyForLines(doc.key)} className={['font-semibold underline-offset-2 hover:underline', cdcRetard ? 'text-red-700' : couvNonServable ? 'text-rose-700' : 'text-blue-700'].join(' ')}>{doc.numero_document}</button>
+                    <tr
+                      key={doc.key}
+                      onClick={() => setModalDocKey(doc.key)}
+                      className={['cursor-pointer hover:bg-blue-50', cdcRetard ? 'bg-red-50' : '', couvNonServable ? 'bg-rose-50' : '', doc.action_recommandee === 'AJOUTER' ? 'bg-red-50' : '', doc.action_recommandee === 'SUPPRIMER' ? 'bg-rose-50' : '', doc.action_recommandee === 'VERIFIER' ? 'bg-amber-50' : '', modalDocKey === doc.key ? 'ring-1 ring-inset ring-blue-400' : ''].join(' ')}
+                    >
+                      <td className={[td, 'whitespace-nowrap', interdite && !interdite.corrigee ? 'border-l-4 border-l-red-500' : ''].join(' ')}>{doc.agence}</td>
+                      <td className={[td, 'whitespace-nowrap'].join(' ')}>{doc.representant}</td>
+                      {isBlSelected && <td className={[td, 'whitespace-nowrap font-semibold'].join(' ')}>{formatDate(doc.date_controle)}</td>}
+                      <td className={[td, 'whitespace-nowrap'].join(' ')}>{doc.numero_tiers}</td>
+                      <td className={[td, 'max-w-[200px] truncate'].join(' ')} title={doc.nom_tiers}>{doc.nom_tiers}</td>
+                      <td className={[td, 'whitespace-nowrap'].join(' ')}>
+                        <div className="flex items-center gap-1">
+                          <span className={['font-semibold', cdcRetard ? 'text-red-700' : couvNonServable ? 'text-rose-700' : 'text-blue-700'].join(' ')}>{doc.numero_document}</span>
+                          {interdite && <InterditeBadge info={interdite} />}
+                        </div>
                       </td>
-                      {isBlSelected && <td className="border-b border-r border-slate-200 px-2 py-2 font-medium">{doc.reference_entete || '—'}</td>}
-                      <td className="border-b border-r border-slate-200 px-2 py-2">{doc.references || '—'}</td>
+                      {isBlSelected && <td className={[td, 'max-w-[160px] truncate font-medium'].join(' ')} title={doc.reference_entete}>{doc.reference_entete || '—'}</td>}
+                      <td className={[td, 'max-w-[180px] truncate'].join(' ')} title={doc.references}>{doc.references || '—'}</td>
                       {isBlSelected && (
                         <>
-                          <td className="border-b border-r border-slate-200 px-2 py-2">{doc.expedition || '—'}</td>
-                          <td className="border-b border-r border-slate-200 px-2 py-2">{doc.depot_entete || '—'}</td>
-                          <td className="max-w-[280px] border-b border-r border-slate-200 px-2 py-2" title={doc.lieu_livraison}>{doc.lieu_livraison || '—'}</td>
-                          <td className="border-b border-r border-slate-200 px-2 py-2 text-right font-semibold">{doc.nb_bl_groupe || '—'}</td>
-                          <td className="border-b border-r border-slate-200 px-2 py-2 text-right">{doc.nb_bl_avec_port || '—'}</td>
-                          <td className="border-b border-r border-slate-200 px-2 py-2 text-right font-semibold">{formatMoneyCents(doc.frais_port_constate_ht)}</td>
-                          <td className="border-b border-r border-slate-200 px-2 py-2 text-right">{formatMoneyCents(doc.frais_port_constate_groupe_ht)}</td>
-                          <td className="border-b border-r border-slate-200 px-2 py-2 text-right">{formatMoneyCents(doc.frais_port_attendu_groupe_ht)}</td>
-                          <td className="border-b border-r border-slate-200 px-2 py-2"><span className={['inline-flex whitespace-nowrap rounded-full border px-2 py-1 text-xs font-semibold', actionClassName(doc.action_recommandee)].join(' ')}>{actionLabel(doc.action_recommandee)}</span></td>
-                          <td className="border-b border-r border-slate-200 px-2 py-2 text-right font-semibold">{formatMoneyCents(doc.montant_action_ht)}</td>
-                          <td className="border-b border-r border-slate-200 px-2 py-2"><span className={['inline-flex whitespace-nowrap rounded-full border px-2 py-1 text-xs font-semibold', controlStatusClassName(doc.statut_controle)].join(' ')} title={doc.base_calcul_frais_port || undefined}>{controlStatusLabel(doc.statut_controle)}</span></td>
+                          <td className={[td, 'whitespace-nowrap'].join(' ')}>{doc.expedition || '—'}</td>
+                          <td className={[td, 'whitespace-nowrap'].join(' ')}>{doc.depot_entete || '—'}</td>
+                          <td className={[td, 'max-w-[220px] truncate'].join(' ')} title={doc.lieu_livraison}>{doc.lieu_livraison || '—'}</td>
+                          <td className={[td, 'text-right font-semibold'].join(' ')}>{doc.nb_bl_groupe || '—'}</td>
+                          <td className={[td, 'text-right'].join(' ')}>{doc.nb_bl_avec_port || '—'}</td>
+                          <td className={[td, 'whitespace-nowrap text-right font-semibold'].join(' ')}>{formatMoneyCents(doc.frais_port_constate_ht)}</td>
+                          <td className={[td, 'whitespace-nowrap text-right'].join(' ')}>{formatMoneyCents(doc.frais_port_constate_groupe_ht)}</td>
+                          <td className={[td, 'whitespace-nowrap text-right'].join(' ')}>{formatMoneyCents(doc.frais_port_attendu_groupe_ht)}</td>
+                          <td className={td}><span className={['inline-flex whitespace-nowrap rounded-full border px-1.5 py-0 text-[10px] font-semibold', actionClassName(doc.action_recommandee)].join(' ')}>{actionLabel(doc.action_recommandee)}</span></td>
+                          <td className={[td, 'whitespace-nowrap text-right font-semibold'].join(' ')}>{formatMoneyCents(doc.montant_action_ht)}</td>
+                          <td className={td}><span className={['inline-flex whitespace-nowrap rounded-full border px-1.5 py-0 text-[10px] font-semibold', controlStatusClassName(doc.statut_controle)].join(' ')} title={doc.base_calcul_frais_port || undefined}>{controlStatusLabel(doc.statut_controle)}</span></td>
                         </>
                       )}
-                      <td className={['border-b border-r border-slate-200 px-2 py-2', cdcRetard ? 'font-semibold text-red-700' : ''].join(' ')} title={cdcRetard ? `${CDC_RETARD_LABEL} : ${getCdcRetardDescription()}` : undefined}>
+                      {!isBlSelected && <td className={[td, 'whitespace-nowrap'].join(' ')}>{formatDate(doc.date_creation_document)}</td>}
+                      <td className={[td, 'whitespace-nowrap', cdcRetard ? 'font-semibold text-red-700' : ''].join(' ')} title={cdcRetard ? `${CDC_RETARD_LABEL} : ${getCdcRetardDescription()}` : undefined}>
                         {formatDate(doc.date_livraison)}{cdcRetard ? ' ⚠' : ''}
                       </td>
+                      <td className={[td, 'whitespace-nowrap text-right'].join(' ')}>{formatMoney(doc.montant_ht)}</td>
+                      <td className={[td, 'text-right'].join(' ')}>{doc.nb_lignes}</td>
                       {couvertureCells}
-                      <td className="border-b border-r border-slate-200 px-2 py-2">{doc.familles_macro}</td>
-                      <td className="border-b border-slate-200 px-2 py-2">{doc.client_en_sommeil ? 'Oui' : 'Non'}</td>
+                      <td className={[td, 'max-w-[140px] truncate'].join(' ')} title={doc.familles_macro}>{doc.familles_macro}</td>
+                      <td className="border-b border-slate-200 px-1.5 py-1">{doc.client_en_sommeil ? 'Oui' : 'Non'}</td>
                     </tr>
                   )
                 })}
-                {sortedDocuments.length === 0 && <tr><td colSpan={documentColumns.length} className="px-4 py-8 text-center text-slate-500">Aucun document à afficher.</td></tr>}
+                {sortedDocuments.length === 0 && <tr><td colSpan={documentColumns.length} className="px-4 py-8 text-center text-slate-500">{loading ? 'Chargement…' : 'Aucun document à afficher.'}</td></tr>}
               </tbody>
             </table>
           </div>
         </section>
 
+        {showLignes && (
         <section className="rounded-2xl border border-slate-200 bg-white shadow-sm">
           <div className="flex items-center justify-between border-b border-slate-200 px-4 py-3">
             <div>
@@ -2424,6 +2777,205 @@ export default function PortefeuilleLivraisonPage() {
             </table>
           </div>
         </section>
+        )}
+
+        {/* ── Fenêtre flottante d'une commande ─────────────────────────── */}
+        {editionPromesse && (
+          <EditionAction
+            commande={editionPromesse}
+            onClose={() => setEditionPromesse(null)}
+            onSaved={() => { setEditionPromesse(null); void chargerPromesses() }}
+          />
+        )}
+        {modalDoc && (
+          <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-900/40 p-3" onClick={() => setModalDocKey(null)}>
+            <div className="flex max-h-[94vh] w-[min(1500px,97vw)] flex-col rounded-xl bg-white shadow-2xl" onClick={(e) => e.stopPropagation()}>
+              <div className="flex flex-wrap items-start justify-between gap-2 border-b border-slate-200 px-4 py-2">
+                <div className="min-w-0 space-y-0.5">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-base font-semibold text-slate-900">{modalDoc.type_document} {modalDoc.numero_document}</span>
+                    {modalDoc.type_document === 'CDC' && (
+                      <span className={['inline-flex whitespace-nowrap rounded-full border px-2 py-0.5 text-[11px] font-semibold', couvertureClassName(modalDoc.couv_statut_doc)].join(' ')}>{couvertureLabel(modalDoc.couv_statut_doc)}</span>
+                    )}
+                    {isCdcEnRetard(modalDoc) && <span className="rounded-full border border-red-300 bg-red-100 px-2 py-0.5 text-[11px] font-semibold text-red-800">{CDC_RETARD_LABEL}</span>}
+                    {interditeByDoc.get(cdcDuDoc(modalDoc)) && <InterditeBadge info={interditeByDoc.get(cdcDuDoc(modalDoc))!} />}
+                  </div>
+                  <div className="text-xs text-slate-600">
+                    <b>{modalDoc.nom_tiers}</b> ({modalDoc.numero_tiers}) · {modalDoc.representant} · {modalDoc.agence}
+                    {modalDoc.references ? <> · Chantier / réf. : <b>{modalDoc.references}</b></> : null}
+                  </div>
+                  <div className="text-xs text-slate-600">
+                    Créée le {formatDate(modalDoc.date_creation_document) || '—'} · Livraison <b>{formatDate(modalDoc.date_livraison) || '—'}</b> · {modalDoc.nb_lignes} ligne(s) · <b>{formatMoney(modalDoc.montant_ht)}</b>
+                    {modalDoc.couv_nb_non_servables > 0 && <> · <span className="font-semibold text-rose-700">{modalDoc.couv_nb_non_servables} ligne(s) non dispo. à date liv.{modalDoc.couv_date_couverture_doc ? ` — complète le ${formatDate(modalDoc.couv_date_couverture_doc)}` : ''}</span></>}
+                  </div>
+                  {(() => {
+                    const info = interditeByDoc.get(cdcDuDoc(modalDoc))
+                    if (!info) return null
+                    return (
+                      <div className={['text-xs', info.corrigee ? 'text-slate-500' : 'font-semibold text-red-700'].join(' ')}>
+                        ⛔ Date de livraison interdite repérée le {info.premiere_detection ? new Date(info.premiere_detection).toLocaleDateString('fr-FR') : '?'}
+                        {info.date_livraison_saisie ? ` · date promise alors ${formatDate(info.date_livraison_saisie)}` : ''}
+                        {info.date_proposee ? ` · date au plus tôt sans léser personne ${formatDate(info.date_proposee)}` : ''}
+                        {info.references.length ? ` · réf. ${info.references.join(', ')}` : ''}
+                        {info.corrigee ? ' · corrigée depuis' : ''}
+                      </div>
+                    )
+                  })()}
+                  {(() => {
+                    const c = promesseDuDoc(modalDoc)
+                    if (!c) return null
+                    return (
+                      <div className="mt-1 rounded-lg border border-rose-200 bg-rose-50/70 px-2.5 py-1.5 text-xs">
+                        <div className="mb-1 flex flex-wrap items-center gap-2">
+                          <span className="font-semibold text-rose-800">⛔ Date de livraison interdite{modalDoc.type_document === 'PL' ? ` (commande ${c.numero_document})` : ''}</span>
+                          <span className="text-slate-600">
+                            {c.lignes.length ? VERDICT_INFO[c.verdict].label : 'désormais tenable'}
+                            {c.date_proposee ? <> · livrable au plus tôt le <b>{formatDateCourte(c.date_proposee)}</b>{c.via_appro ? ' (appro à lancer)' : ''}</> : null}
+                          </span>
+                        </div>
+                        <CelluleAction c={c} onEdit={() => setEditionPromesse(c)} />
+                        {c.lignes.length > 0 && (
+                          <div className="mt-1 text-[11px] text-slate-700">
+                            {c.lignes.map((l) => (
+                              <div key={l.reference_article}>
+                                <b>{l.reference_article}</b> · {VERDICT_INFO[l.verdict].court} · qté {l.quantite} · manque {l.q_manque}
+                                {l.date_exacte ? <> · dispo exacte {formatDateCourte(l.date_exacte)}</> : null}
+                                {l.date_proposee ? <> · date proposée {formatDateCourte(l.date_proposee)}</> : null}
+                                {l.nb_victimes ? <> · retarde {l.nb_victimes} commande(s)</> : null}
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )
+                  })()}
+                  <div className="text-xs text-slate-500">
+                    Historique date de livraison :{' '}
+                    {dateHistoLoading ? 'chargement…' : !dateHisto || dateHisto.length === 0 ? 'aucun changement enregistré (suivi depuis le 24/11/2026)' : dateHisto.map((h, i) => (
+                      <span key={h.observe_le}>
+                        {i > 0 ? ' → ' : ''}
+                        <b>{formatDate(h.date_livraison_min)}{h.date_livraison_max && h.date_livraison_max !== h.date_livraison_min ? `–${formatDate(h.date_livraison_max)}` : ''}</b>
+                        <span className="text-slate-400"> (vu le {new Date(h.observe_le).toLocaleDateString('fr-FR')})</span>
+                      </span>
+                    ))}
+                  </div>
+                </div>
+                <div className="flex shrink-0 items-center gap-1.5">
+                  <button type="button" onClick={() => { setShowLignes(true); setSelectedDocumentKeyForLines(modalDoc.key); setModalDocKey(null) }} className="rounded-lg border border-slate-300 bg-white px-2.5 py-1 text-xs font-medium text-slate-700 hover:bg-slate-50">Voir dans le détail à la ligne</button>
+                  <button type="button" onClick={() => setModalDocKey(null)} className="rounded-lg bg-slate-900 px-2.5 py-1 text-xs font-medium text-white">Fermer ✕</button>
+                </div>
+              </div>
+              <div className="min-h-0 flex-1 overflow-y-auto">
+                <table className="w-full table-fixed border-collapse text-xs">
+                  <colgroup>
+                    <col className="w-[22px]" />
+                    <col className="w-[150px]" />
+                    <col />
+                    <col className="w-[50px]" />
+                    <col className="w-[85px]" />
+                    <col className="w-[80px]" />
+                    {modalDoc.type_document === 'CDC' && (<>
+                      <col className="w-[150px]" />
+                      <col className="w-[70px]" />
+                      <col className="w-[70px]" />
+                      <col className="w-[170px]" />
+                      <col className="w-[230px]" />
+                    </>)}
+                  </colgroup>
+                  <thead className="sticky top-0 z-10 bg-slate-100 text-[11px]">
+                    <tr>
+                      <th className="border-b border-slate-200 px-1 py-1"></th>
+                      <th className="border-b border-slate-200 px-1.5 py-1 text-left">Référence</th>
+                      <th className="border-b border-slate-200 px-1.5 py-1 text-left">Désignation</th>
+                      <th className="border-b border-slate-200 px-1.5 py-1 text-right">Qté</th>
+                      <th className="border-b border-slate-200 px-1.5 py-1 text-right">Montant</th>
+                      <th className="border-b border-slate-200 px-1.5 py-1 text-left">Livraison</th>
+                      {modalDoc.type_document === 'CDC' && (<>
+                        <th className="border-b border-slate-200 px-1.5 py-1 text-left">Couverture</th>
+                        <th className="border-b border-slate-200 px-1.5 py-1 text-right" title="Stock dispo global tous dépôts">Stock</th>
+                        <th className="border-b border-slate-200 px-1.5 py-1 text-right" title="Stock projeté à la date de livraison">Projeté</th>
+                        <th className="border-b border-slate-200 px-1.5 py-1 text-left">Couvert le</th>
+                        <th className="border-b border-slate-200 px-1.5 py-1 text-left">Prochaine réception</th>
+                      </>)}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {modalLignes.map((ligne, index) => {
+                      const couvNonServable = isCouvertureNonServable(ligne.couv_statut)
+                      const isCouvertureLine = Boolean(ligne.couv_statut) && ligne.couv_statut !== COUVERTURE_HORS_CONTROLE
+                      const info = interditeByDoc.get(cdcDuDoc(modalDoc))
+                      const refInfo = info?.refs.get(normalizeReferenceKey(ligne.reference_article))
+                      const refInterdite = Boolean(refInfo && !refInfo.corrigee)
+                      const souci = couvNonServable || refInterdite || ligne.couv_arret_appro
+                      const nbCols = modalDoc.type_document === 'CDC' ? 11 : 6
+                      return (
+                        <Fragment key={`${ligne.id || index}`}>
+                        <tr className={[couvNonServable ? 'bg-rose-50' : refInterdite ? 'bg-red-50' : '', 'hover:bg-slate-50'].join(' ')}>
+                          <td className="border-b border-slate-100 px-1 py-0.5 text-center">{souci ? (refInterdite ? '⛔' : '⚠') : ''}</td>
+                          <td className="truncate border-b border-slate-100 px-1.5 py-0.5 font-medium" title={safeText(ligne.reference_article, '')}>
+                            {ligne.reference_article ? <a href={`/stock?ref=${encodeURIComponent(ligne.reference_article)}`} target="_blank" rel="noreferrer" className={['hover:underline', couvNonServable ? 'text-rose-700' : 'text-blue-700'].join(' ')}>{ligne.reference_article}</a> : '—'}
+                          </td>
+                          <td className="truncate border-b border-slate-100 px-1.5 py-0.5" title={safeText(ligne.designation_article, '')}>{safeText(ligne.designation_article, '')}</td>
+                          <td className="border-b border-slate-100 px-1.5 py-0.5 text-right">{formatQty(ligne.quantite)}</td>
+                          <td className="border-b border-slate-100 px-1.5 py-0.5 text-right">{formatMoney(ligne.montant_ht)}</td>
+                          <td className="border-b border-slate-100 px-1.5 py-0.5">{formatDate(ligne.date_livraison)}</td>
+                          {modalDoc.type_document === 'CDC' && (<>
+                            <td className="border-b border-slate-100 px-1.5 py-0.5">
+                              <div className="flex items-center gap-1 overflow-hidden">
+                                {ligne.couv_statut ? <span className={['inline-flex whitespace-nowrap rounded-full border px-1.5 py-0 text-[10px] font-semibold', couvertureClassName(ligne.couv_statut)].join(' ')}>{couvertureLabel(ligne.couv_statut)}</span> : '—'}
+                                {ligne.couv_arret_appro && <span title={ARRET_APPRO_TITLE}>⛔</span>}
+                                {refInfo && (
+                                  <span title={interditeRefComment(refInfo)} className={['inline-flex whitespace-nowrap rounded border px-1 py-0 text-[10px] font-semibold', refInfo.corrigee ? 'border-slate-300 bg-slate-100 text-slate-500' : 'border-red-300 bg-red-100 text-red-800'].join(' ')}>⛔ Interdite</span>
+                                )}
+                              </div>
+                            </td>
+                            <td className="border-b border-slate-100 px-1.5 py-0.5 text-right">{isCouvertureLine ? formatQty(ligne.couv_stock_disponible) : '—'}</td>
+                            <td className={['border-b border-slate-100 px-1.5 py-0.5 text-right font-semibold', isCouvertureLine && Number(ligne.couv_stock_projete) < 0 ? 'text-rose-700' : ''].join(' ')}>{isCouvertureLine ? formatQty(ligne.couv_stock_projete) : '—'}</td>
+                            <td className="truncate border-b border-slate-100 px-1.5 py-0.5">
+                              {couvNonServable
+                                ? (ligne.couv_date_couverture
+                                  ? <span className="text-orange-800">{formatDate(ligne.couv_date_couverture)}{ligne.couv_retard_jours !== null ? ` (+${ligne.couv_retard_jours} j)` : ''}</span>
+                                  : ligne.couv_arret_appro
+                                    ? <span className="font-semibold text-violet-800">Jamais — pas de réappro</span>
+                                    : <span className="font-semibold text-rose-700">Aucune réception connue</span>)
+                                : ligne.couv_statut === 'COUVERT_PAR_RECEPTION' && ligne.couv_date_couverture
+                                  ? <span className="text-sky-800">{formatDate(ligne.couv_date_couverture)}</span>
+                                  : ligne.couv_statut === 'A_COUVRIR_PAR_APPRO'
+                                    ? <span className="text-amber-800">Appro dès le {formatDate(ligne.couv_date_appro)}</span>
+                                    : '—'}
+                            </td>
+                            <td className="truncate border-b border-slate-100 px-1.5 py-0.5 text-[11px]" title={ligne.couv_prochaine_reception || undefined}>
+                              {ligne.couv_prochaine_reception || (isCouvertureLine ? <span className="text-slate-400">—</span> : '—')}
+                            </td>
+                          </>)}
+                        </tr>
+                        {refInfo && (
+                          <tr className={refInfo.corrigee ? 'bg-slate-50' : 'bg-red-50'}>
+                            <td className="border-b border-slate-100 px-1 py-0.5"></td>
+                            <td colSpan={nbCols - 1} className={['border-b border-slate-100 px-1.5 pb-1 pt-0 text-[11px]', refInfo.corrigee ? 'text-slate-500' : 'font-semibold text-red-800'].join(' ')}>
+                              ⛔ Date de livraison interdite — {interditeRefComment(refInfo)}
+                            </td>
+                          </tr>
+                        )}
+                        </Fragment>
+                      )
+                    })}
+                    {modalLignes.length === 0 && <tr><td colSpan={11} className="px-4 py-6 text-center text-slate-500">Aucune ligne.</td></tr>}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ── Règles et légende (en bas de page) ───────────────────────── */}
+        <footer className="space-y-1 px-1 pt-2 text-[11px] leading-snug text-slate-400">
+          <p>Contrôle groupé des BL : un seul forfait par Date BL / N° tiers / Mode d'expédition / Lieu de livraison. Les BL à corriger sont identifiés avec une action Ajouter, Supprimer ou Vérifier.</p>
+          <p>Les CDC en retard de livraison ({getCdcRetardDescription()}) sont surlignées en rouge.</p>
+          <p>Couverture stock des CDC : stock global tous dépôts + réceptions fournisseurs attendues (commandes SAGE non réceptionnées), besoins servis par date de livraison puis date de création ; les commandes fournisseurs en retard ou sans date sont supposées reçues demain. Une ligne livrable après la période figée (aujourd'hui + délai d'appro de la référence) n'est pas en alerte : elle est « à couvrir par appro ». Dates de prochaine dispo par référence : écran Références en pénurie. « Hors contrôle » : référence non gérée en stock (prestation, article divers) ou quantité nulle.</p>
+          <p>⛔ Date interdite : commande repérée au moins une fois par le contrôle des dates de livraison interdites (date promise sans tenir compte du stock : intenable, ou prise sur le stock d'une commande plus ancienne), mémorisée sans limite de durée depuis le 24/11/2026 ; « corrigée » = le dernier contrôle ne la voit plus en défaut. Une commande peut être « couverte » aujourd'hui tout en ayant été saisie à une date interdite. L'historique des dates de livraison est photographié toutes les heures depuis le 24/11/2026.</p>
+          <p>Par défaut, la sélection couvre les livraisons jusqu'à aujourd'hui + 2 mois (retards inclus).</p>
+        </footer>
       </div>
     </main>
   )
