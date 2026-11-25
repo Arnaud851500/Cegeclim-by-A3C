@@ -1217,6 +1217,14 @@ const OPERATEUR_LABELS: Record<Operateur, string> = {
   egal: 'est égal à', contient: 'contient', ne_contient_pas: 'ne contient pas',
   commence_par: 'commence par', est_vide: 'est vide', non_vide: "n'est pas vide",
 }
+/** Filtres par défaut de l'onglet Comparaison (public.controle_filtres_defaut.filtres). */
+type FiltresDefaut = {
+  conditions?: Array<Omit<FiltreCondition, 'id'>>
+  logique?: 'et' | 'ou'
+  statut?: 'tous' | 'apparie' | 'manquant_blg'
+  exclureSommeil?: boolean
+  onlyEcarts?: boolean
+}
 function nouvelleCondition(): FiltreCondition {
   return { id: Math.random().toString(36).slice(2), cote: 'sage', champ: '', operateur: 'contient', valeur: '' }
 }
@@ -2170,6 +2178,9 @@ function OngletComparaison() {
   const [exclureSommeil, setExclureSommeil] = useState(true)
   const [conditions, setConditions] = useState<FiltreCondition[]>([])
   const [logiqueConditions, setLogiqueConditions] = useState<'et' | 'ou'>('et')
+  const [filtresDefautPrets, setFiltresDefautPrets] = useState(false)
+  const [filtresDefautInfo, setFiltresDefautInfo] = useState<{ updated_at: string | null; updated_by: string | null } | null>(null)
+  const [filtresDefautMessage, setFiltresDefautMessage] = useState<string | null>(null)
   const [search, setSearch] = useState('')
   const [onlyEcarts, setOnlyEcarts] = useState(false)
 
@@ -2207,8 +2218,57 @@ function OngletComparaison() {
     [conditions]
   )
 
-  useEffect(() => { void loadMappingPanel(); void chargerChampsMaitres() }, [])
-  useEffect(() => { void chargerToutes() }, [statutFilter, exclureSommeil, conditionsValides, logiqueConditions]) // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { void loadMappingPanel(); void chargerChampsMaitres(); void chargerFiltresDefaut(true) }, []) // eslint-disable-line react-hooks/exhaustive-deps
+  // Le premier chargement attend les filtres par défaut (évite un double chargement).
+  useEffect(() => { if (filtresDefautPrets) void chargerToutes() }, [filtresDefautPrets, statutFilter, exclureSommeil, conditionsValides, logiqueConditions]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  /** Lit les filtres par défaut partagés (table controle_filtres_defaut) et les applique. */
+  async function chargerFiltresDefaut(initial: boolean) {
+    setFiltresDefautMessage(null)
+    const { data, error: err } = await supabase.from('controle_filtres_defaut').select('*').eq('domaine', 'client').maybeSingle()
+    if (err) {
+      setFiltresDefautMessage(`Filtres par défaut non chargés : ${err.message}`)
+    } else if (data) {
+      const f = (data as { filtres: FiltresDefaut; updated_at: string | null; updated_by: string | null })
+      appliquerFiltres(f.filtres || {})
+      setFiltresDefautInfo({ updated_at: f.updated_at, updated_by: f.updated_by })
+      if (!initial) setFiltresDefautMessage('Filtres par défaut rétablis.')
+    } else if (!initial) {
+      appliquerFiltres({})
+      setFiltresDefautMessage('Aucun filtre par défaut enregistré : filtres remis à zéro.')
+    }
+    setFiltresDefautPrets(true)
+  }
+
+  function appliquerFiltres(f: FiltresDefaut) {
+    setConditions((f.conditions || []).map((c) => ({ ...nouvelleCondition(), ...c, id: Math.random().toString(36).slice(2) })))
+    setLogiqueConditions(f.logique === 'ou' ? 'ou' : 'et')
+    setStatutFilter(f.statut ?? 'tous')
+    setExclureSommeil(f.exclureSommeil ?? true)
+    setOnlyEcarts(f.onlyEcarts ?? false)
+  }
+
+  /** Enregistre les filtres affichés comme filtres par défaut (partagés par tous les utilisateurs de l'écran). */
+  async function enregistrerFiltresDefaut() {
+    setFiltresDefautMessage(null)
+    const filtres: FiltresDefaut = {
+      conditions: conditionsValides.map(({ cote, champ, operateur, valeur }) => ({ cote, champ, operateur, valeur })),
+      logique: logiqueConditions,
+      statut: statutFilter,
+      exclureSommeil,
+      onlyEcarts,
+    }
+    const { data: auth } = await supabase.auth.getUser()
+    const updated_at = new Date().toISOString()
+    const updated_by = auth?.user?.email ?? null
+    const { error: err } = await supabase.from('controle_filtres_defaut').upsert(
+      { domaine: 'client', filtres, updated_at, updated_by },
+      { onConflict: 'domaine' },
+    )
+    if (err) { setFiltresDefautMessage(`Enregistrement impossible : ${err.message}`); return }
+    setFiltresDefautInfo({ updated_at, updated_by })
+    setFiltresDefautMessage(`Filtres par défaut enregistrés (${filtres.conditions?.length ?? 0} condition${(filtres.conditions?.length ?? 0) > 1 ? 's' : ''}).`)
+  }
 
   async function chargerChampsMaitres() {
     const { data, error: err } = await supabase.from('controle_champ_maitre').select('*').eq('domaine', 'client')
@@ -2720,8 +2780,28 @@ function OngletComparaison() {
                 ))}
               </div>
 
-              <button type="button" onClick={() => setConditions((prev) => [...prev, nouvelleCondition()])}
-                className="mt-2 text-[12px] font-bold text-[#B4761A] hover:underline">+ Ajouter une condition</button>
+              <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1">
+                <button type="button" onClick={() => setConditions((prev) => [...prev, nouvelleCondition()])}
+                  className="text-[12px] font-bold text-[#B4761A] hover:underline">+ Ajouter une condition</button>
+                <span className="ml-auto flex flex-wrap items-center gap-2">
+                  {filtresDefautInfo?.updated_at && (
+                    <span className="text-[11px] text-[#8A8474]">
+                      Défaut enregistré le {new Date(filtresDefautInfo.updated_at).toLocaleString('fr-FR', { dateStyle: 'short', timeStyle: 'short' })}
+                      {filtresDefautInfo.updated_by ? ` par ${filtresDefautInfo.updated_by}` : ''}
+                    </span>
+                  )}
+                  <button type="button" onClick={() => void chargerFiltresDefaut(false)}
+                    className="rounded-lg border border-[#E5E1D8] bg-white px-3 py-1.5 text-[12px] font-bold text-[#3A362E] hover:bg-[#F4F3F0]">
+                    ↺ Filtres par défaut
+                  </button>
+                  <button type="button" onClick={() => void enregistrerFiltresDefaut()}
+                    title="Enregistre les filtres affichés (conditions, ET/OU, statut, sommeil, écart réel) comme filtres par défaut de l'écran, pour tous les utilisateurs"
+                    className="rounded-lg border border-[#B4761A] bg-[#FFF8EC] px-3 py-1.5 text-[12px] font-bold text-[#8A5A12] hover:bg-[#FCEFD6]">
+                    💾 Enregistrer comme filtres par défaut
+                  </button>
+                </span>
+              </div>
+              {filtresDefautMessage && <p className="mt-1 text-right text-[12px] font-semibold text-[#8A5A12]">{filtresDefautMessage}</p>}
             </div>
 
             <div className="mt-3 flex flex-wrap items-center justify-between gap-2 border-t border-[#E5E1D8] pt-3">
@@ -3014,7 +3094,7 @@ function MappingBuilder({
 type OngletPrincipal = 'sage' | 'blg' | 'comparaison'
 
 export default function ClientsSageBlgPage() {
-  const [onglet, setOnglet] = useState<OngletPrincipal>('sage')
+  const [onglet, setOnglet] = useState<OngletPrincipal>('comparaison')
 
   return (
     <main className="min-h-screen bg-[#F4F3F0] p-6 text-[#111820]" style={{ fontFeatureSettings: '"tnum"' }}>
