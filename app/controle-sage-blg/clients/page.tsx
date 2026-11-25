@@ -1602,6 +1602,8 @@ function comparerAdresse(sage: unknown, blg: unknown): ResultatComparaison {
  * - tous=true (représentant) : chaque mot BLG doit se retrouver dans SAGE
  *   (préfixe agence absorbé, une lettre d'écart tolérée). "MPEYRE Philippe"
  *   vs "Christophe MICHALUC" → rouge ; "AAMENA Damien" vs "Damien MENA" → vert.
+ *   Nom composé BLG : une partie suffit ("DCAZES Jérémy" vs "Jérémy
+ *   CAZES-CARRERE" → vert, même collaborateur).
  * - tous=false (contact principal) : un seul mot commun suffit
  *   ("FARDEGUE/ DANQUIGNY" vs "Charles DANQUIGNY" → vert). */
 function comparerPersonne(sage: unknown, blg: unknown, tous: boolean): ResultatComparaison {
@@ -1609,7 +1611,17 @@ function comparerPersonne(sage: unknown, blg: unknown, tous: boolean): ResultatC
   const mb = motsDe(blg).filter((m) => m.length >= 3)
   if (ms.length === 0 || mb.length === 0) return 'partiel'
   const proche = (m: string) => motTrouveDans(m, ms)
-  if (tous) return mb.every(proche) ? 'ok' : 'ecart'
+  if (tous) {
+    if (mb.every(proche)) return 'ok'
+    // Nom composé côté BLG ("Jérémy CAZES-CARRERE") face au nom court SAGE
+    // ("DCAZES Jérémy") : chaque mot BLG (séparé par des espaces) est retrouvé
+    // si l'une de ses parties (séparées par un tiret) est dans SAGE.
+    const groupes = String(blg ?? '')
+      .split(/\s+/)
+      .map((g) => motsDe(g.replace(/-/g, ' ')).filter((m) => m.length >= 3))
+      .filter((g) => g.length > 0)
+    return groupes.length > 0 && groupes.every((g) => g.some(proche)) ? 'ok' : 'ecart'
+  }
   return mb.some(proche) ? 'ok' : 'ecart'
 }
 
