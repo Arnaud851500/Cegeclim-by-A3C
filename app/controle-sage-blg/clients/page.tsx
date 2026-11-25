@@ -68,7 +68,7 @@
  *  - Champs numériques (encours, assurance crédit, nb adresses) : une valeur
  *    absente vaut 0 — "0" d'un côté et "rien" de l'autre = identique.
  *  - Encours autorisé / assurance crédit : BLG ne pouvant pas porter 0, une
- *    valeur BLG vide, 0 ou 0,1 est considérée comme 0 (OK si SAGE = 0/vide).
+ *    valeur BLG vide, 0, 0,1 ou 1 est considérée comme 0 (OK si SAGE = 0/vide).
  *  - Table public.controle_champ_maitre : champs pour lesquels BLG est maître
  *    (réglage via le bouton "⚙ BLG maître" du pavé Champs contrôlés). Ces
  *    champs ne sont plus comparés : pastille verte "BLG maître", exclus des
@@ -1689,14 +1689,15 @@ type PaireExport = {
 
 /**
  * Encours autorisé / assurance crédit : BLG n'accepte pas 0 sur la partie
- * encours. Côté BLG, vide, 0 et 0,1 valent donc 0 (= 0 ou vide dans SAGE).
+ * encours. Côté BLG, vide, 0, 0,1 et 1 valent donc 0 (= 0 ou vide dans SAGE).
  * Une valeur SAGE absente vaut 0.
  */
 function normaliserMontantEncoursBlg(v: unknown): number {
   if (v === null || v === undefined || String(v).trim() === '') return 0
   const n = Number(String(v).replace(',', '.').replace(/\s/g, ''))
   if (!Number.isFinite(n)) return NaN
-  return Math.abs(n - 0.1) < 1e-9 ? 0 : n
+  // 0,1 saisi dans BLG remonte arrondi à 1 dans la vue : 0,1 et 1 valent 0
+  return Math.abs(n - 0.1) < 1e-9 || Math.abs(n - 1) < 1e-9 ? 0 : n
 }
 function comparerMontantEncoursBlg(sage: unknown, blg: unknown): 'ok' | 'ecart' {
   const s = sage === null || sage === undefined || String(sage).trim() === ''
