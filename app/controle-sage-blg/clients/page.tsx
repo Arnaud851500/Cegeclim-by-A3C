@@ -67,6 +67,8 @@
  *    retirés, comparaison sur les 9 derniers chiffres.
  *  - Champs numériques (encours, assurance crédit, nb adresses) : une valeur
  *    absente vaut 0 — "0" d'un côté et "rien" de l'autre = identique.
+ *  - Encours autorisé / assurance crédit : BLG ne pouvant pas porter 0, une
+ *    valeur BLG vide, 0 ou 0,1 est considérée comme 0 (OK si SAGE = 0/vide).
  *  - Table public.controle_champ_maitre : champs pour lesquels BLG est maître
  *    (réglage via le bouton "⚙ BLG maître" du pavé Champs contrôlés). Ces
  *    champs ne sont plus comparés : pastille verte "BLG maître", exclus des
@@ -1684,6 +1686,26 @@ type PaireExport = {
   numerique?: boolean
 }
 
+
+/**
+ * Encours autorisé / assurance crédit : BLG n'accepte pas 0 sur la partie
+ * encours. Côté BLG, vide, 0 et 0,1 valent donc 0 (= 0 ou vide dans SAGE).
+ * Une valeur SAGE absente vaut 0.
+ */
+function normaliserMontantEncoursBlg(v: unknown): number {
+  if (v === null || v === undefined || String(v).trim() === '') return 0
+  const n = Number(String(v).replace(',', '.').replace(/\s/g, ''))
+  if (!Number.isFinite(n)) return NaN
+  return Math.abs(n - 0.1) < 1e-9 ? 0 : n
+}
+function comparerMontantEncoursBlg(sage: unknown, blg: unknown): 'ok' | 'ecart' {
+  const s = sage === null || sage === undefined || String(sage).trim() === ''
+    ? 0
+    : Number(String(sage).replace(',', '.').replace(/\s/g, ''))
+  const b = normaliserMontantEncoursBlg(blg)
+  return Number.isFinite(s) && Number.isFinite(b) && Math.abs(s - b) < 1e-9 ? 'ok' : 'ecart'
+}
+
 const EXPORT_PAIRES_COMPARAISON: PaireExport[] = [
   { numeroSage: 2, labelSage: 'Intitulé', sageKey: 'sage_intitule', numeroBlg: '2', labelBlg: 'Raison sociale', blgKey: 'blg_intitule', compareStrict: true },
   {
@@ -1744,11 +1766,11 @@ const EXPORT_PAIRES_COMPARAISON: PaireExport[] = [
   },
   {
     numeroSage: 28, labelSage: 'Encours autorisé', sageKey: 'sage_encours', numeroBlg: '18', labelBlg: "Limite d'encours", blgKey: 'blg_encours', compareStrict: true, numerique: true,
-    comparer: (r) => (Number(r.sage_encours ?? 0) === Number(r.blg_encours ?? 0) ? 'ok' : 'ecart'),
+    comparer: (r) => comparerMontantEncoursBlg(r.sage_encours, r.blg_encours),
   },
   {
     numeroSage: 29, labelSage: 'Assurance crédit', sageKey: 'sage_assurance_credit', numeroBlg: '19', labelBlg: "Montant d'assurance crédit", blgKey: 'blg_assurance_credit', compareStrict: true, numerique: true,
-    comparer: (r) => (Number(r.sage_assurance_credit ?? 0) === Number(r.blg_assurance_credit ?? 0) ? 'ok' : 'ecart'),
+    comparer: (r) => comparerMontantEncoursBlg(r.sage_assurance_credit, r.blg_assurance_credit),
   },
   { numeroSage: 30, labelSage: 'Agence de rattachement', sageKey: 'sage_agence_rattachement', numeroBlg: '23', labelBlg: 'Division (informatif, pas d\'équivalence confirmée)', blgKey: 'blg_division', compareStrict: false },
   {
