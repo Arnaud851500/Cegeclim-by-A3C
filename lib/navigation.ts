@@ -69,6 +69,8 @@
 // ÉVOLUTION (2026-11-02) : nouveau bloc « Hotline technique » (SAV PV / thermique) :
 // console d'appel et tickets (can_hotline), éditeur de diagnostic et statistiques
 // (can_hotline_expert). Migration 20261102_hotline_technique.sql.
+// ÉVOLUTION (2026-11-25) : « Contrats d’objectifs » sort du droit can_dashboard → droit dédié
+// can_contrats_objectifs (profils Direction et Administrateur), verrouillé aussi en base (obj_peut_lire).
 // ÉVOLUTION (2026-11-03) : « Contrats d’objectifs » (/objectifs/contrats) ajouté au bloc
 // Mes agences / Mes commerciaux (menu sous can_dashboard ; lecture / écriture contrôlées
 // en base par obj_peut_lire / obj_peut_modifier). Migration 20261103_contrats_objectifs.sql.
@@ -211,7 +213,7 @@ export const NAV_BLOCS: NavBloc[] = [
     iconBg: 'rgba(255,255,255,0.18)',
     pages: [
       { label: 'Suivi agences – commerciaux', path: '/suivi-agences', activeLabel: 'Suivi agences – commerciaux', accessKey: 'can_suivi_agences', description: 'CA facturé N-2 / N-1 / N par agence et collaborateur, évolution vs N-1 et vs entreprise, croix de positionnement trimestrielle, fiche détaillée — limité aux agences / collaborateurs autorisés.' },
-      { label: 'Contrats d’objectifs', path: '/objectifs/contrats', activeLabel: 'Contrats d’objectifs', accessKey: 'can_dashboard', description: 'Contrat d’objectifs signé par chaque commercial : objectif CA, commission sur marge, avances, primes annuelles. Le commercial voit sa fiche ; la direction modifie, évalue et importe le classeur.' },
+      { label: 'Contrats d’objectifs', path: '/objectifs/contrats', activeLabel: 'Contrats d’objectifs', accessKey: 'can_contrats_objectifs', description: 'Contrat d’objectifs signé par chaque commercial : objectif CA, commission sur marge, avances, primes annuelles. Le commercial voit sa fiche ; la direction modifie, évalue et importe le classeur.' },
     ],
   },
   {

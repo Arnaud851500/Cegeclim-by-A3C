@@ -32,6 +32,7 @@ type PermissionKey =
   | 'can_hotline_expert'
   | 'can_hotline_editeur'
   | 'can_guides_blg'
+  | 'can_contrats_objectifs'
 
 type AlertKey =
   | 'show_alert_cerfa_ko'
@@ -117,7 +118,7 @@ const PERMISSION_GROUPS: Array<{
     family: 'Activité & clients',
     hint: 'Blocs « Mon activité » et « Mes clients »',
     items: [
-      { key: 'can_dashboard', label: 'Activité commerciale', description: 'One Page, activité quotidienne, analyse devis, courbes de flux, suivi multi clients, vision client 360, agenda.' },
+      { key: 'can_dashboard', label: 'Activité commerciale', description: 'One Page, activité quotidienne, analyse devis, courbes de flux, suivi multi clients, vision client 360, agenda (hors contrats d’objectifs, droit dédié).' },
       { key: 'can_activites', label: 'Activités – CA', description: 'Suivi des activités et indicateurs de chiffre d’affaires.' },
       { key: 'can_carte', label: 'Prospects / Clients', description: 'Carte commerciale et fiches prospects.' },
       { key: 'can_clients', label: 'Clients (ancien écran)', description: 'Liste clients — écran hors arborescence, ouvrable par URL.' },
@@ -135,6 +136,7 @@ const PERMISSION_GROUPS: Array<{
         description: 'CA facturé, évolution vs N-1, croix de positionnement, fiches. Chaque personne ne voit que les agences et collaborateurs de son périmètre (onglet Utilisateurs).',
       },
       { key: 'can_objectifs', label: 'Objectifs', description: 'Fixer et suivre les objectifs commerciaux (Direction).' },
+      { key: 'can_contrats_objectifs', label: 'Contrats d’objectifs', description: 'Contrats signés des commerciaux : objectif CA, commission sur marge, avances, primes. Réservé à la direction (droit sorti d’« Activité commerciale » le 25/11/2026).' },
     ],
   },
   {
@@ -290,6 +292,7 @@ const EMPTY_PROFILE: AccessProfile = {
   can_hotline_expert: false,
   can_hotline_editeur: false,
   can_guides_blg: false,
+  can_contrats_objectifs: false,
   show_alert_cerfa_ko: false,
   show_alert_cdc_liv_avant_2026: false,
   show_alert_controle_frais_port: false,

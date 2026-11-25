@@ -32,6 +32,7 @@ export type AccessRights = {
   can_hotline_editeur: boolean
   /** (2026-11-03) Bloc « Guides BLG » : modes opératoires BLG Cloud (HTML déposés). */
   can_guides_blg: boolean
+  can_contrats_objectifs: boolean
   can_change_scope: boolean
   allowed_scopes: string[]
   allowed_agences: string[]
@@ -118,6 +119,7 @@ type AccessProfileRow = {
   can_hotline_expert?: boolean | null
   can_hotline_editeur?: boolean | null
   can_guides_blg?: boolean | null
+  can_contrats_objectifs?: boolean | null
   can_change_scope?: boolean | null
   default_landing_page?: string | null
   show_alert_cerfa_ko?: boolean | null
@@ -190,6 +192,7 @@ export const defaultRights: AccessRights = {
   can_hotline_expert: false,
   can_hotline_editeur: false,
   can_guides_blg: false,
+  can_contrats_objectifs: false,
   can_change_scope: false,
   allowed_scopes: ['Global'],
   allowed_agences: [],
@@ -272,6 +275,8 @@ const PAGE_ACCESS_CHECKS: Array<[string, keyof AccessRights]> = [
   ['/activites', 'can_activites'],
   ['/financement', 'can_financement'],
   ['/suivi-agences', 'can_suivi_agences'],
+  // 25/11/2026 : contrats d'objectifs réservés à la direction (droit dédié)
+  ['/objectifs/contrats', 'can_contrats_objectifs'],
   ['/objectifs', 'can_objectifs'],
   ['/hotline/diagnostic', 'can_hotline_editeur'],
   ['/hotline/stats', 'can_hotline_expert'],
@@ -347,6 +352,7 @@ const PROFILE_FLAG_KEYS = [
   'can_hotline_expert',
   'can_hotline_editeur',
   'can_guides_blg',
+  'can_contrats_objectifs',
   'can_change_scope',
   'show_alert_cerfa_ko',
   'show_alert_cdc_liv_avant_2026',
