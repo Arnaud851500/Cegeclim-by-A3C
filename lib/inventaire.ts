@@ -796,7 +796,7 @@ export function pdfListeComptageV2(
       String(l.id),
       p(l.reference) + (l.hors_liste ? ' (HL)' : ''),
       p(l.ref_fournisseur || ''),
-      p(des.length > 40 ? des.slice(0, 40) : des),
+      p(des),
       pQte(l.qte_theorique),
       avec && l.qte !== null ? pQte(l.qte) : '',
       pEuro(l.pump),
@@ -809,8 +809,41 @@ export function pdfListeComptageV2(
   const columnStyles: Record<number, Record<string, unknown>> = {
     0: { cellWidth: 13, font: 'courier', fontStyle: 'bold', fontSize: 8.5, halign: 'center' },
     1: { cellWidth: 29, fontStyle: 'bold' }, 2: { cellWidth: 23 }, 3: { cellWidth: 'auto' },
-    4: { cellWidth: 12, halign: 'right' }, 5: { cellWidth: 21, halign: 'center', minCellHeight: 6.6 },
+    4: { cellWidth: 12, halign: 'center' }, 5: { cellWidth: 21, halign: 'center', minCellHeight: 6.6 },
     6: { cellWidth: 17, halign: 'right' }, 7: { cellWidth: 27 },
+  }
+
+  // Ajustement au dessin, sans changer la largeur des colonnes ni la hauteur des lignes :
+  //  - références (CEGECLIM, fournisseur) trop longues : police réduite pour tenir sur une ligne ;
+  //  - désignation trop longue : passage sur 2 lignes en police réduite (tronquée au-delà).
+  const TAILLE = 7.5
+  const ajusterCellule = (data: { section: string; column: { index: number }; cell: { raw: unknown; text: string[]; width: number; height: number; colSpan: number; padding: (c: 'left' | 'right' | 'top' | 'bottom') => number } }) => {
+    if (data.section !== 'body' || data.cell.colSpan > 1) return
+    const i = data.column.index
+    if (i !== 1 && i !== 2 && i !== 3) return
+    const brut = String(data.cell.raw ?? '')
+    if (!brut) return
+    const dispo = data.cell.width - data.cell.padding('left') - data.cell.padding('right') - 0.3
+    const hauteur = data.cell.height - data.cell.padding('top') - data.cell.padding('bottom')
+    doc.setFontSize(TAILLE)
+    const largeur = doc.getTextWidth(brut)
+    if (largeur <= dispo) { data.cell.text = [brut]; return }
+    if (i === 1 || i === 2) {
+      const f = Math.max(4.5, TAILLE * dispo / largeur)
+      doc.setFontSize(f)
+      data.cell.text = [brut]
+      return
+    }
+    // Désignation : plus grande police permettant 2 lignes dans la hauteur de la ligne.
+    for (let f = TAILLE; f >= 4.8; f -= 0.3) {
+      doc.setFontSize(f)
+      const lignes: string[] = doc.splitTextToSize(brut, dispo)
+      const hLignes = lignes.length * f * 1.15 * 0.3528
+      if (lignes.length <= 2 && hLignes <= hauteur + 0.6) { data.cell.text = lignes; return }
+    }
+    doc.setFontSize(4.8)
+    const lignes: string[] = doc.splitTextToSize(brut, dispo)
+    data.cell.text = lignes.slice(0, 2)
   }
 
   autoTable(doc, {
@@ -825,6 +858,7 @@ export function pdfListeComptageV2(
     showHead: 'everyPage',
     rowPageBreak: 'avoid',
     willDrawPage: (data: { pageNumber: number }) => { if (data.pageNumber === 1) enteteComplet(); else enteteReduit() },
+    willDrawCell: ajusterCellule as never,
   })
 
   // Récapitulatif, articles hors liste et signature.
