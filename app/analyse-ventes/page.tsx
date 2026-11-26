@@ -107,7 +107,7 @@ type Modele = {
   created_by: string
 }
 
-type Client = { code: string; nom: string; ville: string | null }
+type Client = { code: string; nom: string; ville: string | null; ca_12m: number | null; dernier_mois: string | null }
 
 /** Ligne affichée (détail, sous-total ou total). */
 type LigneAff = {
@@ -245,6 +245,15 @@ function grouper<T extends { groupe: string }>(liste: T[]) {
     m.get(x.groupe)!.push(x)
   }
   return Array.from(m.entries())
+}
+
+const fmtKeuros = new Intl.NumberFormat('fr-FR', { maximumFractionDigits: 0 })
+
+/** CA facturé 12 mois glissants, en k€ (aide à choisir le bon compte quand un client en a plusieurs). */
+function libelleActivite(c: Client) {
+  if (!c.ca_12m) return 'aucune facture sur 12 mois'
+  const mois = c.dernier_mois ? ` · dernière facture ${c.dernier_mois.slice(5, 7)}/${c.dernier_mois.slice(0, 4)}` : ''
+  return `${fmtKeuros.format(c.ca_12m / 1000)} k€ facturés sur 12 mois${mois}`
 }
 
 function cleDe(vals: unknown[]) {
@@ -408,6 +417,7 @@ function ChoixClients({ codes, onChange }: { codes: string[]; onChange: (codes: 
                 <span className="font-mono text-xs text-slate-500">{c.code}</span>
                 <span className="font-semibold">{c.nom}</span>
                 {c.ville && <span className="text-xs text-slate-400">{c.ville}</span>}
+                <span className={`ml-auto whitespace-nowrap text-xs ${c.ca_12m ? 'text-emerald-700' : 'text-amber-700'}`}>{libelleActivite(c)}</span>
               </label>
             ))}
           </div>
@@ -419,9 +429,16 @@ function ChoixClients({ codes, onChange }: { codes: string[]; onChange: (codes: 
       <div className="flex flex-wrap gap-1.5">
         {codes.length === 0 && <span className="text-xs text-slate-500">Tous les clients de votre périmètre.</span>}
         {codes.map((c) => (
-          <span key={c} className="inline-flex items-center gap-1 rounded-full border border-blue-200 bg-blue-50 py-0.5 pl-2.5 pr-1.5 text-xs text-blue-900">
+          <span
+            key={c}
+            title={connus[c] ? libelleActivite(connus[c]) : undefined}
+            className={`inline-flex items-center gap-1 rounded-full border py-0.5 pl-2.5 pr-1.5 text-xs ${
+              connus[c] && !connus[c].ca_12m ? 'border-amber-300 bg-amber-50 text-amber-900' : 'border-blue-200 bg-blue-50 text-blue-900'
+            }`}
+          >
             <span className="font-mono">{c}</span>
             {connus[c] && <span className="font-semibold">{connus[c].nom}</span>}
+            {connus[c] && !connus[c].ca_12m && <span>· aucune facture sur 12 mois</span>}
             <button onClick={() => basculer(c)} className="px-1 text-blue-400 hover:text-red-600" title="Retirer">
               ✕
             </button>
@@ -1412,7 +1429,12 @@ export default function AnalyseVentesPage() {
                       {lignes.length === 0 && nbDims > 0 && (
                         <tr>
                           <td colSpan={colonnes.length + (afficherPart ? 1 : 0)} className="p-6 text-center text-slate-500">
-                            Aucune vente ne correspond à ces critères.
+                            Aucune ligne ne correspond à ces critères.
+                            {clients.length > 0 && (
+                              <div className="mt-1 text-xs">
+                                Vérifiez le compte client choisi : un même client peut avoir plusieurs comptes (la recherche affiche le CA 12 mois de chacun).
+                              </div>
+                            )}
                           </td>
                         </tr>
                       )}
