@@ -33,6 +33,8 @@ type PermissionKey =
   | 'can_hotline_editeur'
   | 'can_guides_blg'
   | 'can_contrats_objectifs'
+  | 'can_analyse_ventes'
+  | 'can_voir_marge'
 
 type AlertKey =
   | 'show_alert_cerfa_ko'
@@ -120,6 +122,8 @@ const PERMISSION_GROUPS: Array<{
     items: [
       { key: 'can_dashboard', label: 'Activité commerciale', description: 'One Page, activité quotidienne, analyse devis, courbes de flux, suivi multi clients, vision client 360, agenda (hors contrats d’objectifs, droit dédié).' },
       { key: 'can_activites', label: 'Activités – CA', description: 'Suivi des activités et indicateurs de chiffre d’affaires.' },
+      { key: 'can_analyse_ventes', label: 'Analyse des ventes & devis', description: 'Requêtes rapides sur les lignes de factures, BL, CDC et devis : CA et quantités par client, famille macro, famille, article, top N, export Excel. Limité au périmètre agences / collaborateurs de la personne.' },
+      { key: 'can_voir_marge', label: 'Voir la marge (analyse des ventes)', description: 'Affiche la marge et le taux de marge dans l’analyse des ventes & devis. Sans ce droit, ces mesures sont retirées (contrôle aussi en base).' },
       { key: 'can_carte', label: 'Prospects / Clients', description: 'Carte commerciale et fiches prospects.' },
       { key: 'can_clients', label: 'Clients (ancien écran)', description: 'Liste clients — écran hors arborescence, ouvrable par URL.' },
       { key: 'can_clients_cegeclim', label: 'Clients Cegeclim (ancien écran)', description: 'Écran hors arborescence, ouvrable par URL.' },
@@ -293,6 +297,8 @@ const EMPTY_PROFILE: AccessProfile = {
   can_hotline_editeur: false,
   can_guides_blg: false,
   can_contrats_objectifs: false,
+  can_analyse_ventes: false,
+  can_voir_marge: false,
   show_alert_cerfa_ko: false,
   show_alert_cdc_liv_avant_2026: false,
   show_alert_controle_frais_port: false,

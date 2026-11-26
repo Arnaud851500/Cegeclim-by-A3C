@@ -71,6 +71,8 @@
 // ÉVOLUTION (2026-11-02) : nouveau bloc « Hotline technique » (SAV PV / thermique) :
 // console d'appel et tickets (can_hotline), éditeur de diagnostic et statistiques
 // (can_hotline_expert). Migration 20261102_hotline_technique.sql.
+// ÉVOLUTION (2026-11-26) : « Analyse des ventes & devis » (/analyse-ventes) ajouté au bloc Mon activité —
+// droit dédié can_analyse_ventes (+ can_voir_marge pour la marge). Migration 20261126d_analyse_ventes_devis.sql.
 // ÉVOLUTION (2026-11-25) : « Contrats d’objectifs » sort du droit can_dashboard → droit dédié
 // can_contrats_objectifs (profils Direction et Administrateur), verrouillé aussi en base (obj_peut_lire).
 // ÉVOLUTION (2026-11-03) : « Contrats d’objectifs » (/objectifs/contrats) ajouté au bloc
@@ -124,6 +126,7 @@ export type MenuAccessKey = Exclude<
   | 'show_alert_data_coherence'
   | 'show_alert_dates_interdites'
   | 'can_change_scope'
+  | 'can_voir_marge'
 >
 
 export type NavPage = {
@@ -185,6 +188,7 @@ export const NAV_BLOCS: NavBloc[] = [
       { label: 'Activité quotidienne', path: '/focus_mensuel2', accessKey: 'can_dashboard', description: 'Focus mensuel jour par jour, faits marquants et projection de CA.' },
       { label: 'Tableaux de bord', path: '/atelier-analyse', accessKey: 'can_autorisation', description: 'Atelier d’analyse et tableaux de bord personnalisables.' },
       { label: 'Analyse devis', path: '/cycle-documents', accessKey: 'can_dashboard', description: 'Cycle des documents et transformation des devis.' },
+      { label: 'Analyse des ventes & devis', path: '/analyse-ventes', accessKey: 'can_analyse_ventes', description: 'CA et quantités par client, famille macro, famille ou article sur une période (factures, BL, CDC ou devis), top N, sous-totaux et export Excel.' },
       { label: 'Courbes de flux', path: '/approvisionnements', accessKey: 'can_dashboard', description: 'Courbes Devis – CDC – BL – Factures dans le temps.' },
       { label: 'Activités – CA', path: '/activites', accessKey: 'can_activites', description: 'Suivre les activités et les indicateurs de chiffre d’affaires.' },
       { label: 'Indicateurs', path: '/indicateurs', accessKey: 'can_superuser', description: 'Principaux indicateurs de performance (commerce, services, coûts, stocks).' },

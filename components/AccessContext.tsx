@@ -33,6 +33,9 @@ export type AccessRights = {
   /** (2026-11-03) Bloc « Guides BLG » : modes opératoires BLG Cloud (HTML déposés). */
   can_guides_blg: boolean
   can_contrats_objectifs: boolean
+  /** (2026-11-26) Écran « Analyse des ventes & devis » et affichage des mesures de marge. */
+  can_analyse_ventes: boolean
+  can_voir_marge: boolean
   can_change_scope: boolean
   allowed_scopes: string[]
   allowed_agences: string[]
@@ -120,6 +123,8 @@ type AccessProfileRow = {
   can_hotline_editeur?: boolean | null
   can_guides_blg?: boolean | null
   can_contrats_objectifs?: boolean | null
+  can_analyse_ventes?: boolean | null
+  can_voir_marge?: boolean | null
   can_change_scope?: boolean | null
   default_landing_page?: string | null
   show_alert_cerfa_ko?: boolean | null
@@ -193,6 +198,8 @@ export const defaultRights: AccessRights = {
   can_hotline_editeur: false,
   can_guides_blg: false,
   can_contrats_objectifs: false,
+  can_analyse_ventes: false,
+  can_voir_marge: false,
   can_change_scope: false,
   allowed_scopes: ['Global'],
   allowed_agences: [],
@@ -277,6 +284,8 @@ const PAGE_ACCESS_CHECKS: Array<[string, keyof AccessRights]> = [
   ['/suivi-agences', 'can_suivi_agences'],
   // 25/11/2026 : contrats d'objectifs réservés à la direction (droit dédié)
   ['/objectifs/contrats', 'can_contrats_objectifs'],
+  // 26/11/2026 : analyse des ventes & devis (droit dédié)
+  ['/analyse-ventes', 'can_analyse_ventes'],
   ['/objectifs', 'can_objectifs'],
   ['/hotline/diagnostic', 'can_hotline_editeur'],
   ['/hotline/stats', 'can_hotline_expert'],
@@ -353,6 +362,8 @@ const PROFILE_FLAG_KEYS = [
   'can_hotline_editeur',
   'can_guides_blg',
   'can_contrats_objectifs',
+  'can_analyse_ventes',
+  'can_voir_marge',
   'can_change_scope',
   'show_alert_cerfa_ko',
   'show_alert_cdc_liv_avant_2026',
