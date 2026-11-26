@@ -3,51 +3,49 @@
 /**
  * Écran « Inventaire — saisie dépôt » (menu Stocks & logistique, /stock/inventaire/saisie?id=<inventaire dépôt>).
  * ---------------------------------------------------------------------------
- * Créé le 01/11/2026 pour l'inventaire de fin d'année (≈ samedi 28/11/2026).
+ * Créé le 01/11/2026 pour l'inventaire de fin d'année (≈ samedi 28/11/2026). Utilisé en agence
+ * (PC ou tablette) pour le 1er, 2e et 3e comptage.
  *
- * Utilisé en agence (PC ou tablette) pour le 1er, 2e et 3e comptage :
- *  - initiales de l'inventoriste obligatoires avant toute saisie, différentes d'un
- *    comptage à l'autre (contrôlé en base) ;
- *  - liste du comptage en cours : réf. CEGECLIM, réf. fournisseur, désignation, qté en
- *    stock, quantité comptée, PUMP, commentaire ; enregistrement à chaque saisie,
- *    Entrée = ligne suivante ;
- *  - 2e / 3e comptage : seules les lignes renvoyées par les achats, sans les quantités
- *    des comptages précédents ;
- *  - « Imprimer la liste » (PDF) pour compter sur papier puis saisir ;
- *  - « Fin du comptage » seulement quand toutes les lignes sont saisies : la saisie est
- *    ensuite verrouillée et les achats analysent les écarts ;
- *  - 1er comptage : ajout d'un article trouvé en rayon mais absent de la liste ;
- *  - 01/11/2026 : section « En transit » en tête de liste = stock du dépôt SAGE TRANSIT de
- *    l'agence (expédié par FMS, non réceptionné), à compter s'il est physiquement arrivé.
- *  - 20/11/2026 : plusieurs équipes par dépôt. L'équipe (initiales, ex. PJC/AV) est propre à
- *    chaque tablette / PC (mémorisée sur l'appareil), modifiable à tout moment (saisie de
- *    feuilles papier d'équipes différentes) et enregistrée sur chaque ligne saisie (colonne
- *    « Équipe »). Règle « initiales différentes » appliquée ligne par ligne : une ligne ne se
- *    recompte pas par un inventoriste qui l'a déjà comptée. Les saisies des autres tablettes
- *    remontent toutes les 30 s. Impression de la sélection affichée (répartition des feuilles).
- *  - 23/11/2026 : « Intégrer des feuilles (PDF) » — feuilles de comptage scannées lues par l'IA,
- *    initiales / quantités / commentaires proposés, référence déjà saisie proposée en ajout avec
- *    alerte, enregistrement après validation (components/inventaire/ImportFeuilles.tsx).
+ * V2 — validée par Arnaud le 26/11/2026 (remplace la V1, testée en page bis /stock/inventaire/saisie-bis) :
+ *  - SAISIES PAR ÉQUIPE CUMULÉES : un article rangé dans plusieurs zones est compté par plusieurs
+ *    équipes. Une fois les initiales saisies, la case de saisie ne montre QUE la quantité de cette
+ *    équipe (vide tant qu'elle n'a pas compté la ligne) ; les quantités des autres équipes sont
+ *    affichées à droite ; la quantité de la ligne = somme des équipes (RPC inv_saisir_equipe,
+ *    table inventaire_saisies, migration 20261126_inventaire_saisies_equipes.sql).
+ *    Bouton ✎ : correction de la saisie de n'importe quelle équipe avant la clôture.
+ *  - TRI au choix : alphabétique (réf. CEGECLIM) ou famille puis réf., avec rupture (nom de la
+ *    famille) en début de famille, à l'écran et sur la feuille imprimée.
+ *  - FEUILLE PDF portrait dense (pdfListeComptageV2) : en-tête réduit à partir de la page 2,
+ *    sans colonne « Éq. », références / désignation ajustées, mode de tri en en-tête.
+ *  - Filtre « À saisir » : la liste est figée au clic (une ligne ne disparaît plus dès le 1er
+ *    chiffre tapé) ; recliquer sur le filtre pour la rafraîchir.
+ *  - Intégration des feuilles scannées en mode équipes (chaque équipe garde sa quantité).
  *
- * Accès : droit can_stocks ; dépôt limité à l'agence de l'utilisateur (périmètre agences
- * de l'onglet Utilisateurs d'Autorisations, MEES = DAX) ; achats = tous les dépôts.
- * Sources : RPC inv_saisie_depots, inv_saisie_liste, inv_comptage_initiales, inv_saisir,
- * inv_ajouter_hors_liste, inv_comptage_terminer (migration 20261101_inventaire_annuel.sql).
+ * Toujours en vigueur : initiales de l'équipe obligatoires, propres à chaque appareil, différentes
+ * d'un comptage à l'autre ligne par ligne ; 2e / 3e comptage à l'aveugle sur les lignes renvoyées
+ * par les achats ; « Fin du comptage » quand toutes les lignes sont comptées (saisie verrouillée) ;
+ * article hors liste au 1er comptage ; section « En transit » ; saisies des autres tablettes
+ * relues toutes les 30 s ; code de liste et n° de ligne imprimés (intégration des scans).
+ *
+ * Accès : droit can_stocks ; dépôt limité à l'agence de l'utilisateur ; achats = tous les dépôts.
+ * Sources : RPC inv_saisie_depots, inv_saisie_liste, inv_comptage_initiales, inv_saisir_equipe,
+ * inv_ajouter_hors_liste, inv_comptage_terminer.
  */
 
 import React, { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
 import { supabase } from '@/lib/supabaseClient'
 import {
-  AIDE_TRANSIT, ORDINAL, ORDINAL_LONG, couleurStatut, sectionLigne, fmtDate, fmtDateHeure, fmtEuro, fmtNum, fmtQte, libelleStatut,
-  lireQuantite, membresCommuns, messageErreur, normaliserEquipe, pdfListeComptage,
-  type InvDepot, type LigneSaisie, type ListeSaisie,
+  AIDE_TRANSIT, LIB_TRI, ORDINAL, ORDINAL_LONG, couleurStatut, fmtDate, fmtDateHeure, fmtEuro, fmtNum, fmtQte, libelleStatut,
+  lireQuantite, membresCommuns, messageErreur, normaliserEquipe, pdfListeComptageV2, sectionLigneV2, trierLignes,
+  type InvDepot, type LigneSaisie, type ListeSaisie, type SaisieEquipe, type TriListe,
 } from '@/lib/inventaire'
 import ImportFeuilles from '@/components/inventaire/ImportFeuilles'
 
 type InvAgence = InvDepot & { nb_a_compter: number; nb_saisies: number }
 type Brouillon = { qte: string; com: string; etat: 'idle' | 'saving' | 'ok' | 'err'; msg?: string }
 type Filtre = 'tous' | 'a_saisir' | 'saisis' | 'mon_equipe' | 'ecart_stock'
+type Correction = { ligne: LigneSaisie; lignes: Array<{ equipe: string; qte: string; com: string; etat: 'idle' | 'saving' | 'ok' | 'err'; msg?: string }> }
 
 const cleEquipe = (id: string, n: number) => `cegeclim-inv-equipe:${id}:${n}`
 function lireEquipe(id: string, n: number): string {
@@ -56,8 +54,17 @@ function lireEquipe(id: string, n: number): string {
 function ecrireEquipe(id: string, n: number, v: string) {
   try { if (v) window.localStorage.setItem(cleEquipe(id, n), v); else window.localStorage.removeItem(cleEquipe(id, n)) } catch { /* stockage indisponible */ }
 }
+const CLE_TRI = 'cegeclim-inv-tri'
+function lireTri(): TriListe {
+  try { return window.localStorage.getItem(CLE_TRI) === 'famille' ? 'famille' : 'alpha' } catch { return 'alpha' }
+}
 
-const vQte = (v: number | null) => (v === null || v === undefined ? '' : String(v).replace('.', ','))
+const vQte = (v: number | null | undefined) => (v === null || v === undefined ? '' : String(v).replace('.', ','))
+const saisieDe = (l: LigneSaisie, eq: string): SaisieEquipe | undefined => (eq ? (l.saisies || []).find((s) => s.equipe === eq) : undefined)
+const brouillonDe = (l: LigneSaisie, eq: string): Brouillon => {
+  const s = saisieDe(l, eq)
+  return { qte: vQte(s?.qte ?? null), com: s?.commentaire || '', etat: 'idle' }
+}
 
 function SaisieInventaire() {
   const router = useRouter()
@@ -74,12 +81,21 @@ function SaisieInventaire() {
   const [editEquipe, setEditEquipe] = useState(false)
   const [search, setSearch] = useState('')
   const [filtre, setFiltre] = useState<Filtre>('tous')
+  /** Filtre « À saisir » : lignes figées au clic (ne disparaissent pas pendant la frappe). */
+  const [figees, setFigees] = useState<Set<number> | null>(null)
+  const [tri, setTri] = useState<TriListe>('alpha')
   const [confirmFin, setConfirmFin] = useState(false)
   const [finEnCours, setFinEnCours] = useState(false)
   const [ajoutRef, setAjoutRef] = useState('')
   const [ajoutEnCours, setAjoutEnCours] = useState(false)
   const [importOuvert, setImportOuvert] = useState(false)
+  const [correction, setCorrection] = useState<Correction | null>(null)
   const tableRef = useRef<HTMLTableSectionElement | null>(null)
+
+  function changerTri(t: TriListe) {
+    setTri(t)
+    try { window.localStorage.setItem(CLE_TRI, t) } catch { /* stockage indisponible */ }
+  }
 
   const appliquerInventaires = useCallback((data: unknown, error: unknown) => {
     if (error) { setErreur(messageErreur(error)); setInventaires([]); return }
@@ -100,18 +116,23 @@ function SaisieInventaire() {
     if (error) { setErreur(messageErreur(error)); setListe(null); return }
     setErreur(null)
     const l = data as ListeSaisie
-    setListe(l)
-    setBrouillons(Object.fromEntries(l.lignes.map((x) => [x.id, { qte: vQte(x.qte), com: x.commentaire || '', etat: 'idle' as const }])))
     const eq = lireEquipe(l.id, l.numero)
+    setListe(l)
     setEquipe(eq); setInitiales(eq); setEditEquipe(!eq)
+    setBrouillons(Object.fromEntries(l.lignes.map((x) => [x.id, brouillonDe(x, eq)])))
+    setFigees(null)
+    setTri(lireTri())
   }, [])
 
   /** Rafraîchissement silencieux (saisies des autres tablettes) sans écraser une ligne en cours de frappe. */
   const listeRef = useRef<ListeSaisie | null>(null)
+  const equipeRef = useRef('')
   useEffect(() => { listeRef.current = liste }, [liste])
+  useEffect(() => { equipeRef.current = equipe }, [equipe])
   const fusionnerListe = useCallback((data: unknown) => {
     const l = data as ListeSaisie
     const cur = listeRef.current
+    const eq = equipeRef.current
     if (!cur || cur.id !== l.id || cur.numero !== l.numero) return
     const ancien = new Map(cur.lignes.map((x) => [x.id, x]))
     setBrouillons((bs) => {
@@ -119,8 +140,9 @@ function SaisieInventaire() {
       for (const x of l.lignes) {
         const b = bs[x.id]
         const a = ancien.get(x.id)
-        const propre = !b || (b.etat !== 'saving' && b.etat !== 'err' && (!a || (b.qte === vQte(a.qte) && b.com === (a.commentaire || ''))))
-        if (propre) out[x.id] = { qte: vQte(x.qte), com: x.commentaire || '', etat: b?.etat === 'ok' ? 'ok' : 'idle' }
+        const avant = a ? brouillonDe(a, eq) : null
+        const propre = !b || (b.etat !== 'saving' && b.etat !== 'err' && (!avant || (b.qte === avant.qte && b.com === avant.com)))
+        if (propre) out[x.id] = { ...brouillonDe(x, eq), etat: b?.etat === 'ok' ? 'ok' : 'idle' }
       }
       return out
     })
@@ -167,29 +189,31 @@ function SaisieInventaire() {
   /** Inventoristes de l'équipe courante ayant déjà compté la ligne à un comptage précédent. */
   const bloqueePour = (l: LigneSaisie) => (numero > 1 && equipe ? membresCommuns(equipe, l.equipes_prec) : [])
 
+  function choisirFiltre(f: Filtre) {
+    setFiltre(f)
+    // « À saisir » : liste figée au clic ; recliquer pour la rafraîchir.
+    setFigees(f === 'a_saisir' ? new Set((liste?.lignes || []).filter((l) => l.qte === null).map((l) => l.id)) : null)
+  }
+
   const lignesAffichees = useMemo(() => {
     const q = search.trim().toUpperCase()
-    return (liste?.lignes || []).filter((l) => {
-      const b = brouillons[l.id]
-      const saisie = b ? b.qte.trim() !== '' : l.qte !== null
-      if (filtre === 'a_saisir' && saisie) return false
-      if (filtre === 'saisis' && !saisie) return false
-      if (filtre === 'mon_equipe' && (!equipe || l.initiales !== equipe)) return false
-      if (filtre === 'ecart_stock') {
-        const v = b ? lireQuantite(b.qte) : l.qte
-        if (v === null || Number.isNaN(v) || v === l.qte_theorique) return false
-      }
+    return trierLignes(liste?.lignes || [], tri).filter((l) => {
+      if (filtre === 'a_saisir' && !(figees?.has(l.id) ?? l.qte === null)) return false
+      if (filtre === 'saisis' && l.qte === null) return false
+      if (filtre === 'mon_equipe' && !saisieDe(l, equipe)) return false
+      if (filtre === 'ecart_stock' && (l.qte === null || l.qte === l.qte_theorique)) return false
       if (!q) return true
-      return [l.reference, l.ref_fournisseur, l.designation, l.famille].some((x) => (x || '').toUpperCase().includes(q))
+      return [l.reference, l.ref_fournisseur, l.designation, l.famille, l.famille_macro].some((x) => (x || '').toUpperCase().includes(q))
     })
-  }, [liste, brouillons, search, filtre, equipe])
+  }, [liste, search, filtre, figees, equipe, tri])
 
   const nbTotal = liste?.lignes.length ?? 0
   const nbSaisis = (liste?.lignes || []).filter((l) => l.qte !== null).length
   const nbErreurs = Object.values(brouillons).filter((b) => b.etat === 'err').length
   const nbEnCours = Object.values(brouillons).filter((b) => b.etat === 'saving').length
   const valeurStock = (liste?.lignes || []).reduce((s, l) => s + l.qte_theorique * l.pump, 0)
-  const nbMonEquipe = equipe ? (liste?.lignes || []).filter((l) => l.qte !== null && l.initiales === equipe).length : 0
+  const nbMonEquipe = equipe ? (liste?.lignes || []).filter((l) => saisieDe(l, equipe)).length : 0
+  const nbMultiEquipes = (liste?.lignes || []).filter((l) => (l.saisies || []).length > 1).length
   const nbBloquees = (liste?.lignes || []).filter((l) => l.qte === null && bloqueePour(l).length > 0).length
   const selectionActive = filtre !== 'tous' || search.trim() !== ''
 
@@ -202,9 +226,26 @@ function SaisieInventaire() {
     const changement = !!equipe && equipe !== eq
     setEquipe(eq); setInitiales(eq); setEditEquipe(false)
     ecrireEquipe(liste.id, numero, eq)
+    // Les cases de saisie montrent désormais les quantités de CETTE équipe.
+    setBrouillons(Object.fromEntries(liste.lignes.map((x) => [x.id, brouillonDe(x, eq)])))
     setInfo(changement
-      ? `Équipe changée : les prochaines lignes saisies sur cet appareil seront attribuées à ${eq}.`
-      : `Équipe ${eq} : les lignes saisies sur cet appareil lui sont attribuées.`)
+      ? `Équipe changée : les cases montrent maintenant les quantités comptées par ${eq} (vides si elle n’a pas encore compté la ligne).`
+      : `Équipe ${eq} : les quantités saisies sur cet appareil lui sont attribuées et s’ajoutent à celles des autres équipes.`)
+  }
+
+  function majLigne(id: number, data: unknown) {
+    const r = data as { qte: number | null; commentaire: string | null; initiales: string | null; saisies: SaisieEquipe[] } | null
+    if (!r) return
+    setListe((cur) => cur && ({
+      ...cur,
+      lignes: cur.lignes.map((x) => (x.id === id ? { ...x, qte: r.qte, commentaire: r.commentaire, initiales: r.initiales, saisies: r.saisies } : x)),
+      comptages: cur.comptages.map((c) => {
+        if (c.numero !== numero) return c
+        const eqs = (c.initiales || '').split(',').map((v) => v.trim()).filter(Boolean)
+        const nouvelles = (r.saisies || []).map((s) => s.equipe).filter((e) => !eqs.includes(e))
+        return nouvelles.length ? { ...c, initiales: [...eqs, ...nouvelles].join(', ') } : c
+      }),
+    }))
   }
 
   async function enregistrer(l: LigneSaisie, b: Brouillon) {
@@ -213,28 +254,22 @@ function SaisieInventaire() {
     if (Number.isNaN(q)) { setBrouillons((cur) => ({ ...cur, [l.id]: { ...b, etat: 'err', msg: 'Quantité invalide' } })); return }
     if (q !== null && q < 0) { setBrouillons((cur) => ({ ...cur, [l.id]: { ...b, etat: 'err', msg: 'Quantité négative' } })); return }
     const com = b.com.trim()
-    if (q === l.qte && com === (l.commentaire || '')) return
+    const mienne = saisieDe(l, equipe)
+    if (q === (mienne?.qte ?? null) && com === (mienne?.commentaire || '')) return
     const communs = bloqueePour(l)
     if (communs.length > 0) {
       setBrouillons((cur) => ({ ...cur, [l.id]: { ...b, etat: 'err', msg: `Déjà comptée par ${communs.join('/')} : une autre équipe doit la recompter` } }))
       return
     }
     setBrouillons((cur) => ({ ...cur, [l.id]: { ...b, etat: 'saving', msg: undefined } }))
-    const { data, error } = await supabase.rpc('inv_saisir', { p_ligne_id: l.id, p_numero: numero, p_qte: q, p_commentaire: com || null, p_initiales: equipe })
+    const { data, error } = await supabase.rpc('inv_saisir_equipe', {
+      p_ligne_id: l.id, p_numero: numero, p_equipe: equipe, p_qte: q, p_commentaire: com || null, p_mode: 'remplacer',
+    })
     if (error) {
       setBrouillons((cur) => ({ ...cur, [l.id]: { ...(cur[l.id] || b), etat: 'err', msg: messageErreur(error) } }))
       return
     }
-    const ini = (data as { initiales?: string | null } | null)?.initiales ?? null
-    setListe((cur) => cur && ({
-      ...cur,
-      lignes: cur.lignes.map((x) => (x.id === l.id ? { ...x, qte: q, commentaire: com || null, initiales: ini } : x)),
-      comptages: ini ? cur.comptages.map((c) => {
-        if (c.numero !== numero) return c
-        const eqs = (c.initiales || '').split(',').map((v) => v.trim()).filter(Boolean)
-        return eqs.includes(ini) ? c : { ...c, initiales: [...eqs, ini].join(', ') }
-      }) : cur.comptages,
-    }))
+    majLigne(l.id, data)
     setBrouillons((cur) => ({ ...cur, [l.id]: { ...(cur[l.id] || b), etat: 'ok', msg: undefined } }))
   }
 
@@ -245,6 +280,33 @@ function SaisieInventaire() {
     const i = inputs.findIndex((x) => x.dataset.id === String(id))
     const next = inputs[i + 1]
     if (next) { next.focus(); next.select() } else e.currentTarget.blur()
+  }
+
+  // ── Correction des saisies de chaque équipe (avant clôture) ────────────────────────
+  function ouvrirCorrection(l: LigneSaisie) {
+    setCorrection({ ligne: l, lignes: (l.saisies || []).map((s) => ({ equipe: s.equipe, qte: vQte(s.qte), com: s.commentaire || '', etat: 'idle' })) })
+  }
+  async function corriger(i: number, supprimer = false) {
+    if (!correction || !liste) return
+    const c = correction.lignes[i]
+    const q = supprimer ? null : lireQuantite(c.qte)
+    const maj = (patch: Partial<Correction['lignes'][number]>) =>
+      setCorrection((cur) => cur && ({ ...cur, lignes: cur.lignes.map((x, k) => (k === i ? { ...x, ...patch } : x)) }))
+    if (q !== null && (Number.isNaN(q) || q < 0)) { maj({ etat: 'err', msg: 'Quantité invalide' }); return }
+    maj({ etat: 'saving', msg: undefined })
+    const { data, error } = await supabase.rpc('inv_saisir_equipe', {
+      p_ligne_id: correction.ligne.id, p_numero: numero, p_equipe: c.equipe, p_qte: q,
+      p_commentaire: supprimer ? null : c.com.trim() || null, p_mode: 'remplacer',
+    })
+    if (error) { maj({ etat: 'err', msg: messageErreur(error) }); return }
+    majLigne(correction.ligne.id, data)
+    const r = data as { saisies: SaisieEquipe[] }
+    setCorrection((cur) => cur && ({ ...cur, lignes: (r.saisies || []).map((s) => ({ equipe: s.equipe, qte: vQte(s.qte), com: s.commentaire || '', etat: s.equipe === c.equipe ? 'ok' as const : 'idle' as const })) }))
+    // La case de l'équipe courante suit la correction de sa propre saisie.
+    if (c.equipe === equipe) {
+      const s = (r.saisies || []).find((x) => x.equipe === equipe)
+      setBrouillons((cur) => ({ ...cur, [correction.ligne.id]: { qte: vQte(s?.qte ?? null), com: s?.commentaire || '', etat: 'ok' } }))
+    }
   }
 
   async function terminer() {
@@ -263,11 +325,11 @@ function SaisieInventaire() {
     const { data, error } = await supabase.rpc('inv_ajouter_hors_liste', { p_inv_depot_id: liste.id, p_reference: ajoutRef.trim() })
     setAjoutEnCours(false)
     if (error) { setErreur(messageErreur(error)); return }
-    const l = data as LigneSaisie
+    const l = { ...(data as LigneSaisie), saisies: [] }
     setListe((cur) => cur && ({ ...cur, lignes: [...cur.lignes, l] }))
     setBrouillons((cur) => ({ ...cur, [l.id]: { qte: '', com: '', etat: 'idle' } }))
     setAjoutRef('')
-    setSearch(l.reference); setFiltre('tous')
+    setSearch(l.reference); choisirFiltre('tous')
     setInfo(`${l.reference} ajoutée à la liste (stock SAGE ${fmtQte(l.qte_theorique)}) : saisir la quantité trouvée.`)
     setTimeout(() => {
       const el = tableRef.current?.querySelector<HTMLInputElement>(`input[data-champ="qte"][data-id="${l.id}"]`)
@@ -279,10 +341,11 @@ function SaisieInventaire() {
     if (!liste) return
     const libFiltre: Record<Filtre, string> = { tous: '', a_saisir: 'à saisir', saisis: 'saisies', mon_equipe: `équipe ${equipe}`, ecart_stock: 'écart au stock' }
     const sel = selection ? [libFiltre[filtre], search.trim() ? `« ${search.trim()} »` : ''].filter(Boolean).join(', ') : undefined
-    pdfListeComptage(liste, { avecSaisies, lignes: selection ? lignesAffichees : undefined, selection: sel })
+    pdfListeComptageV2(liste, { avecSaisies, lignes: selection ? lignesAffichees : undefined, selection: sel, tri })
   }
 
   const ctl = 'h-10 rounded-lg border border-[#E5E1D8] bg-white px-3 text-[14px] font-semibold text-[#3A362E] outline-none focus:border-[#B4761A]'
+  const NB_COL = 8
 
   return (
     <main className="min-h-screen bg-[#F4F3F0] px-3 py-3 text-[#111820] sm:px-4" style={{ fontFeatureSettings: '"tnum"' }}>
@@ -301,7 +364,7 @@ function SaisieInventaire() {
           </div>
           <div className="flex flex-wrap items-center gap-2">
             {inventaires && inventaires.length > 1 && (
-              <select value={selId || ''} onChange={(e) => { setSelId(e.target.value); setSearch(''); setFiltre('tous'); setInfo(null) }} className={`${ctl} font-bold`}>
+              <select value={selId || ''} onChange={(e) => { setSelId(e.target.value); setSearch(''); choisirFiltre('tous'); setInfo(null) }} className={`${ctl} font-bold`}>
                 {inventaires.map((i) => (
                   <option key={i.id} value={i.id}>{i.depot_libelle} — {i.campagne?.libelle} ({libelleStatut(i)})</option>
                 ))}
@@ -309,9 +372,15 @@ function SaisieInventaire() {
             )}
             {liste && (
               <>
-                <button type="button" onClick={() => imprimer(false)} className="h-10 rounded-lg border border-[#E5E1D8] bg-white px-3 text-[13px] font-bold hover:bg-[#F4F3F0]" title="Liste à compter, cases vides">🖨 Imprimer la liste</button>
+                <div className="flex overflow-hidden rounded-lg border border-[#E5E1D8]" title="Ordre de la liste à l'écran et sur la feuille imprimée">
+                  {([['alpha', 'Tri alpha'], ['famille', 'Tri famille']] as Array<[TriListe, string]>).map(([k, lib]) => (
+                    <button key={k} type="button" onClick={() => changerTri(k)}
+                      className={`h-10 px-3 text-[13px] font-bold ${tri === k ? 'bg-[#1D4F91] text-white' : 'bg-white text-[#3A362E] hover:bg-[#F4F3F0]'}`}>{lib}</button>
+                  ))}
+                </div>
+                <button type="button" onClick={() => imprimer(false)} className="h-10 rounded-lg border border-[#E5E1D8] bg-white px-3 text-[13px] font-bold hover:bg-[#F4F3F0]" title={`Liste à compter, cases vides — ${LIB_TRI[tri]}`}>🖨 Imprimer la liste</button>
                 {nbSaisis > 0 && (
-                  <button type="button" onClick={() => imprimer(true)} className="h-10 rounded-lg border border-[#E5E1D8] bg-white px-3 text-[13px] font-bold hover:bg-[#F4F3F0]" title="Liste avec les quantités déjà saisies et l'équipe de chaque ligne">🖨 Avec les saisies</button>
+                  <button type="button" onClick={() => imprimer(true)} className="h-10 rounded-lg border border-[#E5E1D8] bg-white px-3 text-[13px] font-bold hover:bg-[#F4F3F0]" title="Liste avec les quantités déjà saisies (total des équipes)">🖨 Avec les saisies</button>
                 )}
                 {selectionActive && lignesAffichees.length > 0 && (
                   <button type="button" onClick={() => imprimer(nbSaisis > 0 && filtre !== 'a_saisir', true)} className="h-10 rounded-lg border border-[#E5E1D8] bg-white px-3 text-[13px] font-bold hover:bg-[#F4F3F0]" title="Imprimer uniquement les lignes affichées (filtre / recherche) pour les confier à une équipe">🖨 Sélection ({fmtNum(lignesAffichees.length)})</button>
@@ -319,7 +388,7 @@ function SaisieInventaire() {
               </>
             )}
             {liste && ouvert && (
-              <button type="button" onClick={() => setImportOuvert(true)} className="h-10 rounded-lg bg-[#111820] px-3 text-[13px] font-bold text-white" title="Feuilles de comptage scannées : lecture automatique des initiales, quantités et commentaires, à valider avant enregistrement">📄 Intégrer des feuilles (PDF)</button>
+              <button type="button" onClick={() => setImportOuvert(true)} className="h-10 rounded-lg bg-[#111820] px-3 text-[13px] font-bold text-white" title="Feuilles de comptage scannées : chaque équipe garde sa quantité, cumulée avec les autres">📄 Intégrer des feuilles (PDF)</button>
             )}
             <button type="button" onClick={() => { void chargerInventaires(); if (selId) void chargerListe(selId) }} className="h-10 rounded-lg border border-[#E5E1D8] bg-white px-3 text-[14px] font-bold" title="Actualiser">↻</button>
           </div>
@@ -336,7 +405,6 @@ function SaisieInventaire() {
 
         {liste && (
           <>
-            {/* Statut, initiales, avancement */}
             <section className="grid gap-2.5 lg:grid-cols-[1.1fr_1fr_1fr]">
               <div className="rounded-xl border border-[#E5E1D8] bg-white p-3">
                 <div className="flex items-center gap-2">
@@ -351,7 +419,7 @@ function SaisieInventaire() {
                         <button type="button" onClick={() => { setEditEquipe(true); setInitiales('') }}
                           className="h-10 rounded-lg border border-[#E5E1D8] bg-white px-3 text-[13px] font-bold hover:bg-[#F4F3F0]"
                           title="Saisie d'une feuille d'une autre équipe ou relève d'équipe">⇄ Changer d’équipe</button>
-                        <span className="text-[12px] text-[#5E5A44]">{fmtNum(nbMonEquipe)} ligne(s) saisie(s) par {equipe}</span>
+                        <span className="text-[12px] text-[#5E5A44]">{fmtNum(nbMonEquipe)} ligne(s) comptée(s) par {equipe}</span>
                       </div>
                     ) : (
                       <div className="mt-1 flex flex-wrap items-center gap-2">
@@ -364,11 +432,11 @@ function SaisieInventaire() {
                       </div>
                     )}
                     <p className="mt-1 text-[12px] text-[#8A8474]">
-                      Deux inventoristes : séparer par « / ». Chaque ligne saisie garde l’équipe qui l’a comptée ; changer d’équipe pour saisir la feuille d’une autre équipe.
+                      La case de saisie montre seulement ce que <b>votre équipe</b> a compté ; les quantités des autres équipes s’affichent à droite et <b>s’ajoutent</b> (article rangé dans plusieurs zones). ✎ pour corriger la saisie d’une équipe.
                       {numero > 1 && ' Une ligne ne peut pas être recomptée par un inventoriste qui l’a déjà comptée.'}
                     </p>
                     {equipesComptage.length > 0 && (
-                      <p className="mt-0.5 text-[12px] text-[#5E5A44]">Équipes ayant saisi ce comptage : <b>{equipesComptage.join(' · ')}</b></p>
+                      <p className="mt-0.5 text-[12px] text-[#5E5A44]">Équipes ayant saisi ce comptage : <b>{equipesComptage.join(' · ')}</b>{nbMultiEquipes > 0 && <> · {fmtNum(nbMultiEquipes)} ligne(s) comptée(s) par plusieurs équipes</>}</p>
                     )}
                     {nbBloquees > 0 && (
                       <p className="mt-0.5 text-[12px] font-semibold text-[#96600F]">{fmtNum(nbBloquees)} ligne(s) restant à saisir ont déjà été comptées par {equipe} : à confier à une autre équipe.</p>
@@ -386,7 +454,7 @@ function SaisieInventaire() {
 
               <div className="rounded-xl border border-[#E5E1D8] bg-white p-3">
                 <div className="text-[11px] font-bold uppercase tracking-wide text-[#8A8474]">Avancement</div>
-                <div className="mt-1 text-[24px] font-bold leading-8">{fmtNum(nbSaisis)} <span className="text-[15px] font-semibold text-[#8A8474]">/ {fmtNum(nbTotal)} lignes saisies</span></div>
+                <div className="mt-1 text-[24px] font-bold leading-8">{fmtNum(nbSaisis)} <span className="text-[15px] font-semibold text-[#8A8474]">/ {fmtNum(nbTotal)} références comptées</span></div>
                 <div className="mt-1.5 h-2.5 overflow-hidden rounded-full bg-[#EFECE4]">
                   <div className="h-full rounded-full bg-[#3F9142] transition-all" style={{ width: `${nbTotal ? (nbSaisis / nbTotal) * 100 : 0}%` }} />
                 </div>
@@ -399,7 +467,7 @@ function SaisieInventaire() {
               <div className="flex flex-col justify-between rounded-xl border border-[#E5E1D8] bg-white p-3">
                 <div className="text-[12.5px] text-[#5E5A44]">
                   {ouvert
-                    ? <>Toutes les lignes doivent être saisies (0 si l’article est absent) pour terminer. Après la fin du {ORDINAL_LONG[numero]} comptage, plus aucune modification n’est possible.</>
+                    ? <>Toutes les lignes doivent être comptées (0 si l’article est absent) pour terminer. Vérifiez que toutes les équipes ont saisi. Après la fin du {ORDINAL_LONG[numero]} comptage, plus aucune modification n’est possible.</>
                     : <>Les quantités des comptages précédents ne sont pas affichées : chaque comptage est fait à l’aveugle.</>}
                 </div>
                 {ouvert && (
@@ -412,13 +480,13 @@ function SaisieInventaire() {
               </div>
             </section>
 
-            {/* Barre d'outils */}
             <section className="flex flex-wrap items-center gap-2 rounded-xl border border-[#E5E1D8] bg-white px-3 py-2">
-              <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Référence, réf. fournisseur, désignation…" className={`${ctl} min-w-[220px] flex-1`} />
+              <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Référence, réf. fournisseur, désignation, famille…" className={`${ctl} min-w-[220px] flex-1`} />
               <div className="flex overflow-hidden rounded-lg border border-[#E5E1D8]">
                 {([['tous', 'Toutes'], ['a_saisir', 'À saisir'], ['saisis', 'Saisies'], ...(equipe ? [['mon_equipe', `Équipe ${equipe}`]] : []), ['ecart_stock', '≠ stock']] as Array<[Filtre, string]>).map(([k, lib]) => (
-                  <button key={k} type="button" onClick={() => setFiltre(k)}
-                    className={`h-10 px-3 text-[13px] font-bold ${filtre === k ? 'bg-[#111820] text-white' : 'bg-white text-[#3A362E] hover:bg-[#F4F3F0]'}`}>{lib}</button>
+                  <button key={k} type="button" onClick={() => choisirFiltre(k)}
+                    title={k === 'a_saisir' ? 'Lignes non comptées au moment du clic (recliquer pour rafraîchir)' : undefined}
+                    className={`h-10 px-3 text-[13px] font-bold ${filtre === k ? 'bg-[#111820] text-white' : 'bg-white text-[#3A362E] hover:bg-[#F4F3F0]'}`}>{lib}{k === 'a_saisir' && filtre === k ? ' ↻' : ''}</button>
                 ))}
               </div>
               {ouvert && numero === 1 && (
@@ -429,45 +497,44 @@ function SaisieInventaire() {
                     className="h-10 rounded-lg border border-[#E5E1D8] bg-white px-3 text-[13px] font-bold disabled:opacity-40">+ Ajouter</button>
                 </div>
               )}
-              <span className="text-[12px] text-[#8A8474]">{fmtNum(lignesAffichees.length)} ligne(s)</span>
+              <span className="text-[12px] text-[#8A8474]">{fmtNum(lignesAffichees.length)} ligne(s) · {tri === 'famille' ? 'tri famille' : 'tri alpha'}</span>
             </section>
 
-            {/* Liste */}
             <section className="overflow-hidden rounded-xl border border-[#E5E1D8] bg-white">
               <div className="overflow-x-auto">
-                <table className="w-full min-w-[980px] border-collapse text-[13.5px]">
+                <table className="w-full min-w-[1040px] border-collapse text-[13.5px]">
                   <thead className="sticky top-0 z-10 bg-[#FAF8F3]">
                     <tr className="text-left text-[11px] font-bold uppercase tracking-wide text-[#8A8474]">
                       <th className="px-3 py-2">Réf. CEGECLIM</th>
                       <th className="px-2 py-2">Réf. fournisseur</th>
                       <th className="px-2 py-2">Désignation</th>
                       <th className="px-2 py-2 text-right">Qté stock</th>
-                      <th className="px-2 py-2 text-center">Qté comptée</th>
-                      <th className="px-2 py-2 text-center">Équipe</th>
+                      <th className="px-2 py-2 text-center">Ma qté{equipe ? ` (${equipe})` : ''}</th>
+                      <th className="px-2 py-2">Autres équipes · total</th>
                       <th className="px-2 py-2 text-right">PUMP</th>
                       <th className="px-2 py-2">Commentaire</th>
                     </tr>
                   </thead>
                   <tbody ref={tableRef}>
-                    {chargement && <tr><td colSpan={8} className="px-3 py-8 text-center text-[#8A8474]">Chargement…</td></tr>}
+                    {chargement && <tr><td colSpan={NB_COL} className="px-3 py-8 text-center text-[#8A8474]">Chargement…</td></tr>}
                     {!chargement && lignesAffichees.map((l, i) => {
-                      const b = brouillons[l.id] || { qte: vQte(l.qte), com: l.commentaire || '', etat: 'idle' as const }
-                      const macro = sectionLigne(l)
-                      const macroPrec = i > 0 ? sectionLigne(lignesAffichees[i - 1]) : null
-                      const vq = lireQuantite(b.qte)
-                      const diff = vq !== null && !Number.isNaN(vq) && vq !== l.qte_theorique
+                      const b = brouillons[l.id] || brouillonDe(l, equipe)
+                      const section = sectionLigneV2(l, tri)
+                      const sectionPrec = i > 0 ? sectionLigneV2(lignesAffichees[i - 1], tri) : null
+                      const autres = (l.saisies || []).filter((s) => s.equipe !== equipe)
                       const communs = bloqueePour(l)
                       const bloquee = communs.length > 0
                       const editableLigne = editable && !bloquee
+                      const diff = l.qte !== null && l.qte !== l.qte_theorique
                       return (
                         <React.Fragment key={l.id}>
-                          {macro !== macroPrec && (l.transit || macroPrec !== null) && (
+                          {section !== sectionPrec && (l.transit || tri === 'famille' || sectionPrec !== null) && (
                             l.transit ? (
-                              <tr><td colSpan={8} className="border-t border-[#B9CFEE] bg-[#E8F0FB] px-3 py-1.5 text-[12px] text-[#1D4F91]">
-                                <span className="font-bold uppercase tracking-wide">{macro}</span> · {AIDE_TRANSIT}
+                              <tr><td colSpan={NB_COL} className="border-t border-[#B9CFEE] bg-[#E8F0FB] px-3 py-1.5 text-[12px] text-[#1D4F91]">
+                                <span className="font-bold uppercase tracking-wide">{section}</span> · {AIDE_TRANSIT}
                               </td></tr>
                             ) : (
-                              <tr><td colSpan={8} className="border-t border-[#E5E1D8] bg-[#F4F3F0] px-3 py-1 text-[11px] font-bold uppercase tracking-wide text-[#5E5A44]">{macro}</td></tr>
+                              <tr><td colSpan={NB_COL} className="border-t border-[#D9D4C7] bg-[#EFECE4] px-3 py-1.5 text-[12px] font-bold uppercase tracking-wide text-[#3A362E]">{section}</td></tr>
                             )
                           )}
                           <tr className={`border-t border-[#EFECE4] ${b.etat === 'err' ? 'bg-red-50' : l.qte === null ? '' : 'bg-[#F7FBF7]'}`}>
@@ -483,12 +550,13 @@ function SaisieInventaire() {
                               <div className="flex items-center justify-center gap-1.5">
                                 <input
                                   data-champ="qte" data-id={l.id} inputMode="decimal" value={b.qte} disabled={!editableLigne}
-                                  title={bloquee ? `Déjà comptée par ${communs.join('/')} au comptage précédent : une autre équipe doit la recompter` : undefined}
+                                  placeholder={editableLigne ? '—' : ''}
+                                  title={bloquee ? `Déjà comptée par ${communs.join('/')} au comptage précédent : une autre équipe doit la recompter` : 'Quantité comptée par votre équipe (s’ajoute à celles des autres équipes)'}
                                   onChange={(e) => setBrouillons((cur) => ({ ...cur, [l.id]: { ...b, qte: e.target.value, etat: 'idle', msg: undefined } }))}
                                   onBlur={() => void enregistrer(l, b)}
                                   onKeyDown={(e) => { if (e.key === 'Enter') focusSuivant(e, l.id, 'qte') }}
                                   onFocus={(e) => e.currentTarget.select()}
-                                  className={`h-10 w-24 rounded-lg border text-center text-[16px] font-bold outline-none focus:border-[#B4761A] disabled:bg-[#F4F3F0] ${diff ? 'border-[#F0D4A6] text-[#96600F]' : 'border-[#D9D4C7]'}`}
+                                  className="h-10 w-24 rounded-lg border border-[#D9D4C7] text-center text-[16px] font-bold outline-none focus:border-[#B4761A] disabled:bg-[#F4F3F0]"
                                 />
                                 <span className="w-4 text-[13px]" title={b.msg || ''}>
                                   {b.etat === 'saving' ? '…' : b.etat === 'ok' ? <span className="text-[#3F9142]">✓</span> : b.etat === 'err' ? <span className="text-red-700">!</span> : ''}
@@ -496,11 +564,23 @@ function SaisieInventaire() {
                               </div>
                               {b.etat === 'err' && b.msg && <div className="mt-0.5 text-[11px] font-semibold text-red-700">{b.msg}</div>}
                             </td>
-                            <td className="whitespace-nowrap px-2 py-1.5 text-center text-[12px] font-bold">
-                              {l.qte !== null && l.initiales
-                                ? <span className={`rounded px-1.5 py-0.5 ${l.initiales === equipe ? 'bg-[#111820] text-white' : 'bg-[#EFECE4] text-[#3A362E]'}`}>{l.initiales}</span>
-                                : bloquee ? <span className="text-[11px] font-semibold text-[#96600F]" title={`Comptée par ${l.equipes_prec} au comptage précédent`}>autre équipe</span>
-                                : <span className="text-[#C9C4B6]">—</span>}
+                            <td className="px-2 py-1.5 text-[12px]">
+                              <div className="flex flex-wrap items-center gap-1">
+                                {autres.map((s) => (
+                                  <span key={s.equipe} className="rounded bg-[#EFECE4] px-1.5 py-0.5 font-semibold text-[#3A362E]" title={s.commentaire || undefined}>
+                                    {s.equipe} <b>{fmtQte(s.qte)}</b>
+                                  </span>
+                                ))}
+                                {l.qte !== null && (autres.length > 0 || !saisieDe(l, equipe)) && (
+                                  <span className={`rounded px-1.5 py-0.5 font-bold ${diff ? 'bg-[#FDF3E3] text-[#96600F]' : 'bg-[#E9F5EA] text-[#2F6F33]'}`} title="Total compté (toutes équipes)">= {fmtQte(l.qte)}</span>
+                                )}
+                                {l.qte === null && autres.length === 0 && (bloquee
+                                  ? <span className="text-[11px] font-semibold text-[#96600F]" title={`Comptée par ${l.equipes_prec} au comptage précédent`}>autre équipe</span>
+                                  : <span className="text-[#C9C4B6]">—</span>)}
+                                {ouvert && (l.saisies || []).length > 0 && (
+                                  <button type="button" onClick={() => ouvrirCorrection(l)} className="ml-0.5 rounded border border-[#D9D4C7] bg-white px-1.5 py-0.5 text-[12px] font-bold text-[#5E5A44] hover:bg-[#F4F3F0]" title="Voir et corriger les saisies de chaque équipe">✎</button>
+                                )}
+                              </div>
                             </td>
                             <td className="px-2 py-1.5 text-right text-[#5E5A44]">{fmtEuro(l.pump, 2)}</td>
                             <td className="px-2 py-1">
@@ -509,8 +589,8 @@ function SaisieInventaire() {
                                 onChange={(e) => setBrouillons((cur) => ({ ...cur, [l.id]: { ...b, com: e.target.value, etat: 'idle', msg: undefined } }))}
                                 onBlur={() => void enregistrer(l, b)}
                                 onKeyDown={(e) => { if (e.key === 'Enter') focusSuivant(e, l.id, 'com') }}
-                                placeholder={editableLigne ? 'Commentaire' : ''}
-                                className="h-10 w-full min-w-[160px] rounded-lg border border-[#E5E1D8] px-2 text-[13px] outline-none focus:border-[#B4761A] disabled:bg-[#F4F3F0]"
+                                placeholder={editableLigne ? 'Commentaire de l’équipe' : ''}
+                                className="h-10 w-full min-w-[150px] rounded-lg border border-[#E5E1D8] px-2 text-[13px] outline-none focus:border-[#B4761A] disabled:bg-[#F4F3F0]"
                               />
                             </td>
                           </tr>
@@ -518,7 +598,7 @@ function SaisieInventaire() {
                       )
                     })}
                     {!chargement && lignesAffichees.length === 0 && (
-                      <tr><td colSpan={8} className="px-3 py-8 text-center text-[#8A8474]">Aucune ligne pour ce filtre.</td></tr>
+                      <tr><td colSpan={NB_COL} className="px-3 py-8 text-center text-[#8A8474]">Aucune ligne pour ce filtre.</td></tr>
                     )}
                   </tbody>
                 </table>
@@ -533,9 +613,50 @@ function SaisieInventaire() {
           depots={[{ id: liste.id, depot_libelle: liste.depot_libelle, depot_num: liste.depot_num, statut: liste.statut, comptage_courant: liste.comptage_courant, campagne: liste.campagne }]}
           depotFixe={liste.id}
           equipeParDefaut={equipe}
+          modeEquipes
           onFermer={() => setImportOuvert(false)}
           onEnregistre={() => { void chargerListe(liste.id); void chargerInventaires() }}
         />
+      )}
+
+      {correction && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={() => setCorrection(null)}>
+          <div className="w-full max-w-lg rounded-xl bg-white p-5 shadow-xl" onClick={(e) => e.stopPropagation()}>
+            <h2 className="text-[17px] font-bold">{correction.ligne.reference} — saisies par équipe</h2>
+            <p className="mt-0.5 text-[12.5px] text-[#5E5A44]">{correction.ligne.designation} · stock SAGE {fmtQte(correction.ligne.qte_theorique)}</p>
+            <table className="mt-3 w-full text-[13.5px]">
+              <thead className="text-left text-[11px] font-bold uppercase tracking-wide text-[#8A8474]">
+                <tr><th className="py-1">Équipe</th><th className="py-1 text-center">Qté</th><th className="py-1">Commentaire</th><th /></tr>
+              </thead>
+              <tbody>
+                {correction.lignes.map((c, i) => (
+                  <tr key={c.equipe} className="border-t border-[#EFECE4]">
+                    <td className="py-1.5 pr-2 font-bold">{c.equipe}{c.equipe === equipe && <span className="ml-1 text-[10px] font-semibold text-[#8A8474]">(vous)</span>}</td>
+                    <td className="py-1.5 pr-2 text-center">
+                      <input value={c.qte} inputMode="decimal" onChange={(e) => setCorrection((cur) => cur && ({ ...cur, lignes: cur.lignes.map((x, k) => (k === i ? { ...x, qte: e.target.value, etat: 'idle' } : x)) }))}
+                        onKeyDown={(e) => { if (e.key === 'Enter') void corriger(i) }}
+                        className="h-9 w-20 rounded-lg border border-[#D9D4C7] text-center text-[15px] font-bold outline-none focus:border-[#B4761A]" />
+                    </td>
+                    <td className="py-1.5 pr-2">
+                      <input value={c.com} onChange={(e) => setCorrection((cur) => cur && ({ ...cur, lignes: cur.lignes.map((x, k) => (k === i ? { ...x, com: e.target.value, etat: 'idle' } : x)) }))}
+                        className="h-9 w-full rounded-lg border border-[#E5E1D8] px-2 text-[13px] outline-none focus:border-[#B4761A]" />
+                      {c.etat === 'err' && c.msg && <div className="mt-0.5 text-[11px] font-semibold text-red-700">{c.msg}</div>}
+                    </td>
+                    <td className="whitespace-nowrap py-1.5 text-right">
+                      <button type="button" onClick={() => void corriger(i)} disabled={c.etat === 'saving'} className="h-9 rounded-lg bg-[#111820] px-2.5 text-[12px] font-bold text-white disabled:opacity-50">{c.etat === 'saving' ? '…' : c.etat === 'ok' ? '✓' : 'Enregistrer'}</button>
+                      <button type="button" onClick={() => void corriger(i, true)} disabled={c.etat === 'saving'} className="ml-1 h-9 rounded-lg border border-[#E8B4AE] px-2 text-[12px] font-bold text-[#B42318]" title="Supprimer la saisie de cette équipe">✕</button>
+                    </td>
+                  </tr>
+                ))}
+                {correction.lignes.length === 0 && <tr><td colSpan={4} className="py-3 text-center text-[#8A8474]">Plus aucune saisie sur cette ligne.</td></tr>}
+              </tbody>
+            </table>
+            <div className="mt-3 flex items-center justify-between text-[13px]">
+              <span>Total compté : <b>{fmtQte((liste?.lignes.find((x) => x.id === correction.ligne.id) || correction.ligne).qte)}</b></span>
+              <button type="button" onClick={() => setCorrection(null)} className="h-9 rounded-lg border border-[#E5E1D8] px-4 text-[13px] font-bold">Fermer</button>
+            </div>
+          </div>
+        </div>
       )}
 
       {confirmFin && liste && (
@@ -543,7 +664,7 @@ function SaisieInventaire() {
           <div className="w-full max-w-md rounded-xl bg-white p-5 shadow-xl" onClick={(e) => e.stopPropagation()}>
             <h2 className="text-[18px] font-bold">Terminer le {ORDINAL_LONG[numero]} comptage ?</h2>
             <p className="mt-2 text-[14px] text-[#3A362E]">
-              {liste.depot_libelle} · {fmtNum(nbTotal)} lignes saisies par {equipesComptage.length > 1 ? `les équipes ${equipesComptage.join(', ')}` : `l’équipe ${equipesComptage[0] || equipe}`}.
+              {liste.depot_libelle} · {fmtNum(nbTotal)} lignes comptées par {equipesComptage.length > 1 ? `les équipes ${equipesComptage.join(', ')}` : `l’équipe ${equipesComptage[0] || equipe}`}.
               Vérifiez que toutes les équipes ont terminé leur saisie avant de clôturer.
               Après validation, <b>plus aucune quantité ne pourra être modifiée</b> : les achats analysent les écarts et peuvent demander un nouveau comptage.
             </p>

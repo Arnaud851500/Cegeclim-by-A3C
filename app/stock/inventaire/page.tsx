@@ -33,6 +33,10 @@
  * la liste de chaque page est retrouvée par l'en-tête (code « Liste INV-… », sinon dépôt du titre),
  * puis même revue et même validation que depuis l'écran de saisie (components/inventaire/ImportFeuilles.tsx).
  *
+ * 26/11/2026 : V2 validée par Arnaud — feuille de comptage au format portrait (pdfListeComptageV2) avec
+ * choix du tri (alphabétique ou famille puis réf.) ; intégration des feuilles en mode équipes
+ * (chaque équipe garde sa quantité, cumulée par ligne).
+ *
  * Accès : droit can_appro (ou can_autorisation), contrôlé aussi par chaque RPC.
  * Sources : RPC inv_* (supabase/migrations/20261101_inventaire_annuel.sql).
  */
@@ -42,7 +46,7 @@ import { useRouter, useSearchParams } from 'next/navigation'
 import { supabase } from '@/lib/supabaseClient'
 import {
   ORDINAL, commentairesLigne, couleurStatut, excelEcarts, fmtDate, fmtDateHeure, fmtEuro, fmtNum, fmtQte,
-  libelleDecision, libelleStatut, messageErreur, n0, pdfEcarts, pdfListeComptage,
+  libelleDecision, libelleStatut, messageErreur, n0, pdfEcarts, pdfListeComptageV2, LIB_TRI, type TriListe,
   type Campagne, type InvDepot, type LignePilotage, type ListeSaisie, type SuiviDepot,
 } from '@/lib/inventaire'
 import ImportFeuilles from '@/components/inventaire/ImportFeuilles'
@@ -126,6 +130,8 @@ function PilotageInventaire() {
   const [selection, setSelection] = useState<Set<number>>(new Set())
   const [commentaireDecision, setCommentaireDecision] = useState('')
   const [importOuvert, setImportOuvert] = useState(false)
+  /** Tri de la feuille de comptage imprimée (même format portrait que l'écran de saisie). */
+  const [triImpression, setTriImpression] = useState<TriListe>('alpha')
   const [confirmation, setConfirmation] = useState<null | { titre: string; texte: string; action: () => Promise<void>; bouton: string }>(null)
 
   const campagne = ctx?.campagnes.find((c) => c.id === campagneId) || null
@@ -304,7 +310,7 @@ function PilotageInventaire() {
         initiales: n === 1 ? l.ini1 : n === 2 ? l.ini2 : l.ini3,
       })),
     }
-    pdfListeComptage(liste, { avecSaisies: false })
+    pdfListeComptageV2(liste, { avecSaisies: false, tri: triImpression })
   }
 
   // ── Calculs ────────────────────────────────────────────────────────────
@@ -624,7 +630,16 @@ function PilotageInventaire() {
                     </p>
                   </div>
                   <div className="flex flex-wrap items-center gap-1.5">
-                    {detail.statut !== 'preparation' && <button type="button" className={btn} onClick={() => imprimerListe(detail)}>🖨 Liste {ORDINAL[Math.max(detail.comptage_courant, 1)]} comptage</button>}
+                    {detail.statut !== 'preparation' && (
+                      <div className="flex items-center overflow-hidden rounded-lg border border-[#E5E1D8]">
+                        <select value={triImpression} onChange={(e) => setTriImpression(e.target.value as TriListe)} title="Ordre de la feuille imprimée"
+                          className="h-9 border-r border-[#E5E1D8] bg-white px-2 text-[12.5px] font-semibold text-[#3A362E] outline-none">
+                          <option value="alpha">{LIB_TRI.alpha}</option>
+                          <option value="famille">{LIB_TRI.famille}</option>
+                        </select>
+                        <button type="button" className="h-9 bg-white px-3 text-[12.5px] font-bold text-[#3A362E] hover:bg-[#F4F3F0]" onClick={() => imprimerListe(detail)}>🖨 Liste {ORDINAL[Math.max(detail.comptage_courant, 1)]} comptage</button>
+                      </div>
+                    )}
                     {suiviDetail && suiviDetail.nb_ecarts > 0 && <button type="button" className={btn} disabled={occupe !== null} onClick={() => void imprimerEcarts([detail.id])}>🖨 Écarts du dépôt</button>}
                     {(detail.statut === 'preparation' || (detail.statut === 'comptage' && detail.comptage_courant === 1)) && (
                       <button type="button" className={btn} disabled={occupe !== null} onClick={() => void rafraichirStock(detail.id)} title="Recharger quantités et PUMP depuis la dernière synchro SAGE (saisies conservées)">
@@ -824,6 +839,7 @@ function PilotageInventaire() {
       {importOuvert && campagne && (
         <ImportFeuilles
           depots={suivi.map((d) => ({ id: d.id, depot_libelle: d.depot_libelle, depot_num: d.depot_num, statut: d.statut, comptage_courant: d.comptage_courant, campagne: d.campagne }))}
+          modeEquipes
           onFermer={() => setImportOuvert(false)}
           onEnregistre={() => void rafraichirTout()}
         />

@@ -63,8 +63,8 @@
 // ÉVOLUTION (2026-11-01) : « Inventaire – pilotage achats » (/stock/inventaire, can_appro) et
 // « Inventaire – saisie dépôt » (/stock/inventaire/saisie, can_stocks, dépôt de l'agence).
 // Migration 20261101_inventaire_annuel.sql.
-// ÉVOLUTION (2026-11-26) : « Inventaire – saisie dépôt V2 (test) » (/stock/inventaire/saisie-bis, can_stocks) :
-// saisies par équipe cumulées, tri famille, feuille portrait (migration 20261126_inventaire_saisies_equipes.sql).
+// ÉVOLUTION (2026-11-26) : V2 de la saisie validée (saisies par équipe cumulées, tri famille, feuille
+// portrait — migration 20261126_inventaire_saisies_equipes.sql) ; la page de test saisie-bis est supprimée.
 // ÉVOLUTION (2026-11-12) : « Contrôle stock FMS – MyStock » (/stock/controle-mystock, can_appro) :
 // image MyStock de fin de journée J comparée au stock SAGE FMS de fin de J (photo quotidienne).
 // Migrations 20261112a_stock_depot_snapshot_journalier.sql et 20261112b_controle_stock_mystock.sql.
@@ -272,8 +272,7 @@ export const NAV_BLOCS: NavBloc[] = [
       { label: 'Stocks', path: '/stock', accessKey: 'can_stocks', description: 'Consultation des stocks (FMS et Agences), stocks prévisionnels et visu des dates de disponibilité .' },
       { label: 'Analyse Stock Depot', path: '/stock/analyse-agence', accessKey: 'can_stocks', description: 'Analyse stock Dépot, proposition MIN / MAX ' },
       { label: 'Inventaire – pilotage achats', path: '/stock/inventaire', activeLabel: 'Inventaire – pilotage', accessKey: 'can_appro', description: 'Inventaire de fin d’année : listes par dépôt (familles, fournisseurs), avancement, écarts au PUMP, 2e / 3e comptage, validation, PDF et Excel pour SAGE.' },
-      { label: 'Inventaire – saisie dépôt', path: '/stock/inventaire/saisie', activeLabel: 'Inventaire – saisie', accessKey: 'can_stocks', description: 'Saisie des comptages de votre dépôt (1er, 2e, 3e) avec les initiales de l’inventoriste, impression de la liste à compter.' },
-      { label: 'Inventaire – saisie dépôt V2 (test)', path: '/stock/inventaire/saisie-bis', activeLabel: 'Inventaire – saisie V2', accessKey: 'can_stocks', description: 'Version 2 en test : saisies cumulées par équipe (article dans plusieurs zones), tri alpha ou famille avec ruptures, feuille de comptage portrait dense.' },
+      { label: 'Inventaire – saisie dépôt', path: '/stock/inventaire/saisie', activeLabel: 'Inventaire – saisie', accessKey: 'can_stocks', description: 'Saisie des comptages de votre dépôt (1er, 2e, 3e) par équipe, quantités cumulées entre équipes, tri alpha ou famille, impression de la liste à compter, intégration des feuilles scannées.' },
     ],
   },
   {

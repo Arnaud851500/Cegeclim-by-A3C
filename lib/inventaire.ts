@@ -6,13 +6,10 @@
  *   - app/stock/inventaire/saisie/page.tsx  (saisie en agence)
  *
  * Éditions :
- *   - pdfListeComptage : liste à compter d'un dépôt (1er, 2e ou 3e comptage) —
- *     réf. CEGECLIM, réf. fournisseur, désignation, qté en stock, case de saisie,
- *     PUMP, case commentaire ; cadre « équipe (initiales) / date / feuille x/y » en tête
- *     de CHAQUE page (feuilles réparties entre plusieurs équipes), pagination en pied ;
- *     23/11/2026 : code de liste « INV-xxxxxxxx-Cn » en tête de page et colonne « Éq. »
- *     (une feuille peut servir à 2 équipes) pour l'intégration des feuilles scannées ;
- *     colonne « N° » = identifiant stable de la ligne, clé de rapprochement des scans ;
+ *   - pdfListeComptageV2 (26/11/2026) : liste à compter d'un dépôt, A4 portrait — N° de ligne (clé
+ *     des scans), réf. CEGECLIM, réf. fournisseur, désignation, qté en stock, case de saisie, PUMP,
+ *     commentaire ; code de liste « INV-xxxxxxxx-Cn » et cadre équipe sur chaque page (en-tête
+ *     réduit à partir de la page 2) ; tri alphabétique ou famille puis réf. avec ruptures ;
  *   - pdfEcarts : écarts d'un ou plusieurs dépôts avec les comptages, la valeur
  *     au PUMP et la décision des achats ;
  *   - excelEcarts : écarts validés prêts à saisir dans SAGE (+ détail + synthèse).
@@ -351,107 +348,8 @@ function telecharger(doc: jsPDF, nom: string) {
 // PDF — liste de comptage
 // ─────────────────────────────────────────────────────────────────────────
 
-export function pdfListeComptage(
-  liste: ListeSaisie,
-  opts: { avecSaisies?: boolean; lignes?: LigneSaisie[]; selection?: string } = {},
-) {
-  const numero = liste.numero
-  const doc = new jsPDF({ orientation: 'landscape', unit: 'mm', format: 'a4' })
-  const w = doc.internal.pageSize.getWidth()
-  const titre = `${liste.campagne?.libelle || 'Inventaire'} - ${liste.depot_libelle}`
-  const code = codeListe(liste.id, numero)
-  const sousTitre = `${ORDINAL[numero]} comptage - inventaire du ${fmtDate(liste.campagne?.date_inventaire)} - stock SAGE du ${fmtDateHeure(liste.stock_sage_le)}`
-    + (opts.selection ? ` - sélection : ${opts.selection}` : '')
-  const avec = !!opts.avecSaisies
-
-  // Cadre équipe sur chaque page : chaque feuille peut être confiée à une équipe différente.
-  const entete = () => {
-    enteteCegeclim(doc, titre, sousTitre)
-    // Code de liste lisible par l'intégration des feuilles scannées
-    doc.setFont('courier', 'bold'); doc.setFontSize(13); doc.setTextColor(0)
-    doc.text(`Liste ${code}`, w - 116, 9, { align: 'right' })
-    doc.setDrawColor(60); doc.setLineWidth(0.3)
-    doc.rect(w - 112, 4, 104, 16)
-    doc.setFont('helvetica', 'normal'); doc.setFontSize(8)
-    doc.text(p('Équipe(s) (initiales, ex. PJC/AV) :'), w - 110, 9)
-    doc.line(w - 60, 9.6, w - 34, 9.6)
-    doc.text('Date / heure :', w - 110, 16)
-    doc.line(w - 88, 16.6, w - 34, 16.6)
-  }
-
-  const lignes = opts.lignes ? [...opts.lignes] : [...liste.lignes]
-  const nbCol = 9
-  const body: Array<Array<string | { content: string; colSpan?: number; styles?: Record<string, unknown> }>> = []
-  let macro = ''
-  for (const l of lignes) {
-    const m = sectionLigne(l)
-    if (m !== macro && (l.transit || macro !== '')) {
-      macro = m
-      body.push([{ content: p(l.transit ? `${m} : ${AIDE_TRANSIT}` : m), colSpan: nbCol,
-        styles: { font: 'helvetica', fontSize: 8, halign: 'left', ...(l.transit ? { fillColor: [232, 240, 251], fontStyle: 'bold', textColor: [29, 79, 145] } : { fillColor: [238, 235, 226], fontStyle: 'bold', textColor: [60, 56, 46] }) } }])
-    }
-    const row = [
-      String(l.id),
-      p(l.reference) + (l.hors_liste ? ' (hors liste)' : '') + (l.transit ? ' (transit)' : ''),
-      p(l.ref_fournisseur || ''),
-      p(l.designation || ''),
-      pQte(l.qte_theorique),
-      avec && l.qte !== null ? pQte(l.qte) : '',
-      pEuro(l.pump),
-      avec ? p(l.commentaire || '') : '',
-    ]
-    row.splice(6, 0, avec && l.qte !== null ? p(l.initiales || '') : '')
-    body.push(row)
-  }
-
-  // Colonne « N° » : identifiant stable de la ligne (inventaire_lignes.id), clé de lecture des feuilles scannées.
-  // Colonne « Éq. » : une feuille peut servir à deux équipes, chacune note ses initiales sur ses lignes.
-  const head = [['N°', 'Réf. CEGECLIM', 'Réf. fournisseur', 'Désignation', 'Qté stock', 'Qté comptée', 'Éq.', 'PUMP', 'Commentaire']]
-  const columnStyles: Record<number, Record<string, unknown>> = {
-    0: { cellWidth: 16, font: 'courier', fontStyle: 'bold', fontSize: 10, halign: 'center' },
-    1: { cellWidth: 34, fontStyle: 'bold' }, 2: { cellWidth: 30 }, 3: { cellWidth: 'auto' },
-    4: { cellWidth: 16, halign: 'right' }, 5: { cellWidth: 24, halign: 'center', minCellHeight: 7.5 },
-    6: { cellWidth: 16, halign: 'center' }, 7: { cellWidth: 21, halign: 'right' }, 8: { cellWidth: 46 },
-  }
-
-  autoTable(doc, {
-    startY: 25,
-    head,
-    body,
-    theme: 'grid',
-    margin: { top: 25, right: 8, bottom: 12, left: 8 },
-    styles: { font: 'helvetica', fontSize: 8, cellPadding: 1.6, valign: 'middle', lineColor: [170, 170, 170], lineWidth: 0.15 },
-    headStyles: { fillColor: [17, 24, 32], textColor: 255, fontStyle: 'bold', fontSize: 8 },
-    columnStyles,
-    showHead: 'everyPage',
-    rowPageBreak: 'avoid',
-    willDrawPage: () => entete(),
-  })
-
-  // Récapitulatif et signature
-  const finalY = (doc as unknown as { lastAutoTable?: { finalY: number } }).lastAutoTable?.finalY ?? 30
-  let y = finalY + 8
-  if (y > doc.internal.pageSize.getHeight() - 30) { doc.addPage(); entete(); y = 30 }
-  doc.setFont('helvetica', 'normal'); doc.setFontSize(9)
-  const nbArt = lignes.length
-  doc.text(p(`${nbArt} ligne(s) à compter${opts.selection ? ' (sélection)' : ''}. Toutes les lignes doivent être comptées, y compris à 0.`), 8, y)
-  doc.text(p('Articles trouvés hors liste : les noter ci-dessous (réf., quantité). Feuille partagée par 2 équipes : initiales dans la colonne Éq.'), 8, y + 5)
-  doc.setDrawColor(120)
-  doc.rect(8, y + 8, 160, 16)
-  doc.text(p('Signature de l\'équipe :'), 180, y + 12)
-  doc.rect(180, y + 14, 70, 12)
-
-  // Feuille x / y dans le cadre équipe de chaque page (+ pied de page).
-  const total = doc.getNumberOfPages()
-  for (let i = 1; i <= total; i++) {
-    doc.setPage(i)
-    doc.setFont('helvetica', 'bold'); doc.setFontSize(10)
-    doc.text(`Feuille ${i} / ${total}`, w - 10, 9, { align: 'right' })
-  }
-  doc.setFont('helvetica', 'normal')
-  piedDePage(doc, `${titre} - ${ORDINAL[numero]} comptage - édité le ${fmtDateHeure(new Date().toISOString())}`)
-  telecharger(doc, `inventaire_${slug(liste.depot_libelle)}_comptage${numero}${opts.selection ? '_selection' : ''}.pdf`)
-}
+// Ancien format paysage (pdfListeComptage) retiré le 26/11/2026 : remplacé par pdfListeComptageV2
+// (portrait, tri alpha / famille), utilisé par l'écran de saisie et par le pilotage.
 
 // ─────────────────────────────────────────────────────────────────────────
 // PDF — écarts (un ou plusieurs dépôts)
