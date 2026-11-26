@@ -723,20 +723,41 @@ export function pdfListeComptageV2(
   const sousTitre = `${ORDINAL[numero]} comptage - inventaire du ${fmtDate(liste.campagne?.date_inventaire)} - stock SAGE du ${fmtDateHeure(liste.stock_sage_le)}`
   const avec = !!opts.avecSaisies
 
-  // Page 1 : en-tête complet.
+  // Page 1 : en-tête complet. Titre, contexte et tri restent à gauche de l'encart équipe
+  // (largeur bornée, retour à la ligne si besoin) : jamais de superposition.
+  const xEncart = w - 86
+  const largeurTexte = xEncart - 8 - 4
+  doc.setFont('helvetica', 'bold'); doc.setFontSize(12.5)
+  let tailleTitre = 12.5
+  let lignesTitre: string[] = doc.splitTextToSize(p(titre), largeurTexte)
+  if (lignesTitre.length > 2) { tailleTitre = 10.5; doc.setFontSize(tailleTitre); lignesTitre = doc.splitTextToSize(p(titre), largeurTexte) }
+  doc.setFont('helvetica', 'normal'); doc.setFontSize(8.5)
+  const lignesSous: string[] = doc.splitTextToSize(p(sousTitre), largeurTexte)
+  doc.setFont('helvetica', 'bold')
+  const lignesTri: string[] = doc.splitTextToSize(p(`${LIB_TRI[tri]}${opts.selection ? ` - sélection : ${opts.selection}` : ''}`), largeurTexte)
+  const yTitre = 14
+  const ySous = yTitre + (lignesTitre.length - 1) * (tailleTitre * 0.42) + 5.5
+  const yTri = ySous + (lignesSous.length - 1) * 3.8 + 4.8
+  const basEntete = Math.max(29, yTri + (lignesTri.length - 1) * 3.8 + 4.5)
+
   const enteteComplet = () => {
-    enteteCegeclim(doc, titre, sousTitre)
-    doc.setFont('helvetica', 'bold'); doc.setFontSize(8.5); doc.setTextColor(29, 79, 145)
-    doc.text(p(`${LIB_TRI[tri]}${opts.selection ? ` - sélection : ${opts.selection}` : ''}`), 8, 24.5)
+    doc.setFont('helvetica', 'bold'); doc.setFontSize(8.5); doc.setTextColor(180, 118, 26)
+    doc.text('CEGECLIM', 8, 8)
+    doc.setTextColor(0); doc.setFontSize(tailleTitre)
+    doc.text(lignesTitre, 8, yTitre)
+    doc.setFont('helvetica', 'normal'); doc.setFontSize(8.5); doc.setTextColor(90)
+    doc.text(lignesSous, 8, ySous)
+    doc.setFont('helvetica', 'bold'); doc.setTextColor(29, 79, 145)
+    doc.text(lignesTri, 8, yTri)
     doc.setTextColor(0)
     doc.setFont('courier', 'bold'); doc.setFontSize(11)
-    doc.text(`Liste ${code}`, w - 86, 8)
+    doc.text(`Liste ${code}`, xEncart, 8)
     doc.setDrawColor(60); doc.setLineWidth(0.3)
-    doc.rect(w - 86, 11, 78, 16)
+    doc.rect(xEncart, 11, 78, 16)
     doc.setFont('helvetica', 'normal'); doc.setFontSize(8)
-    doc.text(p('Équipe(s) (initiales, ex. PJC/AV) :'), w - 84, 16)
+    doc.text(p('Équipe(s) (initiales, ex. PJC/AV) :'), xEncart + 2, 16)
     doc.line(w - 38, 16.6, w - 10, 16.6)
-    doc.text('Date / heure :', w - 84, 23)
+    doc.text('Date / heure :', xEncart + 2, 23)
     doc.line(w - 64, 23.6, w - 10, 23.6)
   }
   // Pages suivantes : en-tête réduit sur une ligne (code de liste et cadre équipe conservés).
@@ -793,7 +814,7 @@ export function pdfListeComptageV2(
   }
 
   autoTable(doc, {
-    startY: 29,
+    startY: basEntete,
     head,
     body,
     theme: 'grid',
