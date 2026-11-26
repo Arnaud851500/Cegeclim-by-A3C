@@ -481,8 +481,8 @@ async function fetchAccess(): Promise<{ email: string | null; rights: AccessRigh
         can_financement: !!merged.can_financement || individualFinancement,
         // 26/11/2026 : écrans réservés à une liste nominative (ecrans_reserves) et exclusions
         // individuelles — on reprend le droit calculé en base dans user_page_access.
-        can_suivi_agences: !!merged.can_suivi_agences && !!userRow.can_suivi_agences,
-        can_contrats_objectifs: !!merged.can_contrats_objectifs && !!userRow.can_contrats_objectifs,
+        can_suivi_agences: !!merged.can_suivi_agences && !!(userRow as Record<string, unknown>).can_suivi_agences,
+        can_contrats_objectifs: !!merged.can_contrats_objectifs && !!(userRow as Record<string, unknown>).can_contrats_objectifs,
         default_landing_page: landing,
         profile_id: principalId || null,
         profile_code: String(principal?.code || '').trim(),
