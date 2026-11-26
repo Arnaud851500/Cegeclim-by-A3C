@@ -747,7 +747,9 @@ export default function AnalyseVentesPage() {
     if (periode.operateur === 'entre' && periode.valeur && periode.valeur2) liste.push({ champ: 'date_ref', operateur: 'entre', valeur: periode.valeur, valeur2: periode.valeur2, valeurs: [] })
     if (clients.length) liste.push({ champ: 'code_client', operateur: 'parmi', valeur: '', valeur2: '', valeurs: clients })
     if (horsStat) liste.push({ champ: 'hors_statistique', operateur: 'est', valeur: 'Non', valeur2: '', valeurs: [] })
-    for (const f of filtres.filter(filtreComplet)) {
+    // Un filtre dont le champ n'existe plus dans le catalogue (page ouverte avant une mise à jour,
+    // analyse enregistrée ancienne) est ignoré au lieu de faire échouer l'analyse.
+    for (const f of filtres.filter((x) => champParCode.has(x.champ) && filtreComplet(x))) {
       const c = champParCode.get(f.champ)
       const valeurs = f.operateur === 'parmi' && c?.type === 'texte' && f.valeurs.length === 0 ? f.valeur.split(/[\n;,]+/).map((x) => x.trim()).filter(Boolean) : f.valeurs
       liste.push({ champ: f.champ, operateur: f.operateur, valeur: f.valeur, valeur2: f.valeur2, valeurs })
@@ -877,7 +879,7 @@ export default function AnalyseVentesPage() {
     const l: string[] = [`${source.date_libelle} : ${libellePeriode}`]
     l.push(clients.length ? `Clients : ${clients.join(', ')}` : 'Clients : tous (périmètre de l’utilisateur)')
     if (horsStat) l.push('Articles hors statistique exclus')
-    for (const f of filtres.filter(filtreComplet)) l.push(decrireFiltre(f, champParCode.get(f.champ)))
+    for (const f of filtres.filter((x) => champParCode.has(x.champ) && filtreComplet(x))) l.push(decrireFiltre(f, champParCode.get(f.champ)))
     if (top) l.push(`Top ${top}`)
     return l
   }, [source, libellePeriode, clients, horsStat, filtres, champParCode, top])
