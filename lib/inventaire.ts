@@ -151,7 +151,11 @@ export type LigneSaisie = {
   initiales?: string | null
   /** Équipes des comptages précédents (sans leurs quantités) : ne peuvent pas recompter la ligne. */
   equipes_prec?: string | null
+  /** V2 (26/11/2026) : détail par équipe du comptage en cours ; qte = somme des équipes. */
+  saisies?: SaisieEquipe[]
 }
+
+export type SaisieEquipe = { equipe: string; qte: number | null; commentaire: string | null; saisi_le?: string | null }
 
 export type ListeSaisie = InvDepot & { numero: number; lignes: LigneSaisie[] }
 
@@ -655,4 +659,173 @@ export async function excelEcarts(lignes: LignePilotage[], suivi: SuiviDepot[], 
   a.download = `ecarts_inventaire_${slug(opts.campagne)}_${new Date().toISOString().slice(0, 10)}.xlsx`
   a.click()
   URL.revokeObjectURL(url)
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// V2 (26/11/2026, demandé par Arnaud) — tri alpha / famille, feuille portrait dense
+// ─────────────────────────────────────────────────────────────────────────
+
+export type TriListe = 'alpha' | 'famille'
+export const LIB_TRI: Record<TriListe, string> = {
+  alpha: 'Tri alphabétique (réf. CEGECLIM)',
+  famille: 'Tri par famille puis réf. CEGECLIM',
+}
+
+type LigneTriable = { transit?: boolean; reference: string; famille: string | null; famille_macro: string | null }
+
+export function libelleFamille(l: { famille: string | null; famille_macro: string | null }): string {
+  return [l.famille_macro, l.famille].filter(Boolean).join(' > ') || 'Sans famille'
+}
+
+const cmpFr = (a: string | null | undefined, b: string | null | undefined) =>
+  String(a || '').localeCompare(String(b || ''), 'fr', { numeric: true, sensitivity: 'base' })
+
+/** Transit en tête, puis référence (alpha) ou famille macro > famille > référence (famille). */
+export function trierLignes<T extends LigneTriable>(lignes: T[], tri: TriListe): T[] {
+  return [...lignes].sort((a, b) => {
+    if (!!a.transit !== !!b.transit) return a.transit ? -1 : 1
+    if (tri === 'famille') {
+      const f = cmpFr(a.famille_macro, b.famille_macro) || cmpFr(a.famille, b.famille)
+      if (f) return f
+    }
+    return cmpFr(a.reference, b.reference)
+  })
+}
+
+/** Rupture d'affichage : transit, puis famille (tri famille) ou « Stock du dépôt » (tri alpha). */
+export function sectionLigneV2(l: LigneTriable & { depot_stock?: string | null; depot_stock_libelle?: string | null }, tri: TriListe): string {
+  if (l.transit) return sectionLigne(l)
+  return tri === 'famille' ? libelleFamille(l) : 'Stock du dépôt'
+}
+
+/** Détail « AV/LD 3 + PJ/YV 2 » des saisies par équipe. */
+export function detailEquipes(saisies: SaisieEquipe[] | undefined): string {
+  return (saisies || []).filter((s) => s.qte !== null).map((s) => `${s.equipe} ${fmtQte(s.qte)}`).join(' + ')
+}
+
+/**
+ * Feuille de comptage V2 : A4 portrait, en-tête complet en page 1 puis réduit (densité),
+ * désignation limitée à 40 caractères, sans colonne « Éq. » (l'équipe est celle du cadre de
+ * la page), commentaire réduit, mode de tri rappelé en en-tête, ruptures par famille.
+ * Conserve le code de liste et la colonne N° (clés de l'intégration des feuilles scannées).
+ */
+export function pdfListeComptageV2(
+  liste: ListeSaisie,
+  opts: { avecSaisies?: boolean; lignes?: LigneSaisie[]; selection?: string; tri?: TriListe } = {},
+) {
+  const numero = liste.numero
+  const tri: TriListe = opts.tri || 'alpha'
+  const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' })
+  const w = doc.internal.pageSize.getWidth()
+  const h = doc.internal.pageSize.getHeight()
+  const titre = `${liste.campagne?.libelle || 'Inventaire'} - ${liste.depot_libelle}`
+  const code = codeListe(liste.id, numero)
+  const sousTitre = `${ORDINAL[numero]} comptage - inventaire du ${fmtDate(liste.campagne?.date_inventaire)} - stock SAGE du ${fmtDateHeure(liste.stock_sage_le)}`
+  const avec = !!opts.avecSaisies
+
+  // Page 1 : en-tête complet.
+  const enteteComplet = () => {
+    enteteCegeclim(doc, titre, sousTitre)
+    doc.setFont('helvetica', 'bold'); doc.setFontSize(8.5); doc.setTextColor(29, 79, 145)
+    doc.text(p(`${LIB_TRI[tri]}${opts.selection ? ` - sélection : ${opts.selection}` : ''}`), 8, 24.5)
+    doc.setTextColor(0)
+    doc.setFont('courier', 'bold'); doc.setFontSize(11)
+    doc.text(`Liste ${code}`, w - 86, 8)
+    doc.setDrawColor(60); doc.setLineWidth(0.3)
+    doc.rect(w - 86, 11, 78, 16)
+    doc.setFont('helvetica', 'normal'); doc.setFontSize(8)
+    doc.text(p('Équipe(s) (initiales, ex. PJC/AV) :'), w - 84, 16)
+    doc.line(w - 38, 16.6, w - 10, 16.6)
+    doc.text('Date / heure :', w - 84, 23)
+    doc.line(w - 64, 23.6, w - 10, 23.6)
+  }
+  // Pages suivantes : en-tête réduit sur une ligne (code de liste et cadre équipe conservés).
+  const enteteReduit = () => {
+    doc.setFont('helvetica', 'bold'); doc.setFontSize(8); doc.setTextColor(180, 118, 26)
+    doc.text('CEGECLIM', 8, 7.5)
+    doc.setTextColor(0)
+    doc.text(p(`${liste.depot_libelle} - ${ORDINAL[numero]} comptage`), 26, 7.5)
+    doc.setFont('courier', 'bold'); doc.setFontSize(9.5)
+    doc.text(`Liste ${code}`, 8, 12)
+    doc.setFont('helvetica', 'normal'); doc.setFontSize(7); doc.setTextColor(29, 79, 145)
+    doc.text(p(tri === 'famille' ? 'Tri famille puis réf.' : 'Tri alphabétique'), 56, 12)
+    doc.setTextColor(0)
+    doc.setDrawColor(60); doc.setLineWidth(0.3)
+    doc.rect(w - 86, 3.5, 78, 9)
+    doc.setFont('helvetica', 'normal'); doc.setFontSize(7.5)
+    doc.text(p('Équipe(s) :'), w - 84, 9)
+    doc.line(w - 69, 9.6, w - 34, 9.6)
+  }
+
+  const lignes = trierLignes(opts.lignes ? [...opts.lignes] : [...liste.lignes], tri)
+  const nbCol = 8
+  const body: Array<Array<string | { content: string; colSpan?: number; styles?: Record<string, unknown> }>> = []
+  let section = ''
+  for (const l of lignes) {
+    const m = sectionLigneV2(l, tri)
+    if (m !== section && (l.transit || tri === 'famille' || section !== '')) {
+      section = m
+      body.push([{ content: p(l.transit ? `${m} : ${AIDE_TRANSIT}` : m.toUpperCase()), colSpan: nbCol,
+        styles: { font: 'helvetica', fontSize: 7.5, halign: 'left', fontStyle: 'bold', cellPadding: 1, overflow: 'linebreak',
+          ...(l.transit ? { fillColor: [232, 240, 251], textColor: [29, 79, 145] } : { fillColor: [238, 235, 226], textColor: [60, 56, 46] }) } }])
+    } else if (!section) section = m
+    const des = (l.designation || '').replace(/\s+/g, ' ').trim()
+    const comAvec = avec ? [detailEquipes(l.saisies).includes('+') ? detailEquipes(l.saisies) : '', l.commentaire || ''].filter(Boolean).join(' - ') : ''
+    body.push([
+      String(l.id),
+      p(l.reference) + (l.hors_liste ? ' (HL)' : ''),
+      p(l.ref_fournisseur || ''),
+      p(des.length > 40 ? des.slice(0, 40) : des),
+      pQte(l.qte_theorique),
+      avec && l.qte !== null ? pQte(l.qte) : '',
+      pEuro(l.pump),
+      p(comAvec),
+    ])
+  }
+
+  // N° = identifiant stable de la ligne (clé de l'intégration des feuilles scannées).
+  const head = [['N°', 'Réf. CEGECLIM', 'Réf. fourn.', 'Désignation', 'Stock', 'Qté comptée', 'PUMP', 'Commentaire']]
+  const columnStyles: Record<number, Record<string, unknown>> = {
+    0: { cellWidth: 13, font: 'courier', fontStyle: 'bold', fontSize: 8.5, halign: 'center' },
+    1: { cellWidth: 29, fontStyle: 'bold' }, 2: { cellWidth: 23 }, 3: { cellWidth: 'auto' },
+    4: { cellWidth: 12, halign: 'right' }, 5: { cellWidth: 21, halign: 'center', minCellHeight: 6.6 },
+    6: { cellWidth: 17, halign: 'right' }, 7: { cellWidth: 27 },
+  }
+
+  autoTable(doc, {
+    startY: 29,
+    head,
+    body,
+    theme: 'grid',
+    margin: { top: 15, right: 8, bottom: 10, left: 8 },
+    styles: { font: 'helvetica', fontSize: 7.5, cellPadding: 1.1, valign: 'middle', lineColor: [170, 170, 170], lineWidth: 0.15, overflow: 'ellipsize' },
+    headStyles: { fillColor: [17, 24, 32], textColor: 255, fontStyle: 'bold', fontSize: 7.5, cellPadding: 1.2 },
+    columnStyles,
+    showHead: 'everyPage',
+    rowPageBreak: 'avoid',
+    willDrawPage: (data: { pageNumber: number }) => { if (data.pageNumber === 1) enteteComplet(); else enteteReduit() },
+  })
+
+  // Récapitulatif, articles hors liste et signature.
+  const finalY = (doc as unknown as { lastAutoTable?: { finalY: number } }).lastAutoTable?.finalY ?? 30
+  let y = finalY + 6
+  if (y > h - 34) { doc.addPage(); enteteReduit(); y = 18 }
+  doc.setFont('helvetica', 'normal'); doc.setFontSize(8)
+  doc.text(p(`${lignes.length} ligne(s) à compter${opts.selection ? ' (sélection)' : ''}. Toutes les lignes doivent être comptées, y compris à 0.`), 8, y)
+  doc.text(p('Articles trouvés hors liste : les noter ci-dessous (réf., quantité).'), 8, y + 4.5)
+  doc.setDrawColor(120)
+  doc.rect(8, y + 7, 120, 16)
+  doc.text(p('Signature de l\'équipe :'), 134, y + 10.5)
+  doc.rect(134, y + 12, w - 142, 11)
+
+  // Feuille x / y : dans le cadre équipe (page 1) ou à droite de l'en-tête réduit.
+  const total = doc.getNumberOfPages()
+  for (let i = 1; i <= total; i++) {
+    doc.setPage(i)
+    doc.setFont('helvetica', 'bold'); doc.setFontSize(8.5)
+    doc.text(`Feuille ${i} / ${total}`, w - 9, i === 1 ? 8 : 9, { align: 'right' })
+  }
+  doc.setFont('helvetica', 'normal')
+  piedDePage(doc, `${titre} - ${ORDINAL[numero]} comptage - ${tri === 'famille' ? 'tri famille' : 'tri alpha'} - édité le ${fmtDateHeure(new Date().toISOString())}`)
+  telecharger(doc, `inventaire_${slug(liste.depot_libelle)}_comptage${numero}_${tri}${opts.selection ? '_selection' : ''}.pdf`)
 }

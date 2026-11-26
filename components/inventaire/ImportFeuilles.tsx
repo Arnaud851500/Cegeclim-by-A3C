@@ -38,6 +38,9 @@
  *     juste avant l'enregistrement ; chaque écriture passe la quantité vue à la revue
  *     (inv_saisir p_verifier_avant / p_qte_avant) : si la ligne a changé entre-temps, refus en base
  *     et revue rafraîchie avec l'alerte « déjà saisie ».
+ *   - 26/11/2026 (V2, prop modeEquipes) : enregistrement PAR ÉQUIPE (inv_saisir_equipe) — chaque
+ *     équipe lue garde sa propre quantité, cumulée avec celles des autres équipes ; « remplacer »
+ *     efface les saisies des autres équipes de la ligne (mode remplacer_tout).
  */
 
 import React, { useEffect, useMemo, useRef, useState } from 'react'
@@ -67,6 +70,8 @@ type Props = {
   equipeParDefaut?: string
   onFermer: () => void
   onEnregistre: () => void
+  /** V2 : saisies par équipe (inv_saisir_equipe) au lieu d'un total par ligne (inv_saisir). */
+  modeEquipes?: boolean
 }
 
 type Etape = 'choix' | 'lecture' | 'revue' | 'enregistrement' | 'fin'
@@ -139,6 +144,9 @@ type Ecriture = {
   libelle: string
   /** Quantité en base vue à la revue pour ce comptage (verrou : l'écriture est refusée si elle a changé). */
   qteAvant: number | null
+  /** V2 : quantités par équipe lues dans ce lot, et effacement des autres équipes (« remplacer »). */
+  parts: Array<{ equipe: string; qte: number; com: string | null }>
+  remplacerTout: boolean
 }
 
 const norm = (v: string) => v.toUpperCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^A-Z0-9]/g, '')
@@ -198,7 +206,7 @@ function verifierPage(lu: FeuilleLue, liste: ListeSaisie): { ok: boolean; messag
   return { ok: true, message: 'ancienne feuille sans code ni n° de ligne : liste retrouvée par le nom du dépôt, contrôle renforcé par référence' }
 }
 
-export default function ImportFeuilles({ depots, depotFixe, equipeParDefaut, onFermer, onEnregistre }: Props) {
+export default function ImportFeuilles({ depots, depotFixe, equipeParDefaut, onFermer, onEnregistre, modeEquipes }: Props) {
   const [etape, setEtape] = useState<Etape>('choix')
   const [progres, setProgres] = useState('')
   const [erreur, setErreur] = useState<string | null>(null)
@@ -304,7 +312,10 @@ export default function ImportFeuilles({ depots, depotFixe, equipeParDefaut, onF
   // ── Calcul de la revue : rapprochement, cumul des quantités, contrôles ─────────────
   const { calculs, ecritures, stats } = useMemo(() => {
     const pageParCle = new Map(pages.map((p) => [p.cle, p]))
-    type Run = { db: number | null; val: number | null; equipe: string | null; dbCom: string; garderDbCom: boolean; coms: string[]; sources: string[]; ecr: Ecriture | null }
+    type Run = {
+      db: number | null; val: number | null; equipe: string | null; dbCom: string; garderDbCom: boolean; coms: string[]; sources: string[]; ecr: Ecriture | null
+      parts: Map<string, { qte: number; coms: string[] }>; remplacerTout: boolean
+    }
     const runs = new Map<string, Run>()
     const out = new Map<string, Calcul>()
     for (const r of lignes) {
@@ -388,7 +399,7 @@ export default function ImportFeuilles({ depots, depotFixe, equipeParDefaut, onF
       c.cleCible = cle
       let run = runs.get(cle)
       if (!run) {
-        run = { db: c.ligne?.qte ?? null, val: c.ligne?.qte ?? null, equipe: c.ligne?.initiales ?? null, dbCom: c.ligne?.commentaire || '', garderDbCom: true, coms: [], sources: [], ecr: null }
+        run = { db: c.ligne?.qte ?? null, val: c.ligne?.qte ?? null, equipe: c.ligne?.initiales ?? null, dbCom: c.ligne?.commentaire || '', garderDbCom: true, coms: [], sources: [], ecr: null, parts: new Map(), remplacerTout: false }
         if (run.val !== null) run.sources.push(`${fmtQte(run.val)} (${run.equipe || 'saisi'})`)
         runs.set(cle, run)
       }
@@ -396,8 +407,12 @@ export default function ImportFeuilles({ depots, depotFixe, equipeParDefaut, onF
       c.existantEquipe = run.equipe
       if (run.val === null) c.resolu = c.ligne ? 'saisir' : 'hors_liste'
       else c.resolu = r.action === 'remplacer' ? 'remplacer' : 'ajouter'
-      if (c.resolu === 'remplacer') { run.val = q; run.sources = []; run.coms = []; run.garderDbCom = false }
+      if (c.resolu === 'remplacer') { run.val = q; run.sources = []; run.coms = []; run.garderDbCom = false; run.parts = new Map(); run.remplacerTout = true }
       else run.val = (run.val ?? 0) + q
+      const part = run.parts.get(c.equipe) || { qte: 0, coms: [] }
+      part.qte += q
+      if (r.com.trim()) part.coms.push(r.com.trim())
+      run.parts.set(c.equipe, part)
       run.sources.push(`${fmtQte(q)} (${c.equipe})`)
       run.equipe = c.equipe
       if (r.com.trim()) run.coms.push(r.com.trim())
@@ -406,6 +421,8 @@ export default function ImportFeuilles({ depots, depotFixe, equipeParDefaut, onF
       run.ecr = {
         cle, invDepotId: p.cibleId, numero: liste.numero, ligneId: c.ligne?.id ?? null, ref, qte: run.val, com: null, equipe: c.equipe,
         horsListe: !c.ligne, libelle: `${liste.depot_libelle} · ${ref}`, qteAvant: run.db,
+        parts: Array.from(run.parts.entries()).map(([equipe, x]) => ({ equipe, qte: x.qte, com: x.coms.join(' · ').slice(0, 300) || null })),
+        remplacerTout: run.remplacerTout,
       }
       const coms = Array.from(new Set([...(run.garderDbCom && run.dbCom ? [run.dbCom] : []), ...run.coms]))
       const cumul = run.sources.length > 1 ? `cumul ${run.sources.join(' + ')}` : ''
@@ -469,11 +486,23 @@ export default function ImportFeuilles({ depots, depotFixe, equipeParDefaut, onF
           if (error) throw error
           id = (data as { id: number }).id
         }
-        const { error } = await supabase.rpc('inv_saisir', {
-          p_ligne_id: id, p_numero: e.numero, p_qte: e.qte, p_commentaire: e.com, p_initiales: e.equipe,
-          p_verifier_avant: true, p_qte_avant: e.ligneId === null ? null : e.qteAvant,
-        })
-        if (error) throw error
+        if (modeEquipes) {
+          // V2 : une saisie par équipe, cumulée avec les autres équipes ; verrou sur le total au 1er appel.
+          for (const [k, part] of e.parts.entries()) {
+            const { error } = await supabase.rpc('inv_saisir_equipe', {
+              p_ligne_id: id, p_numero: e.numero, p_equipe: part.equipe, p_qte: part.qte, p_commentaire: part.com,
+              p_mode: k === 0 && e.remplacerTout ? 'remplacer_tout' : 'ajouter',
+              p_verifier_avant: k === 0, p_qte_avant: k === 0 && e.ligneId !== null ? e.qteAvant : null,
+            })
+            if (error) throw error
+          }
+        } else {
+          const { error } = await supabase.rpc('inv_saisir', {
+            p_ligne_id: id, p_numero: e.numero, p_qte: e.qte, p_commentaire: e.com, p_initiales: e.equipe,
+            p_verifier_avant: true, p_qte_avant: e.ligneId === null ? null : e.qteAvant,
+          })
+          if (error) throw error
+        }
         ok++
       } catch (err) {
         erreurs.push({ libelle: e.libelle, msg: messageErreur(err).replace(/^MODIFIEE_ENTRE_TEMPS:\s*/, 'non enregistrée — ') })
