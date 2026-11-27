@@ -833,12 +833,14 @@ function FicheTicket({
             className="h-8 rounded-lg border border-[#D9CCEB] bg-white px-2 text-[12px] text-slate-800"
           >
             <option value="">— sans préférence —</option>
+            {/* (27/11/2026) Rappel confié à l'ADV (service, pas une personne). */}
+            <option value="ADV">ADV</option>
             {n1.map((c) => (
               <option key={c.email} value={c.email}>
                 {c.nom}
               </option>
             ))}
-            {ticket.rappel_par && !n1.some((c) => c.email === ticket.rappel_par) ? <option value={ticket.rappel_par}>{nomCollaborateur(ticket.rappel_par, collaborateurs)}</option> : null}
+            {ticket.rappel_par && ticket.rappel_par !== 'ADV' && !n1.some((c) => c.email === ticket.rappel_par) ? <option value={ticket.rappel_par}>{nomCollaborateur(ticket.rappel_par, collaborateurs)}</option> : null}
           </select>
           {actif ? (
             <button

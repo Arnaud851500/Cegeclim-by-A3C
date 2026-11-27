@@ -1895,12 +1895,14 @@ function HotlineConsole() {
                   className={`${champ} ${form.rappel_par ? 'border-[#7A5EA8] font-semibold text-[#5B3F8C]' : ''}`}
                 >
                   <option value="">— sans préférence —</option>
+                  {/* (27/11/2026) Rappel confié à l'ADV (service, pas une personne). */}
+                  <option value="ADV">ADV</option>
                   {collaborateursN1.map((c) => (
                     <option key={c.email} value={c.email}>
                       {c.nom}
                     </option>
                   ))}
-                  {form.rappel_par && !collaborateursN1.some((c) => c.email === form.rappel_par) ? (
+                  {form.rappel_par && form.rappel_par !== 'ADV' && !collaborateursN1.some((c) => c.email === form.rappel_par) ? (
                     <option value={form.rappel_par}>{nomCollaborateur(form.rappel_par, collaborateurs)}</option>
                   ) : null}
                 </select>
