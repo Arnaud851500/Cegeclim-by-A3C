@@ -71,6 +71,7 @@ import {
   mettreEnAttenteClient,
   serieOnduleurCourt,
   relancerRappel,
+  mesValeursRappel,
   signalerConsultation,
   COMPTES_IMPORT_HISTORIQUE,
   serieBatterieCourt,
@@ -153,6 +154,8 @@ function HotlineTickets() {
       const MAX = 10_000
       const PAGE = 1_000
       const tous: Ticket[] = []
+      // (27/11/2026) Mes rappels : mon e-mail, plus « ADV » pour les collaborateurs ADV.
+      const valeursRappel = mesRappels ? await mesValeursRappel(email) : []
       for (let debut = 0; debut < MAX; debut += PAGE) {
         let query = supabase.from('hotline_tickets').select('*').order('opened_at', { ascending: false }).order('id').range(debut, debut + PAGE - 1)
         if (filiere !== 'TOUTES') query = query.eq('filiere', filiere)
@@ -160,7 +163,7 @@ function HotlineTickets() {
         else if (statut !== 'TOUS') query = query.eq('statut', statut)
         if (niveau) query = query.eq('niveau', niveau)
         if (mesTickets && email) query = query.eq('assigne_a', email)
-        if (mesRappels && email) query = query.eq('rappel_par', email)
+        if (mesRappels && email) query = query.in('rappel_par', valeursRappel)
         if (du) query = query.gte('opened_at', new Date(`${du}T00:00:00`).toISOString())
         if (au) query = query.lt('opened_at', new Date(new Date(`${au}T00:00:00`).getTime() + 86_400_000).toISOString())
         for (const [col, v] of [['symptome', classifF.symptome], ['organe', classifF.organe], ['issue', classifF.issue], ['nature', natureF], ['gamme', gammeF]] as const) {
@@ -301,17 +304,27 @@ function HotlineTickets() {
     }
   }
 
+  // (27/11/2026) Valeurs de « rappel_par » qui me concernent (e-mail, + « ADV » pour l'ADV).
+  const [mesRappelsValeurs, setMesRappelsValeurs] = useState<string[]>([])
+  useEffect(() => {
+    let actif = true
+    void mesValeursRappel(email).then((v) => actif && setMesRappelsValeurs(v.map((x) => x.toLowerCase())))
+    return () => {
+      actif = false
+    }
+  }, [email])
+
   const compteurs = useMemo(() => {
     const c = { n1: 0, n2: 0, n3: 0, escalades: 0, rappels: 0 }
     tickets.forEach((t) => {
-      if (t.rappel_par && email && t.rappel_par.toLowerCase() === email.toLowerCase()) c.rappels += 1
+      if (t.rappel_par && mesRappelsValeurs.includes(t.rappel_par.toLowerCase())) c.rappels += 1
       if (t.niveau === 1) c.n1 += 1
       if (t.niveau === 2) c.n2 += 1
       if (t.niveau === 3) c.n3 += 1
       if (t.statut === 'ESCALADE') c.escalades += 1
     })
     return c
-  }, [tickets, email])
+  }, [tickets, mesRappelsValeurs])
 
   // (20/11/2026) Ouverture / fermeture de la fiche par l'API History native (prise
   // en compte par useSearchParams) : pas d'aller-retour serveur, donc pas de fiche

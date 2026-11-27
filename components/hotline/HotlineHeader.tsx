@@ -10,6 +10,7 @@ import { useEffect, useState } from 'react'
 import type React from 'react'
 import { useAccess } from '@/components/AccessContext'
 import { supabase } from '@/lib/supabaseClient'
+import { mesValeursRappel } from '@/lib/hotline'
 
 const ONGLETS: Array<{ href: string; label: string; expert?: boolean; editeur?: boolean }> = [
   { href: '/hotline', label: 'Console d’appel' },
@@ -37,13 +38,16 @@ export default function HotlineHeader({
   useEffect(() => {
     if (!email) return
     let vivant = true
-    const lire = () =>
-      supabase
+    // (27/11/2026) Les collaborateurs ADV comptent aussi les rappels « ADV ».
+    const lire = async () => {
+      const valeurs = await mesValeursRappel(email)
+      const { count } = await supabase
         .from('hotline_tickets')
         .select('id', { count: 'exact', head: true })
-        .eq('rappel_par', email)
+        .in('rappel_par', valeurs)
         .neq('statut', 'RESOLU')
-        .then(({ count }) => vivant && setRappels(count || 0))
+      if (vivant) setRappels(count || 0)
+    }
     void lire()
     const t = window.setInterval(lire, 60_000)
     return () => {

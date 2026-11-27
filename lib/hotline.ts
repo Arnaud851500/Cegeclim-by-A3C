@@ -743,6 +743,19 @@ export async function rappelEffectue(ticketId: string, qui: string, commentaire?
   await ajouterEtape(ticketId, 'RAPPEL', `Client rappelé par ${qui}${commentaire ? ` : ${commentaire}` : ''}`, { details: { fait: true } })
 }
 
+/**
+ * (27/11/2026) Valeurs de « rappel_par » qui concernent l'utilisateur : son
+ * e-mail, plus « ADV » s'il fait partie des collaborateurs ADV paramétrés
+ * (hotline_parametres.adv_destinataires).
+ */
+let advCache: Promise<string[]> | null = null
+export async function mesValeursRappel(email: string | null | undefined): Promise<string[]> {
+  if (!email) return []
+  advCache ??= Promise.resolve(supabase.rpc('hotline_adv_destinataires')).then(({ data }) => ((data as string[] | null) || []).map((e) => e.toLowerCase()))
+  const adv = await advCache.catch(() => [] as string[])
+  return adv.includes(email.toLowerCase()) ? [email, 'ADV'] : [email]
+}
+
 /** (18/11/2026) Soleil : transfert du ticket à un collaborateur (assigné + alerte du bandeau violet). */
 export async function transfererTicket(ticket: Pick<Ticket, 'id' | 'statut'>, destinataire: { email: string; nom: string }, motif?: string) {
   await majTicket(ticket.id, { assigne_a: destinataire.email, ...(ticket.statut === 'OUVERT' ? { statut: 'EN_COURS' as const } : {}) })
